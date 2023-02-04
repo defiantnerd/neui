@@ -12,8 +12,6 @@ namespace neui
     AppWindow::AppWindow()
       : BaseWindow()
     {
-      // this->setAlpha(70);
-      
     }
 
     void AppWindow::create()

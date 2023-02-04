@@ -237,6 +237,16 @@ namespace neui
       (self->addProperty(std::forward<Args>(args)), ...);
     }
 
+    void addProperty(IHandlerBase& r)
+    {
+      _event_handler.push_back(r.make_shared());
+    }
+
+    void addProperty(std::shared_ptr<IHandlerBase> r)
+    {
+      _event_handler.push_back(r);
+    }
+
     void addProperty(const Id& newId)
     {
       id = newId;
@@ -277,7 +287,20 @@ namespace neui
       this->setVisible(false);
     }    
 
+    bool processEvent(const Event& ev) override
+    {
+      return executeEvents(ev);
+    }
   protected:
+    bool executeEvents(const event::Base& ev)
+    {
+      bool r = false;
+      for (auto&& handler : _event_handler)
+      {
+        r |= handler->execute(ev);
+      }
+      return r;
+    }
     virtual widgettype getWidgetType() = 0;
     void updateSeatProperties() override
     {
@@ -289,6 +312,7 @@ namespace neui
     bool visible = true;
     IWidgetContainer* parent = nullptr;
   private:
+    std::vector<std::shared_ptr<IHandlerBase>> _event_handler;
     ~WidgetBase() = default;
     friend Derived;
   };

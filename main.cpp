@@ -43,6 +43,10 @@ int run()
   //};
 
   auto blaba = make<Label>("First Static", Rect{ 10,10,300,20 });
+  OnClick klci([](OnClick::Args e)->bool 
+    { return true; }
+  );
+  
   blaba->setText("bla");
   auto window = make<AppWindow>(
     "My Application Window",
@@ -53,7 +57,7 @@ int run()
     , blaba
     , Label{ "Second Static Text Label", Id{"second"}, Rect{10,40,300,20}}
     , Text{"Write Something", Id{"editfield"}, Rect{10,70,300,20}}
-    , Button{"Click me", Rect(10,160,120,30)}
+    , Button{ "Click me", Rect(10,160,120,30), klci }
     );
   return neui::run();  
 #if 0

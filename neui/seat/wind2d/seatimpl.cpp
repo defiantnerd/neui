@@ -85,6 +85,7 @@ namespace neui
   uint32_t wind2dSeat::allocate(widget_type_t widgettype, widget_index_t parent, IEventCallback* cb)
   {
     RefPtr<IPlatformView> view;
+    // TODO: this switch should be a factory function where additional seat based control types can be registered
     switch (widgettype)
     {
       case widgettype::appwindow:
@@ -100,6 +101,7 @@ namespace neui
         view = RefPtr<wind2d::TextField>::make();
         break;
       case widgettype::panel:
+        return 0;
         break;
       default:
         return 0;

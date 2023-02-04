@@ -133,7 +133,7 @@ namespace neui
     using WidgetBase::addProperty;
 
     void addProperty(const std::string_view text) { this->text = text; }
-
+    
     void updateSeatProperties() override;
     widgettype getWidgetType() override { return widgettype::button; }
 
