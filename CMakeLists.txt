@@ -159,6 +159,7 @@ set(neui_sources
 	neui/seat/seat.h
 	neui/seat/seat.cpp
 	neui/common/events.h
+	neui/common/contents.h
 
 	#neui/seat/base/baseseat.h
 	#neui/seat/base/indexedwidgettree.h

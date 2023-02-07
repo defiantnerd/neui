@@ -264,8 +264,10 @@ namespace neui
 
     LRESULT BaseWindow::handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam)
     {
+
       switch (message)
       {
+
       case WM_NCDESTROY:
         if (this->patchedWndProc)
         {
@@ -332,7 +334,8 @@ namespace neui
         SetBkMode(hdc, TRANSPARENT);
         return 0; //  (LRESULT)GetStockBrush(COLOR_WINDOWTEXT);
       }
-      break;      
+      break;
+
       case WM_COMMAND:
         // OutputDebugString(utf8_to_wstring(fmt::format("BASE HWND {3:p}:MSG {0}, {1:x},{2:x}\n","WM_COMMAND", wParam, lParam, (void*)hwnd)).c_str());
         if (lParam)

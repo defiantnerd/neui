@@ -103,7 +103,8 @@ namespace neui
         POINT p{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         //swprintf_s(buf, sizeof(buf), _T("Right-Click in control!\nx: %i\ny: %i\n\nNow, we'll convert this to the coordinates of the frame and pass the message up-stream!"),
         //  p.x, p.y);
-        viewHandle.sendEvent(event::Clicked(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),0));
+        event::Clicked ev(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), 0);
+        viewHandle.sendEvent(ev);
 #if 0
         // this is how to bubble up an event via Win32 HWNDs
         hParent = GetParent(hwnd);
@@ -176,9 +177,80 @@ namespace neui
           break;
       }
 #endif
-
+      switch (message)
+      {
+      case EN_CHANGE:
+        OutputDebugStringA("oj");
+        break;
+      case WM_COMMAND:
+        OutputDebugStringA("oj");
+        break;
+      }
       return BaseWindow::handleWindowMessage(message, wParam, lParam);
     }
 
-  }
+    bool Droplist::setText(const std::string_view text, int32_t index)
+    {
+      if (index < 0)
+      {
+        this->text = text;
+        super::setText(text, 0);
+      }
+      else
+      {
+        texts.push_back(std::string(text));
+        if (hwnd)
+        {
+          auto k = ComboBox_AddString(hwnd, utf8_to_wstring(text).c_str());
+        }
+
+      }
+      return true;
+    }
+
+    void Droplist::create()
+    {
+
+      HWND parent = NULL;
+      assert(viewHandle.seat);
+      if (parentView)
+      {
+        parent = NativeHandle(parentView->getNativeHandle());
+      }
+      auto r = upscaleRect(rect);
+      SubclassWindowProc(CreateWindowEx(NEUI_WS_EX_LAYERED |
+        WS_EX_CLIENTEDGE | WS_EX_LEFT | WS_EX_RIGHTSCROLLBAR,
+        _T("ComboBox"), utf8_to_wstring(this->text).c_str(),
+        CBS_DROPDOWN | CBS_HASSTRINGS | WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        r.x, r.y, r.w, r.h,
+        parent, 0, gInstance, this));
+      if (hwnd)
+      {
+        // ::SetParent(hwnd, parent);
+        ::SetLayeredWindowAttributes(hwnd, 0, 0, 0);
+        // SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOREDRAW | SWP_NOSIZE);        
+      }
+      else
+      {
+        auto out = ::GetLastError();
+        fprintf(stderr, "err: %d\n", out);
+        assert(false);
+      }
+
+      for (auto&& s : texts)
+      {
+        auto n = ComboBox_AddString(hwnd, utf8_to_wstring(s).c_str());
+        OutputDebugStringA(fmt::format("string {} added with index {}", s, n).c_str());
+      }
+      super::setText(text, 0);
+
+      super::create();
+    }
+
+    //LRESULT Droplist::handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam)
+    //{
+    //  return super::handleWindowMessage(message,wParam,lParam);
+    //}
+
+}
 }

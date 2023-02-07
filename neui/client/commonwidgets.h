@@ -2,6 +2,7 @@
 
 #include "common/widget.h"
 #include "common/events.h"
+#include "common/contents.h"
 #include <string>
 
 namespace neui
@@ -166,6 +167,37 @@ namespace neui
 
     bool processEvent(const Event& ev) override { return false; };
   private:
+    std::string text;
+  };
+
+  class Droplist : public WidgetBase<Droplist>
+  {
+  public:
+    Droplist() = default;
+    template <typename... Args,
+      typename = enable_if_not_similar<head_t<Args...>, Label>>
+      explicit Droplist(Args&&... args)
+      : WidgetBase()
+    {
+      addProperties(std::forward<Args>(args)...);
+      this->setType(getWidgetType());
+      texts = { "bla","blub","tete"};
+    }
+
+    widgettype getWidgetType() override { return widgettype::droplist; }
+
+    using WidgetBase::addProperty;
+
+    void setText(const std::string_view& text) { this->text = text; setString(text, 0); }
+
+
+    void addProperty(const std::string_view text) { this->text = text; }
+
+    void updateSeatProperties() override;
+
+    bool processEvent(const Event& ev) override { return false; };
+  private:
+    std::vector<std::string> texts;
     std::string text;
   };
 

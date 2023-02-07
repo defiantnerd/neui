@@ -43,21 +43,26 @@ int run()
   //};
 
   auto blaba = make<Label>("First Static", Rect{ 10,10,300,20 });
-  OnClick klci([](OnClick::Args e)->bool 
+  OnClick klci([](OnClick::Args e)->bool
     { return true; }
   );
-  
+
+  auto  droplist = make<Droplist>( "Auswahl", Id{ "droplist" }, Rect{ 10,110,300,20 } );
+  // droplist.Itemlist = {"eintrag", "austrag", "betrag"};
+
   blaba->setText("bla");
   auto window = make<AppWindow>(
     "My Application Window",
-    Rect{250,250,700,450}
-    ,Border{ 20 }
-    , Id{"mainwindow"}
+    Rect{ 250,250,700,450 }
+    , Border{ 20 }
+    , Id{ "mainwindow" }
     // ,Button{"Clickme"}
     , blaba
-    , Label{ "Second Static Text Label", Id{"second"}, Rect{10,40,300,20}}
-    , Text{"Write Something", Id{"editfield"}, Rect{10,70,300,20}}
+    , Label{ "Second Static Text Label", Id{"second"}, Rect{10,40,300,20}, klci }
+    , Text{ "Write Something", Id{"editfield"}, Rect{10,70,300,20} }
+    , droplist
     , Button{ "Click me", Rect(10,160,120,30), klci }
+
     );
   return neui::run();  
 #if 0

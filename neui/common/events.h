@@ -10,6 +10,7 @@
 
 #include <string>
 #include <functional>
+#include <memory>
 
 namespace neui
 {
@@ -96,6 +97,7 @@ namespace neui
       type getType() { return type_v; }
       const std::string text;
       const int32_t index;
+      bool useContent = true;
     };
   }
 
@@ -142,6 +144,6 @@ namespace neui
   };
 
   using OnClick = Handler<event::Clicked>;
-
+  using OnUpdate = Handler<event::Textupdate>;
 
 }

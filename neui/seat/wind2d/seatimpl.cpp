@@ -5,6 +5,8 @@
 #include "seatcontrols.h"
 #include "staticcontrols.h"
 #include "appwindow.h"
+#include <CommCtrl.h>
+#pragma comment(lib, "Comctl32")
 
 #if 1
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
@@ -65,6 +67,7 @@ namespace neui
     : BaseSeat()
     , IFrontEnd()
   {
+    initComCtrl32();
     if (wind2d::gInstances == 0)
     {
       wind2d::gDefaultFont = ::CreateFont(-11, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
@@ -73,6 +76,14 @@ namespace neui
     ++wind2d::gInstances;
   }
   
+  void wind2dSeat::initComCtrl32()
+  {
+    INITCOMMONCONTROLSEX p;
+    p.dwSize = sizeof(p);
+    p.dwICC = ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_TREEVIEW_CLASSES | ICC_USEREX_CLASSES | ICC_TREEVIEW_CLASSES;
+    ::InitCommonControlsEx(&p);
+  }
+
   wind2dSeat::~wind2dSeat()
   {
    wind2d::gInstances--;
@@ -99,6 +110,9 @@ namespace neui
         break;
       case widgettype::text:
         view = RefPtr<wind2d::TextField>::make();
+        break;
+      case widgettype::droplist:
+        view = RefPtr<wind2d::Droplist>::make();
         break;
       case widgettype::panel:
         return 0;
@@ -196,21 +210,23 @@ namespace neui
   {
       return uint32_t();
   }
-  ;
 
   uint32_t wind2dSeat::setSize(widget_index_t widget, int size, int32_t index)
   {
     return 0;
   }
+
   uint32_t wind2dSeat::setString(widget_index_t widget, const std::string_view string, int32_t index)
   {
     widgets[widget]->setText(string, index);
     return 0;
   }
+
   uint32_t wind2dSeat::setInteger(widget_index_t widget, int32_t value, int index)
   {
       return uint32_t();
   }
+
   int32_t wind2dSeat::run()
   {    
     MSG message = { 0 };
