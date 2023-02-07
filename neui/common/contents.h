@@ -17,16 +17,33 @@ namespace neui
   class Itemlist;
   class IItemListOwner
   {
+    friend class ItemList;
   public:
-    virtual void update(Itemlist* sender) = 0;
+    virtual void updateItemList(Itemlist* sender) = 0;
+  protected:
   };
   class Itemlist
   {
   public:
-    
-  protected:
-    Itemlist(IItemListOwner* owner) : _owner(owner) {}
+    friend class IItemListOwner;
+    size_t add(const std::string_view text)
+    {
+      auto k = _texts.size();
+      _texts.push_back(std::string(text));
+      _owner->updateItemList(this);
+      return k;
+    }
+    void remove(size_t index)
+    {
+      if (index < _texts.size())
+      {
+        _texts.erase(_texts.begin()+index);
+      }
+      _owner->updateItemList(this);
+    }
     std::vector<std::string> _texts;
+    void setOwner(IItemListOwner* owner) { _owner = owner; }
+  protected:
     IItemListOwner* _owner = nullptr;
   };
 

@@ -56,12 +56,17 @@ namespace neui
   {
     WidgetBase::updateSeatProperties();
     // TODO: set droplist texts
-    setString(text, 0);
+    setString(_text, 0);
     int32_t i = 1;
-    for (auto&& n : texts)
+    for (auto&& n : _items._texts)
     {
       setString(n, i++);
     }
+  }
+
+  void Droplist::updateItemList(Itemlist* sender)
+  {
+    updateSeatProperties();
   }
 }
 
