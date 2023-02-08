@@ -52,13 +52,14 @@ namespace neui
     WidgetBase::updateSeatProperties();
     setString(this->text);
   }
+
   void Droplist::updateSeatProperties()
   {
     WidgetBase::updateSeatProperties();
     // TODO: set droplist texts
     setString(_text, 0);
     int32_t i = 1;
-    for (auto&& n : _items._texts)
+    for (auto&& n : _items.texts())
     {
       setString(n, i++);
     }

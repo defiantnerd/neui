@@ -182,7 +182,8 @@ namespace neui
     {
       addProperties(std::forward<Args>(args)...);
       this->setType(getWidgetType());      
-      _items._texts = {"bla","blub","tete"};
+      _items.add("Bla");
+      _items.add("Blub");
     }
 
     widgettype getWidgetType() override { return widgettype::droplist; }

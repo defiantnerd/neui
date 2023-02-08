@@ -31,6 +31,15 @@ namespace neui
   {
   public:
     friend class ItemlistOwner;
+    void clear()
+    {
+      _texts.clear();
+      _owner->updateItemList(this);
+    }
+    size_t count() const
+    {
+      return _texts.size();
+    }
     size_t add(const std::string_view text)
     {
       auto k = _texts.size();
@@ -43,11 +52,15 @@ namespace neui
       if (index < _texts.size())
       {
         _texts.erase(_texts.begin() + index);
-      }
       _owner->updateItemList(this);
+      }
     }
-    std::vector<std::string> _texts;
+    const std::vector<std::string>& texts() const
+    {
+      return _texts;
+    }
   protected:
+    std::vector<std::string> _texts;
     void setOwner(ItemlistOwner* owner) { _owner = owner; }
     ItemlistOwner* _owner = nullptr;
   };

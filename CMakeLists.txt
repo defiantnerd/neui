@@ -185,6 +185,8 @@ target_link_libraries(neui PRIVATE wind2d)
 target_link_libraries(neui PRIVATE commonlib)
 #target_link_libraries(neui PRIVATE fmt::fmt)
 
+target_compile_definitions(neui INTERFACE NOMINMAX)
+target_compile_definitions(commonlib INTERFACE NOMINMAX)
 
 target_include_directories(neui
   PRIVATE
@@ -194,13 +196,6 @@ target_include_directories(neui
 add_executable(main WIN32
 	main.cpp
 )
-
-# declare_dpiawareness(main)
-
-#add manifest for hidpi
-#target_sources(main PRIVATE
-#neui/seat/wind2d/dpiaware.manifest
-#)
 
 declare_dpiawareness(main)
 compatible_with_win10(main)
@@ -218,13 +213,11 @@ target_include_directories(main
 #         fmt     fmt
 
 target_link_libraries(main PRIVATE neui)
-target_link_libraries(main PRIVATE wind2d)
 
 if (WIN32)
+target_link_libraries(main PRIVATE wind2d)
 target_link_options(main PRIVATE -mwindows)
 endif()
 
-target_compile_definitions(neui INTERFACE NOMINMAX)
-target_compile_definitions(commonlib INTERFACE NOMINMAX)
 
 # TODO: Add tests and install targets if needed.
