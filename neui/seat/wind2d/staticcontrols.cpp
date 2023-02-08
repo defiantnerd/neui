@@ -198,12 +198,22 @@ namespace neui
       }
       else
       {
-        texts.push_back(std::string(text));
+        if (index < texts.size())
+        {
+          texts[index] = text;
+        }
+        else
+        {
+          texts.push_back(std::string(text));
+        }
         if (hwnd)
         {
-          auto k = ComboBox_AddString(hwnd, utf8_to_wstring(text).c_str());
+          auto n = ComboBox_GetCount(hwnd);
+          if ( index < n)
+            ComboBox_SetItemData(hwnd, index, (LPARAM) std::string(text).c_str());
+          else
+            auto k = ComboBox_AddString(hwnd, utf8_to_wstring(text).c_str());
         }
-
       }
       return true;
     }
@@ -240,7 +250,6 @@ namespace neui
       for (auto&& s : texts)
       {
         auto n = ComboBox_AddString(hwnd, utf8_to_wstring(s).c_str());
-        OutputDebugStringA(fmt::format("string {} added with index {}", s, n).c_str());
       }
       super::setText(text, 0);
 

@@ -14,18 +14,23 @@
 
 namespace neui
 {
+  class ItemlistOwner;
   class Itemlist;
-  class IItemListOwner
+
+  class ItemlistOwner
   {
-    friend class ItemList;
+    friend class Itemlist;
   public:
+    ItemlistOwner();
+    virtual ~ItemlistOwner();
     virtual void updateItemList(Itemlist* sender) = 0;
   protected:
+    Itemlist* _itemslistimpl;
   };
   class Itemlist
   {
   public:
-    friend class IItemListOwner;
+    friend class ItemlistOwner;
     size_t add(const std::string_view text)
     {
       auto k = _texts.size();
@@ -37,15 +42,19 @@ namespace neui
     {
       if (index < _texts.size())
       {
-        _texts.erase(_texts.begin()+index);
+        _texts.erase(_texts.begin() + index);
       }
       _owner->updateItemList(this);
     }
     std::vector<std::string> _texts;
-    void setOwner(IItemListOwner* owner) { _owner = owner; }
   protected:
-    IItemListOwner* _owner = nullptr;
+    void setOwner(ItemlistOwner* owner) { _owner = owner; }
+    ItemlistOwner* _owner = nullptr;
   };
+
+
+
+
 
 
 }

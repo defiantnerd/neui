@@ -14,7 +14,7 @@
 #include <functional>
 #include <tchar.h>
 #include <Uxtheme.h>
-#include "fmt/format.h"
+// #include "fmt/format.h"
 
 #define UWM_DPICHANGED WM_USER+WM_DPICHANGED
 

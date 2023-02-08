@@ -38,7 +38,7 @@ namespace neui
     WidgetBase::updateSeatProperties();
     setString(this->text);
   }
-  bool Button::processEvent(const Event& ev)
+  void Button::processEvent(Event& ev)
   {
     if (ev.getType() == event::type::click)
     {

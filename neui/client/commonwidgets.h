@@ -138,7 +138,7 @@ namespace neui
     void updateSeatProperties() override;
     widgettype getWidgetType() override { return widgettype::button; }
 
-    bool processEvent(const Event& ev) override;
+    void processEvent(Event& ev) override;
   private:
     std::string text;
   };
@@ -165,12 +165,12 @@ namespace neui
     void updateSeatProperties() override;
     widgettype getWidgetType() override { return widgettype::text; }
 
-    bool processEvent(const Event& ev) override { return false; };
+    void processEvent(Event& ev) override { };
   private:
     std::string text;
   };
 
-  class Droplist : public WidgetBase<Droplist> , public IItemListOwner
+  class Droplist : public WidgetBase<Droplist> , public ItemlistOwner
   {
   public:
     Droplist() = default;
@@ -178,11 +178,11 @@ namespace neui
       typename = enable_if_not_similar<head_t<Args...>, Label>>
       explicit Droplist(Args&&... args)
       : WidgetBase()
+      , _items(*_itemslistimpl)
     {
       addProperties(std::forward<Args>(args)...);
-      this->setType(getWidgetType());
-      _items.setOwner(this);
-      _items._texts = { "bla","blub","tete"};
+      this->setType(getWidgetType());      
+      _items._texts = {"bla","blub","tete"};
     }
 
     widgettype getWidgetType() override { return widgettype::droplist; }
@@ -196,11 +196,11 @@ namespace neui
 
     void updateSeatProperties() override;
 
-    bool processEvent(const Event& ev) override { return false; };
+    void processEvent(Event& ev) override {  };
 
     void updateItemList(Itemlist* sender) override;
+    Itemlist& _items;
   private:
-    Itemlist _items;
     std::string _text;
   };
 

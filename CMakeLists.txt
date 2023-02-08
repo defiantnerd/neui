@@ -98,7 +98,7 @@ add_library(winlight
 )
 
 
-target_link_libraries(winlight PRIVATE fmt::fmt)
+#target_link_libraries(winlight PRIVATE fmt::fmt)
 target_link_libraries(winlight PRIVATE commonlib)
 
 target_include_directories(winlight
@@ -138,7 +138,7 @@ add_library(wind2d
 )
 
 
-target_link_libraries(wind2d PRIVATE fmt::fmt)
+# target_link_libraries(wind2d PRIVATE fmt::fmt)
 target_link_libraries(wind2d PRIVATE commonlib)
 
 
@@ -160,6 +160,7 @@ set(neui_sources
 	neui/seat/seat.cpp
 	neui/common/events.h
 	neui/common/contents.h
+	neui/common/contents.cpp
 
 	#neui/seat/base/baseseat.h
 	#neui/seat/base/indexedwidgettree.h
@@ -182,7 +183,7 @@ add_library (neui
 
 target_link_libraries(neui PRIVATE wind2d)
 target_link_libraries(neui PRIVATE commonlib)
-target_link_libraries(neui PRIVATE fmt::fmt)
+#target_link_libraries(neui PRIVATE fmt::fmt)
 
 
 target_include_directories(neui
@@ -210,7 +211,7 @@ target_include_directories(main
 )
 
 
-find_package(fmt CONFIG REQUIRED)
+# find_package(fmt CONFIG REQUIRED)
 
 # main -> neui -> wind2d
 #         |       |

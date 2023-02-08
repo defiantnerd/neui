@@ -2,3 +2,4 @@
 #
 
 include(neui/cmake/win32.cmake)
+include(neui/cmake/resources.cmake)

@@ -86,10 +86,9 @@ namespace neui
     return false;
   }
 
-  bool WidgetReference::processEvent(const Event& ev)
+  void WidgetReference::processEvent(Event& ev)
   {
     (void)ev;
-    return false;
     //this->exe
     //return executeEvents(ev);
   }

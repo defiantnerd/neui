@@ -85,9 +85,10 @@ namespace neui
       Clicked(int x, int y, uint32_t flags)
         : x(x), y(y), flags(flags) {}
       type getType() const override { return type_v; }
-      int x = 0;
-      int y = 0;
-      uint32_t flags = 0;
+      const int x = 0;
+      const int y = 0;
+      const uint32_t flags = 0;
+      bool handled = false;
     };
 
     class Textupdate : public Base
@@ -107,7 +108,7 @@ namespace neui
   {
   public:
     virtual bool wantsEvent(const event::type eventtype) = 0;
-    virtual bool processEvent(const Event& ev) = 0;
+    virtual void processEvent(Event& ev) = 0;
     virtual ~IEventCallback() = default;
   };
 
@@ -116,7 +117,7 @@ namespace neui
   public:
     virtual event::type getType() const = 0;
     virtual std::shared_ptr<IHandlerBase> make_shared() = 0;
-    virtual bool execute(const event::Base& ev) = 0;
+    virtual void execute(event::Base& ev) = 0;
   };
 
   template<typename T>
@@ -124,20 +125,19 @@ namespace neui
   {
   public:
     event::type getType() const override { return T::type_v; }
-    using Args = const T&;
-    using handler_t = std::function<auto(const T& ev)->bool>;
-    using handler_function = std::function<auto(const T& ev)->bool>;
+    using Args = T&;
+    using handler_t = std::function<auto(T& ev)->void>;
+    using handler_function = std::function<auto(T& ev)->void>;
     std::shared_ptr<IHandlerBase> make_shared() override { return std::make_shared<Handler<T>>(*this); }
 
     Handler(handler_function func)
       : func(func) {}
-    bool execute(const event::Base& ev) override
+    void execute(event::Base& ev) override
     {
       if (ev.getType() == T::type_v)
       {
-        return func(static_cast<const T&>(ev));
+        func(static_cast<T&>(ev));
       }
-      return false;
     }
   private:
     handler_t func;

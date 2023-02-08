@@ -26,7 +26,7 @@ namespace neui
     ISeat::widget_index_t index = 0;
     IEventCallback* eventcallback = nullptr;
     bool wantsEvent(const event::type eventtype);
-    bool sendEvent(const Event& ev);
+    void sendEvent(Event& ev);
     bool validateContent(std::string& text, int32_t& caretPos);
   };
 

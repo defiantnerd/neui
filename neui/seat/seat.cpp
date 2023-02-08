@@ -24,9 +24,9 @@ namespace neui
     return eventcallback->wantsEvent(eventtype);
   }
 
-  bool ViewHandle::sendEvent(const Event& ev)
+  void ViewHandle::sendEvent(Event& ev)
   {
-    return eventcallback->processEvent(ev);
+    eventcallback->processEvent(ev);
   }
 
   bool ViewHandle::validateContent(std::string& text, int32_t& caretPos)

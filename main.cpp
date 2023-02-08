@@ -23,6 +23,12 @@ int main(int argc, char* argv[])
   run();
 }
 
+
+auto myfunc(int arg) -> bool
+{
+  return false;
+}
+
 int run()
 {
 
@@ -42,13 +48,17 @@ int run()
   //  FontSize(18)
   //};
 
-  auto blaba = make<Label>("First Static", Rect{ 10,10,300,20 });
-  OnClick klci([](OnClick::Args e)->bool
-    { return true; }
-  );
 
   auto  droplist = make<Droplist>( "Auswahl", Id{ "droplist" }, Rect{ 10,110,300,20 } );
-  // droplist.Itemlist = {"eintrag", "austrag", "betrag"};
+  // droplist.Itemlist = {"eintrag", "austrag", "betrag"};  
+  auto blaba = make<Label>("First Static", Rect{ 10,10,300,20 });
+
+  OnClick klci([droplist](OnClick::Args e)->void
+    {
+      droplist->_items.add("Zonk");
+      e.handled = true;
+    }
+  );
 
   blaba->setText("bla");
   auto window = make<AppWindow>(

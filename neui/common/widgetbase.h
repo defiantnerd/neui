@@ -64,7 +64,7 @@ namespace neui
     void selectLevel(SeatInstantiationLevel level);
 
     bool wantsEvent(const event::type eventtype) override;
-    bool processEvent(const Event& ev) override;
+    void processEvent(Event& ev) override;
   protected:
     void setVisible(bool visible);
     uint32_t getParent() const { return parentwidget; }
@@ -287,19 +287,17 @@ namespace neui
       this->setVisible(false);
     }    
 
-    bool processEvent(const Event& ev) override
+    void processEvent(Event& ev) override
     {
-      return executeEvents(ev);
+      executeEvents(ev);
     }
   protected:
-    bool executeEvents(const event::Base& ev)
+    void executeEvents(event::Base& ev)
     {
-      bool r = false;
       for (auto&& handler : _event_handler)
       {
-        r |= handler->execute(ev);
+        handler->execute(ev);
       }
-      return r;
     }
     virtual widgettype getWidgetType() = 0;
     void updateSeatProperties() override
