@@ -63,6 +63,11 @@ namespace neui
     {
       setString(n, i++);
     }
+    auto curindex = _items.getSelectedIndex();
+    if (curindex >= 0)
+    {
+      this->setInteger(curindex,0);
+    }
   }
 
   void Droplist::updateItemList(Itemlist* sender)

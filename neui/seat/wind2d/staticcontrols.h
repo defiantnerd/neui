@@ -41,6 +41,7 @@ namespace neui
       bool setText(const std::string_view text, int32_t index) override;
       void create() override;
       LRESULT handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam) override;
+      bool setInteger(const int32_t value, int32_t index) override;
     private:
       std::string text;
       std::vector<std::string> texts;

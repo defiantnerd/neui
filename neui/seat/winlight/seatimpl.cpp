@@ -206,10 +206,12 @@ namespace neui
     widgets[widget]->setText(string, index);
     return 0;
   }
-  uint32_t winlight::setInteger(widget_index_t widget, int32_t value, int index)
+  uint32_t winlight::setInteger(widget_index_t widget, int32_t value, int32_t index)
   {
-      return uint32_t();
+    widgets[widget]->setInteger(value, index);
+    return uint32_t();
   }
+
   int32_t winlight::run()
   {    
     MSG message = { 0 };

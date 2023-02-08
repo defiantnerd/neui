@@ -215,6 +215,12 @@ namespace neui
       return false;
     }
 
+    bool BaseWindow::setInteger(const int32_t value, int32_t index)
+    {
+      // no base functionality
+      return false;
+    }
+
     void BaseWindow::setFont(int size, const TCHAR* font)
     {
       if (hFont)

@@ -224,7 +224,8 @@ namespace neui
 
   uint32_t wind2dSeat::setInteger(widget_index_t widget, int32_t value, int index)
   {
-      return uint32_t();
+    widgets[widget]->setInteger(value, index);
+    return 0;
   }
 
   int32_t wind2dSeat::run()

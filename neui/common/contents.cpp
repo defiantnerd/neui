@@ -12,4 +12,17 @@ namespace neui
   {
     delete _itemslistimpl;
   }
+  void ItemlistOwner::setIndex(size_t index)
+  {
+    _itemslistimpl->updateIndex(index);
+  }
+  void Itemlist::setSelectedIndex(int32_t index)
+  {
+    _index = index;
+    _owner->updateItemList(this);
+  }
+  int32_t Itemlist::getSelectedIndex()
+  {
+    return _index;
+  }
 }

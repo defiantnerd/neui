@@ -122,4 +122,12 @@ namespace neui
     }
   }
 
+  void WidgetReference::setInteger(int32_t value, int32_t index)
+  {
+    if (widgetid)
+    {
+      Seat::Instance().setInteger(widgetid, value, index);
+    }
+  }
+
 }

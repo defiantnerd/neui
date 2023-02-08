@@ -66,6 +66,7 @@ int run()
   OnClick klci([droplist](OnClick::Args e)->void
     {
       droplist->_items.add("Zonk");
+      droplist->_items.setSelectedIndex(1);
       e.handled = true;
     }
   );

@@ -71,6 +71,7 @@ namespace neui
     void setBoxModelOnSeat(const BoxModel& boxmodel);
     void setRectOnSeat(const Rect& rect);
     void setString(const std::string_view text, int32_t index = 0);
+    void setInteger(int32_t value, int32_t index);
 
     void setType(widgettype type) { assert(level == SeatInstantiationLevel::none); this->type = type; }
     virtual void updateSeatProperties() = 0;

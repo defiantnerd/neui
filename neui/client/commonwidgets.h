@@ -192,7 +192,6 @@ namespace neui
 
     void setText(const std::string_view& text) { _text = text; setString(_text, 0); }
 
-
     void addProperty(const std::string_view text) { _text = text; }
 
     void updateSeatProperties() override;

@@ -62,6 +62,7 @@ namespace neui
       void show(int show = SW_SHOWDEFAULT) override;
       void hide() override { show(SW_HIDE); }
       bool setText(const std::string_view text, int32_t index) override;
+      bool setInteger(const int32_t value, int32_t index) override;
       void focus();
       HWND getHWND() const final { return hwnd; }
       static LRESULT CALLBACK basicWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);

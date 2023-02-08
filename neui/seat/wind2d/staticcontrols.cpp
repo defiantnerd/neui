@@ -263,13 +263,24 @@ namespace neui
         auto notificationcode = HIWORD(wParam);
         if (notificationcode == CBN_SELCHANGE)
         {
-          // HWND control = (HWND)lParam;
           auto k = ComboBox_GetCurSel(hwnd);
           event::Selected e(k, 0);
           this->viewHandle.sendEvent(e);
         }
       }
       return super::handleWindowMessage(message,wParam,lParam);
+    }
+
+    bool Droplist::setInteger(const int32_t value, int32_t index)
+    {
+      if (index == 0)
+      {
+        if (hwnd)
+        {
+          ComboBox_SetCurSel(hwnd, value);
+        }
+      }
+      return false;
     }
 
 }

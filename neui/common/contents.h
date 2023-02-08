@@ -25,6 +25,7 @@ namespace neui
     virtual ~ItemlistOwner();
     virtual void updateItemList(Itemlist* sender) = 0;
   protected:
+    void setIndex(size_t index);
     Itemlist* _itemslistimpl;
   };
   class Itemlist
@@ -59,10 +60,17 @@ namespace neui
     {
       return _texts;
     }
+    void setSelectedIndex(int32_t index);
+    int32_t getSelectedIndex();
   protected:
+    void updateIndex(size_t index)
+    {
+      _index = (int32_t)index;
+    }
     std::vector<std::string> _texts;
     void setOwner(ItemlistOwner* owner) { _owner = owner; }
     ItemlistOwner* _owner = nullptr;
+    int32_t _index = -1;
   };
 
 
