@@ -237,7 +237,7 @@ namespace neui
       (self->addProperty(std::forward<Args>(args)), ...);
     }
 
-    void addProperty(IHandlerBase& r)
+    void addProperty(const IHandlerBase& r)
     {
       _event_handler.push_back(r.make_shared());
     }

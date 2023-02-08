@@ -51,15 +51,14 @@ int run()
   // the droplist
   std::shared_ptr<Droplist> droplist;
 
-  // the event handler for OnSelect:
-  OnSelect selector([droplist](OnSelect::Args e)->void
-    {
-      // entry selected
-      e.handled = true;
-    }
-  );
   droplist = make<Droplist>( "Auswahl", Id{ "droplist" }
-    , Rect{ 10,110,300,20 } , selector
+    , Rect{ 10,110,300,20 } , 
+    OnSelect ([droplist](OnSelect::Args e)->void
+      {
+        // entry selected
+        e.handled = true;
+      }
+    )
     );
 
   auto blaba = make<Label>("First Static", Rect{ 10,10,300,20 });

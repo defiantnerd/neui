@@ -129,7 +129,7 @@ namespace neui
   {
   public:
     virtual event::type getType() const = 0;
-    virtual std::shared_ptr<IHandlerBase> make_shared() = 0;
+    virtual std::shared_ptr<IHandlerBase> make_shared() const = 0;
     virtual void execute(event::Base& ev) = 0;
   };
 
@@ -141,7 +141,7 @@ namespace neui
     using Args = T&;
     using handler_t = std::function<auto(T& ev)->void>;
     using handler_function = std::function<auto(T& ev)->void>;
-    std::shared_ptr<IHandlerBase> make_shared() override { return std::make_shared<Handler<T>>(*this); }
+    std::shared_ptr<IHandlerBase> make_shared() const override { return std::make_shared<Handler<T>>(*this); }
 
     Handler(handler_function func)
       : func(func) {}
