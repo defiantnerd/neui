@@ -165,7 +165,7 @@ namespace neui
     void updateSeatProperties() override;
     widgettype getWidgetType() override { return widgettype::text; }
 
-    void processEvent(Event& ev) override { };
+    // void processEvent(Event& ev) override { };
   private:
     std::string text;
   };
@@ -197,7 +197,7 @@ namespace neui
 
     void updateSeatProperties() override;
 
-    void processEvent(Event& ev) override {  };
+    // void processEvent(Event& ev) override {  };
 
     void updateItemList(Itemlist* sender) override;
     Itemlist& _items;

@@ -43,6 +43,7 @@ namespace neui
 
       // content updates
       textupdate = category::content | 0x0001,
+      selected   = category::content | 0x0002,
 
       // mouse events
       click = category::mousebutton | 0x0001,
@@ -87,6 +88,18 @@ namespace neui
       type getType() const override { return type_v; }
       const int x = 0;
       const int y = 0;
+      const uint32_t flags = 0;
+      bool handled = false;
+    };
+
+    class Selected : public Base
+    {
+    public:
+      static const type type_v = type::selected;
+      Selected(int index, uint32_t flags)
+        : index(index), flags(flags) {}
+      type getType() const override { return type_v; }
+      const size_t index = 0;
       const uint32_t flags = 0;
       bool handled = false;
     };
@@ -145,5 +158,6 @@ namespace neui
 
   using OnClick = Handler<event::Clicked>;
   using OnUpdate = Handler<event::Textupdate>;
+  using OnSelect = Handler<event::Selected>;
 
 }

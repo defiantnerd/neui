@@ -48,9 +48,20 @@ int run()
   //  FontSize(18)
   //};
 
+  // the droplist
+  std::shared_ptr<Droplist> droplist;
 
-  auto  droplist = make<Droplist>( "Auswahl", Id{ "droplist" }, Rect{ 10,110,300,20 } );
-  // droplist.Itemlist = {"eintrag", "austrag", "betrag"};  
+  // the event handler for OnSelect:
+  OnSelect selector([droplist](OnSelect::Args e)->void
+    {
+      // entry selected
+      e.handled = true;
+    }
+  );
+  droplist = make<Droplist>( "Auswahl", Id{ "droplist" }
+    , Rect{ 10,110,300,20 } , selector
+    );
+
   auto blaba = make<Label>("First Static", Rect{ 10,10,300,20 });
 
   OnClick klci([droplist](OnClick::Args e)->void
@@ -59,6 +70,8 @@ int run()
       e.handled = true;
     }
   );
+
+
 
   blaba->setText("bla");
   auto window = make<AppWindow>(

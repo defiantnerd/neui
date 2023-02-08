@@ -256,10 +256,21 @@ namespace neui
       super::create();
     }
 
-    //LRESULT Droplist::handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam)
-    //{
-    //  return super::handleWindowMessage(message,wParam,lParam);
-    //}
+    LRESULT Droplist::handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam)
+    {
+      if (message == WM_COMMAND)
+      {
+        auto notificationcode = HIWORD(wParam);
+        if (notificationcode == CBN_SELCHANGE)
+        {
+          // HWND control = (HWND)lParam;
+          auto k = ComboBox_GetCurSel(hwnd);
+          event::Selected e(k, 0);
+          this->viewHandle.sendEvent(e);
+        }
+      }
+      return super::handleWindowMessage(message,wParam,lParam);
+    }
 
 }
 }
