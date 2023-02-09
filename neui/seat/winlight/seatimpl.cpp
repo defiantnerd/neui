@@ -64,12 +64,21 @@ namespace neui
     : BaseSeat()
     , IFrontEnd()
   {
+    initComCtrl32();
     if (wind2d::gInstances == 0)
     {
       wind2d::gDefaultFont = ::CreateFont(-11, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, _T("sans serif"));
     }
     ++wind2d::gInstances;
+  }
+
+  void winlight::initComCtrl32()
+  {
+    INITCOMMONCONTROLSEX p;
+    p.dwSize = sizeof(p);
+    p.dwICC = ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_TREEVIEW_CLASSES | ICC_USEREX_CLASSES | ICC_TREEVIEW_CLASSES;
+    ::InitCommonControlsEx(&p);
   }
   
   winlight::~winlight()
@@ -96,10 +105,17 @@ namespace neui
       case widgettype::button:
         view = RefPtr<wind2d::Button>::make();
         break;
+      case widgettype::checkbox:
+        view = RefPtr<wind2d::Checkbox>::make();
+        break;
       case widgettype::text:
         view = RefPtr<wind2d::TextField>::make();
         break;
+      case widgettype::droplist:
+        view = RefPtr<wind2d::Droplist>::make();
+        break;
       case widgettype::panel:
+        return 0;
         break;
       default:
         return 0;
@@ -209,7 +225,7 @@ namespace neui
   uint32_t winlight::setInteger(widget_index_t widget, int32_t value, int32_t index)
   {
     widgets[widget]->setInteger(value, index);
-    return uint32_t();
+    return 0;
   }
 
   int32_t winlight::run()

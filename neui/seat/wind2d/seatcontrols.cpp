@@ -376,6 +376,14 @@ namespace neui
               ignoreNext = false;
             }
           }
+          if (notificationcode == BN_CLICKED)
+          {
+            auto win = (BaseWindow*)(GetWindowLongPtr((HWND)lParam, GWLP_USERDATA));
+            if (win)
+            {
+              win->handleWindowMessage(UWM_BN_CLICKED, 0, 0);
+            }
+          }
         }
         break;
       default:

@@ -17,6 +17,8 @@
 // #include "fmt/format.h"
 
 #define UWM_DPICHANGED WM_USER+WM_DPICHANGED
+#define UWM_UPDATE_STATE (WM_USER+1001)
+#define UWM_BN_CLICKED (WM_USER+1002)
 
 namespace neui
 {

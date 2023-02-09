@@ -33,7 +33,8 @@ namespace neui
 
     // IFrontEnd
 
-  private:   
+  private:
+    void initComCtrl32();
     WidgetIndex<IPlatformView> widgets;
   };
 

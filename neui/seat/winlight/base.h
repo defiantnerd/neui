@@ -18,6 +18,11 @@
 
 #define UWM_DPICHANGED WM_USER+WM_DPICHANGED
 
+// notify child windows about new parent resize
+#define WMTT_PARENT_WM_SIZE (WM_USER+1000)
+#define UWM_UPDATE_STATE (WM_USER+1001)
+#define UWM_BN_CLICKED (WM_USER+1002)
+
 namespace neui
 {
   namespace win
@@ -77,6 +82,4 @@ namespace neui
   }
 }
 
-// notify child windows about new parent resize
-#define WMTT_PARENT_WM_SIZE (WM_USER+1000)
 

@@ -215,6 +215,12 @@ namespace neui
       return false;
     }
 
+    bool BaseWindow::setInteger(const int32_t value, int32_t index)
+    {
+      // no base functionality
+      return false;
+    }
+
     void BaseWindow::setFont(int size, const TCHAR* font)
     {
       if (hFont)
@@ -267,6 +273,19 @@ namespace neui
 
       switch (message)
       {
+
+      case WM_NCDESTROY:
+        if (this->patchedWndProc)
+        {
+          // unpatch the WNDPROC, which is not in the documentation, but
+          // Raymond Chen stated this in one of his blog articles
+          SetWindowLongPtr(this->hwnd, GWLP_WNDPROC, (LONG_PTR) this->patchedWndProc);
+          auto temp = this->patchedWndProc;
+          this->patchedWndProc = nullptr; // remove the connection completely
+          // call the original message handler
+          return temp(this->hwnd, message, wParam, lParam);
+        }
+        break;
       case WM_DPICHANGED_AFTERPARENT:
       {
         //OutputDebugString(utf8_to_wstring(fmt::format("DPI changed HWND {:x}\n", (uint64_t) hwnd)).c_str());
@@ -354,6 +373,14 @@ namespace neui
               // this means, that the setText came from us and we shall not
               // process this again
               ignoreNext = false;
+            }
+          }
+          if (notificationcode == BN_CLICKED)
+          {
+            auto win = (BaseWindow*)(GetWindowLongPtr((HWND)lParam, GWLP_USERDATA));
+            if (win)
+            {
+              win->handleWindowMessage(UWM_BN_CLICKED, 0, 0);
             }
           }
         }

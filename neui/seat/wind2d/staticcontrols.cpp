@@ -123,7 +123,7 @@ namespace neui
       auto r = upscaleRect(rect);
       SubclassWindowProc(CreateWindowEx(NEUI_WS_EX_LAYERED | 0, _T("Button"),
         utf8_to_wstring(this->windowText).c_str(),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_CHECKBOX | BS_FLAT,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_FLAT | BS_AUTOCHECKBOX,
         r.x, r.y, r.w, r.h,
         parent, 0, gInstance, this));
       if (hwnd)
@@ -146,18 +146,24 @@ namespace neui
     {
       switch (message)
       {
-        case BM_SETSTATE:
-        {
-          // if (wParam == BM_CLICK)
+        case UWM_BN_CLICKED:
           {
             BOOL checked = Button_GetCheck(hwnd);
-            bool newchecked = !checked;
-            Button_SetCheck(hwnd, newchecked ? BST_CHECKED : BST_UNCHECKED);
-            event::Selected ev(newchecked ? 1 : 0, 0);
+            event::Selected ev(checked ? 1 : 0, 0);
             viewHandle.sendEvent(ev);
           }
-          return 1;
-        }
+          break;
+        //case WM_COMMAND:
+        //{
+        //  auto result = BaseWindow::handleWindowMessage(message, wParam, lParam);
+        //  if (wParam == BN_CLICKED)
+        //  {
+        //    BOOL checked = Button_GetCheck(hwnd);            
+        //    event::Selected ev(!checked ? 1 : 0, 0);
+        //    viewHandle.sendEvent(ev);
+        //  }
+        //  return result;
+        //}
         break;
         default:
           break;
