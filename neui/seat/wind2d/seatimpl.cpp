@@ -6,6 +6,7 @@
 #include "staticcontrols.h"
 #include "appwindow.h"
 #include <CommCtrl.h>
+
 #pragma comment(lib, "Comctl32")
 
 #if 1
@@ -107,6 +108,9 @@ namespace neui
         break;
       case widgettype::button:
         view = RefPtr<wind2d::Button>::make();
+        break;
+      case widgettype::checkbox:
+        view = RefPtr<wind2d::Checkbox>::make();
         break;
       case widgettype::text:
         view = RefPtr<wind2d::TextField>::make();

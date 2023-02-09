@@ -61,13 +61,25 @@ int run()
     )
     );
 
+    auto checkerbox = make<Checkbox>("My Option", Rect{ 10,130,120,20 },
+    OnSelect{ [](OnSelect::Args e)
+      {
+        auto sender = e.sender<Checkbox>();
+        OutputDebugStringA(sender->checked ? "An" : "Aus");
+        e.handled = true;
+      }
+    }
+  );
+
   auto blaba = make<Label>("First Static", Rect{ 10,10,300,20 });
 
-  OnClick klci([droplist](OnClick::Args e)->void
+  OnClick klci([droplist, checkerbox](OnClick::Args e)->void
     {
       droplist->_items.add("Zonk");
       droplist->_items.setSelectedIndex(1);
+      checkerbox->setChecked(!checkerbox->checked);
       e.handled = true;
+
     }
   );
 
@@ -84,6 +96,7 @@ int run()
     , Label{ "Second Static Text Label", Id{"second"}, Rect{10,40,300,20}, klci }
     , Text{ "Write Something", Id{"editfield"}, Rect{10,70,300,20} }
     , droplist
+    , checkerbox
     , Button{ "Click me", Rect(10,160,120,30), klci }
 
     );

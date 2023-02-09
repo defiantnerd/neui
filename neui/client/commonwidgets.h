@@ -138,9 +138,41 @@ namespace neui
     void updateSeatProperties() override;
     widgettype getWidgetType() override { return widgettype::button; }
 
-    void processEvent(Event& ev) override;
   private:
     std::string text;
+  };
+
+  class Checkbox : public WidgetBase<Checkbox>
+  {
+  public:
+    using super = WidgetBase<Checkbox>;
+    Checkbox() = default;
+    template <typename... Args,
+      typename = enable_if_not_similar<head_t<Args...>, Label>>
+      explicit Checkbox(Args&&... args)
+      : WidgetBase()
+    {
+      addProperties(std::forward<Args>(args)...);
+      this->setType(getWidgetType());
+    }
+
+    void setText(const std::string_view& text) { this->text = text; setString(text, 0); }
+
+    using WidgetBase::addProperty;
+
+    void addProperty(const std::string_view text) { this->text = text; }
+
+    void updateSeatProperties() override;
+    widgettype getWidgetType() override { return widgettype::checkbox; }
+
+    const bool& checked = _checked;
+
+    void processEvent(Event& ev) override;
+
+    void setChecked(bool state);
+  private:
+    std::string text;
+    bool _checked = false;
   };
 
   class Text : public WidgetBase<Text>

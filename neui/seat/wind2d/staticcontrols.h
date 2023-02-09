@@ -18,9 +18,20 @@ namespace neui
     {
       using super = BaseWindow;
     public:
-      Button();
+      Button() = default;
       void create() override;
       LRESULT handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam) override;
+    };
+
+
+    class Checkbox : public BaseWindow
+    {
+      using super = BaseWindow;
+    public:
+      Checkbox() = default;
+      void create() override;
+      LRESULT handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam) override;
+      bool setInteger(const int32_t value, int32_t index) override;
     };
 
     class TextField : public BaseWindow

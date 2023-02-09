@@ -290,6 +290,7 @@ namespace neui
 
     void processEvent(Event& ev) override
     {
+      ev._sender = this;
       executeEvents(ev);
     }
   protected:

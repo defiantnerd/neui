@@ -58,12 +58,6 @@ namespace neui
     }
 #endif
 
-    Button::Button()
-      : BaseWindow()
-    {
-      // this->setAlpha(70);
-    }
-
     void Button::create()
     {
       HWND parent = NULL;
@@ -117,6 +111,72 @@ namespace neui
       return BaseWindow::handleWindowMessage(message, wParam, lParam);
     }
 
+
+    void Checkbox::create()
+    {
+      HWND parent = NULL;
+      assert(viewHandle.seat);
+      if (parentView)
+      {
+        parent = NativeHandle(parentView->getNativeHandle());
+      }
+      auto r = upscaleRect(rect);
+      SubclassWindowProc(CreateWindowEx(NEUI_WS_EX_LAYERED | 0, _T("Button"),
+        utf8_to_wstring(this->windowText).c_str(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_CHECKBOX | BS_FLAT,
+        r.x, r.y, r.w, r.h,
+        parent, 0, gInstance, this));
+      if (hwnd)
+      {
+        // ::SetParent(hwnd, parent);
+        ::SetLayeredWindowAttributes(hwnd, 0, 0, 0);
+        // SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOREDRAW | SWP_NOSIZE);
+        // setFont(12, _T("Segoe UI"));
+      }
+      else
+      {
+        auto out = ::GetLastError();
+        fprintf(stderr, "err: %d\n", out);
+        assert(false);
+      }
+      super::create();
+    }
+
+    LRESULT Checkbox::handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam)
+    {
+      switch (message)
+      {
+        case BM_SETSTATE:
+        {
+          // if (wParam == BM_CLICK)
+          {
+            BOOL checked = Button_GetCheck(hwnd);
+            bool newchecked = !checked;
+            Button_SetCheck(hwnd, newchecked ? BST_CHECKED : BST_UNCHECKED);
+            event::Selected ev(newchecked ? 1 : 0, 0);
+            viewHandle.sendEvent(ev);
+          }
+          return 1;
+        }
+        break;
+        default:
+          break;
+      }
+      return BaseWindow::handleWindowMessage(message, wParam, lParam);
+    }
+
+    bool Checkbox::setInteger(const int32_t value, int32_t index)
+    {
+      if (index == 0)
+      {
+        if (hwnd)
+        {
+          Button_SetCheck(hwnd, (value != 0) ? BST_CHECKED : BST_UNCHECKED);
+        }
+      }
+      return false;
+    }
+
     bool TextField::setText(const std::string_view text, int32_t index)
     {
       if (index == 0)
@@ -136,9 +196,9 @@ namespace neui
       }
       auto r = upscaleRect(rect);
       SubclassWindowProc(CreateWindowEx(NEUI_WS_EX_LAYERED |
-        WS_EX_CLIENTEDGE | WS_EX_LEFT | WS_EX_RIGHTSCROLLBAR, 
+        WS_EX_CLIENTEDGE | WS_EX_LEFT | WS_EX_RIGHTSCROLLBAR,
         _T("Edit"), utf8_to_wstring(this->label).c_str(),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP |  ES_AUTOHSCROLL,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
         r.x, r.y, r.w, r.h,
         parent, 0, gInstance, this));
       if (hwnd)
@@ -164,17 +224,17 @@ namespace neui
 #if 0
       switch (message)
       {
-        case WM_DPICHANGED:
-        {
-          currentDPI = HIWORD(wParam);
-          // UpdateDpiDependentFontsAndResources();
-          // WM_DPICHANGED comes with lParam pointing to a new rect for this control
-          LPRECT r = (LPRECT)lParam;
-          SetWindowPos(hwnd, hwnd, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
-        }
+      case WM_DPICHANGED:
+      {
+        currentDPI = HIWORD(wParam);
+        // UpdateDpiDependentFontsAndResources();
+        // WM_DPICHANGED comes with lParam pointing to a new rect for this control
+        LPRECT r = (LPRECT)lParam;
+        SetWindowPos(hwnd, hwnd, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+      }
+      break;
+      default:
         break;
-        default:
-          break;
       }
 #endif
       switch (message)
@@ -209,8 +269,8 @@ namespace neui
         if (hwnd)
         {
           auto n = ComboBox_GetCount(hwnd);
-          if ( index < n)
-            ComboBox_SetItemData(hwnd, index, (LPARAM) std::string(text).c_str());
+          if (index < n)
+            ComboBox_SetItemData(hwnd, index, (LPARAM)std::string(text).c_str());
           else
             auto k = ComboBox_AddString(hwnd, utf8_to_wstring(text).c_str());
         }
@@ -268,7 +328,7 @@ namespace neui
           this->viewHandle.sendEvent(e);
         }
       }
-      return super::handleWindowMessage(message,wParam,lParam);
+      return super::handleWindowMessage(message, wParam, lParam);
     }
 
     bool Droplist::setInteger(const int32_t value, int32_t index)
@@ -283,5 +343,5 @@ namespace neui
       return false;
     }
 
-}
+  }
 }

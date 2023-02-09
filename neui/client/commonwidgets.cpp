@@ -38,13 +38,28 @@ namespace neui
     WidgetBase::updateSeatProperties();
     setString(this->text);
   }
-  void Button::processEvent(Event& ev)
+
+  void Checkbox::updateSeatProperties()
   {
-    if (ev.getType() == event::type::click)
+    super::updateSeatProperties();
+    setString(this->text);
+    setInteger(this->checked ? 1 : 0, 0);
+  }
+
+  void Checkbox::setChecked(bool state)
+  {
+    _checked = state;
+    setInteger(this->checked ? 1 : 0, 0);
+  }
+
+  void Checkbox::processEvent(Event& ev)
+  {
+    if (ev.getType() == event::Selected::type_v)
     {
-      this->setText("Button clicked");
+      auto& e = static_cast<event::Selected&>(ev);
+      _checked = (e.index != 0);
     }
-    return WidgetBase::processEvent(ev);
+    super::processEvent(ev);
   }
 
   void Text::updateSeatProperties()
@@ -74,5 +89,6 @@ namespace neui
   {
     updateSeatProperties();
   }
+
 }
 

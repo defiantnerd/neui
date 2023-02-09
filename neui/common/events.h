@@ -14,6 +14,8 @@
 
 namespace neui
 {
+  class WidgetReference;
+
   template<typename T>
   class IBinding
   {
@@ -74,8 +76,14 @@ namespace neui
     protected:
       Base() = default;
     public:
+      WidgetReference* _sender = nullptr;
       virtual type getType() const = 0;
       virtual ~Base() = default;
+      template<typename T>
+      T* sender()
+      {
+        return dynamic_cast<T*>(_sender);
+      }
     };
 
     // simplified events
