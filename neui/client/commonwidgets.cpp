@@ -43,7 +43,7 @@ namespace neui
   {
     super::updateSeatProperties();
     setString(this->text);
-    setInteger(this->checked ? 1 : 0, 0);
+    setInteger(this->checked ? 1 : 0, -1);
   }
 
   void Checkbox::setChecked(bool state)

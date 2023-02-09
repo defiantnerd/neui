@@ -32,6 +32,8 @@ namespace neui
       void create() override;
       LRESULT handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam) override;
       bool setInteger(const int32_t value, int32_t index) override;
+    private:
+      bool _checked = false;
     };
 
     class TextField : public BaseWindow

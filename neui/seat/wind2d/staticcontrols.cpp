@@ -139,6 +139,7 @@ namespace neui
         fprintf(stderr, "err: %d\n", out);
         assert(false);
       }
+      Button_SetCheck(hwnd, (_checked) ? BST_CHECKED : BST_UNCHECKED);
       super::create();
     }
 
@@ -175,6 +176,7 @@ namespace neui
     {
       if (index == 0 || index == -1)
       {
+        _checked = (value != 0);
         if (hwnd)
         {
           Button_SetCheck(hwnd, (value != 0) ? BST_CHECKED : BST_UNCHECKED);

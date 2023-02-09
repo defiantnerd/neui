@@ -58,7 +58,9 @@ int run()
     )
     );
 
-  auto checkerbox = make<Checkbox>("My Option", Rect{ 10,130,120,20 },
+  auto checkerbox = make<Checkbox>("My Option",
+    Id{"the checkbox"},
+   Rect{ 10,130,120,20 },
     OnSelect{ [](OnSelect::Args e)
       {
         auto sender = e.sender<Checkbox>();
@@ -105,9 +107,9 @@ int run()
   );
 
   // get the shared pointer to an object by ID - you must provide a Class Type
-  auto mc = window->getWidgetById<IWidget>("editfield");
+  auto mc = window->getWidgetById<Checkbox>("the checkbox");
   mc->hide();
-
+  mc->setChecked(true);
   mc->show();
   
   return neui::run();
