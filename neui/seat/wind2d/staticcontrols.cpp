@@ -307,11 +307,16 @@ namespace neui
 
     bool Droplist::setInteger(const int32_t value, int32_t index)
     {
-      if (index == 0)
+      if (index == 0 || index == -1)
       {
         if (hwnd)
         {
           ComboBox_SetCurSel(hwnd, value);
+          if (index == 0)
+          {
+            event::Selected e(value, 0);
+            this->viewHandle.sendEvent(e);
+          }
         }
       }
       return false;

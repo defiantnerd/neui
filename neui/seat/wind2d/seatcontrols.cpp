@@ -273,7 +273,13 @@ namespace neui
 
       switch (message)
       {
-
+      case WM_NOTIFY:
+        {
+        auto nfy = (LPNMHDR)lParam;
+          // nfy->code
+        OutputDebugStringA("WM_NOTIFY\n");
+        }
+        break;
       case WM_NCDESTROY:
         if (this->patchedWndProc)
         {

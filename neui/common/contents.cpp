@@ -19,7 +19,8 @@ namespace neui
   void Itemlist::setSelectedIndex(int32_t index)
   {
     _index = index;
-    _owner->updateItemList(this);
+    _owner->updateItemIndex(this);
+
   }
   int32_t Itemlist::getSelectedIndex()
   {

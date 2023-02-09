@@ -51,11 +51,16 @@ int run()
   // the droplist
   std::shared_ptr<Droplist> droplist;
 
-  droplist = make<Droplist>( "Auswahl", Id{ "droplist" }
+  droplist = make<Droplist>( "Selection", Id{ "mydroplist" }
     , Rect{ 10,110,300,20 } , 
-    OnSelect ([droplist](OnSelect::Args e)->void
+    OnSelect ([](OnSelect::Args e)->void
       {
-        // entry selected
+        auto self = e.sender<Droplist>();
+        if (self)
+        {
+          auto cid = self->getID();
+          // OutputDebugStringA(std::string(cid).c_str());
+        }
         e.handled = true;
       }
     )
@@ -65,7 +70,6 @@ int run()
     OnSelect{ [](OnSelect::Args e)
       {
         auto sender = e.sender<Checkbox>();
-        OutputDebugStringA(sender->checked ? "An" : "Aus");
         e.handled = true;
       }
     }
@@ -79,11 +83,8 @@ int run()
       droplist->_items.setSelectedIndex(1);
       checkerbox->setChecked(!checkerbox->checked);
       e.handled = true;
-
     }
   );
-
-
 
   blaba->setText("bla");
   auto window = make<AppWindow>(

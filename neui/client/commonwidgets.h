@@ -231,6 +231,7 @@ namespace neui
     // void processEvent(Event& ev) override {  };
 
     void updateItemList(Itemlist* sender) override;
+    void updateItemIndex(Itemlist* sender) override;
     Itemlist& _items;
   private:
     std::string _text;

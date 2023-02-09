@@ -81,13 +81,22 @@ namespace neui
     auto curindex = _items.getSelectedIndex();
     if (curindex >= 0)
     {
-      this->setInteger(curindex,0);
+      this->setInteger(curindex,-1);
     }
   }
 
   void Droplist::updateItemList(Itemlist* sender)
   {
     updateSeatProperties();
+  }
+
+  void Droplist::updateItemIndex(Itemlist* sender)
+  {
+    auto curindex = _items.getSelectedIndex();
+    if (curindex >= 0)
+    {
+      this->setInteger(curindex, 0);
+    }
   }
 
 }
