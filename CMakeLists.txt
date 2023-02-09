@@ -182,6 +182,7 @@ add_library (neui
 )
 
 target_link_libraries(neui PRIVATE wind2d)
+# target_link_libraries(neui PRIVATE winlight)
 target_link_libraries(neui PRIVATE commonlib)
 #target_link_libraries(neui PRIVATE fmt::fmt)
 
@@ -215,7 +216,6 @@ target_include_directories(main
 target_link_libraries(main PRIVATE neui)
 
 if (WIN32)
-target_link_libraries(main PRIVATE wind2d)
 target_link_options(main PRIVATE -mwindows)
 endif()
 

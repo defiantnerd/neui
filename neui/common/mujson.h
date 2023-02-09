@@ -6,7 +6,7 @@
 #include <tuple>
 
 /*
-*   mujsob
+*   mujson
 * 
 *   - no arrays
 *   - no maps
