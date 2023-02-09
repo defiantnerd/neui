@@ -143,7 +143,7 @@ namespace neui
     }
 
     template<class T>
-    std::shared_ptr<T> getWidgetById(const std::string_view& id)
+    std::shared_ptr<T> getWidgetById(const std::string_view id)
     {
       for (auto& c : children)
       {

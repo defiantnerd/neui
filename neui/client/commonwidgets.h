@@ -39,6 +39,11 @@ namespace neui
       show();
     }
 
+    template<class T>
+    std::shared_ptr<T> getWidgetById(const std::string_view id)
+    {
+      return WidgetContainer::getWidgetById<T>(id);
+    }
     
     void addProperty(const std::string_view& text) { this->title = text; }
     void setText(const char* text) { this->title = text; setString(text, 0); }

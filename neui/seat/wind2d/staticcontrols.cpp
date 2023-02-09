@@ -173,11 +173,17 @@ namespace neui
 
     bool Checkbox::setInteger(const int32_t value, int32_t index)
     {
-      if (index == 0)
+      if (index == 0 || index == -1)
       {
         if (hwnd)
         {
           Button_SetCheck(hwnd, (value != 0) ? BST_CHECKED : BST_UNCHECKED);
+          if (index == 0)
+          {
+            event::Selected e(value, 0);
+            this->viewHandle.sendEvent(e);
+          }
+          return true;
         }
       }
       return false;

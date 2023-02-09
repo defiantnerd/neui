@@ -23,17 +23,8 @@ int main(int argc, char* argv[])
   run();
 }
 
-
-auto myfunc(int arg) -> bool
-{
-  return false;
-}
-
 int run()
 {
-
-  cout << "Hello CMake." << endl;
-
 
   using namespace neui;
   // neui::foo();
@@ -51,11 +42,12 @@ int run()
   // the droplist
   std::shared_ptr<Droplist> droplist;
 
-  droplist = make<Droplist>( "Selection", Id{ "mydroplist" }
-    , Rect{ 10,110,300,20 } , 
-    OnSelect ([](OnSelect::Args e)->void
+  droplist = make<Droplist>("Selection", Id{ "mydroplist" }
+    , Rect{ 10,110,300,20 },
+    OnSelect([](OnSelect::Args e)->void
       {
         auto self = e.sender<Droplist>();
+
         if (self)
         {
           auto cid = self->getID();
@@ -66,7 +58,7 @@ int run()
     )
     );
 
-    auto checkerbox = make<Checkbox>("My Option", Rect{ 10,130,120,20 },
+  auto checkerbox = make<Checkbox>("My Option", Rect{ 10,130,120,20 },
     OnSelect{ [](OnSelect::Args e)
       {
         auto sender = e.sender<Checkbox>();
@@ -79,14 +71,24 @@ int run()
 
   OnClick klci([droplist, checkerbox](OnClick::Args e)->void
     {
-      droplist->_items.add("Zonk");
+
+      // add an additional item
+      if (droplist->_items.count() < 4)
+      {
+        droplist->_items.add("Zonk");
+      }
+
+      // select an entry (-> note that change events are sent)
       droplist->_items.setSelectedIndex(1);
+
+      // invert check box (-> note that change events are sent) 
       checkerbox->setChecked(!checkerbox->checked);
       e.handled = true;
     }
   );
 
   blaba->setText("bla");
+
   auto window = make<AppWindow>(
     "My Application Window",
     Rect{ 250,250,700,450 }
@@ -100,53 +102,12 @@ int run()
     , checkerbox
     , Button{ "Click me", Rect(10,160,120,30), klci }
 
-    );
-  return neui::run();  
-#if 0
-  auto sharedone = std::make_shared<Widget>(Rect(40, 2, 20, 20));
-  auto sharedpanel = std::make_shared<Panel>(Rect(70, 2, 20, 20), Label{ "label in Panel" });
-  std::cout << "panel: " << sharedpanel->hasChildren() << std::endl;
+  );
+
+  // get the shared pointer to an object by ID - you must provide a Class Type
+  auto mc = window->getWidgetById<Text>("editfield");
   
-  *sharedpanel += std::make_shared<Label>("Another one bytes the panel!");
-  Widget w{ Rect(10, 10, 100, 100),
-    Border{2},
-    // mystyle,
-    Widget(Rect(10,2,20,20)),
-    sharedone,
-    Label{Rect(40,32,50,52),Id{"text"}, Border{1}, Margin{2},"Lolo"},
-    Label{"label"},
-    sharedpanel
-  };
+  return neui::run();
 
-  Label testlabel{ Rect(40,32,50,52),Id{"text"}, Border{1}, Margin{2},"Lolo" };
-  (*sharedpanel) += std::make_shared<Label>("blub");
-  std::cout << "label: " << testlabel.hasChildren() << std::endl;
-  auto p = w.getWidgetById<Label>("text");
-  auto q = w.getWidgetById<Label>("unknown");
-
-  if (p)
-  {
-    p->setText("Lalala");
-  }
-
-  w += std::make_shared<Label>("another one to the widget");
-	
-  auto c = R"( 
-
-  Widget
-    Border()
-    Widget
-    Label
-      Rect()
-      Border()
-      Margin()
-      "Lolo"
-    Label
-    &sharedone
-
-
-  )";
-#endif
-	
-	return 0;
+  return 0;
 }
