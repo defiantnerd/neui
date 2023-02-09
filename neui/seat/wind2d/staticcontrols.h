@@ -39,8 +39,7 @@ namespace neui
       using super = BaseWindow;
     public:
       bool setText(const std::string_view text, int32_t index) override;
-      void create() override;
-      LRESULT handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam) override;
+      void create() override;      
     private:
       std::string label;
     };

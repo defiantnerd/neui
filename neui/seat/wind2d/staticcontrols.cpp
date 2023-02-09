@@ -221,38 +221,6 @@ namespace neui
       }
 
       super::create();
-
-    }
-
-    LRESULT TextField::handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam)
-    {
-      // OutputDebugString(utf8_to_wstring( fmt::format("TEXT HWND {3:p}: MSG {0}, {1:x},{2:x}\n", message, wParam, lParam,(void*)hwnd)).c_str());
-#if 0
-      switch (message)
-      {
-      case WM_DPICHANGED:
-      {
-        currentDPI = HIWORD(wParam);
-        // UpdateDpiDependentFontsAndResources();
-        // WM_DPICHANGED comes with lParam pointing to a new rect for this control
-        LPRECT r = (LPRECT)lParam;
-        SetWindowPos(hwnd, hwnd, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
-      }
-      break;
-      default:
-        break;
-      }
-#endif
-      switch (message)
-      {
-      case EN_CHANGE:
-        OutputDebugStringA("oj");
-        break;
-      case WM_COMMAND:
-        OutputDebugStringA("oj");
-        break;
-      }
-      return BaseWindow::handleWindowMessage(message, wParam, lParam);
     }
 
     bool Droplist::setText(const std::string_view text, int32_t index)
