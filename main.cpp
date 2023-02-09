@@ -105,7 +105,10 @@ int run()
   );
 
   // get the shared pointer to an object by ID - you must provide a Class Type
-  auto mc = window->getWidgetById<Text>("editfield");
+  auto mc = window->getWidgetById<IWidget>("editfield");
+  mc->hide();
+
+  mc->show();
   
   return neui::run();
 

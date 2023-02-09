@@ -284,8 +284,9 @@ namespace neui
     }
     void hide() override
     {
-      this->setType(getWidgetType());
+      this->selectLevel(SeatInstantiationLevel::none);
       this->setVisible(false);
+      this->setType(getWidgetType());
     }    
 
     void processEvent(Event& ev) override
