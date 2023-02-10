@@ -1,3 +1,4 @@
+#include "seatimpl.h"
 #define NOMINMAX 1
 #include <windowsx.h>
 #include "seatimpl.h"
@@ -254,6 +255,12 @@ namespace neui
     } while (GetMessage(&message, NULL, 0, 0) > 0);
 
     return (int32_t)message.wParam;
+  }
+
+  int32_t wind2dSeat::quit(int32_t result)
+  {
+    ::PostQuitMessage(result);
+    return 0;
   }
 
 }

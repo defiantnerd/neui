@@ -52,6 +52,7 @@ namespace neui
     virtual uint32_t setString(widget_index_t widget, const std::string_view string, int32_t index = 0) = 0;
     virtual uint32_t setInteger(widget_index_t widget, int32_t value, int32_t index = 0) = 0;
     virtual int32_t run() = 0;
+    virtual int32_t quit(int32_t result = 0) = 0;
     virtual ~ISeat() {}
   };
 
