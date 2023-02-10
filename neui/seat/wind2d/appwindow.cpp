@@ -90,6 +90,7 @@ namespace neui
           break;
         case WM_CREATE:
           theme = GetWindowTheme(hwnd);
+          resizeToDPI();
           return BaseWindow::handleWindowMessage(message, wParam, lParam);
           break;
         case WM_COMMAND:

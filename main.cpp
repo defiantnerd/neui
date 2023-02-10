@@ -9,18 +9,18 @@ using std::endl;
 int run();
 
 int _stdcall WinMain(
-  HINSTANCE hInstance,
-  HINSTANCE hPrevInstance,
-  LPSTR     lpCmdLine,
-  int       nShowCmd
+  _In_ HINSTANCE hInstance,
+  _In_opt_ HINSTANCE hPrevInstance,
+  _In_ LPSTR     lpCmdLine,
+  _In_ int       nShowCmd
 )
 {
-  run();
+  return run();
 }
 
 int main(int argc, char* argv[])
 {
-  run();
+  return run();
 }
 
 int run()
@@ -113,6 +113,11 @@ int run()
     OnClick([&](OnClick::Args e)
       {
         auto sender = e.sender<Button>();
+        auto check2 = window->getWidgetById<Checkbox>("DanielDruckt");
+        if (check2)
+        {
+          if (check2->isVisible()) check2->hide(); else check2->show();
+        }
         if (checkerbox->isEnabled())
         {
           checkerbox->disable();

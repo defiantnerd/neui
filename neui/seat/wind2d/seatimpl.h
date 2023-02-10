@@ -30,7 +30,7 @@ namespace neui
     uint32_t setPos(widget_index_t widget, int size, int32_t index = 0) override;
     uint32_t setSize(widget_index_t widget, int size, int32_t index = 0) override;
     uint32_t setString(widget_index_t widget, const std::string_view string, int32_t index = 0) override;
-    uint32_t setInteger(widget_index_t widget, int32_t value, int int32_t = 0) override;
+    uint32_t setInteger(widget_index_t widget, int32_t value, int32_t index = 0) override;
     int32_t run() override;
 
     // IFrontEnd
