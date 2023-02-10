@@ -131,6 +131,14 @@ namespace neui
       ::SetLayeredWindowAttributes(hwnd, 0, (255 * percent) / 100, LWA_ALPHA);
     }
 
+    void BaseWindow::enable() {
+      ::EnableWindow(hwnd, TRUE);
+    }
+    void BaseWindow::disable() {
+      ::EnableWindow(hwnd, FALSE);
+    }
+
+
     float BaseWindow::getDpi()
     {
       return (float)currentDPI;

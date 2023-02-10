@@ -44,6 +44,8 @@ namespace neui
     virtual void destroy() = 0;
     virtual void show(int show) = 0;
     virtual void hide() = 0;
+    virtual void enable() = 0;
+    virtual void disable() = 0;
     virtual bool setText(const std::string_view text, int32_t index) = 0;
     virtual bool setInteger(const int32_t value, int32_t index) = 0;
     virtual void focus() = 0;

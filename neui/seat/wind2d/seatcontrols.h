@@ -61,6 +61,8 @@ namespace neui
       void destroy() override;
       void show(int show = SW_SHOWDEFAULT) override;
       void hide() override { show(SW_HIDE); }
+      void enable() override;
+      void disable() override;
       bool setText(const std::string_view text, int32_t index) override;
       bool setInteger(const int32_t value, int32_t index) override;
       void focus();

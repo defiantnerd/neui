@@ -178,6 +178,18 @@ namespace neui
     return 0;
   }
 
+  uint32_t wind2dSeat::enable(widget_index_t widget)
+  {
+    widgets[widget]->enable();
+    return 0;
+  }
+
+  uint32_t wind2dSeat::disable(widget_index_t widget)
+  {
+    widgets[widget]->disable();
+    return 0;
+  }
+
   uint32_t wind2dSeat::setParent(widget_index_t widget, widget_index_t parent)
   {
     auto&& c = widgets[widget];

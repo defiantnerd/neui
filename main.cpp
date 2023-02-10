@@ -102,8 +102,26 @@ int run()
     , Text{ "Write Something", Id{"editfield"}, Rect{10,70,300,20} }
     , droplist
     , checkerbox
+    , Checkbox{ "Daniel soll drucken", Rect{140,130,120,20}, Id{"DanielDruckt"}}
     , Button{ "Click me", Rect(10,160,120,30), klci }
+    , Button{ "On/Off", Id{"togglebutton"}  , Rect(140,160,120,30)}
 
+  );
+
+  auto tog = window->getWidgetById<Button>("togglebutton");
+  tog->addProperty(
+    OnClick([&](OnClick::Args e)
+      {
+        auto sender = e.sender<Button>();
+        if (checkerbox->isEnabled())
+        {
+          checkerbox->disable();
+        }
+        else
+        {
+          checkerbox->enable();
+        }
+      })
   );
 
   // get the shared pointer to an object by ID - you must provide a Class Type

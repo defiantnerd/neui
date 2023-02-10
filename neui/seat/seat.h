@@ -41,6 +41,8 @@ namespace neui
     virtual uint32_t destroyWidget(widget_index_t widget) = 0;
     virtual uint32_t show(widget_index_t widget) = 0;
     virtual uint32_t hide(widget_index_t widget) = 0;
+    virtual uint32_t enable(widget_index_t widget) = 0;
+    virtual uint32_t disable(widget_index_t widget) = 0;
     virtual uint32_t setParent(widget_index_t widget, widget_index_t parent) = 0;
     virtual uint32_t setRect(widget_index_t widget, const Rect& pos, int32_t index = 0) = 0;
     virtual uint32_t setBoxModel(widget_index_t widget, const BoxModel& pos) = 0;

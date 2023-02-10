@@ -40,7 +40,11 @@ namespace neui
     virtual void show() = 0;
     virtual void hide() = 0;
 
+    virtual void enable() = 0;
+    virtual void disable() = 0;
+
     virtual bool isVisible() const = 0;
+    virtual bool isEnabled() const = 0;
 
     virtual ~IWidget() = default;
   };
@@ -67,6 +71,9 @@ namespace neui
     void processEvent(Event& ev) override;
   protected:
     void setVisible(bool visible);
+    bool isVisible() const { return visibleOnSeat; }
+    bool isEnabled() const { return enabled; }
+    void setEnable(bool enable);
     uint32_t getParent() const { return parentwidget; }
     void setBoxModelOnSeat(const BoxModel& boxmodel);
     void setRectOnSeat(const Rect& rect);
@@ -93,6 +100,7 @@ namespace neui
     widgettype type;
     SeatInstantiationLevel level = SeatInstantiationLevel::none;
     bool visibleOnSeat = true;
+    bool enabled = true;
     ISeat * seat = nullptr;
     uint32_t widgetid = 0;
     uint32_t parentwidget = 0;
@@ -274,7 +282,19 @@ namespace neui
 
     const std::string_view getID() const override { return id; }
     const Layout& getLayout() const override { return layout; }
-    bool isVisible() const override { return visible; }
+    bool isVisible() const override { return WidgetReference::isVisible(); }
+    bool isEnabled() const override { return WidgetReference::isEnabled(); }
+
+
+    void enable() override
+    {
+      this->setEnable(true);
+    }
+
+    void disable() override
+    {
+      this->setEnable(false);
+    }
 
     void show() override
     {
@@ -287,7 +307,7 @@ namespace neui
       this->selectLevel(SeatInstantiationLevel::none);
       this->setVisible(false);
       this->setType(getWidgetType());
-    }    
+    }
 
     void processEvent(Event& ev) override
     {
@@ -309,8 +329,7 @@ namespace neui
       setRectOnSeat(layout.position);
     }
     Id id;
-    Layout layout;
-    bool visible = true;
+    Layout layout;    
     IWidgetContainer* parent = nullptr;
   private:
     std::vector<std::shared_ptr<IHandlerBase>> _event_handler;

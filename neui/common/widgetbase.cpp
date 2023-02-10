@@ -27,12 +27,14 @@ namespace neui
 
   void WidgetReference::showOnSeat()
   {
-    Seat::Instance().show(widgetid);
+    if (this->level > SeatInstantiationLevel::none)
+      Seat::Instance().show(widgetid);
   }
 
   void WidgetReference::hideOnSeat()
   {
-    Seat::Instance().hide(widgetid);
+    if (this->level > SeatInstantiationLevel::none)
+      Seat::Instance().hide(widgetid);
   }
 
   void WidgetReference::selectLevel(SeatInstantiationLevel newlevel)
@@ -56,7 +58,16 @@ namespace neui
       }
       if (newlevel == SeatInstantiationLevel::active)
       {
-        if (visibleOnSeat) showOnSeat(); else hideOnSeat();
+        if (visibleOnSeat)
+        {
+          showOnSeat();
+          if (!enabled)
+          {
+            this->setEnable(false);
+          }
+        }
+        else 
+          hideOnSeat();
         level = newlevel;
       }
     }
@@ -95,7 +106,29 @@ namespace neui
 
   void WidgetReference::setVisible(bool visible)
   {
+    if (visibleOnSeat == visible)
+      return;
+
     visibleOnSeat = visible;
+    if (level > SeatInstantiationLevel::none)
+    {
+      if ( visible)
+        Seat::Instance().show(widgetid);
+      else
+        Seat::Instance().hide(widgetid);
+    }
+  }
+
+  void WidgetReference::setEnable(bool state)
+  {
+    if (enabled != state)
+    {
+      enabled = state;
+      if (state)
+        Seat::Instance().enable(widgetid);
+      else
+        Seat::Instance().disable(widgetid);
+    }
   }
 
   void WidgetReference::setBoxModelOnSeat(const BoxModel& boxmodel)
