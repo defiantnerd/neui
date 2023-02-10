@@ -102,7 +102,6 @@ int run()
     , Text{ "Write Something", Id{"editfield"}, Rect{10,70,300,20} }
     , droplist
     , checkerbox
-    , Checkbox{ "Daniel soll drucken", Rect{140,130,120,20}, Id{"DanielDruckt"}}
     , Button{ "Click me", Rect(10,160,120,30), klci }
     , Button{ "On/Off", Id{"togglebutton"}  , Rect(140,160,120,30)}
 
@@ -113,11 +112,6 @@ int run()
     OnClick([&](OnClick::Args e)
       {
         auto sender = e.sender<Button>();
-        auto check2 = window->getWidgetById<Checkbox>("DanielDruckt");
-        if (check2)
-        {
-          if (check2->isVisible()) check2->hide(); else check2->show();
-        }
         if (checkerbox->isEnabled())
         {
           checkerbox->disable();
