@@ -87,6 +87,11 @@ namespace neui
     return Seat::Instance().run();
   }
 
+  void quit(int32_t exitcode)
+  {
+    Seat::Instance().quit(exitcode);
+  }
+
 #if 0 
   //class IPlatformView : public RefCounter
   //{

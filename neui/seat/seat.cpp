@@ -31,9 +31,9 @@ namespace neui
 
   bool ViewHandle::validateContent(std::string& text, int32_t& caretPos)
   {
-    // return true if text and/or caretPos has been changed
-    // TODO: enable a callback in the eventcallback pointer
-    return false;
+    event::Textupdate e {text, caretPos, 0, 0};
+    eventcallback->processEvent(e);
+    return e.useContent;
   }
 
 }

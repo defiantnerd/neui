@@ -78,7 +78,7 @@ namespace neui
     public:
       WidgetReference* _sender = nullptr;
       virtual type getType() const = 0;
-      virtual ~Base() = default;
+      virtual ~Base() {};
       template<typename T>
       T* sender()
       {
@@ -116,9 +116,13 @@ namespace neui
     {
     public:
       static const type type_v = type::textupdate;
-      type getType() { return type_v; }
-      const std::string text;
-      const int32_t index;
+      type getType() const override { return type_v; }
+      Textupdate(const std::string_view text, int32_t caretPos, int32_t index, uint32_t flags)
+        : text(text), caretPos(caretPos), index(index), flags(flags) {}
+      std::string text;
+      int32_t caretPos;
+      const int32_t index = 0;
+      const uint32_t flags = 0;
       bool useContent = true;
     };
   }

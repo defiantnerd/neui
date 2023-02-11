@@ -14,6 +14,7 @@
 namespace neui
 {
   int run();
+  void quit(int32_t exitcode = 0);
 }
 
 /*

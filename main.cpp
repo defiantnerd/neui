@@ -73,7 +73,6 @@ int run()
 
   OnClick klci([droplist, checkerbox](OnClick::Args e)->void
     {
-
       // add an additional item
       if (droplist->_items.count() < 4)
       {
@@ -86,6 +85,7 @@ int run()
       // invert check box (-> note that change events are sent) 
       checkerbox->setChecked(!checkerbox->checked);
       e.handled = true;
+      neui::quit();
     }
   );
 
@@ -129,7 +129,8 @@ int run()
   mc->setChecked(true);
   mc->show();
   
-  return neui::run();
-
+  return neui::run();  
+  window->hide();
+  window.reset();
   return 0;
 }
