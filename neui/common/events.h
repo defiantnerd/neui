@@ -123,7 +123,7 @@ namespace neui
       int32_t caretPos;
       const int32_t index = 0;
       const uint32_t flags = 0;
-      bool useContent = true;
+      bool useContent = false;
     };
   }
 

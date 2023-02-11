@@ -378,8 +378,11 @@ namespace neui
                   ignoreNext = true;
                   win->setText(text, 0);
                   // if we name the variable different, the macro does not work.. *sigh*
-                  newCaretIndex = pos;
-                  Edit_SetCaretIndex(win->getHWND(), newCaretIndex);
+                  if (newCaretIndex != pos)
+                  {
+                    newCaretIndex = pos;
+                    Edit_SetCaretIndex(win->getHWND(), newCaretIndex);
+                  }
                 }
               }
             }

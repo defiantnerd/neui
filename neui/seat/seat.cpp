@@ -33,6 +33,11 @@ namespace neui
   {
     event::Textupdate e {text, caretPos, 0, 0};
     eventcallback->processEvent(e);
+    if (e.useContent)
+    {
+      caretPos = e.caretPos;
+      text = e.text;
+    }
     return e.useContent;
   }
 
