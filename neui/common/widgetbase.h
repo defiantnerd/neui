@@ -67,8 +67,9 @@ namespace neui
     friend class WidgetContainer;
     void selectLevel(SeatInstantiationLevel level);
 
-    bool wantsEvent(const event::type eventtype) override;
-    void processEvent(Event& ev) override;
+    virtual ~WidgetReference();
+  private:
+    void disconnect() override;
   protected:
     void setVisible(bool visible);
     bool isVisible() const { return visibleOnSeat; }
@@ -307,6 +308,16 @@ namespace neui
       this->selectLevel(SeatInstantiationLevel::none);
       this->setVisible(false);
       this->setType(getWidgetType());
+    }
+
+    bool wantsEvent(const event::type eventtype) override
+    {
+      for (auto&& handler : _event_handler)
+      {
+        if (handler->getType() == eventtype)
+          return true;
+      }
+      return false;
     }
 
     void processEvent(Event& ev) override

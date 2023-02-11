@@ -34,6 +34,8 @@ namespace neui
     int32_t run() override;
     int32_t quit(int32_t result = 0) override;
 
+
+    void destroyChildren(widget_index_t widget);
     // IFrontEnd
 
   private:

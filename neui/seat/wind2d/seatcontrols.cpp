@@ -114,6 +114,7 @@ namespace neui
 
     BaseWindow::~BaseWindow()
     {
+      this->viewHandle.disconnect();
       destroy();
       if (hFont)
       {
@@ -174,7 +175,7 @@ namespace neui
     }
 
     void BaseWindow::destroy()
-    {
+    {      
       if (hwnd)
       {
         ::DestroyWindow(hwnd);
@@ -403,22 +404,19 @@ namespace neui
           }
         }
         break;
+      case WM_LBUTTONDOWN:
+        {
+          if (this->viewHandle.wantsEvent(event::type::click))
+          {
+            event::Clicked e { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), 0 };
+            this->viewHandle.sendEvent(e);
+          }
+        }
+        break;
       default:
         break;
       }
 
-      if (this->viewHandle.wantsEvent(event::type::click))
-      {
-        switch (message)
-        {
-        case WM_LBUTTONDOWN:
-          {
-          event::Clicked e{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),0 };
-          this->viewHandle.sendEvent(e);
-          }
-          break;
-        }
-      }
       // if the derived class subclassed a CommonControl window, the messages are passed to the
       // original WndProc of the control (which might finally end in DefWindowProc() as well).
       if (patchedWndProc)

@@ -134,6 +134,7 @@ namespace neui
   public:
     virtual bool wantsEvent(const event::type eventtype) = 0;
     virtual void processEvent(Event& ev) = 0;
+    virtual void disconnect() = 0;
     virtual ~IEventCallback() = default;
   };
 

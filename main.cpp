@@ -129,8 +129,8 @@ int run()
   mc->setChecked(true);
   mc->show();
   
-  return neui::run();  
-  window->hide();
-  window.reset();
-  return 0;
+  auto r = neui::run();  
+  //window->hide();
+  //window.reset();
+  return r;
 }

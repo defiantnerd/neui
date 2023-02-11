@@ -146,7 +146,14 @@ namespace neui
   uint32_t wind2dSeat::release(uint32_t widget)
   {
     auto&& w = widgets[widget];
-    // TODO: actually, everything should be handled via the widget tree, check if it is the case
+    auto child = widgets.getfirstchild(widget);
+    while (child)
+    {
+      auto n = child;
+      child = widgets.getnextsibling(child);
+      destroyWidget(n);
+    }
+    // TODO: actually, everything should be handled via the widget tree, check if it is the case    
     widgets.remove(widget);
     return 0;
   }
@@ -159,9 +166,11 @@ namespace neui
 
   uint32_t wind2dSeat::destroyWidget(widget_index_t widget)
   {
-    if (widgets[widget])
+    auto w = widgets[widget];
+    if (w)
     {
-      widgets[widget]->destroy();
+      destroyChildren(widget);
+      w->destroy();
       return 0;
     }
     return 1;
@@ -261,6 +270,21 @@ namespace neui
   {
     ::PostQuitMessage(result);
     return 0;
+  }
+
+  void wind2dSeat::destroyChildren(widget_index_t widget)
+  {
+    // children must be destroyed and disconnected, too
+    auto child = widgets.getfirstchild(widget);
+    while (child)
+    {
+      auto n = child;
+      child = widgets.getnextsibling(n);
+      destroyChildren(n);
+      auto w = widgets[n];
+      w->destroy();
+      widgets.remove(n);
+    }
   }
 
 }

@@ -41,4 +41,9 @@ namespace neui
     return e.useContent;
   }
 
+  void ViewHandle::disconnect()
+  {
+    eventcallback->disconnect();
+  }
+
 }

@@ -46,15 +46,6 @@ namespace neui
       }
     }
 
-    void AppWindow::destroy()
-    {
-      if (hwnd)
-      {
-        ::DestroyWindow(hwnd);
-        hwnd = 0;
-      }
-    }
-
     bool AppWindow::setText(const std::string_view text, int32_t index)
     {
       switch (index)

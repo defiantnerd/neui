@@ -3,6 +3,11 @@
 
 namespace neui
 {
+  WidgetReference::~WidgetReference()
+  {
+    selectLevel(SeatInstantiationLevel::none);
+  }
+
   void WidgetReference::allocateOnSeat()
   {
     widgetid = Seat::Instance().allocate(type,getParent(),this);
@@ -91,17 +96,9 @@ namespace neui
     }
   }
   
-  bool WidgetReference::wantsEvent(const event::type eventtype)
+  void WidgetReference::disconnect()
   {
-    (void)eventtype;
-    return false;
-  }
-
-  void WidgetReference::processEvent(Event& ev)
-  {
-    (void)ev;
-    //this->exe
-    //return executeEvents(ev);
+    selectLevel(SeatInstantiationLevel::none);
   }
 
   void WidgetReference::setVisible(bool visible)

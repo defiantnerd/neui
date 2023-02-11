@@ -16,7 +16,6 @@ namespace neui
       AppWindow();
       ~AppWindow();
       void create() override;
-      void destroy() override;
       bool setText(const std::string_view text, int32_t index) override;
       LRESULT handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam) override;
     private:
