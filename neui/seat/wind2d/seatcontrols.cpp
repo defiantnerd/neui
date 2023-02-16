@@ -364,6 +364,11 @@ namespace neui
           auto notificationcode = HIWORD(wParam);
           if (notificationcode == EN_CHANGE)
           {
+            OutputDebugStringA("EN_CHANGE\n");
+          }
+          if (notificationcode == EN_UPDATE)
+          {
+            OutputDebugStringA("EN_UPDATE\n");
             static bool ignoreNext = false;
             if (!ignoreNext)
             {
@@ -483,7 +488,7 @@ namespace neui
       // https://devblogs.microsoft.com/oldnewthing/20191014-00/?p=102992
 
       // checking if a class is already there
-      BaseWindow* self = (BaseWindow*)(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+      BaseWindow* self = (BaseWindow*)(GetWindowLongPtr(hwnd, GWLP_USERDATA));      
       if (message == WM_NCCREATE) {
         LPCREATESTRUCT lpcs = reinterpret_cast<LPCREATESTRUCT>(lParam);
         self = static_cast<BaseWindow*>(lpcs->lpCreateParams);

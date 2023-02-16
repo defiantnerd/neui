@@ -4,6 +4,7 @@
 #include "common/indexedwidgettree.h"
 #include <vector>
 #include <memory>
+#include <deque>
 
 namespace neui
 {  
@@ -37,10 +38,14 @@ namespace neui
 
     void destroyChildren(widget_index_t widget);
     // IFrontEnd
-
+    void atExit(std::function<void()> exitfunction)
+    {
+      atexit.push_back(exitfunction);
+    }
   private:
     void initComCtrl32();
     WidgetIndex<IPlatformView> widgets;
+    std::deque<std::function<void()>> atexit;
   };
 
 

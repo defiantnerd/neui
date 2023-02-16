@@ -21,12 +21,23 @@ namespace neui
     void Label::create()
     {
       HWND parent = getParentHWND();
+      {
+        static WNDCLASSEX wcx;
+        wcx.cbSize = sizeof(wcx);
+        GetClassInfoEx(NULL, _T("STATIC"), &wcx);
+        wcx.lpszClassName = _T("neui:STATIC");
+        this->patchedWndProc = wcx.lpfnWndProc;
+        wcx.lpfnWndProc = (WNDPROC)&BaseWindow::basicWndProc;
+        wcx.hInstance = (HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE);
+        registerClass(wcx);
+      }
       auto r = upscaleRect(rect);
-      SubclassWindowProc(CreateWindowEx(NEUI_WS_EX_LAYERED | WS_EX_TRANSPARENT, _T("Static"),
+      CreateWindowEx(NEUI_WS_EX_LAYERED | WS_EX_TRANSPARENT,
+        MAKEINTATOM(getClassAtom()),
         utf8_to_wstring(this->windowText).c_str(),
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         r.x, r.y, r.w, r.h,
-        parent, 0, gInstance, this));
+        parent, 0, gInstance, this);
       if (hwnd != NULL)
       {
         // ::SetParent(hwnd, parent);
@@ -66,12 +77,24 @@ namespace neui
       {
         parent = NativeHandle(parentView->getNativeHandle());
       }
+      {
+        static WNDCLASSEX wcx;
+        wcx.cbSize = sizeof(wcx);
+        GetClassInfoEx(NULL, _T("BUTTON"), &wcx);
+        wcx.lpszClassName = _T("neui:BUTTON");
+        this->patchedWndProc = wcx.lpfnWndProc;
+        wcx.lpfnWndProc = (WNDPROC)&BaseWindow::basicWndProc;
+        wcx.hInstance = (HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE);
+        registerClass(wcx);
+      }
+
       auto r = upscaleRect(rect);
-      SubclassWindowProc(CreateWindowEx(NEUI_WS_EX_LAYERED | 0, _T("Button"),
+      CreateWindowEx(NEUI_WS_EX_LAYERED | 0, 
+        MAKEINTATOM(this->getClassAtom()),
         utf8_to_wstring(this->windowText).c_str(),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_DEFPUSHBUTTON | BS_FLAT,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON , //| BS_DEFPUSHBUTTON | BS_FLAT,
         r.x, r.y, r.w, r.h,
-        parent, 0, gInstance, this));
+        parent, 0, gInstance, this);
       if (hwnd)
       {
         // ::SetParent(hwnd, parent);
@@ -90,7 +113,7 @@ namespace neui
 
     LRESULT Button::handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam)
     {
-      if (true && message == WM_LBUTTONUP) {
+      if (false && message == WM_LBUTTONUP) {
         WNDPROC wp = 0;
         HWND hParent = 0;
         // setText("I was clicked!", 0);
@@ -120,12 +143,24 @@ namespace neui
       {
         parent = NativeHandle(parentView->getNativeHandle());
       }
+      {
+        static WNDCLASSEX wcx;
+        wcx.cbSize = sizeof(wcx);
+        GetClassInfoEx(NULL, _T("BUTTON"), &wcx);
+        wcx.lpszClassName = _T("neui:Checkbox");
+        this->patchedWndProc = wcx.lpfnWndProc;
+        wcx.lpfnWndProc = (WNDPROC)&BaseWindow::basicWndProc;
+        wcx.hInstance = (HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE);
+        registerClass(wcx);
+      }
+
       auto r = upscaleRect(rect);
-      SubclassWindowProc(CreateWindowEx(NEUI_WS_EX_LAYERED | 0, _T("Button"),
+      CreateWindowEx(NEUI_WS_EX_LAYERED | 0, 
+        MAKEINTATOM(getClassAtom()),
         utf8_to_wstring(this->windowText).c_str(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_FLAT | BS_AUTOCHECKBOX,
         r.x, r.y, r.w, r.h,
-        parent, 0, gInstance, this));
+        parent, 0, gInstance, this);
       if (hwnd)
       {
         // ::SetParent(hwnd, parent);
@@ -207,14 +242,25 @@ namespace neui
       if (parentView)
       {
         parent = NativeHandle(parentView->getNativeHandle());
+      }      
+      
+      {
+        static WNDCLASSEX wcx;
+        wcx.cbSize = sizeof(wcx);
+        GetClassInfoEx(NULL, _T("EDIT"), &wcx);
+        wcx.lpszClassName = _T("neui:Edit");
+        this->patchedWndProc = wcx.lpfnWndProc;
+        wcx.lpfnWndProc = (WNDPROC)&BaseWindow::basicWndProc;
+        wcx.hInstance = (HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE);
+        registerClass(wcx);
       }
-      auto r = upscaleRect(rect);
-      SubclassWindowProc(CreateWindowEx(NEUI_WS_EX_LAYERED |
+      auto r = upscaleRect(rect);      
+      CreateWindowEx(NEUI_WS_EX_LAYERED |
         WS_EX_CLIENTEDGE | WS_EX_LEFT | WS_EX_RIGHTSCROLLBAR,
-        _T("Edit"), utf8_to_wstring(this->label).c_str(),
+        MAKEINTATOM(getClassAtom()), utf8_to_wstring(this->label).c_str(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
         r.x, r.y, r.w, r.h,
-        parent, 0, gInstance, this));
+        parent, 0, gInstance, this);
       if (hwnd)
       {
         // ::SetParent(hwnd, parent);
@@ -269,13 +315,24 @@ namespace neui
       {
         parent = NativeHandle(parentView->getNativeHandle());
       }
+      {
+        static WNDCLASSEX wcx;
+        wcx.cbSize = sizeof(wcx);
+        GetClassInfoEx(NULL, _T("COMBOBOX"), &wcx);
+        wcx.lpszClassName = _T("neui:COMBOBOX");
+        this->patchedWndProc = wcx.lpfnWndProc;
+        wcx.lpfnWndProc = (WNDPROC)&BaseWindow::basicWndProc;
+        wcx.hInstance = (HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE);
+        registerClass(wcx);
+      }
+
       auto r = upscaleRect(rect);
-      SubclassWindowProc(CreateWindowEx(NEUI_WS_EX_LAYERED |
+      CreateWindowEx(NEUI_WS_EX_LAYERED |
         WS_EX_CLIENTEDGE | WS_EX_LEFT | WS_EX_RIGHTSCROLLBAR,
-        _T("ComboBox"), utf8_to_wstring(this->text).c_str(),
+        MAKEINTATOM(getClassAtom()), utf8_to_wstring(this->text).c_str(),
         CBS_DROPDOWN | CBS_HASSTRINGS | WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         r.x, r.y, r.w, r.h,
-        parent, 0, gInstance, this));
+        parent, 0, gInstance, this);
       if (hwnd)
       {
         // ::SetParent(hwnd, parent);

@@ -69,9 +69,9 @@ namespace neui
     : BaseSeat()
     , IFrontEnd()
   {
-    initComCtrl32();
     if (wind2d::gInstances == 0)
     {
+      initComCtrl32();
       wind2d::gDefaultFont = ::CreateFont(-11, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, _T("sans serif"));
     }
@@ -88,9 +88,14 @@ namespace neui
 
   wind2dSeat::~wind2dSeat()
   {
-   wind2d::gInstances--;
+    wind2d::gInstances--;
     if (wind2d::gInstances == 0)
     {
+      for (auto i = atexit.rbegin(); i != atexit.rend(); ++i)
+      {
+        (*i)();
+      }
+      atexit.clear();
       ::DeleteFont(wind2d::gDefaultFont);
     }
   }

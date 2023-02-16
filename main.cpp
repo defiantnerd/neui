@@ -85,7 +85,7 @@ int run()
       // invert check box (-> note that change events are sent) 
       checkerbox->setChecked(!checkerbox->checked);
       e.handled = true;
-      neui::quit();
+      // neui::quit();
     }
   );
 
