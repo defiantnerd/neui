@@ -285,16 +285,17 @@ namespace neui
 
     bool Droplist::setText(const std::string_view text, int32_t index)
     {
-      if (index < 0)
+      if (index == 0)
       {
         this->text = text;
         super::setText(text, 0);
       }
       else
       {
-        if (index < texts.size())
+        auto listindex = index - 1;
+        if (listindex < texts.size())
         {
-          texts[index] = text;
+          texts[listindex] = text;
         }
         else
         {
@@ -303,8 +304,11 @@ namespace neui
         if (hwnd)
         {
           auto n = ComboBox_GetCount(hwnd);
-          if (index < n)
-            ComboBox_SetItemData(hwnd, index, (LPARAM)std::string(text).c_str());
+          if (listindex < n)
+          {
+            ComboBox_DeleteString(hwnd, listindex);
+            ComboBox_InsertString(hwnd, listindex, utf8_to_wstring(text).c_str());
+          }
           else
             auto k = ComboBox_AddString(hwnd, utf8_to_wstring(text).c_str());
         }

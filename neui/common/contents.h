@@ -11,6 +11,7 @@
 #include <string>
 #include <functional>
 #include <memory>
+#include <vector>
 
 namespace neui
 {
@@ -56,6 +57,11 @@ namespace neui
         _texts.erase(_texts.begin() + index);
       _owner->updateItemList(this);
       }
+    }
+    void set(const std::vector<std::string> texts)
+    {
+      _texts = texts;
+      _owner->updateItemList(this);
     }
     const std::vector<std::string>& texts() const
     {

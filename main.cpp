@@ -132,7 +132,7 @@ int run()
         auto p = window->getWidgetById<Label>("Painter");
         if (p)
           p->setText("bllsdfl");
-
+        droplist->_items.set({"a","b","c"});
       })
   );
 

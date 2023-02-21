@@ -521,6 +521,14 @@ namespace neui
         case WM_ERASEBKGND:
           if (self->viewHandle.wantsEvent(event::Paint::type_v))
           {
+            HBRUSH brush;
+            RECT rect;
+            brush = CreateSolidBrush(RGB(255, 128, 128));
+            HPEN pen = CreatePen(PS_NULL,1,RGB(255, 128, 128));
+            SelectObject((HDC)wParam, brush);
+            SelectObject((HDC)wParam, pen);
+            GetClientRect(hwnd, &rect);//m_hDlg is HWND type
+            Rectangle((HDC)wParam, rect.left, rect.top, rect.right+1, rect.bottom+1);
             return 0;
           }
           break;

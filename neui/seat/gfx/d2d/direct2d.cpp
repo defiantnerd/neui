@@ -74,17 +74,10 @@ namespace neui
         {          
         }
 
-        int getDpi() const { return _dpi; }
-        bool isScaled() const { return _dpi != 96; }
-        void doScale(const bool scale)
-        {
-          _doscale = scale;
-          // todo: any coords stored in members might need to be converted
-        }
-
         IRenderer& begin() override
         {
           _hdc = BeginPaint(_hwnd, &_ps);
+          SelectObject(_hdc, GetStockObject(WHITE_BRUSH));
           SelectObject(_hdc, GetStockObject(WHITE_PEN));
           return *this;
         }
@@ -101,6 +94,13 @@ namespace neui
           return *this;
         }
 
+        int getDpi() const { return _dpi; }
+        bool isScaled() const { return _dpi != 96; }
+        void doScale(const bool scale)
+        {
+          _doscale = scale;
+          // todo: any coords stored in members might need to be converted
+        }
       private:
         inline int scaled(const int n)
         {
