@@ -11,6 +11,7 @@
 #include <string>
 #include <functional>
 #include <memory>
+#include "render.h"
 
 namespace neui
 {
@@ -125,6 +126,18 @@ namespace neui
       const uint32_t flags = 0;
       bool useContent = false;
     };
+
+    class Paint : public Base
+    {
+    public:
+      static const type type_v = type::repaint;
+      Paint(std::shared_ptr<IRenderer> renderer, uint32_t flags)
+        : renderer(renderer), flags(flags) {}
+      type getType() const override { return type_v; }
+      std::shared_ptr<IRenderer> renderer = nullptr;
+      const uint32_t flags = 0;
+      bool handled = false;
+    };
   }
 
   using Event = event::Base;
@@ -172,5 +185,6 @@ namespace neui
   using OnClick = Handler<event::Clicked>;
   using OnUpdate = Handler<event::Textupdate>;
   using OnSelect = Handler<event::Selected>;
+  using OnPaint = Handler<event::Paint>;
 
 }

@@ -63,7 +63,7 @@ set(commonsources
 	neui/common/color.h
 	neui/common/geometry.h
 	neui/common/bitmap.h
-	neui/common/renderer.h
+	neui/common/render.h
 	neui/common/style.h
 	neui/common/boxmodel.h
 	neui/common/layoutable.h

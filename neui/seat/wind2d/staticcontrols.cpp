@@ -31,11 +31,17 @@ namespace neui
         wcx.hInstance = (HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE);
         registerClass(wcx);
       }
+
+      DWORD additionalStyles = 0;
+      if (viewHandle.wantsEvent(event::Paint::type_v))
+      {
+        additionalStyles |= SS_OWNERDRAW;
+      }
       auto r = upscaleRect(rect);
       CreateWindowEx(NEUI_WS_EX_LAYERED | WS_EX_TRANSPARENT,
         MAKEINTATOM(getClassAtom()),
         utf8_to_wstring(this->windowText).c_str(),
-        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        WS_CHILD | WS_VISIBLE | SS_LEFT | additionalStyles,
         r.x, r.y, r.w, r.h,
         parent, 0, gInstance, this);
       if (hwnd != NULL)

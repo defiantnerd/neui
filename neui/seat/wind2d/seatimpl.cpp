@@ -8,13 +8,13 @@
 #include "appwindow.h"
 #include <CommCtrl.h>
 
+// linking the common controls library
 #pragma comment(lib, "Comctl32")
 
-#if 1
+// configuring the manifest directly for this seat
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
-#endif
 
 namespace neui
 {

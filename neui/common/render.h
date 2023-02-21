@@ -29,6 +29,11 @@ namespace neui
     using uint = unsigned int;
 
     virtual ~IRenderer() = default;
+
+    // switch a context to native DPI
+    virtual int getDpi() const = 0;
+    virtual bool isScaled() const = 0;
+    virtual void doScale(const bool scale) = 0;
     // 
     virtual IRenderer& begin() = 0;
     virtual IRenderer& end() = 0;

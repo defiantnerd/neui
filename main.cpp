@@ -104,7 +104,16 @@ int run()
     , checkerbox
     , Button{ "Click me", Rect(10,160,120,30), klci }
     , Button{ "On/Off", Id{"togglebutton"}  , Rect(140,160,120,30)}
-
+    , Label{ "X",Id{"Painter"}, Rect{10,200,100,100},
+      OnPaint{[&](OnPaint::Args e) {
+          e.renderer->begin()
+            .line(Point(10, 10), Point(90, 90))
+            .line(Point(10, 90), Point(90, 10))
+            .end();
+          e.handled = true;
+        }
+      }
+    }
   );
 
   auto tog = window->getWidgetById<Button>("togglebutton");
@@ -120,6 +129,10 @@ int run()
         {
           checkerbox->enable();
         }
+        auto p = window->getWidgetById<Label>("Painter");
+        if (p)
+          p->setText("bllsdfl");
+
       })
   );
 

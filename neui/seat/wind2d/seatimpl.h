@@ -8,8 +8,6 @@
 
 namespace neui
 {  
-
-
   class wind2dSeat : public BaseSeat, public IFrontEnd
   {
   public:

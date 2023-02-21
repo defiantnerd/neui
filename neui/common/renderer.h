@@ -6,6 +6,7 @@
 
 */
 
+#error ndont
 #include "geometry.h"
 
 namespace neui

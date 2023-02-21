@@ -1,6 +1,7 @@
 #include "seatcontrols.h"
 #include "base.h"
 // #include <fmt/format.h>
+#include "seat/gfx/d2d/direct2d.h"
 
 HINSTANCE gInstance = 0;
 
@@ -212,6 +213,7 @@ namespace neui
         windowText = text;
         if (hwnd)
         {
+          ::InvalidateRect(hwnd, NULL, true);
 #if UNICODE
           auto wstr = win::utf8_to_wstring(text);
           return (0 == ::SetWindowText(hwnd, wstr.c_str()));
@@ -516,7 +518,26 @@ namespace neui
         case WM_DPICHANGED:
           OutputDebugString(_T("DPI_CHANGED\n"));
           break;
+        case WM_ERASEBKGND:
+          if (self->viewHandle.wantsEvent(event::Paint::type_v))
+          {
+            return 0;
+          }
+          break;
+        case WM_PAINT:
+          if (self->viewHandle.wantsEvent(event::Paint::type_v))
+          {
+            
+            event::Paint n(gfx::d2d::make(self->getHWND(), Rect{}), 0);
 
+            self->viewHandle.sendEvent(n);
+            if (n.handled)
+            {
+              ValidateRect(hwnd, NULL);
+              return 0;
+            }
+          }
+          break;
         default:
           break;
         }
