@@ -34,9 +34,15 @@ namespace neui
     virtual int getDpi() const = 0;
     virtual bool isScaled() const = 0;
     virtual void doScale(const bool scale) = 0;
+    //
+    virtual IRenderer& pen(uint32_t color) = 0;
+    virtual IRenderer& brush(uint32_t color) = 0;
     // 
     virtual IRenderer& begin() = 0;
     virtual IRenderer& end() = 0;
+    //
+    virtual IRenderer& push() = 0;
+    virtual IRenderer& pop() = 0;
     // 
     virtual IRenderer& line(const Point from, const Point to) = 0;    
     // polyline
@@ -51,11 +57,12 @@ namespace neui
     // gradients (linear/radial)
     // patterns
     // clipping
+
     virtual IRenderer& pushclip(const Rect rect) = 0;
     virtual IRenderer& popclip() = 0;
     // masking
-    // transformations (transpose/scale/rotate/skew?)
-    virtual IRenderer& transpose(const Size offset) = 0;
+    // transformations (translate/scale/rotate/skew?)
+    virtual IRenderer& translate(const Size offset) = 0;
     virtual IRenderer& rotate(const Point center, float normalized_angle) = 0;
     // text rendering
     virtual IRenderer& text(const std::string_view text, const Rect rect, uint ninealign) = 0;

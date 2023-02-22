@@ -11,10 +11,14 @@ namespace neui
 {
   namespace gfx
   {
+    namespace gdi
+    {
+      std::shared_ptr<IRenderer> make(HWND, const Rect);
+    }
+
     namespace d2d
     {
-      std::shared_ptr<IRenderer> make(HWND,const Rect);
-      
+      std::shared_ptr<IRenderer> make(HWND,const Rect);      
     }
   }
 }

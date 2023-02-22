@@ -71,14 +71,15 @@ namespace neui
   void Droplist::updateSeatProperties()
   {
     WidgetBase::updateSeatProperties();
-    // TODO: set droplist texts
+    auto curindex = _items.getSelectedIndex();
+
     setString(_text, 0);
     int32_t i = 1;
     for (auto&& n : _items.texts())
     {
       setString(n, i++);
     }
-    auto curindex = _items.getSelectedIndex();
+    
     if (curindex >= 0)
     {
       this->setInteger(curindex,-1);
@@ -97,6 +98,12 @@ namespace neui
     {
       this->setInteger(curindex, 0);
     }
+  }
+
+  void Droplist::setIntegerFromSeat(int32_t value, int32_t index)
+  {
+    if (index == -1)
+      this->updateIndex(value);
   }
 
 }

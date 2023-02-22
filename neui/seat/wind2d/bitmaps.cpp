@@ -2,6 +2,7 @@
 
 #include <d2d1helper.h>
 #pragma comment(lib, "d2d1") 
+#include <WinRTBase.h>
 
 namespace neui
 {
@@ -26,8 +27,10 @@ namespace neui
     public:
       COMInit()
       {
-        auto r = CoInitialize(NULL);
-        require(r == S_OK);
+        winrt::init_apartment();
+
+        //auto r = CoInitialize(NULL);
+        //require(r == S_OK);
         HRESULT h = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &mFactory);
         require(h == S_OK);
       }
@@ -35,7 +38,8 @@ namespace neui
       ~COMInit()
       {
         SafeRelease(&mFactory);
-        CoUninitialize();
+        // CoUninitialize();
+        winrt::uninit_apartment();
       }
 
     } gComInit;

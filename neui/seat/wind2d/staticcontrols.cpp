@@ -95,10 +95,10 @@ namespace neui
       }
 
       auto r = upscaleRect(rect);
-      CreateWindowEx(NEUI_WS_EX_LAYERED | 0, 
+      CreateWindowEx(NEUI_WS_EX_LAYERED | 0,
         MAKEINTATOM(this->getClassAtom()),
         utf8_to_wstring(this->windowText).c_str(),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON , //| BS_DEFPUSHBUTTON | BS_FLAT,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, //| BS_DEFPUSHBUTTON | BS_FLAT,
         r.x, r.y, r.w, r.h,
         parent, 0, gInstance, this);
       if (hwnd)
@@ -161,7 +161,7 @@ namespace neui
       }
 
       auto r = upscaleRect(rect);
-      CreateWindowEx(NEUI_WS_EX_LAYERED | 0, 
+      CreateWindowEx(NEUI_WS_EX_LAYERED | 0,
         MAKEINTATOM(getClassAtom()),
         utf8_to_wstring(this->windowText).c_str(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_FLAT | BS_AUTOCHECKBOX,
@@ -188,27 +188,27 @@ namespace neui
     {
       switch (message)
       {
-        case UWM_BN_CLICKED:
-          {
-            BOOL checked = Button_GetCheck(hwnd);
-            event::Selected ev(checked ? 1 : 0, 0);
-            viewHandle.sendEvent(ev);
-          }
-          break;
-        //case WM_COMMAND:
-        //{
-        //  auto result = BaseWindow::handleWindowMessage(message, wParam, lParam);
-        //  if (wParam == BN_CLICKED)
-        //  {
-        //    BOOL checked = Button_GetCheck(hwnd);            
-        //    event::Selected ev(!checked ? 1 : 0, 0);
-        //    viewHandle.sendEvent(ev);
-        //  }
-        //  return result;
-        //}
+      case UWM_BN_CLICKED:
+      {
+        BOOL checked = Button_GetCheck(hwnd);
+        event::Selected ev(checked ? 1 : 0, 0);
+        viewHandle.sendEvent(ev);
+      }
+      break;
+      //case WM_COMMAND:
+      //{
+      //  auto result = BaseWindow::handleWindowMessage(message, wParam, lParam);
+      //  if (wParam == BN_CLICKED)
+      //  {
+      //    BOOL checked = Button_GetCheck(hwnd);            
+      //    event::Selected ev(!checked ? 1 : 0, 0);
+      //    viewHandle.sendEvent(ev);
+      //  }
+      //  return result;
+      //}
+      break;
+      default:
         break;
-        default:
-          break;
       }
       return BaseWindow::handleWindowMessage(message, wParam, lParam);
     }
@@ -248,8 +248,8 @@ namespace neui
       if (parentView)
       {
         parent = NativeHandle(parentView->getNativeHandle());
-      }      
-      
+      }
+
       {
         static WNDCLASSEX wcx;
         wcx.cbSize = sizeof(wcx);
@@ -260,7 +260,7 @@ namespace neui
         wcx.hInstance = (HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE);
         registerClass(wcx);
       }
-      auto r = upscaleRect(rect);      
+      auto r = upscaleRect(rect);
       CreateWindowEx(NEUI_WS_EX_LAYERED |
         WS_EX_CLIENTEDGE | WS_EX_LEFT | WS_EX_RIGHTSCROLLBAR,
         MAKEINTATOM(getClassAtom()), utf8_to_wstring(this->label).c_str(),
@@ -306,6 +306,7 @@ namespace neui
           auto n = ComboBox_GetCount(hwnd);
           if (listindex < n)
           {
+            // item strings can not be replaced, just deleted/inserted
             ComboBox_DeleteString(hwnd, listindex);
             ComboBox_InsertString(hwnd, listindex, utf8_to_wstring(text).c_str());
           }
@@ -373,6 +374,7 @@ namespace neui
         if (notificationcode == CBN_SELCHANGE)
         {
           auto k = ComboBox_GetCurSel(hwnd);
+          viewHandle.eventcallback->setIntegerFromSeat(k, -1);
           event::Selected e(k, 0);
           this->viewHandle.sendEvent(e);
         }
@@ -396,6 +398,7 @@ namespace neui
       }
       return false;
     }
+
 
   }
 }

@@ -7,13 +7,6 @@
 #include <wchar.h>
 #include <math.h>
 
-#include <d2d1.h>
-#include <d2d1helper.h>
-#include <dwrite.h>
-#include <wincodec.h>
-
-#include <Uxtheme.h>
-
 #include <winrt/Windows.UI.ViewManagement.h>
 
 using namespace winrt;
@@ -22,9 +15,6 @@ namespace viewmgmt = winrt::Windows::UI::ViewManagement;
 
 
 /*
-      yeah, right now this is GDI instead of direct2d, but since the interface is
-      not completely designed and still evolving, GDI is being used to draw for the
-      time being for simpler changes.
 
       Current tasks:
       - enable scaled and non scaled (native) mode
@@ -42,24 +32,7 @@ namespace viewmgmt = winrt::Windows::UI::ViewManagement;
 
 */
 
-template<class Interface>
-inline void SafeRelease(
-  Interface** ppInterfaceToRelease)
-{
-  if (*ppInterfaceToRelease != NULL)
-  {
-    (*ppInterfaceToRelease)->Release();
-    (*ppInterfaceToRelease) = NULL;
-  }
-}
-
-#ifndef Assert
-#if defined( DEBUG ) || defined( _DEBUG )
-#define Assert(b) do {if (!(b)) {OutputDebugStringA("Assert: " #b "\n");}} while(0)
-#else
-#define Assert(b)
-#endif //DEBUG || _DEBUG
-#endif
+#define M_PI   3.14159265358979323846264338327950288f
 
 #ifndef HINST_THISCOMPONENT
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
@@ -71,13 +44,20 @@ namespace neui
   namespace gfx
   {
 
-    namespace d2d
+    namespace gdi
     {
       void f()
       {
         viewmgmt::UISettings uisettings;
         const auto color{ uisettings.GetColorValue(viewmgmt::UIColorType::Background) };
       }
+
+      struct RenderState
+      {
+        COLORREF pen;
+        COLORREF brush;
+        XFORM xform;
+      };
 
       class Renderer : public IRenderer
       {
@@ -90,33 +70,60 @@ namespace neui
         {
         }
 
+        int getDpi() const { return _dpi; }
+        bool isScaled() const { return _dpi != 96; }
+        void doScale(const bool scale)
+        {
+          _doscale = scale;
+          // todo: any coords stored in members might need to be converted
+        }
+
         IRenderer& begin() override
         {
           _hdc = BeginPaint(_hwnd, &_ps);
+          auto enh = SetGraphicsMode(_hdc, GM_ADVANCED);
+          auto xz = ((float)_dpi) / 96.f;
+          auto yz = ((float)_dpi) / 96.f;
+          XFORM p = { xz,0.,0.,yz,0.,0. };
+          SetWorldTransform(_hdc, &p);
+          
           SelectObject(_hdc, GetStockObject(DC_BRUSH));
           SelectObject(_hdc, GetStockObject(DC_PEN));
           SetDCPenColor(_hdc, 0x00000000);
           SetDCBrushColor(_hdc, 0x00ffffff);
+        
           return *this;
         }
+
         IRenderer& end() override
         {
           EndPaint(_hwnd, &_ps);
           return *this;
         }
-        
+
         IRenderer& push() override
         {
+          RenderState s;
+          s.pen = GetDCPenColor(_hdc);
+          s.brush = GetDCBrushColor(_hdc);
+          GetWorldTransform(_hdc, &s.xform);
+
+          _states.push_back(s);
           return *this;
         }
 
         IRenderer& pop() override
         {
+          auto s = _states.back();
+          _states.pop_back();
+          SetDCPenColor(_hdc, s.pen);
+          SetDCBrushColor(_hdc, s.brush);
+          SetWorldTransform(_hdc, &s.xform);
           return *this;
         }
 
-        IRenderer& pen(uint32_t color) override 
-        {
+        IRenderer& pen(uint32_t color) override
+        {          
           SetDCPenColor(_hdc, color);
           return *this;
         }
@@ -127,28 +134,73 @@ namespace neui
           return *this;
         }
 
-
         IRenderer& line(const Point from, const Point to) override
         {
-          ::MoveToEx(_hdc, scaled(from.x), scaled(from.y), NULL);
-          ::LineTo(_hdc, scaled(to.x), scaled(to.y));
+          ::MoveToEx(_hdc, from.x, from.y, NULL);
+          ::LineTo(_hdc, to.x, to.y);
           return *this;
         }
 
-        int getDpi() const { return _dpi; }
-        bool isScaled() const { return _dpi != 96; }
-        void doScale(const bool scale)
+        IRenderer& rect(const Rect rect) override
         {
-          _doscale = scale;
-          // todo: any coords stored in members might need to be converted
+          SelectObject(_hdc, GetStockObject(NULL_BRUSH));
+          ::Rectangle(_hdc, rect.x, rect.y, rect.x + rect.w, rect.y + rect.h);
+          SelectObject(_hdc, GetStockObject(DC_BRUSH));
+          return *this;
         }
+        IRenderer& rect(const Rect rect, uint distance) override
+        {
+          SelectObject(_hdc, GetStockObject(NULL_BRUSH));
+          ::RoundRect(_hdc, rect.x, rect.y, rect.x + rect.w, rect.y + rect.h, distance, distance);
+          SelectObject(_hdc, GetStockObject(DC_BRUSH));
+          return *this;
+        }
+        IRenderer& circle(const Point center, const uint r) override
+        {
+          return *this;
+        }
+        IRenderer& ellipse(const Point center, const uint rx, const uint ry) override
+        {
+          return *this;
+        }
+        IRenderer& pushclip(const Rect rect) override
+        {
+          return *this;
+        }
+        IRenderer& popclip() override
+        {
+          return *this;
+        }
+        IRenderer& translate(const Size offset) override
+        {
+          XFORM p = { 1.,0.,0.,1.,(float)(offset.w),(float)(offset.h) };
+          ModifyWorldTransform(_hdc, &p, MWT_RIGHTMULTIPLY);
+          return *this;
+        }
+        IRenderer& rotate(const Point center, float normalized_angle) override
+        {
+          auto x0 = (float)center.x;
+          auto y0 = (float)center.y;
+
+          auto a = normalized_angle * (M_PI / 180.f);
+          XFORM r2;
+          auto c = cos(a);
+          auto s = sin(a);
+          r2.eM11 = c;
+          r2.eM12 = s;
+          r2.eM21 = -s;
+          r2.eM22 = c;
+          r2.eDx = 0.f; //  x0 - c * x0 + s * y0;
+          r2.eDy = 0.f; // y0 - c * y0 - s * x0;
+          ModifyWorldTransform(_hdc, &r2, MWT_RIGHTMULTIPLY);
+          return *this;
+        }
+        IRenderer& text(const std::string_view text, const Rect rect, uint ninealign) override
+        {
+          return *this;
+        }
+
       private:
-        inline int scaled(const int n)
-        {
-          if (_doscale)
-            return MulDiv(n, _dpi, 96);
-          return n;
-        }
 #if 0
         // Initialize device-independent resources.
         HRESULT CreateDeviceIndependentResources();
@@ -170,44 +222,9 @@ namespace neui
         int _dpi = 96;
         bool _doscale = true;
         PAINTSTRUCT _ps = PAINTSTRUCT();
+        std::vector<RenderState> _states;
         // Inherited via IRenderer
-        IRenderer& rect(const Rect rect) override
-        {
-          return *this;
-        }
-        IRenderer& rect(const Rect rect, uint distance) override
-        {
-          return *this;
-        }
-        IRenderer& circle(const Point center, const uint r) override
-        {
-          return *this;
-        }
-        IRenderer& ellipse(const Point center, const uint rx, const uint ry) override
-        {
-          return *this;
-        }
-        IRenderer& pushclip(const Rect rect) override
-        {
-          return *this;
-        }
-        IRenderer& popclip() override
-        {
-          return *this;
-        }
-        IRenderer& translate(const Size offset) override
-        {
-
-          return *this;
-        }
-        IRenderer& rotate(const Point center, float normalized_angle) override
-        {
-          return *this;
-        }
-        IRenderer& text(const std::string_view text, const Rect rect, uint ninealign) override
-        {
-          return *this;
-        }
+       
       };
 
       // factory function for context

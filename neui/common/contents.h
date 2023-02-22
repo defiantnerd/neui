@@ -27,7 +27,7 @@ namespace neui
     virtual void updateItemList(Itemlist* sender) = 0;
     virtual void updateItemIndex(Itemlist* sender) = 0;
   protected:
-    void setIndex(size_t index);
+    void updateIndex(size_t index);
     Itemlist* _itemslistimpl;
   };
   class Itemlist

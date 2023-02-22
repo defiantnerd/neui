@@ -239,6 +239,7 @@ namespace neui
     void updateItemIndex(Itemlist* sender) override;
     Itemlist& _items;
   private:
+    void setIntegerFromSeat(int32_t value, int32_t index) override;
     std::string _text;
   };
 

@@ -79,8 +79,9 @@ add_library(commonlib
 
 # --------------------------
 set(d2dfiles
-	neui/seat/gfx/d2d/direct2d.h
+	neui/seat/gfx/d2d/windowsrenderer.h
 	neui/seat/gfx/d2d/direct2d.cpp
+	neui/seat/gfx/d2d/gdi.cpp
 	)
 # --------------------------
 

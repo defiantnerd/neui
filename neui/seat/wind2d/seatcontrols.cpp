@@ -1,7 +1,7 @@
 #include "seatcontrols.h"
 #include "base.h"
 // #include <fmt/format.h>
-#include "seat/gfx/d2d/direct2d.h"
+#include "seat/gfx/d2d/windowsrenderer.h"
 
 HINSTANCE gInstance = 0;
 
@@ -523,8 +523,8 @@ namespace neui
           {
             HBRUSH brush;
             RECT rect;
-            brush = CreateSolidBrush(RGB(255, 128, 128));
-            HPEN pen = CreatePen(PS_NULL,1,RGB(255, 128, 128));
+            brush = GetSysColorBrush(COLOR_WINDOW); //  CreateSolidBrush(RGB(255, 128, 128));
+            HPEN pen = CreatePen(PS_NULL,1,RGB(128, 0, 0));
             SelectObject((HDC)wParam, brush);
             SelectObject((HDC)wParam, pen);
             GetClientRect(hwnd, &rect);//m_hDlg is HWND type
@@ -536,7 +536,7 @@ namespace neui
           if (self->viewHandle.wantsEvent(event::Paint::type_v))
           {
             
-            event::Paint n(gfx::d2d::make(self->getHWND(), Rect{}), 0);
+            event::Paint n(gfx::gdi::make(self->getHWND(), Rect{}), 0);
 
             self->viewHandle.sendEvent(n);
             if (n.handled)

@@ -325,6 +325,13 @@ namespace neui
       ev._sender = this;
       executeEvents(ev);
     }
+
+    void setIntegerFromSeat(int32_t value, int32_t index) override
+    {
+      (void)value;
+      (void)index;
+    }
+
   protected:
     void executeEvents(event::Base& ev)
     {

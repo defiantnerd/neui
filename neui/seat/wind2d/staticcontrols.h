@@ -58,5 +58,6 @@ namespace neui
       std::string text;
       std::vector<std::string> texts;
     };
+
   }
 }

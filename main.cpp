@@ -104,15 +104,24 @@ int run()
     , checkerbox
     , Button{ "Click me", Rect(10,160,120,30), klci }
     , Button{ "On/Off", Id{"togglebutton"}  , Rect(140,160,120,30)}
-    , Label{ "X",Id{"Painter"}, Rect{10,200,100,100},
-      OnPaint{[&](OnPaint::Args e) {
-          e.renderer->begin()
-            .line(Point(10, 10), Point(90, 90))
-            .line(Point(10, 90), Point(90, 10))
-            .end();
-          e.handled = true;
-        }
-      }
+    , Label{ "XYZ",Id{"Painter"}, Rect{10,200,100,100}
+        ,OnPaint{[&](OnPaint::Args e) {
+            e.renderer->begin()
+              .push()
+              .pen(0x0000ff)
+              .line(Point(10, 10), Point(90, 90))
+              .pen(0xff8000)
+              .line(Point(10, 90), Point(90, 10))
+              .pop()
+              .line(Point(10,50), Point(90,50))
+              .rect(Rect{10,30,80,10},3)
+              .translate({60,35})
+              .rotate(Point(60,35),10)
+              .rect(Rect{-10,-10,10,10},4)
+              .end();
+            e.handled = true;
+          }
+         }
     }
   );
 
