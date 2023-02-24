@@ -80,26 +80,26 @@ namespace neui
 
         IRenderer& begin() override
         {
-          _hdc = BeginPaint(_hwnd, &_ps);
+          _hdc = ::BeginPaint(_hwnd, &_ps);
           
           // use built in scaling
-          auto enh = SetGraphicsMode(_hdc, GM_ADVANCED);
+          auto enh = ::SetGraphicsMode(_hdc, GM_ADVANCED);
           auto xz = ((float)_dpi) / 96.f;
           auto yz = ((float)_dpi) / 96.f;
           XFORM p = { xz,0.,0.,yz,0.,0. };
-          SetWorldTransform(_hdc, &p);
+          ::SetWorldTransform(_hdc, &p);
           
-          SelectObject(_hdc, GetStockObject(DC_BRUSH));
-          SelectObject(_hdc, GetStockObject(DC_PEN));
-          SetDCPenColor(_hdc, 0x00000000);
-          SetDCBrushColor(_hdc, 0x00ffffff);
+          ::SelectObject(_hdc, GetStockObject(DC_BRUSH));
+          ::SelectObject(_hdc, GetStockObject(DC_PEN));
+          ::SetDCPenColor(_hdc, 0x00000000);
+          ::SetDCBrushColor(_hdc, 0x00ffffff);
         
           return *this;
         }
 
         IRenderer& end() override
         {
-          EndPaint(_hwnd, &_ps);
+          ::EndPaint(_hwnd, &_ps);
           return *this;
         }
 
@@ -108,7 +108,7 @@ namespace neui
           RenderState s;
           s.pen = GetDCPenColor(_hdc);
           s.brush = GetDCBrushColor(_hdc);
-          GetWorldTransform(_hdc, &s.xform);
+          ::GetWorldTransform(_hdc, &s.xform);
 
           _states.push_back(s);
           return *this;
@@ -118,21 +118,21 @@ namespace neui
         {
           auto s = _states.back();
           _states.pop_back();
-          SetDCPenColor(_hdc, s.pen);
-          SetDCBrushColor(_hdc, s.brush);
-          SetWorldTransform(_hdc, &s.xform);
+          ::SetDCPenColor(_hdc, s.pen);
+          ::SetDCBrushColor(_hdc, s.brush);
+          ::SetWorldTransform(_hdc, &s.xform);
           return *this;
         }
 
         IRenderer& pen(uint32_t color) override
         {          
-          SetDCPenColor(_hdc, color);
+          ::SetDCPenColor(_hdc, color);
           return *this;
         }
 
         IRenderer& brush(uint32_t color) override
         {
-          SetDCBrushColor(_hdc, color);
+          ::SetDCBrushColor(_hdc, color);
           return *this;
         }
 
@@ -145,16 +145,16 @@ namespace neui
 
         IRenderer& rect(const Rect rect) override
         {
-          SelectObject(_hdc, GetStockObject(NULL_BRUSH));
+          ::SelectObject(_hdc, GetStockObject(NULL_BRUSH));
           ::Rectangle(_hdc, rect.x, rect.y, rect.x + rect.w, rect.y + rect.h);
-          SelectObject(_hdc, GetStockObject(DC_BRUSH));
+          ::SelectObject(_hdc, GetStockObject(DC_BRUSH));
           return *this;
         }
         IRenderer& rect(const Rect rect, uint distance) override
         {
-          SelectObject(_hdc, GetStockObject(NULL_BRUSH));
+          ::SelectObject(_hdc, GetStockObject(NULL_BRUSH));
           ::RoundRect(_hdc, rect.x, rect.y, rect.x + rect.w, rect.y + rect.h, distance, distance);
-          SelectObject(_hdc, GetStockObject(DC_BRUSH));
+          ::SelectObject(_hdc, GetStockObject(DC_BRUSH));
           return *this;
         }
         IRenderer& circle(const Point center, const uint r) override
@@ -176,7 +176,7 @@ namespace neui
         IRenderer& translate(const Size offset) override
         {
           XFORM p = { 1.,0.,0.,1.,(float)(offset.w),(float)(offset.h) };
-          ModifyWorldTransform(_hdc, &p, MWT_LEFTMULTIPLY);
+          ::ModifyWorldTransform(_hdc, &p, MWT_LEFTMULTIPLY);
           return *this;
         }
         IRenderer& rotate(const Point center, float normalized_angle) override
@@ -184,24 +184,12 @@ namespace neui
           auto x0 = (float)center.x;
           auto y0 = (float)center.y;
 
-          XFORM r1{ 1.f,0.f,0.f,1.f,x0,y0 };
-          // ModifyWorldTransform(_hdc, &r1, MWT_LEFTMULTIPLY);
-
           auto a = normalized_angle * (M_PI / 180.f);
           auto c = cos(a);
           auto s = sin(a);
-          auto dx = x0; //  x0 - c * x0 + s * y0;
-          auto dy = y0; //  y0 - c * y0 - s * x0;
-          XFORM r2{c,s,-s,c,dx,dy};
+          XFORM r2{c,s,-s,c,x0,y0};
 
-
-          //r2.eM11 = c;
-          //r2.eM12 = s;
-          //r2.eM21 = -s;
-          //r2.eM22 = c;
-          //r2.eDx = 0.f; //  x0 - c * x0 + s * y0;
-          //r2.eDy = 0.f; // y0 - c * y0 - s * x0;
-          ModifyWorldTransform(_hdc, &r2, MWT_LEFTMULTIPLY);
+          ::ModifyWorldTransform(_hdc, &r2, MWT_LEFTMULTIPLY);
           return *this;
         }
         IRenderer& text(const std::string_view text, const Rect rect, uint ninealign) override
