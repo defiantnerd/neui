@@ -115,10 +115,16 @@ int run()
               .pop()
               .line(Point(10,50), Point(90,50))
               .rect(Rect{10,30,80,10},3)
+              .push()
+              .translate(Point{50,50});
               // .translate({60,35})
-              .rotate(Point(50,50),60)
-              .rect(Rect{-20,-20,40,40},4)
-              .end();
+            for (int i = 0; i < 50; i++)
+              e.renderer->
+              rotate(Point(0, 0), 2)
+              .pen(0x000000+(0xff-i*8)+((i*8)<<8)<<8)
+              .rect(Rect{ -20-i,-20-i,40+i*2,40+i*2 }, 4);
+            e.renderer->pop();
+            e.renderer->end();
             e.handled = true;
           }
          }

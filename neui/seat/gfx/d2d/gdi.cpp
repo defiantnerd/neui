@@ -173,9 +173,9 @@ namespace neui
         {
           return *this;
         }
-        IRenderer& translate(const Size offset) override
+        IRenderer& translate(const Point offset) override
         {
-          XFORM p = { 1.,0.,0.,1.,(float)(offset.w),(float)(offset.h) };
+          XFORM p = { 1.,0.,0.,1.,(float)(offset.x),(float)(offset.y) };
           ::ModifyWorldTransform(_hdc, &p, MWT_LEFTMULTIPLY);
           return *this;
         }

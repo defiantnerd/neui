@@ -195,7 +195,7 @@ namespace neui
         {
           return *this;
         }
-        IRenderer& translate(const Size offset) override
+        IRenderer& translate(const Point offset) override
         {
 
           return *this;
