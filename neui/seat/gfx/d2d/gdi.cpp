@@ -176,7 +176,7 @@ namespace neui
         IRenderer& translate(const Size offset) override
         {
           XFORM p = { 1.,0.,0.,1.,(float)(offset.w),(float)(offset.h) };
-          ModifyWorldTransform(_hdc, &p, MWT_RIGHTMULTIPLY);
+          ModifyWorldTransform(_hdc, &p, MWT_LEFTMULTIPLY);
           return *this;
         }
         IRenderer& rotate(const Point center, float normalized_angle) override
@@ -184,17 +184,24 @@ namespace neui
           auto x0 = (float)center.x;
           auto y0 = (float)center.y;
 
+          XFORM r1{ 1.f,0.f,0.f,1.f,x0,y0 };
+          // ModifyWorldTransform(_hdc, &r1, MWT_LEFTMULTIPLY);
+
           auto a = normalized_angle * (M_PI / 180.f);
           auto c = cos(a);
           auto s = sin(a);
-          XFORM r2{c,s,-s,c,x0,y0};
+          auto dx = x0; //  x0 - c * x0 + s * y0;
+          auto dy = y0; //  y0 - c * y0 - s * x0;
+          XFORM r2{c,s,-s,c,dx,dy};
+
+
           //r2.eM11 = c;
           //r2.eM12 = s;
           //r2.eM21 = -s;
           //r2.eM22 = c;
           //r2.eDx = 0.f; //  x0 - c * x0 + s * y0;
           //r2.eDy = 0.f; // y0 - c * y0 - s * x0;
-          ModifyWorldTransform(_hdc, &r2, MWT_RIGHTMULTIPLY);
+          ModifyWorldTransform(_hdc, &r2, MWT_LEFTMULTIPLY);
           return *this;
         }
         IRenderer& text(const std::string_view text, const Rect rect, uint ninealign) override
