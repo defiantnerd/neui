@@ -81,6 +81,8 @@ namespace neui
         IRenderer& begin() override
         {
           _hdc = BeginPaint(_hwnd, &_ps);
+          
+          // use built in scaling
           auto enh = SetGraphicsMode(_hdc, GM_ADVANCED);
           auto xz = ((float)_dpi) / 96.f;
           auto yz = ((float)_dpi) / 96.f;
@@ -183,15 +185,15 @@ namespace neui
           auto y0 = (float)center.y;
 
           auto a = normalized_angle * (M_PI / 180.f);
-          XFORM r2;
           auto c = cos(a);
           auto s = sin(a);
-          r2.eM11 = c;
-          r2.eM12 = s;
-          r2.eM21 = -s;
-          r2.eM22 = c;
-          r2.eDx = 0.f; //  x0 - c * x0 + s * y0;
-          r2.eDy = 0.f; // y0 - c * y0 - s * x0;
+          XFORM r2{c,s,-s,c,x0,y0};
+          //r2.eM11 = c;
+          //r2.eM12 = s;
+          //r2.eM21 = -s;
+          //r2.eM22 = c;
+          //r2.eDx = 0.f; //  x0 - c * x0 + s * y0;
+          //r2.eDy = 0.f; // y0 - c * y0 - s * x0;
           ModifyWorldTransform(_hdc, &r2, MWT_RIGHTMULTIPLY);
           return *this;
         }

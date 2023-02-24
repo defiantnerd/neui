@@ -115,8 +115,8 @@ int run()
               .pop()
               .line(Point(10,50), Point(90,50))
               .rect(Rect{10,30,80,10},3)
-              .translate({60,35})
-              .rotate(Point(60,35),10)
+              // .translate({60,35})
+              .rotate(Point(50,50),10)
               .rect(Rect{-10,-10,10,10},4)
               .end();
             e.handled = true;
