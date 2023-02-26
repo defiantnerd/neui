@@ -30,3 +30,7 @@
 *.exe
 *.out
 *.app
+
+# Typical Folders
+.vs
+out
