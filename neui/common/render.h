@@ -30,6 +30,8 @@ namespace neui
 
     virtual ~IRenderer() = default;
 
+    virtual void resize(const Size newsize) = 0;
+
     // switch a context to native DPI
     virtual int getDpi() const = 0;
     virtual bool isScaled() const = 0;

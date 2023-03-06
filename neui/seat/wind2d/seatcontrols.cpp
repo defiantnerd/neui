@@ -535,8 +535,14 @@ namespace neui
         case WM_PAINT:
           if (self->viewHandle.wantsEvent(event::Paint::type_v))
           {
-            
-            event::Paint n(gfx::gdi::make(self->getHWND(), Rect{}), 0);
+            if (!self->renderer)
+            {
+              RECT rect;
+              GetClientRect(self->getHWND(),&rect);
+              Rect r(rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top);
+              self->renderer = gfx::d2d::make(self->getHWND(),r);
+            }
+            event::Paint n(self->renderer, 0);
 
             self->viewHandle.sendEvent(n);
             if (n.handled)

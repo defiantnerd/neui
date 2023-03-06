@@ -78,6 +78,11 @@ namespace neui
           // todo: any coords stored in members might need to be converted
         }
 
+        void resize(const Size newsize) override
+        {
+          // nothing to do in this context
+        }
+
         IRenderer& begin() override
         {
           _hdc = ::BeginPaint(_hwnd, &_ps);

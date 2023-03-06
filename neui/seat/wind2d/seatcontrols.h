@@ -95,6 +95,7 @@ namespace neui
       ATOM getClassAtom() const { return classInstance->getAtom(); }
       RefPtr<IPlatformView> parentView = nullptr;
       std::string windowText;
+      std::shared_ptr<IRenderer> renderer = nullptr;
     private:
       
       std::shared_ptr<ClassInstance> classInstance;

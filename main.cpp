@@ -123,8 +123,7 @@ int run()
               rotate(Point(0, 0), 2)
               .pen(0x000000+(0xff-i*8)+((i*8)<<8)<<8)
               .rect(Rect{ -20-i,-20-i,40+i*2,40+i*2 }, 4);
-            e.renderer->pop();
-            e.renderer->end();
+            e.renderer->pop().end();
             e.handled = true;
           }
          }
