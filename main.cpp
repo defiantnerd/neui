@@ -93,7 +93,7 @@ int run()
 
   auto window = make<AppWindow>(
     "My Application Window",
-    Rect{ 250,250,700,450 }
+    Rect{ 3000+250,250,700,450 }
     , Border{ 20 }
     , Id{ "mainwindow" }
     // ,Button{"Clickme"}
@@ -118,11 +118,14 @@ int run()
               .push()
               .translate(Point{50,50});
               // .translate({60,35})
+#if 0
             for (int i = 0; i < 50; i++)
               e.renderer->
               rotate(Point(0, 0), 2)
               .pen(0x000000+(0xff-i*8)+((i*8)<<8)<<8)
               .rect(Rect{ -20-i,-20-i,40+i*2,40+i*2 }, 4);
+#endif
+            e.renderer->circle(Point(0, 0), 30);
             e.renderer->pop().end();
             e.handled = true;
           }

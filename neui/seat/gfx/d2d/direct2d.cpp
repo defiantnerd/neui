@@ -73,10 +73,7 @@ D2D1_SIZE_F asSize2F(const neui::Size& p)
 
 D2D1_POINT_2F asPoint2F(const neui::Point& p)
 {
-  D2D1_POINT_2F result;
-  result.x = p.x;
-  result.y = p.y;
-  return result;
+  return D2D1_POINT_2F{ (FLOAT) p.x, (FLOAT) p.y};
 }
 
 D2D1_RECT_F asRect2F(const neui::Rect& r)
@@ -140,12 +137,14 @@ namespace neui
           if (_renderTarget)
           {
             _renderTarget->Resize(D2D1_SIZE_U{(UINT32)newsize.w,(UINT32)newsize.h});
+              auto dpi = ::GetDpiForWindow(_hwnd);
+              _renderTarget->SetDpi(dpi, dpi);
           }
         }
 
         IRenderer& begin() override
         {
-          
+
           BeginPaint(_hwnd, &ps);
 
           HRESULT hr = S_OK;
@@ -351,8 +350,9 @@ namespace neui
 
         // Create a Direct2D render target.
         D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties();
-        props.dpiX = 96.0;
-        props.dpiY = 96.0;
+        
+        props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
 
         hr = _direct2dFactory->CreateHwndRenderTarget(
           props,
@@ -365,6 +365,12 @@ namespace neui
             __uuidof(ID2D1DeviceContext),
             reinterpret_cast<void**>(&_deviceContext)
           );
+        }
+
+        if (SUCCEEDED(hr))
+        {
+          auto dpi = ::GetDpiForWindow(_hwnd);
+          _renderTarget->SetDpi(dpi, dpi);
         }
 
         if (SUCCEEDED(hr))

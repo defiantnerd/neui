@@ -276,6 +276,10 @@ namespace neui
       UINT uWidth = MulDiv(rect.w, dpi, 96);
       UINT uHeight = MulDiv(rect.h, dpi, 96);
       SetWindowPos(hwnd, nullptr, uX, uY, uWidth, uHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+      if (renderer)
+      {
+        renderer->resize({ (int)uWidth,(int)uHeight });
+      }
 
     }
 
@@ -306,7 +310,7 @@ namespace neui
       case WM_DPICHANGED_AFTERPARENT:
       {
         //OutputDebugString(utf8_to_wstring(fmt::format("DPI changed HWND {:x}\n", (uint64_t) hwnd)).c_str());
-        //currentDPI = GetWindowDPI(hwnd);
+        currentDPI = GetWindowDPI(hwnd);
         //resizeToDPI();
       }
       break;
@@ -314,10 +318,10 @@ namespace neui
       case WM_DPICHANGED:
       {
         /*
-          RECT rect;
-          GetWindowRect(hwnd, &rect);
+
           SetWindowPos(hwnd, hwnd, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOZORDER | SWP_NOACTIVATE);
           */
+
         DWORD newDPI = HIWORD(wParam);
         if (currentDPI != newDPI)
         {
@@ -330,9 +334,14 @@ namespace neui
           {
             LPRECT r = (LPRECT)lParam;
             SetWindowPos(hwnd, 0, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            if (this->renderer)
+            {
+              this->renderer->resize(Size{ (int)(r->right - r->left), (int)(r->bottom - r->top) });
+            }
           }
           else
           {
+            
             resizeToDPI();
           }
 
