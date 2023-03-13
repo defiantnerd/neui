@@ -93,7 +93,7 @@ int run()
 
   auto window = make<AppWindow>(
     "My Application Window",
-    Rect{ 3000+250,250,700,450 }
+    Rect{ 250,250,700,450 }
     , Border{ 20 }
     , Id{ "mainwindow" }
     // ,Button{"Clickme"}
