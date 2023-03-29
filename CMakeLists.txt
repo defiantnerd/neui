@@ -221,4 +221,10 @@ target_link_options(main PRIVATE -mwindows)
 endif()
 
 
+add_executable(tvg 
+	tvg.h tvg.cpp
+)
+
+
+
 # TODO: Add tests and install targets if needed.

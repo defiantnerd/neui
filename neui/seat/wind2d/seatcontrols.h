@@ -70,11 +70,12 @@ namespace neui
       static LRESULT CALLBACK basicWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
       void setParent(RefPtr<IPlatformView> parent) override;
       std::string getText(int32_t index);
+      void animate();
     protected:
+      BaseWindow() = default;
       void create() override;
       void setDefaultFont();
       HWND getParentHWND() const;
-      BaseWindow() = default;
       void setFont(int size, const TCHAR* font);
       void SubclassWindowProc(HWND hwnd);
       virtual LRESULT handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam);
@@ -90,6 +91,7 @@ namespace neui
       WNDPROC patchedWndProc = 0;
       HFONT hFont = 0;
       DWORD currentDPI = 96;
+      bool retrigger = false;
       // DPI on this window?
       void registerClass(WNDCLASSEX& wc); // registers a class. if already registered, it keeps track of all instances
       ATOM getClassAtom() const { return classInstance->getAtom(); }

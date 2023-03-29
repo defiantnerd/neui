@@ -40,8 +40,10 @@ namespace neui
     {
       atexit.push_back(exitfunction);
     }
+
   private:
     void initComCtrl32();
+    void animate();
     WidgetIndex<IPlatformView> widgets;
     std::deque<std::function<void()>> atexit;
   };

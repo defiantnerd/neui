@@ -53,6 +53,7 @@ namespace neui
     virtual void setRect(const Rect& rect) = 0;
     virtual void setBoxModel(const BoxModel& bm) = 0;
     virtual void* getNativeHandle() const = 0;
+    virtual void animate() = 0;
 
     virtual ~IPlatformView() {}
     // virtual void print(std::ostream& out) = 0;

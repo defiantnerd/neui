@@ -81,4 +81,5 @@ namespace neui
 
 // notify child windows about new parent resize
 #define WMTT_PARENT_WM_SIZE (WM_USER+1000)
+#define WMTT_PARENT_WM_MOVE (WM_USER+1001)
 

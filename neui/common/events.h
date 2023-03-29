@@ -136,6 +136,7 @@ namespace neui
       type getType() const override { return type_v; }
       std::shared_ptr<IRenderer> renderer = nullptr;
       const uint32_t flags = 0;
+      bool reschedule = false;
       bool handled = false;
     };
   }

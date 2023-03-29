@@ -1,4 +1,7 @@
 #include "seatimpl.h"
+#include "seatimpl.h"
+#include "seatimpl.h"
+#include "seatimpl.h"
 #define NOMINMAX 1
 #include <windowsx.h>
 #include "seatimpl.h"
@@ -77,13 +80,26 @@ namespace neui
     }
     ++wind2d::gInstances;
   }
-  
+
   void wind2dSeat::initComCtrl32()
   {
     INITCOMMONCONTROLSEX p;
     p.dwSize = sizeof(p);
     p.dwICC = ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_TREEVIEW_CLASSES | ICC_USEREX_CLASSES | ICC_TREEVIEW_CLASSES;
     ::InitCommonControlsEx(&p);
+  }
+
+  void wind2dSeat::animate()
+  {
+    auto l = widgets.size();
+    for (uint32_t n = 0; n < l; ++n)
+    {      
+      auto w = widgets[n];
+      if (w)
+      {
+        w->animate();
+      }
+    }
   }
 
   wind2dSeat::~wind2dSeat()
@@ -260,13 +276,22 @@ namespace neui
   }
 
   int32_t wind2dSeat::run()
-  {    
+  {
+    static wind2dSeat* self = this;
+    // timer 60fps
+    auto tmr = ::SetTimer(NULL, 1, 1000/60 , [](HWND, UINT, UINT_PTR, DWORD)->void
+      {
+        self->animate();
+      });
+
     MSG message = { 0 };
     do
     {
       TranslateMessage(&message);
       DispatchMessage(&message);
     } while (GetMessage(&message, NULL, 0, 0) > 0);
+
+    ::KillTimer(NULL, tmr);
 
     return (int32_t)message.wParam;
   }

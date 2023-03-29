@@ -314,7 +314,8 @@ namespace neui
         }
         IRenderer& rotate(const Point center, float normalized_angle) override
         {
-          _currenttransform = _currenttransform * D2D1::Matrix3x2F::Rotation(normalized_angle * (M_PI / 180.f), asPoint2F(center));
+          _currenttransform = 
+            _currenttransform * D2D1::Matrix3x2F::Rotation(normalized_angle , asPoint2F(center));
           _renderTarget->SetTransform(_currenttransform);
           return *this;
         }
@@ -356,7 +357,7 @@ namespace neui
 
         hr = _direct2dFactory->CreateHwndRenderTarget(
           props,
-          D2D1::HwndRenderTargetProperties(_hwnd, size),
+          D2D1::HwndRenderTargetProperties(_hwnd, size, D2D1_PRESENT_OPTIONS_IMMEDIATELY),
           &_renderTarget);
 
         if (SUCCEEDED(hr))

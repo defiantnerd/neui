@@ -26,15 +26,15 @@ namespace neui
       wcex.lpfnWndProc = &BaseWindow::basicWndProc;
       wcex.lpszClassName = _T("neui::AppWindow");
       wcex.hInstance = gInstance;
-      wcex.style = 0; //  CS_HREDRAW | CS_VREDRAW;
+      wcex.style = CS_HREDRAW | CS_VREDRAW;
 
       registerClass(wcex);
 
       auto r = upscaleRect(rect);
 
-      auto h = CreateWindowEx(WS_EX_APPWINDOW | WS_EX_LAYERED, MAKEINTATOM(getClassAtom()), 
+      auto h = CreateWindowEx(WS_EX_APPWINDOW | WS_EX_LAYERED, MAKEINTATOM(getClassAtom()),
         utf8_to_wstring(windowtitle).c_str(),
-        WS_VISIBLE | WS_SYSMENU | WS_SIZEBOX | WS_OVERLAPPEDWINDOW, 
+        WS_VISIBLE | WS_SYSMENU | WS_SIZEBOX | WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 
         r.x, r.y, r.w, r.h, 
         0, nullptr, gInstance, this);
       assert(h == hwnd);
@@ -105,6 +105,22 @@ namespace neui
           }
         }
         break;
+        case WM_MOVE:
+          {
+            auto result = BaseWindow::handleWindowMessage(message, wParam, lParam);
+
+            bool animated = false;
+            enumWin32ChildWindows(hwnd, [&](HWND window)->void
+              {
+                auto n = SendMessage(window, WMTT_PARENT_WM_MOVE, wParam, lParam);
+                if (n > 0) animated = true;
+              });
+            if (animated)
+              UpdateLayeredWindow(hwnd, NULL, NULL, NULL, NULL, NULL, 0, NULL, 0);
+            return result;
+
+          }
+          break;
         case WM_SIZE:
         {
           UINT width = LOWORD(lParam);
