@@ -162,6 +162,8 @@ set(neui_sources
 	neui/common/events.h
 	neui/common/contents.h
 	neui/common/contents.cpp
+	neui/common/tvg.h
+	neui/common/tvg.cpp
 
 	#neui/seat/base/baseseat.h
 	#neui/seat/base/indexedwidgettree.h
@@ -221,10 +223,21 @@ target_link_options(main PRIVATE -mwindows)
 endif()
 
 
-add_executable(tvg 
-	tvg.h tvg.cpp
+add_executable(tvg WIN32
+	"testtvg.h" "testtvg.cpp"
 )
 
+declare_dpiawareness(tvg)
+compatible_with_win10(tvg)
 
+target_include_directories(tvg 
+  PRIVATE
+  neui
+)
+target_link_libraries(tvg PRIVATE neui)
+
+if (WIN32)
+target_link_options(tvg PRIVATE -mwindows)
+endif()
 
 # TODO: Add tests and install targets if needed.

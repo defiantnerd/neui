@@ -150,8 +150,9 @@ namespace neui
           HRESULT hr = S_OK;
           CreateDeviceResources();
           _renderTarget->BeginDraw();
-          _currenttransform = D2D1::Matrix3x2F::Identity(); // Translation({ +0.5,+0.5 });
+          _currenttransform = D2D1::Matrix3x2F::Translation({ .5,.5 });
           _renderTarget->SetTransform(_currenttransform);
+          
           // _renderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
           _renderTarget->Clear(D2D1::ColorF(D2D1::ColorF::White));
           return *this;

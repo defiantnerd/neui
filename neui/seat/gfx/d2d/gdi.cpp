@@ -57,6 +57,7 @@ namespace neui
         COLORREF pen;
         COLORREF brush;
         XFORM xform;
+        int saved_dc;
       };
 
       class Renderer : public IRenderer
@@ -114,7 +115,7 @@ namespace neui
           s.pen = GetDCPenColor(_hdc);
           s.brush = GetDCBrushColor(_hdc);
           ::GetWorldTransform(_hdc, &s.xform);
-
+          s.saved_dc = ::SaveDC(_hdc);
           _states.push_back(s);
           return *this;
         }
@@ -123,6 +124,7 @@ namespace neui
         {
           auto s = _states.back();
           _states.pop_back();
+          ::RestoreDC(_hdc, s.saved_dc);
           ::SetDCPenColor(_hdc, s.pen);
           ::SetDCBrushColor(_hdc, s.brush);
           ::SetWorldTransform(_hdc, &s.xform);

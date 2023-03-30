@@ -3,6 +3,7 @@
 #include "common/widget.h"
 #include "common/events.h"
 #include "common/contents.h"
+#include "common/tvg.h"
 #include <string>
 
 namespace neui
