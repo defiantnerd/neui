@@ -146,6 +146,7 @@ namespace neui
             return { r.x, r.y, r.x+r.w, r.y+r.h };
           }
           ID2D1Brush* createBrushFromStyle(const tvg::Style& style);
+          ID2D1PathGeometry* createPathFromTVGPolygon(const std::vector<tvg::Point>& points, bool closed);
           ID2D1PathGeometry* createPathFromTVGPath(const tvg::Path& path);
           ID2D1PathGeometry* createPathFromTVGRectangles(const std::vector<tvg::Rectangle>& rects);
           CommandRefs& _refs;
@@ -165,17 +166,84 @@ namespace neui
           ID2D1PathGeometry* _path = nullptr;
         };
 
+        class OutlineFillPolygon : public Command
+        {
+        public:
+          OutlineFillPolygon(CommandRefs& refs, const tvg::OutlineFillPolygon& fill_polygon);
+          void draw() override;
+          void discard() override;
+          ~OutlineFillPolygon() override;
+        private:
+          void allocate();
+          const tvg::OutlineFillPolygon& _data;
+          ID2D1Brush* _brush1 = nullptr;
+          ID2D1Brush* _brush2 = nullptr;
+          ID2D1PathGeometry* _path = nullptr;
+        };
+
         class FillRectangles : public Command
         {
         public:
-          FillRectangles(CommandRefs& refs, const tvg::FillRectangles& fill_rectangles);
-          void draw() override;
-          void discard() override;
-          ~FillRectangles() override;
+          FillRectangles(CommandRefs& refs, const tvg::FillRectangles& fill_rectangles)
+            : Command(refs)
+            , _data(fill_rectangles)
+          {}
+          void draw() override {
+            if (!_brush && !_path)
+              allocate();
+            if (_brush && _path)
+            {
+              _refs._dc->FillGeometry(_path, _brush, nullptr);
+            }
+          }
+          void discard() override {
+            SafeRelease(&_brush);
+          }
+          ~FillRectangles() override {
+            SafeRelease(&_path);
+          }
         private:
-          void allocate();
+          void allocate() {
+            _brush = createBrushFromStyle(_data.prim_style);
+            _path = createPathFromTVGRectangles(_data.rectangles);
+          }
           const tvg::FillRectangles& _data;
           ID2D1Brush* _brush = nullptr;
+          ID2D1PathGeometry* _path = nullptr;
+        };
+
+        class OutlineFillRectangles : public Command
+        {
+        public:
+          OutlineFillRectangles(CommandRefs& refs, const tvg::OutlineFillRectangles& fill_rectangles)
+            : Command(refs)
+            , _data(fill_rectangles)
+          {}
+          void draw() override {
+            if (!_brush1 && !_path)
+              allocate();
+            if (_brush1 && _brush2 && _path)
+            {
+              _refs._dc->FillGeometry(_path, _brush1, nullptr);
+              _refs._dc->DrawGeometry(_path, _brush2, _data.linewdith);
+            }
+          }
+          void discard() override {
+            SafeRelease(&_brush1);
+            SafeRelease(&_brush2);
+          }
+          ~OutlineFillRectangles() override {
+            SafeRelease(&_path);
+          }
+        private:
+          void allocate() {
+            _brush1 = createBrushFromStyle(_data.prim_style);
+            _brush2 = createBrushFromStyle(_data.sec_style);
+            _path = createPathFromTVGRectangles(_data.rectangles);
+          }
+          const tvg::OutlineFillRectangles& _data;
+          ID2D1Brush* _brush1 = nullptr;
+          ID2D1Brush* _brush2 = nullptr;
           ID2D1PathGeometry* _path = nullptr;
         };
 
@@ -207,6 +275,91 @@ namespace neui
           ID2D1Brush* _brush2 = nullptr;
           ID2D1PathGeometry* _path = nullptr;
         };
+
+        class DrawLines : public Command
+        {
+        public:
+          DrawLines(CommandRefs& refs, const tvg::DrawLines& draw_lines)
+            : Command(refs)
+            , _data(draw_lines) {}
+          void draw() override
+          {
+            if (!_brush) allocate();
+            if (_brush)
+            {
+              for (auto& l : _data.lines)
+              {
+                _refs._dc->DrawLine(toD2D1(l.start), toD2D1(l.end), _brush, _data.linewidth);
+              }
+            }
+          }
+          void discard() override { SafeRelease(&_brush); }
+          ~DrawLines() {}
+        private:
+          void allocate()
+          {
+            _brush = createBrushFromStyle(_data.prim_style);
+          }
+          const tvg::DrawLines& _data;
+          ID2D1Brush* _brush = nullptr;
+        };
+
+        class DrawPolygon : public Command
+        {
+        public:
+          DrawPolygon(CommandRefs& refs, const tvg::DrawLineLoop& draw_lines)
+            : Command(refs)
+            , _data(draw_lines) {}
+          void draw() override
+          {
+            if (!_brush) allocate();
+            if (_brush)
+            {
+              _refs._dc->DrawGeometry(_path, _brush, _data.linewidth);
+            }
+          }
+          void discard() override { SafeRelease(&_brush); }
+          ~DrawPolygon() { SafeRelease(&_path); }
+        private:
+          void allocate()
+          {
+            _brush = createBrushFromStyle(_data.prim_style);
+            _path = createPathFromTVGPolygon(_data.points, true);
+          }
+          const tvg::DrawLineLoop& _data;
+          ID2D1Brush* _brush = nullptr;
+          ID2D1PathGeometry* _path = nullptr;
+
+        };
+
+        class DrawLineStrip : public Command
+        {
+        public:
+          DrawLineStrip(CommandRefs& refs, const tvg::DrawLineStrip& draw_line_strip)
+            : Command(refs)
+            , _data(draw_line_strip) {}
+          void draw()
+          {
+            if (!_brush) allocate();
+            if (_brush)
+            {
+              _refs._dc->DrawGeometry(_path, _brush, _data.linewidth);
+            }
+          }
+          void discard() { SafeRelease(&_brush); }
+          ~DrawLineStrip() { SafeRelease(&_path); }
+        private:
+          void allocate()
+          {
+            _brush = createBrushFromStyle(_data.prim_style);
+            _path = createPathFromTVGPolygon(_data.points, false);
+          }
+          const tvg::DrawLineStrip& _data;
+          ID2D1Brush* _brush = nullptr;
+          ID2D1PathGeometry* _path = nullptr;
+
+        };
+
         // -------------------------------------------------
       public:
         AssetImpl(Asset& data);
@@ -568,6 +721,21 @@ namespace neui
               case 3:
                 _nativeCommands.push_back(std::make_unique<FillPath>(_refs, static_cast<const tvg::FillPath&>(*i)));
                 break;
+              case 4:
+                _nativeCommands.push_back(std::make_unique<DrawLines>(_refs, static_cast<const tvg::DrawLines&>(*i)));
+                break;
+              case 5:
+                _nativeCommands.push_back(std::make_unique<DrawPolygon>(_refs, static_cast<const tvg::DrawLineLoop&>(*i)));
+                break;
+              case 6:
+                _nativeCommands.push_back(std::make_unique<DrawLineStrip>(_refs, static_cast<const tvg::DrawLineStrip&>(*i)));
+                break;
+              case 8:
+                _nativeCommands.push_back(std::make_unique<OutlineFillPolygon>(_refs, static_cast<const tvg::OutlineFillPolygon&>(*i)));
+                break;
+              case 9:
+                _nativeCommands.push_back(std::make_unique<OutlineFillRectangles>(_refs, static_cast<const tvg::OutlineFillRectangles&>(*i)));
+                break;
               case 10:
                 _nativeCommands.push_back(std::make_unique<OutlineFillPath>(_refs, static_cast<const tvg::OutlineFillPath&>(*i)));
                 break;
@@ -658,8 +826,7 @@ namespace neui
         return result;
       }
 
-      ID2D1PathGeometry* AssetImpl::Command::createPathFromTVGRectangles(const std::vector<tvg::Rectangle>& rects)
-      {
+      ID2D1PathGeometry* AssetImpl::Command::createPathFromTVGRectangles(const std::vector<tvg::Rectangle>& rects) {
         ID2D1PathGeometry* result = nullptr;
         factories.d2dfactory->CreatePathGeometry(&result);
         ID2D1GeometrySink* s = NULL;
@@ -684,8 +851,50 @@ namespace neui
         return result;
       }
 
-      ID2D1PathGeometry* AssetImpl::Command::createPathFromTVGPath(const tvg::Path& path)
-      {
+      ID2D1PathGeometry* AssetImpl::Command::createPathFromTVGPolygon(const std::vector<tvg::Point>& points, bool closed) {
+        ID2D1PathGeometry* result;
+
+        factories.d2dfactory->CreatePathGeometry(&result);
+        ID2D1GeometrySink* s = NULL;
+        result->Open(&s);
+        s->SetFillMode(D2D1_FILL_MODE_ALTERNATE);
+        s->SetSegmentFlags(D2D1_PATH_SEGMENT_FORCE_ROUND_LINE_JOIN);
+        s->BeginFigure(toD2D1(points[0]), D2D1_FIGURE_BEGIN_FILLED);
+        
+        if (points.size() <= 64)
+        {
+          D2D1_POINT_2F n[64];
+          auto r = n;
+          for (int i = 1; i < points.size(); ++i)
+          {
+            auto& p = points[i];
+            *r++ = { p.x, p.y };
+          }
+          s->AddLines(n, points.size() - 1);
+        }
+        else
+        {
+          auto n = new D2D1_POINT_2F[points.size()];
+          auto r = n;
+          for (int i = 1; i < points.size(); ++i)
+          {
+            auto& p = points[i];
+            *r++ = { p.x, p.y };
+          }
+          s->AddLines(n, points.size() - 1);
+          delete[] n;
+        }
+        
+        s->EndFigure(closed ? D2D1_FIGURE_END_CLOSED : D2D1_FIGURE_END_OPEN);
+
+        s->Close();
+
+        SafeRelease(&s);
+
+        return result;
+      }
+
+      ID2D1PathGeometry* AssetImpl::Command::createPathFromTVGPath(const tvg::Path& path) {
         ID2D1PathGeometry* result = nullptr;
         factories.d2dfactory->CreatePathGeometry(&result);
         ID2D1GeometrySink* s = NULL;
@@ -772,21 +981,8 @@ namespace neui
       void AssetImpl::FillPolygon::allocate() {
         // allocating _dc resources
         _brush = createBrushFromStyle(_data.prim_style);
-        factories.d2dfactory->CreatePathGeometry(&_path);
-        ID2D1GeometrySink* s = NULL;
-        _path->Open(&s);
-        s->SetFillMode(D2D1_FILL_MODE_ALTERNATE);
-        s->BeginFigure(toD2D1(_data.points[0]), D2D1_FIGURE_BEGIN_FILLED);
-        D2D1_POINT_2F n[100];
-        for (int i = 1; i < _data.points.size(); ++i)
-        {
-          n[i - 1] = { _data.points[i].x, _data.points[i].y };
-        }
-        s->AddLines(n, _data.points.size() - 1);
-        s->EndFigure(D2D1_FIGURE_END_CLOSED);
+        _path = createPathFromTVGPolygon(_data.points, true);
 
-        s->Close();
-        SafeRelease(&s);
       }
       void AssetImpl::FillPolygon::draw() {
         if (!_path) allocate();
@@ -803,27 +999,35 @@ namespace neui
         SafeRelease(&_path);
       }
 
-      AssetImpl::FillRectangles::FillRectangles(CommandRefs& refs, const tvg::FillRectangles& fill_rectangles)
-        : Command(refs)
-        , _data(fill_rectangles)
-      {}
-      void AssetImpl::FillRectangles::draw() {
-        if (!_brush && !_path)
-          allocate();
-        if (_brush && _path)
+      AssetImpl::OutlineFillPolygon::OutlineFillPolygon(CommandRefs& refs, const tvg::OutlineFillPolygon& fill_polygon)
+        : AssetImpl::Command(refs)
+        , _data(fill_polygon) {
+        // 
+      }
+
+      void AssetImpl::OutlineFillPolygon::allocate() {
+        // allocating _dc resources
+        _brush1 = createBrushFromStyle(_data.prim_style);
+        _brush2 = createBrushFromStyle(_data.sec_style);
+        _path = createPathFromTVGPolygon(_data.points, true);
+      }
+      void AssetImpl::OutlineFillPolygon::draw() {
+        if (!_path) allocate();
+        if (_path && _brush1 && _brush2)
         {
-          _refs._dc->FillGeometry(_path, _brush, nullptr);
+          _refs._dc->FillGeometry(_path, _brush1, nullptr);
+          _refs._dc->DrawGeometry(_path, _brush2, _data.linewdith);
         }
-      };
-      void AssetImpl::FillRectangles::discard() {
-        SafeRelease(&_brush);
       }
-      AssetImpl::FillRectangles::~FillRectangles() {
+      void AssetImpl::OutlineFillPolygon::discard()
+      {
+        SafeRelease(&_brush2);
+        SafeRelease(&_brush1);
+      }
+
+      AssetImpl::OutlineFillPolygon::~OutlineFillPolygon()
+      {
         SafeRelease(&_path);
-      }
-      void AssetImpl::FillRectangles::allocate() {
-        _brush = createBrushFromStyle(_data.prim_style);   
-        _path = createPathFromTVGRectangles(_data.rectangles);
       }
 
       AssetImpl::FillPath::FillPath(CommandRefs& refs, const tvg::FillPath& fill_path)

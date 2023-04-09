@@ -232,7 +232,9 @@ int WinMain(
       {
         e.renderer->begin();
         e.renderer->rect(Rect{ 0,0,1000,800 },10);
+        // e.renderer->push().rotate({ k[1].width/2,k[1].height/2}, 45);
         e.renderer->draw(Point(5,5), k[0]);
+        // e.renderer->pop();
         e.renderer->end();
         
         e.handled = true;
