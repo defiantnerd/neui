@@ -9,10 +9,11 @@
 #include "geometry.h"
 #include "color.h"
 #include <string>
+#include "tvg.h"
 
 namespace neui
 {
-
+  using Asset = tvg::Asset;
   /*
       IRenderer is an interface class returned by a graphical context
       Internally, it is connected to the specific context as well as the resource management
@@ -53,12 +54,15 @@ namespace neui
 
     virtual IRenderer& circle(const Point center, const uint r) = 0;
     virtual IRenderer& ellipse(const Point center, const uint rx, const uint ry) = 0;
+
+
     // polygon
     // path (like svg path) with bezier/quadbezier
     // solid colors
     // gradients (linear/radial)
     // patterns
     // clipping
+    virtual IRenderer& draw(const Point origin, Asset& asset) = 0;
 
     virtual IRenderer& pushclip(const Rect rect) = 0;
     virtual IRenderer& popclip() = 0;

@@ -172,6 +172,16 @@ namespace neui
         {
           return *this;
         }
+
+        IRenderer& draw(const Point origin, Asset& asset) override
+        {
+          push();
+          translate(origin);
+
+          pop();
+          return *this;
+        }
+
         IRenderer& pushclip(const Rect rect) override
         {
           return *this;
