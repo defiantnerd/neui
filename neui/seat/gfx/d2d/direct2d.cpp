@@ -360,6 +360,34 @@ namespace neui
 
         };
 
+        class DrawPath : public Command
+        {
+        public:
+          DrawPath(CommandRefs& refs, const tvg::DrawLinePath& draw_lines)
+            : Command(refs)
+            , _data(draw_lines) {}
+          void draw() override
+          {
+            if (!_brush) allocate();
+            if (_brush)
+            {
+              _refs._dc->DrawGeometry(_path, _brush, _data.linewidth);
+            }
+          }
+          void discard() override { SafeRelease(&_brush); }
+          ~DrawPath() { SafeRelease(&_path); }
+        private:
+          void allocate()
+          {
+            _brush = createBrushFromStyle(_data.prim_style);
+            _path = createPathFromTVGPath(_data.path);
+          }
+          const tvg::DrawLinePath& _data;
+          ID2D1Brush* _brush = nullptr;
+          ID2D1PathGeometry* _path = nullptr;
+
+        };
+
         // -------------------------------------------------
       public:
         AssetImpl(Asset& data);
@@ -729,6 +757,9 @@ namespace neui
                 break;
               case 6:
                 _nativeCommands.push_back(std::make_unique<DrawLineStrip>(_refs, static_cast<const tvg::DrawLineStrip&>(*i)));
+                break;
+              case 7:
+                _nativeCommands.push_back(std::make_unique<DrawPath>(_refs, static_cast<const tvg::DrawLinePath&>(*i)));
                 break;
               case 8:
                 _nativeCommands.push_back(std::make_unique<OutlineFillPolygon>(_refs, static_cast<const tvg::OutlineFillPolygon&>(*i)));
