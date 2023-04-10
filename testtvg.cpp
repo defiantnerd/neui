@@ -1940,11 +1940,14 @@ int WinMain(
 {
   using namespace neui;
 
+  int form = 0;
+
   std::cout << "hello" << std::endl;
-  tvg::Asset k[3];
-  k[0].load(tiger);
-  k[1].load(app_icon);
-  k[2].load(shield_32);
+  tvg::Asset k[4];
+  k[0].load(everything);
+  k[1].load(tiger);
+  k[2].load(app_icon);
+  k[3].load(shield_32);
   auto window = make<AppWindow>(
     "TVG Testing",
     Rect{ 250,250,1200,1000 }
@@ -1952,16 +1955,34 @@ int WinMain(
     , Id{ "mainwindow" }
     // ,Button{"Clickme"}
     , Label{ "tvg test rendering", Id{"label"}, Rect{10,20,300,20} }
-    , Label{ "painter", Rect{50,50,1100,900},
+    , Button{ "painter", Rect{50,50,1100,900},
+    OnClick([&](event::Clicked& e) {
+       form = (form + 1) % 4;
+      }),
     OnPaint([&](event::Paint& e)->void 
       {
+        static float n = 0.f;
+        static float sc = 1.f;
+        static bool blow = true;
         e.renderer->begin();
         e.renderer->rect(Rect{ 0,0,1000,800 },10);
-        // e.renderer->push().rotate({ k[1].width/2,k[1].height/2}, 45);
-        e.renderer->draw(Point(5,5), k[0]);
-        // e.renderer->pop();
+        e.renderer->push().rotate({ k[form].width / 2,k[form].height / 2 }, n).scale(sc);
+        e.renderer->draw(Point(5,5), k[form]);
+        e.renderer->pop();
         e.renderer->end();
-        
+        if (++n >= 360) n -= 360;
+        if (blow)
+        {
+          sc += 0.01f;
+          if (sc > 1.5f)
+            blow = false;
+        }
+        else
+        {
+          sc -= 0.01f;
+          if (sc < 0.75f) blow = true;
+        }
+        e.reschedule = true;
         e.handled = true;
       }) }
   );

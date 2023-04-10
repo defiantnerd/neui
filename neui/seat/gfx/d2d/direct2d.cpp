@@ -638,6 +638,14 @@ namespace neui
           _renderTarget->SetTransform(_currenttransform);
           return *this;
         }
+        IRenderer& scale(float factor, const Point center ) override
+        {
+          _currenttransform =
+            _currenttransform * D2D1::Matrix3x2F::Scale({ factor,factor }, asPoint2F(center));
+          _renderTarget->SetTransform(_currenttransform);
+          return *this;
+        }
+
         IRenderer& text(const std::string_view text, const Rect rect, uint ninealign) override
         {
           return *this;

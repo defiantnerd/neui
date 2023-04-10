@@ -83,6 +83,7 @@ namespace neui
       while (readCommand(stream));
 
       loaded = true;
+      auto n = this->commands.size();
       return true;
     }
 

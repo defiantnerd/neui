@@ -209,6 +209,10 @@ namespace neui
           ::ModifyWorldTransform(_hdc, &r2, MWT_LEFTMULTIPLY);
           return *this;
         }
+        IRenderer& scale(float factor, const Point center) override
+        {
+          return *this;
+        }
         IRenderer& text(const std::string_view text, const Rect rect, uint ninealign) override
         {
           return *this;

@@ -70,6 +70,7 @@ namespace neui
     // transformations (translate/scale/rotate/skew?)
     virtual IRenderer& translate(const Point offset) = 0;
     virtual IRenderer& rotate(const Point center, float normalized_angle) = 0;
+    virtual IRenderer& scale(float factor, const Point center = Point()) = 0;
     // text rendering
     virtual IRenderer& text(const std::string_view text, const Rect rect, uint ninealign) = 0;
     // fonts
