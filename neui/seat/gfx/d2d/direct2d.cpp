@@ -942,7 +942,7 @@ namespace neui
         for (const auto& r : path.segments)
         {
           s->BeginFigure({ r.p0.x,r.p0.y }, D2D1_FIGURE_BEGIN_FILLED);
-          tvg::Point last = r.p0;
+          tvg::Point last = r.p0; // for horz/vert segments we need to keep and update the last point
           for (const auto& seg : r.node)
           {
             switch (seg.type)
@@ -974,7 +974,8 @@ namespace neui
                       {seg.data.arc.radius,seg.data.arc.radius},
                       0.f,
                       (seg.data.arc.sweep ? D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE : D2D1_SWEEP_DIRECTION_CLOCKWISE),
-                      (seg.data.arc.large_arc ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL) };
+                      (seg.data.arc.large_arc ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL) 
+                  };
                   s->AddArc(as);
                 }
                 break;
@@ -1002,7 +1003,6 @@ namespace neui
             }
           }
 
-          // s->AddLines(n, 3);
           s->EndFigure(r.closed ? D2D1_FIGURE_END_CLOSED : D2D1_FIGURE_END_OPEN);
         }
 

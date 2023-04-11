@@ -1931,6 +1931,88 @@ static const uint8_t tiger[] = {
 
 */
 
+std::shared_ptr<neui::AppWindow> window;
+neui::Asset k[4];
+
+void updatecounterdisplay(int f)
+{
+  using namespace neui;
+  auto l = window->getWidgetById<Label>("counterdisplay");
+  if (l)
+  {
+    char buf[200];
+    auto& n = k[f];
+    auto a = n.commands.size();
+    int p = 0; int s = 0;
+    for (auto& cmd : n.commands)
+    {
+      switch (cmd->index)
+      {
+        case 1:
+          p++; s++;
+          break;
+        case 2: {
+            auto c = static_cast<tvg::FillRectangles*>(cmd.get());
+            p++; s += c->rectangles.size();
+          }
+              break;
+        case 3: {
+            auto c = static_cast<tvg::FillPath*>(cmd.get());
+            for (auto& paths : c->path.segments)
+            {
+              p++;
+              s += paths.node.size();
+            }
+          }
+              break;
+        case 4: {
+            auto c = static_cast<tvg::DrawLines*>(cmd.get());
+            p += c->lines.size(); s += c->lines.size();
+          }
+              break;
+        case 5: {
+            p++; s++;
+          }
+              break;
+        case 6: {
+            auto c = static_cast<tvg::DrawLineStrip*>(cmd.get());
+            p += c->points.size() / 2; s += c->points.size() / 2;
+          }
+              break;
+        case 7: {
+            auto c = static_cast<tvg::DrawLinePath*>(cmd.get());
+            for (auto& cc : c->path.segments)
+            {
+              p++;
+              s += cc.node.size();
+            }
+          }
+              break;
+        case 8: {
+            auto c = static_cast<tvg::OutlineFillPolygon*>(cmd.get());
+            p++; s++;
+          }
+              break;
+        case 9: {
+            auto c = static_cast<tvg::OutlineFillRectangles*>(cmd.get());
+            p++; s += c->rectangles.size();
+          }
+              break;
+        case 10:
+          auto c = static_cast<tvg::OutlineFillPath*>(cmd.get());
+          for (auto& paths : c->path.segments)
+          {
+            p++;
+            s += paths.node.size();
+          }
+        break;
+      }
+
+    }
+    sprintf(buf, "%d commands, %d paths, %d segments", (int)a, (int)p, (int)s);
+    l->setText(buf);
+  }
+}
 
 int WinMain(
   _In_ HINSTANCE hInstance,
@@ -1943,21 +2025,23 @@ int WinMain(
   int form = 0;
 
   std::cout << "hello" << std::endl;
-  tvg::Asset k[4];
+  
   k[0].load(everything);
   k[1].load(tiger);
   k[2].load(app_icon);
   k[3].load(shield_32);
-  auto window = make<AppWindow>(
+  window = make<AppWindow>(
     "TVG Testing",
     Rect{ 250,250,1200,1000 }
     , Border{ 20 }
     , Id{ "mainwindow" }
     // ,Button{"Clickme"}
     , Label{ "tvg test rendering", Id{"label"}, Rect{10,20,300,20} }
+    , Label(Id{ "counterdisplay" }, "", Rect{ 320,20,250,20 })
     , Button{ "painter", Rect{50,50,1100,900},
     OnClick([&](event::Clicked& e) {
        form = (form + 1) % 4;
+       updatecounterdisplay(form);
       }),
     OnPaint([&](event::Paint& e)->void 
       {
@@ -1987,7 +2071,8 @@ int WinMain(
       }) }
   );
 
+  updatecounterdisplay(0);
   auto r = neui::run();
-
+  window.reset();
   return r;
 }
