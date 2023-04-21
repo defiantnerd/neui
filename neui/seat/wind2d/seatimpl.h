@@ -18,6 +18,7 @@ namespace neui
     uint32_t release(widget_index_t widget) override;
     uint32_t createWidget(widget_index_t widget) override;
     uint32_t destroyWidget(widget_index_t widget) override;
+    uint32_t invalidate(widget_index_t widget) override;
     uint32_t show(widget_index_t widget) override;
     uint32_t hide(widget_index_t widget) override;
     uint32_t enable(widget_index_t widget) override;

@@ -59,6 +59,7 @@ namespace neui
       void setAlpha(int percent) override;
       float getDpi() override;
       void destroy() override;
+      void invalidate() override;
       void show(int show = SW_SHOWDEFAULT) override;
       void hide() override { show(SW_HIDE); }
       void enable() override;

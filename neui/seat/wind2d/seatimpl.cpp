@@ -197,6 +197,12 @@ namespace neui
     return 1;
   }
 
+  uint32_t wind2dSeat::invalidate(widget_index_t widget)
+  {
+    widgets[widget]->invalidate();
+    return 0;
+  }
+
   uint32_t wind2dSeat::show(widget_index_t widget)
   {
     widgets[widget]->show(1);

@@ -104,18 +104,24 @@ namespace neui
       std::vector<Segment> segments;
     };
 
+    // ----------------------------------------------------
+
     class Command
     {
     public:
       virtual ~Command() {}
       uint8_t index;
       Style prim_style;
+      virtual Rectangle getRect() const {
+        return { 0,0,0,0 };
+      }
     };
 
     class FillPolygon : public Command
     {
     public:
       std::vector<Point> points;
+      Rectangle getRect() const override;
     };
 
     class FillRectangles : public Command
@@ -181,12 +187,23 @@ namespace neui
       Unit linewdith;
       Path path;
     };
+    // ----------------------------------------------------
+
+    class MutableAsset;
+
+    class PlatformData
+    {
+    public:
+      virtual ~PlatformData() {}
+    };
 
     class Asset
     {
     public:
       bool load(const uint8_t* stream);
       ~Asset();
+      void discard();
+      tvg::Rectangle getRectForCommand(uint32_t command);
     private:
       static uint32_t sRGBtoColorSpace(uint32_t color);
       Unit readUnit(const uint8_t*& stream);
@@ -211,20 +228,20 @@ namespace neui
       // for now this is public
     public:
 
-      uint8_t scale;              // 3:4 (a)
-      uint8_t color_encoding;     // 3:2 (b)  
-      uint8_t coord_range;        // 3:2 (c)
-                                  // coord range -> 0=u16, 1=u8, 2=u32
+      uint8_t scale = 0;              // 3:4 (a)
+      uint8_t color_encoding = 0;     // 3:2 (b)  
+      uint8_t coord_range = 0;        // 3:2 (c)
+                                      // coord range -> 0=u16, 1=u8, 2=u32
 
-      int32_t width;             // u8, u16 or u32
-      int32_t height;            // u8, u16 or u32
-      uint32_t color_count;       // VarUInt
+      int32_t width = 0;              // u8, u16 or u32
+      int32_t height= 0;              // u8, u16 or u32
+      uint32_t color_count = 0;       // VarUInt
 
       uint32_t* colors = nullptr; // color_count colors
 
       std::vector<std::unique_ptr<Command>> commands;
 
-      void* _platformdata = nullptr;
+      PlatformData* _platformdata = nullptr;
     };
   }
 }

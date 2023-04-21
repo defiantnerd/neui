@@ -123,6 +123,18 @@ namespace neui
       }
     }
 
+    event::Clicked makeClickedEvent(const DWORD lParam, const int dpi)
+    {
+      uint32_t flags = 1
+        | (GetAsyncKeyState(VK_SHIFT) & 0x8000 ? 0x10 : 0)
+        | (GetAsyncKeyState(VK_CONTROL) & 0x8000 ? 0x20 : 0)
+        ;
+      auto mx = GET_X_LPARAM(lParam) * 96 /dpi;
+      auto my = GET_Y_LPARAM(lParam) * 96 /dpi;
+
+      return { mx, my, flags};
+    }
+
     void BaseWindow::registerClass(WNDCLASSEX& wc)
     {
       classInstance = ClassRegistry::registerClass(wc);
@@ -183,6 +195,11 @@ namespace neui
         hwnd = 0;
       }
       classInstance.reset();
+    }
+
+    void BaseWindow::invalidate()
+    {
+      ::InvalidateRect(hwnd, NULL, false);
     }
 
     void BaseWindow::show(int show)
@@ -437,7 +454,16 @@ namespace neui
           {
             if (this->viewHandle.wantsEvent(event::type::click))
             {
-              event::Clicked e { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), 0 };
+              auto e(makeClickedEvent(lParam, (int)currentDPI));
+              this->viewHandle.sendEvent(e);
+            }
+          }
+          break;
+        case WM_RBUTTONDOWN:
+          {
+            if (this->viewHandle.wantsEvent(event::type::click))
+            {
+              auto e(makeClickedEvent(lParam, (int)currentDPI));
               this->viewHandle.sendEvent(e);
             }
           }

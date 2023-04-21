@@ -101,6 +101,14 @@ namespace neui
     selectLevel(SeatInstantiationLevel::none);
   }
 
+  void WidgetReference::invalidate()
+  {
+    if (visibleOnSeat)
+    {
+      Seat::Instance().invalidate(widgetid);
+    }
+  }
+
   void WidgetReference::setVisible(bool visible)
   {
     if (visibleOnSeat == visible)

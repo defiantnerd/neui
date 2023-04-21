@@ -5,6 +5,17 @@
 #include <Windows.h>
 #include <iostream>
 
+// array size is 103
+static const uint8_t slidern[] = {
+  0x72, 0x56, 0x01, 0x85, 0xd2, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x03, 0xe7, 0xa9, 0x14,
+  0xff, 0xff, 0x78, 0x00, 0xff, 0x40, 0x33, 0x4c, 0xff, 0x42, 0x00, 0x80, 0x02, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x80, 0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+  0x00, 0x40, 0x01, 0x00, 0x00, 0x40, 0x1a, 0x00, 0x00, 0x80, 0x02, 0x00, 0x00, 0x49, 0x00, 0x80,
+  0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x01,
+  0x02, 0x00, 0x50, 0x00, 0x00, 0x00, 0x80, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x01,
+  0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00
+};
+
 // array size is 1447
 static const uint8_t everything[] = {
   0x72, 0x56, 0x01, 0x05, 0x90, 0x01, 0x00, 0x03, 0x06, 0xe7, 0xa9, 0x15, 0xff, 0xff, 0x78, 0x00,
@@ -1932,7 +1943,7 @@ static const uint8_t tiger[] = {
 */
 
 std::shared_ptr<neui::AppWindow> window;
-neui::Asset k[4];
+neui::Asset k[5];
 
 void updatecounterdisplay(int f)
 {
@@ -2023,37 +2034,99 @@ int WinMain(
   using namespace neui;
 
   int form = 0;
+  float value = 0.f;
+  int selectedform = -1;
 
-  std::cout << "hello" << std::endl;
-  
-  k[0].load(everything);
-  k[1].load(tiger);
-  k[2].load(app_icon);
-  k[3].load(shield_32);
+  auto valuedisplay = make<Label>("0.0", Rect{ 276,20,26,20 });
+
+  std::cout << "hello" << std::endl;  
+  k[0].load(slidern);
+  k[1].load(everything);
+  k[2].load(tiger);
+  k[3].load(app_icon);
+  k[4].load(shield_32);
   window = make<AppWindow>(
     "TVG Testing",
     Rect{ 250,250,1200,1000 }
     , Border{ 20 }
     , Id{ "mainwindow" }
     // ,Button{"Clickme"}
-    , Label{ "tvg test rendering", Id{"label"}, Rect{10,20,300,20} }
-    , Label(Id{ "counterdisplay" }, "", Rect{ 320,20,250,20 })
-    , Button{ "painter", Rect{50,50,1100,900},
-    OnClick([&](event::Clicked& e) {
-       form = (form + 1) % 4;
-       updatecounterdisplay(form);
+    , Label{ "tvg test rendering", Id{"label"}, Rect{10,20,200,20} }
+    , Button{ "-", Rect{220,20,20,20}, OnClick{[&](event::Clicked& ev) {
+        value -= 0.15; if (value < 0.f) value = 0.f;
+        char m[30]; sprintf(m, "%1.2f", value); valuedisplay->setText(m);
+    }} }
+    , Button{ "+", Rect{250,20,20,20}, OnClick{[&](event::Clicked& ev) {
+        value += 0.15; if (value > 1.f) value = 1.f;
+        char m[30]; sprintf(m, "%1.2f", value); valuedisplay->setText(m);
+        }} }
+      , Label(Id{ "counterdisplay" }, "", Rect{ 320,20,250,20 })
+          , valuedisplay
+          , Button{ "painter", Rect{50,50,1100,900},
+          OnClick([&](event::Clicked& e) {              
+             auto self = e.sender<Button>();
+             if (e.left())
+             {
+               if (e.control())
+               {
+                 form = (form + 1) % 5;
+                 selectedform = -1;
+                 updatecounterdisplay(form);
+               }
+
+               else
+               {
+                 int x = e.x-5; int y = e.y-5;
+
+                 selectedform = -1;
+                 int n = k[form].commands.size();
+                 for (int s = 0; s < n ; ++ s)
+                 {
+                   auto r = k[form].commands[s]->getRect();
+                   if (x >= r.x && y >= r.y && x <= r.x + r.w && y <= r.y + r.h)
+                   {
+                     selectedform = s;
+                   }
+                 }
+               }
+             }
+             if (e.right()) selectedform = -1;
+             
+
+             self->invalidate();
+
       }),
-    OnPaint([&](event::Paint& e)->void 
+    OnPaint([&](event::Paint& e)->void
       {
+        if (form == 0)
+        {
+          static float lastval = -1.f;
+          if (lastval != value)
+          {
+            k[0].discard();
+            lastval = value;
+          }
+          auto n = static_cast<tvg::OutlineFillRectangles*>(k[0].commands[1].get());
+          n->rectangles[0].x = 20.f + value * 150.f;
+
+        }
         static float n = 0.f;
         static float sc = 1.f;
         static bool blow = true;
         e.renderer->begin();
         e.renderer->rect(Rect{ 0,0,1000,800 },10);
-        e.renderer->push().rotate({ k[form].width / 2,k[form].height / 2 }, n).scale(sc);
+        // e.renderer->push().rotate({ k[form].width / 2,k[form].height / 2 }, n).scale(sc);
         e.renderer->draw(Point(5,5), k[form]);
-        e.renderer->pop();
+        if (selectedform >= 0)
+        {
+          auto rect = k[form].getRectForCommand(selectedform);
+
+          e.renderer->pen(0x00FF2020);
+          e.renderer->rect({ (int)rect.x+5,(int)rect.y + 5,(int)rect.w,(int)rect.h });
+        }
+        // e.renderer->pop();
         e.renderer->end();
+#if 0
         if (++n >= 360) n -= 360;
         if (blow)
         {
@@ -2067,9 +2140,11 @@ int WinMain(
           if (sc < 0.75f) blow = true;
         }
         e.reschedule = true;
+#endif
         e.handled = true;
-      }) }
-  );
+      })
+}
+        );
 
   updatecounterdisplay(0);
   auto r = neui::run();

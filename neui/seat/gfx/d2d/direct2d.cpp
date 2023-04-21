@@ -111,13 +111,14 @@ namespace neui
         }
       } factories;
 
-      class AssetImpl
+      class AssetImpl : public tvg::PlatformData
       {
       private:
         // -------------------------------------------------
         struct CommandRefs
         {
           ID2D1DeviceContext* _dc = nullptr;
+          uint32_t _dc_age = 0;
           const Asset& _data;
         };
         class Command
@@ -198,9 +199,10 @@ namespace neui
           }
           void discard() override {
             SafeRelease(&_brush);
+            SafeRelease(&_path);
           }
           ~FillRectangles() override {
-            SafeRelease(&_path);
+            discard();
           }
         private:
           void allocate() {
@@ -231,9 +233,10 @@ namespace neui
           void discard() override {
             SafeRelease(&_brush1);
             SafeRelease(&_brush2);
+            SafeRelease(&_path);
           }
           ~OutlineFillRectangles() override {
-            SafeRelease(&_path);
+            discard();
           }
         private:
           void allocate() {
@@ -294,7 +297,7 @@ namespace neui
             }
           }
           void discard() override { SafeRelease(&_brush); }
-          ~DrawLines() {}
+          ~DrawLines() { discard(); }
         private:
           void allocate()
           {
@@ -318,8 +321,11 @@ namespace neui
               _refs._dc->DrawGeometry(_path, _brush, _data.linewidth);
             }
           }
-          void discard() override { SafeRelease(&_brush); }
-          ~DrawPolygon() { SafeRelease(&_path); }
+          void discard() override {
+            SafeRelease(&_brush); 
+            SafeRelease(&_path);
+          }
+          ~DrawPolygon() { discard(); }
         private:
           void allocate()
           {
@@ -346,8 +352,13 @@ namespace neui
               _refs._dc->DrawGeometry(_path, _brush, _data.linewidth);
             }
           }
-          void discard() { SafeRelease(&_brush); }
-          ~DrawLineStrip() { SafeRelease(&_path); }
+          void discard() { 
+            SafeRelease(&_brush);
+            SafeRelease(&_path);
+          }
+          ~DrawLineStrip() {
+            discard();
+          }
         private:
           void allocate()
           {
@@ -374,8 +385,13 @@ namespace neui
               _refs._dc->DrawGeometry(_path, _brush, _data.linewidth);
             }
           }
-          void discard() override { SafeRelease(&_brush); }
-          ~DrawPath() { SafeRelease(&_path); }
+          void discard() override {
+            SafeRelease(&_brush);
+            SafeRelease(&_path);
+          }
+          ~DrawPath() {
+            discard();
+          }
         private:
           void allocate()
           {
@@ -392,7 +408,9 @@ namespace neui
       public:
         AssetImpl(Asset& data);
         void draw(ID2D1DeviceContext* d2ddc);
-
+        ~AssetImpl() {
+          _nativeCommands.clear();
+        }
       private:
         void prepareNative(ID2D1DeviceContext* d2ddc);
 
@@ -604,7 +622,13 @@ namespace neui
         {
           push();
           translate(origin);
-
+          //if (asset._platformdata && asset.discarded)
+          //{
+          //  auto k = static_cast<AssetImpl*>(asset._platformdata);
+          //  delete k;
+          //  asset.discarded = false;
+          //  asset._platformdata = nullptr;
+          //}
           if (!asset._platformdata)
           {
             // create assets platform data
@@ -734,8 +758,9 @@ namespace neui
       }
 
       AssetImpl::AssetImpl(Asset& data)
-        : _data(data)
-        , _refs{ nullptr, data }
+        : tvg::PlatformData()
+        , _data(data)
+        , _refs{ nullptr, 0, data }
       {
       }
 
@@ -1031,11 +1056,12 @@ namespace neui
       void AssetImpl::FillPolygon::discard()
       {
         SafeRelease(&_brush);
+        SafeRelease(&_path);
       }
 
       AssetImpl::FillPolygon::~FillPolygon()
       {
-        SafeRelease(&_path);
+        discard();
       }
 
       AssetImpl::OutlineFillPolygon::OutlineFillPolygon(CommandRefs& refs, const tvg::OutlineFillPolygon& fill_polygon)
@@ -1062,11 +1088,12 @@ namespace neui
       {
         SafeRelease(&_brush2);
         SafeRelease(&_brush1);
+        SafeRelease(&_path);
       }
 
       AssetImpl::OutlineFillPolygon::~OutlineFillPolygon()
       {
-        SafeRelease(&_path);
+        discard();
       }
 
       AssetImpl::FillPath::FillPath(CommandRefs& refs, const tvg::FillPath& fill_path)
@@ -1081,11 +1108,13 @@ namespace neui
       }
       void AssetImpl::FillPath::discard() {
         SafeRelease(&_brush);
-      }
-      AssetImpl::FillPath::~FillPath() {
         SafeRelease(&_path);
       }
+      AssetImpl::FillPath::~FillPath() {
+        discard();
+      }
       void AssetImpl::FillPath::allocate() {
+        discard();
         _brush = createBrushFromStyle(_data.prim_style);
         _path = createPathFromTVGPath(_data.path);
       }
@@ -1105,11 +1134,13 @@ namespace neui
       void AssetImpl::OutlineFillPath::discard() {
         SafeRelease(&_brush2);
         SafeRelease(&_brush1);
-      }
-      AssetImpl::OutlineFillPath::~OutlineFillPath() {
         SafeRelease(&_path);
       }
+      AssetImpl::OutlineFillPath::~OutlineFillPath() {
+        discard();
+      }
       void AssetImpl::OutlineFillPath::allocate() {
+        discard();
         _brush1 = createBrushFromStyle(_data.prim_style);
         _brush2 = createBrushFromStyle(_data.sec_style);
         _path = createPathFromTVGPath(_data.path);

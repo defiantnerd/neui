@@ -41,6 +41,7 @@ namespace neui
     //
     virtual void setAlpha(int percent) = 0;
     virtual float getDpi() = 0;
+    virtual void invalidate() = 0;
     virtual void create() = 0;
     virtual void destroy() = 0;
     virtual void show(int show) = 0;

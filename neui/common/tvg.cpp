@@ -58,6 +58,7 @@ namespace neui
 
     bool Asset::load(const uint8_t* stream)
     {
+      discard();
       loaded = false;
 
       // TV version 1?
@@ -85,6 +86,13 @@ namespace neui
       loaded = true;
       auto n = this->commands.size();
       return true;
+    }
+
+    void Asset::discard()
+    {
+      delete _platformdata;
+      _platformdata = nullptr;
+
     }
 
     Asset::~Asset()
@@ -137,6 +145,15 @@ namespace neui
       return (uint8_t)(srgb * 255.f);
 #endif
 #endif
+    }
+
+    tvg::Rectangle Asset::getRectForCommand(uint32_t command)
+    {
+      if (commands.size() > command)
+      {
+        return commands[command]->getRect();
+      }
+      return { 0,0,0,0 };
     }
 
 
@@ -582,6 +599,19 @@ namespace neui
 
       return path;
     }
-
+  
+    Rectangle FillPolygon::getRect() const {
+      Rectangle r{ points[0].x,points[0].y,points[0].x,points[0].y };
+      for (auto& p : points)
+      {
+        r.x = std::min(r.x, p.x);
+        r.y = std::min(r.y, p.y);
+        r.w = std::max(r.w, p.x);
+        r.h = std::max(r.h, p.y);
+      }
+      r.w -= r.x;
+      r.h -= r.y;
+      return r;
+    }
   }
 }
