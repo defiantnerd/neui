@@ -43,8 +43,9 @@ int run()
   std::shared_ptr<Droplist> droplist;
 
   droplist = make<Droplist>("Selection", Id{ "mydroplist" }
-    , Rect{ 10,110,300,20 },
-    OnSelect([](OnSelect::Args e)->void
+    , Rect{ 10,110,300,20 }
+    , Itemlist({"a","b","c"})
+    , OnSelect([](OnSelect::Args e)->void
       {
         auto self = e.sender<Droplist>();
 
@@ -104,7 +105,8 @@ int run()
     , checkerbox
     , Button{ "Click me", Rect(10,160,120,30), klci }
     , Button{ "On/Off", Id{"togglebutton"}  , Rect(140,160,120,30)}
-    , Label{ "XYZ",Id{"Painter"}, Rect{10,200,100,100}
+    , Slider{ Id{"Slider"}, Rect{ 10,200,120,30} }
+    , Label{ "XYZ",Id{"Painter"}, Rect{10,240,100,100}
         ,OnPaint{[&](OnPaint::Args e) {
             e.renderer->begin()
               .push()

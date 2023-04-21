@@ -363,8 +363,8 @@ namespace neui
       {
         auto hdc = (HDC)wParam;
         auto wnd = (HWND)lParam;
-        SetBkMode(hdc, TRANSPARENT);
-        return 0; //  (LRESULT)GetStockBrush(COLOR_WINDOWTEXT);
+        // SetBkMode(hdc, TRANSPARENT);
+        return 0; // (LRESULT)GetStockBrush(COLOR_WINDOWTEXT);
       }
       break;
 
@@ -528,7 +528,7 @@ namespace neui
           OutputDebugString(_T("DPI_CHANGED\n"));
           break;
         case WM_ERASEBKGND:
-          if (self->viewHandle.wantsEvent(event::Paint::type_v))
+          if (!self->viewHandle.wantsEvent(event::Paint::type_v))
           {
             HBRUSH brush;
             RECT rect;

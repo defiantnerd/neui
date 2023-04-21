@@ -399,6 +399,71 @@ namespace neui
       return false;
     }
 
+    void Slider::create() {
+
+      HWND parent = NULL;
+      assert(viewHandle.seat);
+      if (parentView)
+      {
+        parent = NativeHandle(parentView->getNativeHandle());
+      }
+      {
+        static WNDCLASSEX wcx;
+        wcx.cbSize = sizeof(wcx);
+        GetClassInfoEx(NULL, TRACKBAR_CLASS, &wcx);
+        wcx.lpszClassName = _T("neui:TRACKBAR");
+        this->patchedWndProc = wcx.lpfnWndProc;
+        wcx.lpfnWndProc = (WNDPROC)&BaseWindow::basicWndProc;
+        wcx.hInstance = (HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE);
+        registerClass(wcx);
+      }
+
+      auto r = upscaleRect(rect);
+      CreateWindowEx( NEUI_WS_EX_LAYERED |
+        WS_EX_LEFT | WS_EX_RIGHTSCROLLBAR,
+        MAKEINTATOM(getClassAtom()), utf8_to_wstring(this->text).c_str(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_OVERLAPPED
+        | TBS_NOTICKS // | TBS_AUTOTICKS
+        | TBS_BOTTOM | TBS_HORZ | TBS_BOTH
+        | TBS_TRANSPARENTBKGND,
+        r.x, r.y, r.w, r.h,
+        parent, 0, gInstance, this);
+      if (hwnd)
+      {
+        // ::SetParent(hwnd, parent);
+        ::SetLayeredWindowAttributes(hwnd, 0, 0, 0);
+        // SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOREDRAW | SWP_NOSIZE);        
+      }
+      else
+      {
+        auto out = ::GetLastError();
+        fprintf(stderr, "err: %d\n", out);
+        assert(false);
+      }
+      SendMessage(hwnd, TBM_SETRANGE,
+        (WPARAM)TRUE,                   // redraw flag 
+        (LPARAM)MAKELONG(0, 100));  // min. & max. positions
+
+      SendMessage(hwnd, TBM_SETPAGESIZE,
+        0, (LPARAM)10);                  // new page size 
+
+      SendMessage(hwnd, TBM_SETSEL,
+        (WPARAM)FALSE,                  // redraw flag 
+        (LPARAM)MAKELONG(0, 100));
+
+      SendMessage(hwnd, TBM_SETPOS,
+        (WPARAM)TRUE,                   // redraw flag 
+        (LPARAM)50);
+
+      super::create();
+    }
+    LRESULT Slider::handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam) {
+      return super::handleWindowMessage(message, wParam, lParam);
+    }
+    bool Slider::setInteger(const int32_t value, int32_t index)
+    {
+      return false;
+    }
 
   }
 }

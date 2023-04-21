@@ -30,10 +30,14 @@ namespace neui
     void updateIndex(size_t index);
     Itemlist* _itemslistimpl;
   };
+
   class Itemlist
   {
   public:
     friend class ItemlistOwner;
+    Itemlist() = default;
+    Itemlist(const std::vector<std::string>& items)
+      : _texts(items) {}
     void clear()
     {
       _texts.clear();
@@ -79,8 +83,6 @@ namespace neui
     ItemlistOwner* _owner = nullptr;
     int32_t _index = -1;
   };
-
-
 
 
 

@@ -124,6 +124,9 @@ namespace neui
       case widgettype::droplist:
         view = RefPtr<wind2d::Droplist>::make();
         break;
+      case widgettype::slider:
+        view = RefPtr<wind2d::Slider>::make();
+        break;
       case widgettype::panel:
         return 0;
         break;
