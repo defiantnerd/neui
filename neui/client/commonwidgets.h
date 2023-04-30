@@ -221,8 +221,6 @@ namespace neui
     {
       addProperties(std::forward<Args>(args)...);
       this->setType(getWidgetType());      
-      _items.add("Bla");
-      _items.add("Blub");
     }
 
     widgettype getWidgetType() override { return widgettype::droplist; }
@@ -232,6 +230,11 @@ namespace neui
     void setText(const std::string_view& text) { _text = text; setString(_text, 0); }
 
     void addProperty(const std::string_view text) { _text = text; }
+
+    void addProperty(const Itemlist& items)
+    {
+      this->_items = items;
+    }
 
     void updateSeatProperties() override;
 
@@ -243,6 +246,27 @@ namespace neui
   private:
     void setIntegerFromSeat(int32_t value, int32_t index) override;
     std::string _text;
+  };
+
+
+  class Slider : public WidgetBase<Slider>
+  {
+  public:
+    Slider() = default;
+    template <typename... Args,
+      typename = enable_if_not_similar<head_t<Args...>, Label>>
+      explicit Slider(Args&&... args)
+      : WidgetBase()
+    {
+      addProperties(std::forward<Args>(args)...);
+      this->setType(getWidgetType());
+    }
+
+    widgettype getWidgetType() override { return widgettype::slider; }
+
+    using WidgetBase::addProperty;
+  private:
+    void setIntegerFromSeat(int32_t value, int32_t index) override;
   };
 
 }

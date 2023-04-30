@@ -106,5 +106,11 @@ namespace neui
       this->updateIndex(value);
   }
 
+  void Slider::setIntegerFromSeat(int32_t value, int32_t index)
+  {
+    // if (index == -1)
+//       this->updateIndex(value);
+  }
+
 }
 

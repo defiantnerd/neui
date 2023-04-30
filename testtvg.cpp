@@ -2062,7 +2062,8 @@ int WinMain(
         }} }
       , Label(Id{ "counterdisplay" }, "", Rect{ 320,20,250,20 })
           , valuedisplay
-          , Button{ "painter", Rect{50,50,1100,900},
+          , Slider{ Id{"Slider"}, Rect{ 50,45,120,40} }
+          , Button{ "painter", Rect{50,100,1100,800},
           OnClick([&](event::Clicked& e) {              
              auto self = e.sender<Button>();
              if (e.left())

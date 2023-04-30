@@ -59,5 +59,19 @@ namespace neui
       std::vector<std::string> texts;
     };
 
+    class Slider : public BaseWindow
+    {
+      using super = BaseWindow;
+    public:
+      void create() override;
+      LRESULT handleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam) override;
+      bool setInteger(const int32_t value, int32_t index) override;
+    private:
+      std::string text;
+      std::vector<std::string> texts;
+    };
+
+
+
   }
 }
