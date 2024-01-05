@@ -14,6 +14,11 @@ namespace neui
     delete _itemslistimpl;
   }
 
+  void ItemlistOwner::updateListOwner()
+  {
+    _itemslistimpl->setOwner(this);
+  }
+
   void ItemlistOwner::updateIndex(size_t index)
   {
     _itemslistimpl->updateIndex(index);
