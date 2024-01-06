@@ -68,6 +68,7 @@ namespace neui
     void selectLevel(SeatInstantiationLevel level);
 
     virtual ~WidgetReference();
+    void invalidate();
   private:
     void disconnect() override;
   protected:
@@ -285,7 +286,6 @@ namespace neui
     const Layout& getLayout() const override { return layout; }
     bool isVisible() const override { return WidgetReference::isVisible(); }
     bool isEnabled() const override { return WidgetReference::isEnabled(); }
-
 
     void enable() override
     {

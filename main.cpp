@@ -62,8 +62,8 @@ int run()
     );
 
   auto checkerbox = make<Checkbox>("My Option",
-    Id{"the checkbox"},
-   Rect{ 10,130,120,20 },
+    Id{ "the checkbox" },
+    Rect{ 10,130,120,20 },
     OnSelect{ [](OnSelect::Args e)
       {
         auto sender = e.sender<Checkbox>();
@@ -110,6 +110,7 @@ int run()
     , Slider{ Id{"Slider"}, Rect{ 10,200,120,30} }
     , Label{ "XYZ",Id{"Painter"}, Rect{10,240,100,100}
         ,OnPaint{[&](OnPaint::Args e) {
+            static float x = 0.0f;
             e.renderer->begin()
               .push()
               .pen(0x0000ff)
@@ -117,25 +118,55 @@ int run()
               .pen(0xff8000)
               .line(Point(10, 90), Point(90, 10))
               .pop()
-              .line(Point(10,50), Point(90,50))
-              .rect(Rect{10,30,80,10},3)
+              .line(Point(10, 50), Point(90, 50))
+              .rect(Rect{ 10,30,80,10 }, 3)
               .push()
-              .translate(Point{50,50});
-              // .translate({60,35})
-#if 0
-            for (int i = 0; i < 50; i++)
-              e.renderer->
-              rotate(Point(0, 0), 2)
-              .pen(0x000000+(0xff-i*8)+((i*8)<<8)<<8)
-              .rect(Rect{ -20-i,-20-i,40+i*2,40+i*2 }, 4);
-#endif
-            e.renderer->circle(Point(0, 0), 30);
-            e.renderer->pop().end();
-            e.handled = true;
-          }
-         }
+              .translate(Point{ 50,50 });
+            // .translate({60,35})
+          e.renderer->push()
+            .rotate(Point{ 50,50 }, x)
+            .ellipse(Point{ 0,0 }, 10, 40)
+            .pop();
+          x += 6.f;
+          if (x > 360.f) x -= 360.f;
+          e.renderer->pen(0x0080ff)
+            .circle(Point(0, 0), 30);
+          e.renderer->pop().end();
+          e.reschedule = true;
+          e.handled = true;
+        }
+      }
     }
-  );
+    , Label{ "XYZ2",Id{"Painter2"}, Rect{110,200,100,100}
+      ,OnPaint{[&](OnPaint::Args e) {
+          static float x = 0.0f;
+          e.renderer->begin()
+            .push()
+            .pen(0x0000ff)
+            .line(Point(10, 10), Point(90, 90))
+            .pen(0xff8000)
+            .line(Point(10, 90), Point(90, 10))
+            .pop()
+            .line(Point(10, 50), Point(90, 50))
+            .rect(Rect{ 10,30,80,10 }, 3)
+            .push()
+            .translate(Point{ 50,50 });
+          // .translate({60,35})
+        e.renderer->push()
+          .rotate(Point{ 50,50 }, x)
+          .ellipse(Point{ 0,0 }, 10, 40)
+          .pop();
+        x -= 6.f;
+        if (x < 0.f) x += 360.f;
+        e.renderer->pen(0x00ff0000)
+          .circle(Point(0, 0), 30);
+        e.renderer->pop().end();
+        e.reschedule = true;
+        e.handled = true;
+      }
+    }
+        }
+        );
 
   auto tog = window->getWidgetById<Button>("togglebutton");
   tog->addProperty(
@@ -153,11 +184,20 @@ int run()
         auto p = window->getWidgetById<Label>("Painter");
         if (p)
           p->setText("bllsdfl");
-        droplist->items().set({"a","b","c"});
+        droplist->_items.set({ "a","b","c" });
       })
   );
-
   auto u = window->getWidgetById<AppWindow>("mainwindow");
+
+    //static auto p = window->getWidgetById<Label>("Painter");
+    //static auto q = window->getWidgetById<Label>("Painter2");
+
+    //auto tmr = ::SetTimer(NULL, 1, 1000 / 60, [](HWND h, UINT w, UINT_PTR l, DWORD) -> void
+    //{
+    //    p->setText("");
+    //    q->setText("");
+    //}
+    //);
 
   // get the shared pointer to an object by ID - you must provide a Class Type
   auto mc = window->getWidgetById<Checkbox>("the checkbox");
@@ -166,6 +206,7 @@ int run()
   mc->show();
   
   auto r = neui::run();  
+  // ::killtimer(null, tmr);
   //window->hide();
   //window.reset();
   return r;

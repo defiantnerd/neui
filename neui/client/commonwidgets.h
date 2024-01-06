@@ -3,10 +3,12 @@
 #include "common/widget.h"
 #include "common/events.h"
 #include "common/contents.h"
+#include "common/tvg.h"
 #include <string>
 
 namespace neui
 {
+  using Asset = tvg::Asset;
 
   //template<typename T, typename... Args>
   //RefPtr<T> make(Args&& ...args)

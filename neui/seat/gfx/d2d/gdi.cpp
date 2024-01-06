@@ -57,6 +57,7 @@ namespace neui
         COLORREF pen;
         COLORREF brush;
         XFORM xform;
+        int saved_dc;
       };
 
       class Renderer : public IRenderer
@@ -114,7 +115,7 @@ namespace neui
           s.pen = GetDCPenColor(_hdc);
           s.brush = GetDCBrushColor(_hdc);
           ::GetWorldTransform(_hdc, &s.xform);
-
+          s.saved_dc = ::SaveDC(_hdc);
           _states.push_back(s);
           return *this;
         }
@@ -123,6 +124,7 @@ namespace neui
         {
           auto s = _states.back();
           _states.pop_back();
+          ::RestoreDC(_hdc, s.saved_dc);
           ::SetDCPenColor(_hdc, s.pen);
           ::SetDCBrushColor(_hdc, s.brush);
           ::SetWorldTransform(_hdc, &s.xform);
@@ -170,6 +172,16 @@ namespace neui
         {
           return *this;
         }
+
+        IRenderer& draw(const Point origin, Asset& asset) override
+        {
+          push();
+          translate(origin);
+
+          pop();
+          return *this;
+        }
+
         IRenderer& pushclip(const Rect rect) override
         {
           return *this;
@@ -195,6 +207,10 @@ namespace neui
           XFORM r2{c,s,-s,c,x0,y0};
 
           ::ModifyWorldTransform(_hdc, &r2, MWT_LEFTMULTIPLY);
+          return *this;
+        }
+        IRenderer& scale(float factor, const Point center) override
+        {
           return *this;
         }
         IRenderer& text(const std::string_view text, const Rect rect, uint ninealign) override

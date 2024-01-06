@@ -123,6 +123,18 @@ namespace neui
       }
     }
 
+    event::Clicked makeClickedEvent(const DWORD lParam, const int dpi)
+    {
+      uint32_t flags = 1
+        | (GetAsyncKeyState(VK_SHIFT) & 0x8000 ? 0x10 : 0)
+        | (GetAsyncKeyState(VK_CONTROL) & 0x8000 ? 0x20 : 0)
+        ;
+      auto mx = GET_X_LPARAM(lParam) * 96 /dpi;
+      auto my = GET_Y_LPARAM(lParam) * 96 /dpi;
+
+      return { mx, my, flags};
+    }
+
     void BaseWindow::registerClass(WNDCLASSEX& wc)
     {
       classInstance = ClassRegistry::registerClass(wc);
@@ -176,13 +188,18 @@ namespace neui
     }
 
     void BaseWindow::destroy()
-    {      
+    {
       if (hwnd)
       {
         ::DestroyWindow(hwnd);
         hwnd = 0;
       }
       classInstance.reset();
+    }
+
+    void BaseWindow::invalidate()
+    {
+      ::InvalidateRect(hwnd, NULL, false);
     }
 
     void BaseWindow::show(int show)
@@ -288,149 +305,171 @@ namespace neui
 
       switch (message)
       {
-      case WM_NOTIFY:
-        {
-        auto nfy = (LPNMHDR)lParam;
-          // nfy->code
-        OutputDebugStringA("WM_NOTIFY\n");
-        }
-        break;
-      case WM_NCDESTROY:
-        if (this->patchedWndProc)
-        {
-          // unpatch the WNDPROC, which is not in the documentation, but
-          // Raymond Chen stated this in one of his blog articles
-          SetWindowLongPtr(this->hwnd, GWLP_WNDPROC, (LONG_PTR) this->patchedWndProc);
-          auto temp = this->patchedWndProc;
-          this->patchedWndProc = nullptr; // remove the connection completely
-          // call the original message handler
-          return temp(this->hwnd, message, wParam, lParam);
-        }
-        break;
-      case WM_DPICHANGED_AFTERPARENT:
-      {
-        //OutputDebugString(utf8_to_wstring(fmt::format("DPI changed HWND {:x}\n", (uint64_t) hwnd)).c_str());
-        currentDPI = GetWindowDPI(hwnd);
-        //resizeToDPI();
-      }
-      break;
-      case UWM_DPICHANGED:
-      case WM_DPICHANGED:
-      {
-        /*
-
-          SetWindowPos(hwnd, hwnd, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOZORDER | SWP_NOACTIVATE);
-          */
-
-        DWORD newDPI = HIWORD(wParam);
-        if (currentDPI != newDPI)
-        {
-          currentDPI = newDPI;
-
-          UpdateDpiDependentFontsAndResources();
-
-          // WM_DPICHANGED comes with lParam pointing to a suggested new rect for this control
-          if (lParam != 0)
+        // this was a test if animation can be continued during window move
+        // but it failed with DWM.
+        //case WMTT_PARENT_WM_MOVE:
+        //  if (this->retrigger)
+        //  {
+        //    OutputDebugStringA("*");
+        //    RedrawWindow(hwnd, NULL, NULL, RDW_NOERASE | RDW_UPDATENOW);
+        //    // UpdateWindow(hwnd);
+        //    // InvalidateRect(hwnd, NULL, false);
+        //    return 1;
+        //  }
+        //  return 0;
+        //  break;
+        case WM_NOTIFY:
           {
-            LPRECT r = (LPRECT)lParam;
-            SetWindowPos(hwnd, 0, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
-            if (this->renderer)
+            auto nfy = (LPNMHDR)lParam;
+            // nfy->code
+            OutputDebugStringA("WM_NOTIFY\n");
+          }
+          break;
+        case WM_NCDESTROY:
+          if (this->patchedWndProc)
+          {
+            // unpatch the WNDPROC, which is not in the documentation, but
+            // Raymond Chen stated this in one of his blog articles
+            SetWindowLongPtr(this->hwnd, GWLP_WNDPROC, (LONG_PTR)this->patchedWndProc);
+            auto temp = this->patchedWndProc;
+            this->patchedWndProc = nullptr; // remove the connection completely
+            // call the original message handler
+            return temp(this->hwnd, message, wParam, lParam);
+          }
+          break;
+        case WM_DPICHANGED_AFTERPARENT:
+          {
+            //OutputDebugString(utf8_to_wstring(fmt::format("DPI changed HWND {:x}\n", (uint64_t) hwnd)).c_str());
+            currentDPI = GetWindowDPI(hwnd);
+            //resizeToDPI();
+          }
+          break;
+        case UWM_DPICHANGED:
+        case WM_DPICHANGED:
+          {
+            /*
+
+              SetWindowPos(hwnd, hwnd, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOZORDER | SWP_NOACTIVATE);
+              */
+
+            DWORD newDPI = HIWORD(wParam);
+            if (currentDPI != newDPI)
             {
-              this->renderer->resize(Size{ (int)(r->right - r->left), (int)(r->bottom - r->top) });
+              currentDPI = newDPI;
+
+              UpdateDpiDependentFontsAndResources();
+
+              // WM_DPICHANGED comes with lParam pointing to a suggested new rect for this control
+              if (lParam != 0)
+              {
+                LPRECT r = (LPRECT)lParam;
+                SetWindowPos(hwnd, 0, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+                if (this->renderer)
+                {
+                  this->renderer->resize(Size{ (int)(r->right - r->left), (int)(r->bottom - r->top) });
+                }
+              }
+              else
+              {
+
+                resizeToDPI();
+              }
+
+              win::enumWin32ChildWindows(hwnd,
+                [&](HWND child)
+                {
+                  auto* self = reinterpret_cast<BaseWindow*>(GetWindowLongPtr(child, GWLP_USERDATA));
+                  if (self)
+                  {
+                    self->basicWndProc(child, UWM_DPICHANGED, wParam, 0);
+                  }
+                }
+              );
             }
           }
-          else
+          break;
+          // default behaviour, we might obtain our window and ask it for a background color
+        case WM_CTLCOLORSTATIC:
           {
-            
-            resizeToDPI();
+            auto hdc = (HDC)wParam;
+            auto wnd = (HWND)lParam;
+            SetBkMode(hdc, TRANSPARENT);
+            return 0; //  (LRESULT)GetStockBrush(COLOR_WINDOWTEXT);
           }
+          break;
 
-          win::enumWin32ChildWindows(hwnd,
-            [&](HWND child)
+        case WM_COMMAND:
+          // OutputDebugString(utf8_to_wstring(fmt::format("BASE HWND {3:p}:MSG {0}, {1:x},{2:x}\n","WM_COMMAND", wParam, lParam, (void*)hwnd)).c_str());
+          if (lParam)
+          {
+            auto notificationcode = HIWORD(wParam);
+            if (notificationcode == EN_CHANGE)
             {
-              auto* self = reinterpret_cast<BaseWindow*>(GetWindowLongPtr(child, GWLP_USERDATA));
-              if (self)
+              OutputDebugStringA("EN_CHANGE\n");
+            }
+            if (notificationcode == EN_UPDATE)
+            {
+              OutputDebugStringA("EN_UPDATE\n");
+              static bool ignoreNext = false;
+              if (!ignoreNext)
               {
-                self->basicWndProc(child, UWM_DPICHANGED, wParam, 0);
+                auto win = (BaseWindow*)(GetWindowLongPtr((HWND)lParam, GWLP_USERDATA));
+                if (win)
+                {
+                  std::string text = win->getText(0);
+                  auto newCaretIndex = Edit_GetCaretIndex(win->getHWND());
+
+                  int32_t pos = newCaretIndex;
+                  if (win->viewHandle.validateContent(text, pos))
+                  {
+                    ignoreNext = true;
+                    win->setText(text, 0);
+                    // if we name the variable different, the macro does not work.. *sigh*
+                    if (newCaretIndex != pos)
+                    {
+                      newCaretIndex = pos;
+                      Edit_SetCaretIndex(win->getHWND(), newCaretIndex);
+                    }
+                  }
+                }
+              }
+              else
+              {
+                // this means, that the setText came from us and we shall not
+                // process this again
+                ignoreNext = false;
               }
             }
-          );
-        }
-      }
-      break;
-      // default behaviour, we might obtain our window and ask it for a background color
-      case WM_CTLCOLORSTATIC:
-      {
-        auto hdc = (HDC)wParam;
-        auto wnd = (HWND)lParam;
-        // SetBkMode(hdc, TRANSPARENT);
-        return 0; // (LRESULT)GetStockBrush(COLOR_WINDOWTEXT);
-      }
-      break;
-
-      case WM_COMMAND:
-        // OutputDebugString(utf8_to_wstring(fmt::format("BASE HWND {3:p}:MSG {0}, {1:x},{2:x}\n","WM_COMMAND", wParam, lParam, (void*)hwnd)).c_str());
-        if (lParam)
-        {
-          auto notificationcode = HIWORD(wParam);
-          if (notificationcode == EN_CHANGE)
-          {
-            OutputDebugStringA("EN_CHANGE\n");
-          }
-          if (notificationcode == EN_UPDATE)
-          {
-            OutputDebugStringA("EN_UPDATE\n");
-            static bool ignoreNext = false;
-            if (!ignoreNext)
+            if (notificationcode == BN_CLICKED)
             {
               auto win = (BaseWindow*)(GetWindowLongPtr((HWND)lParam, GWLP_USERDATA));
               if (win)
               {
-                std::string text = win->getText(0);
-                auto newCaretIndex = Edit_GetCaretIndex(win->getHWND());
-
-                int32_t pos = newCaretIndex;
-                if (win->viewHandle.validateContent(text, pos))
-                {
-                  ignoreNext = true;
-                  win->setText(text, 0);
-                  // if we name the variable different, the macro does not work.. *sigh*
-                  if (newCaretIndex != pos)
-                  {
-                    newCaretIndex = pos;
-                    Edit_SetCaretIndex(win->getHWND(), newCaretIndex);
-                  }
-                }
+                win->handleWindowMessage(UWM_BN_CLICKED, 0, 0);
               }
             }
-            else
+          }
+          break;
+        case WM_LBUTTONDOWN:
+          {
+            if (this->viewHandle.wantsEvent(event::type::click))
             {
-              // this means, that the setText came from us and we shall not
-              // process this again
-              ignoreNext = false;
+              auto e(makeClickedEvent(lParam, (int)currentDPI));
+              this->viewHandle.sendEvent(e);
             }
           }
-          if (notificationcode == BN_CLICKED)
+          break;
+        case WM_RBUTTONDOWN:
           {
-            auto win = (BaseWindow*)(GetWindowLongPtr((HWND)lParam, GWLP_USERDATA));
-            if (win)
+            if (this->viewHandle.wantsEvent(event::type::click))
             {
-              win->handleWindowMessage(UWM_BN_CLICKED, 0, 0);
+              auto e(makeClickedEvent(lParam, (int)currentDPI));
+              this->viewHandle.sendEvent(e);
             }
           }
-        }
-        break;
-      case WM_LBUTTONDOWN:
-        {
-          if (this->viewHandle.wantsEvent(event::type::click))
-          {
-            event::Clicked e { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), 0 };
-            this->viewHandle.sendEvent(e);
-          }
-        }
-        break;
-      default:
-        break;
+          break;
+        default:
+          break;
       }
 
       // if the derived class subclassed a CommonControl window, the messages are passed to the
@@ -468,6 +507,16 @@ namespace neui
       return std::string();
     }
 
+    void BaseWindow::animate()
+    {
+      if (retrigger)
+      {
+        retrigger = false;
+        // RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE);
+        InvalidateRect(hwnd, NULL, false);
+      }
+    }
+
     void BaseWindow::setDefaultFont()
     {
       if (hFont)
@@ -499,7 +548,7 @@ namespace neui
       // https://devblogs.microsoft.com/oldnewthing/20191014-00/?p=102992
 
       // checking if a class is already there
-      BaseWindow* self = (BaseWindow*)(GetWindowLongPtr(hwnd, GWLP_USERDATA));      
+      BaseWindow* self = (BaseWindow*)(GetWindowLongPtr(hwnd, GWLP_USERDATA));
       if (message == WM_NCCREATE) {
         LPCREATESTRUCT lpcs = reinterpret_cast<LPCREATESTRUCT>(lParam);
         self = static_cast<BaseWindow*>(lpcs->lpCreateParams);
@@ -521,48 +570,57 @@ namespace neui
         // prehandling important messages
         switch (message)
         {
-        case WM_CREATE:
-          self->currentDPI = GetWindowDPI(hwnd);
-          break;
-        case WM_DPICHANGED:
-          OutputDebugString(_T("DPI_CHANGED\n"));
-          break;
-        case WM_ERASEBKGND:
-          if (!self->viewHandle.wantsEvent(event::Paint::type_v))
-          {
-            HBRUSH brush;
-            RECT rect;
-            brush = GetSysColorBrush(COLOR_WINDOW); //  CreateSolidBrush(RGB(255, 128, 128));
-            HPEN pen = CreatePen(PS_NULL,1,RGB(128, 0, 0));
-            SelectObject((HDC)wParam, brush);
-            SelectObject((HDC)wParam, pen);
-            GetClientRect(hwnd, &rect);//m_hDlg is HWND type
-            Rectangle((HDC)wParam, rect.left, rect.top, rect.right+1, rect.bottom+1);
-            return 0;
-          }
-          break;
-        case WM_PAINT:
-          if (self->viewHandle.wantsEvent(event::Paint::type_v))
-          {
-            if (!self->renderer)
+          case WM_CREATE:
+            self->currentDPI = GetWindowDPI(hwnd);
+            break;
+          case WM_DPICHANGED:
+            OutputDebugString(_T("DPI_CHANGED\n"));
+            break;
+          case WM_ERASEBKGND:
+            if (self->viewHandle.wantsEvent(event::Paint::type_v))
             {
+              return 0;
+              HBRUSH brush;
               RECT rect;
-              GetClientRect(self->getHWND(),&rect);
-              Rect r(rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top);
-              self->renderer = gfx::d2d::make(self->getHWND(),r);
-            }
-            event::Paint n(self->renderer, 0);
-
-            self->viewHandle.sendEvent(n);
-            if (n.handled)
-            {
-              ValidateRect(hwnd, NULL);
+              brush = GetSysColorBrush(COLOR_WINDOW); //  CreateSolidBrush(RGB(255, 128, 128));
+              HPEN pen = CreatePen(PS_NULL, 1, RGB(128, 0, 0));
+              SelectObject((HDC)wParam, brush);
+              SelectObject((HDC)wParam, pen);
+              GetClientRect(hwnd, &rect);//m_hDlg is HWND type
+              Rectangle((HDC)wParam, rect.left, rect.top, rect.right + 1, rect.bottom + 1);
               return 0;
             }
-          }
-          break;
-        default:
-          break;
+            break;
+          case WM_PAINT:
+            if (self->viewHandle.wantsEvent(event::Paint::type_v))
+            {
+              if (!self->renderer)
+              {
+                RECT rect;
+                GetClientRect(self->getHWND(), &rect);
+                Rect r(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+                self->renderer = gfx::d2d::make(self->getHWND(), r);
+              }
+              event::Paint n(self->renderer, 0);
+
+              self->viewHandle.sendEvent(n);
+              if (n.reschedule)
+              {
+                self->retrigger = true;
+                // RECT r{ 0,0, 400, 400};
+                // InvalidateRect(hwnd, NULL, true);
+                char buf[100]; sprintf(buf, "th: %p\n", self);
+                OutputDebugStringA(buf);
+              }
+              if (n.handled)
+              {
+                ValidateRect(hwnd, NULL);
+                return 0;
+              }
+            }
+            break;
+          default:
+            break;
         }
         if (self->getHWND() == hwnd) {
 

@@ -41,6 +41,7 @@ namespace neui
     //
     virtual void setAlpha(int percent) = 0;
     virtual float getDpi() = 0;
+    virtual void invalidate() = 0;
     virtual void create() = 0;
     virtual void destroy() = 0;
     virtual void show(int show) = 0;
@@ -53,6 +54,7 @@ namespace neui
     virtual void setRect(const Rect& rect) = 0;
     virtual void setBoxModel(const BoxModel& bm) = 0;
     virtual void* getNativeHandle() const = 0;
+    virtual void animate() = 0;
 
     virtual ~IPlatformView() {}
     // virtual void print(std::ostream& out) = 0;

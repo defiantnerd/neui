@@ -29,10 +29,11 @@ namespace neui
         this->patchedWndProc = wcx.lpfnWndProc;
         wcx.lpfnWndProc = (WNDPROC)&BaseWindow::basicWndProc;
         wcx.hInstance = (HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE);
+        wcx.style |= CS_HREDRAW | CS_VREDRAW;
         registerClass(wcx);
       }
 
-      DWORD additionalStyles = 0;
+      DWORD additionalStyles = WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
       if (viewHandle.wantsEvent(event::Paint::type_v))
       {
         additionalStyles |= SS_OWNERDRAW;

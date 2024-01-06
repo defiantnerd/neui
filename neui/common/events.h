@@ -95,6 +95,12 @@ namespace neui
       Clicked(int x, int y, uint32_t flags)
         : x(x), y(y), flags(flags) {}
       type getType() const override { return type_v; }
+
+      bool left() const { return flags & 1; }
+      bool right() const { return flags & 2; }
+      bool shift() const { return flags & 0x10; }
+      bool control() const { return flags & 0x20; }
+
       const int x = 0;
       const int y = 0;
       const uint32_t flags = 0;
@@ -136,6 +142,7 @@ namespace neui
       type getType() const override { return type_v; }
       std::shared_ptr<IRenderer> renderer = nullptr;
       const uint32_t flags = 0;
+      bool reschedule = false;
       bool handled = false;
     };
   }
