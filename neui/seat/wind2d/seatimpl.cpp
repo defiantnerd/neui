@@ -13,11 +13,15 @@
 
 // linking the common controls library
 #pragma comment(lib, "Comctl32")
+// #pragma comment(lib, "WindowsApp")
 
 // configuring the manifest directly for this seat
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+
+#include <winrt/windows.foundation.h>
+#include <winrt/Windows.UI.ViewManagement.h>
 
 namespace neui
 {
@@ -57,6 +61,8 @@ namespace neui
   };
 #endif 
 
+  using namespace winrt::Windows::UI::ViewManagement;
+
   namespace wind2d
   {
     HFONT gDefaultFont = 0;
@@ -67,6 +73,11 @@ namespace neui
 
     static std::atomic_int32_t gInstances = 0;
   }
+
+  inline bool IsColorLight(winrt::Windows::UI::Color& clr)
+{
+    return (((5 * clr.G) + (2 * clr.R) + clr.B) > (8 * 128));
+}
 
   wind2dSeat::wind2dSeat()
     : BaseSeat()
@@ -79,6 +90,23 @@ namespace neui
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, _T("sans serif"));
     }
     ++wind2d::gInstances;
+    auto settings = UISettings();
+    
+    auto foreground = settings.GetColorValue(UIColorType::Foreground);
+    auto col = settings.UIElementColor(UIElementType::ActiveCaption);
+    
+    for (int32_t i = 0; i < 9; ++i)
+    {
+      auto col = settings.GetColorValue((UIColorType)i);
+      wprintf(L"color %d = %02x%02x%02x%02x", i, col.A, col.R, col.G, col.B);
+    }
+    auto revoker = settings.ColorValuesChanged([settings](auto&&...)
+    {
+        auto foregroundRevoker = settings.GetColorValue(UIColorType::Foreground);
+        bool isDarkModeRevoker = static_cast<bool>(IsColorLight(foregroundRevoker));
+        wprintf(L"isDarkModeRevoker: %d\n", isDarkModeRevoker);
+    });
+
   }
 
   void wind2dSeat::initComCtrl32()
