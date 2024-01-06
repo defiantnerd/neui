@@ -234,6 +234,7 @@ namespace neui
     void addProperty(const Itemlist& items)
     {
       this->_items = items;
+      updateListOwner();
     }
 
     void updateSeatProperties() override;
