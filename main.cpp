@@ -52,6 +52,8 @@ int run()
         if (self)
         {
           auto cid = self->getID();
+          self->items().remove(e.index);
+          
           // OutputDebugStringA(std::string(cid).c_str());
         }
         e.handled = true;
@@ -75,13 +77,13 @@ int run()
   OnClick klci([droplist, checkerbox](OnClick::Args e)->void
     {
       // add an additional item
-      if (droplist->_items.count() < 4)
+      if (droplist->items().count() < 4)
       {
-        droplist->_items.add("Zonk");
+        droplist->items().add("Zonk");
       }
 
       // select an entry (-> note that change events are sent)
-      droplist->_items.setSelectedIndex(1);
+      droplist->items().setSelectedIndex(1);
 
       // invert check box (-> note that change events are sent) 
       checkerbox->setChecked(!checkerbox->checked);
@@ -151,9 +153,11 @@ int run()
         auto p = window->getWidgetById<Label>("Painter");
         if (p)
           p->setText("bllsdfl");
-        droplist->_items.set({"a","b","c"});
+        droplist->items().set({"a","b","c"});
       })
   );
+
+  auto u = window->getWidgetById<AppWindow>("mainwindow");
 
   // get the shared pointer to an object by ID - you must provide a Class Type
   auto mc = window->getWidgetById<Checkbox>("the checkbox");

@@ -98,7 +98,7 @@ namespace neui
     void showOnSeat();
     void hideOnSeat();
 
-    widgettype type;
+    widgettype type = none;
     SeatInstantiationLevel level = SeatInstantiationLevel::none;
     bool visibleOnSeat = true;
     bool enabled = true;

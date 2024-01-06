@@ -207,7 +207,7 @@ namespace neui
     std::string text;
   };
 
-  class Droplist : public WidgetBase<Droplist> , public ItemlistOwner
+  class Droplist : public WidgetBase<Droplist>, public ItemlistOwner
   {
   public:
     Droplist() = default;
@@ -218,7 +218,7 @@ namespace neui
       , _items(*_itemslistimpl)
     {
       addProperties(std::forward<Args>(args)...);
-      this->setType(getWidgetType());      
+      this->setType(getWidgetType());
     }
 
     widgettype getWidgetType() override { return widgettype::droplist; }
@@ -239,10 +239,12 @@ namespace neui
 
     // void processEvent(Event& ev) override {  };
 
+    Itemlist& items() { return _items; }
+
     void updateItemList(Itemlist* sender) override;
     void updateItemIndex(Itemlist* sender) override;
-    Itemlist& _items;
   private:
+    Itemlist& _items;
     void setIntegerFromSeat(int32_t value, int32_t index) override;
     std::string _text;
   };

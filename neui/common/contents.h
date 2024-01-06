@@ -60,7 +60,7 @@ namespace neui
       if (index < _texts.size())
       {
         _texts.erase(_texts.begin() + index);
-      _owner->updateItemList(this);
+        _owner->updateItemList(this);
       }
     }
     void set(const std::vector<std::string> texts)
