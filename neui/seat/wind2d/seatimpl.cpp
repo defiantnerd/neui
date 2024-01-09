@@ -262,8 +262,8 @@ namespace neui
   {
     auto&& c = widgets[widget];
     auto&& p = widgets[parent];
-    widgets.add(parent, c);
-    return 0;
+    auto m = widgets.add(parent, c);
+    return m;
   }
 
   uint32_t wind2dSeat::setRect(widget_index_t widget, const Rect& pos, int index)

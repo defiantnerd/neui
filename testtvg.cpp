@@ -2055,15 +2055,19 @@ int WinMain(
     , Button{ "-", Rect{220,20,20,20}, OnClick{[&](event::Clicked& ev) {
         value -= 0.15; if (value < 0.f) value = 0.f;
         char m[30]; sprintf(m, "%1.2f", value); valuedisplay->setText(m);
+        auto w = window->getWidgetById<Button>("painter");
+        if ( w) w->invalidate();
+        // window->invalidate();
     }} }
     , Button{ "+", Rect{250,20,20,20}, OnClick{[&](event::Clicked& ev) {
         value += 0.15; if (value > 1.f) value = 1.f;
         char m[30]; sprintf(m, "%1.2f", value); valuedisplay->setText(m);
+        window->invalidate();
         }} }
       , Label(Id{ "counterdisplay" }, "", Rect{ 320,20,250,20 })
           , valuedisplay
           , Slider{ Id{"Slider"}, Rect{ 50,45,120,40} }
-          , Button{ "painter", Rect{50,100,1100,800},
+          , Button{ "PAINT", Id{"painter"}, Rect{50,100,1100,800},
           OnClick([&](event::Clicked& e) {              
              auto self = e.sender<Button>();
              if (e.left())
@@ -2116,7 +2120,7 @@ int WinMain(
         static bool blow = true;
         e.renderer->begin();
         e.renderer->rect(Rect{ 0,0,1000,800 },10);
-        // e.renderer->push().rotate({ k[form].width / 2,k[form].height / 2 }, n).scale(sc);
+        e.renderer->push().rotate({ k[form].width / 2,k[form].height / 2 }, n).scale(sc);
         e.renderer->draw(Point(5,5), k[form]);
         if (selectedform >= 0)
         {
@@ -2127,7 +2131,7 @@ int WinMain(
         }
         // e.renderer->pop();
         e.renderer->end();
-#if 0
+#if 1
         if (++n >= 360) n -= 360;
         if (blow)
         {

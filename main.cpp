@@ -184,7 +184,7 @@ int run()
         auto p = window->getWidgetById<Label>("Painter");
         if (p)
           p->setText("bllsdfl");
-        droplist->_items.set({ "a","b","c" });
+        droplist->items().set({"a","b","c"});
       })
   );
   auto u = window->getWidgetById<AppWindow>("mainwindow");

@@ -199,7 +199,7 @@ namespace neui
 
     void BaseWindow::invalidate()
     {
-      ::InvalidateRect(hwnd, NULL, false);
+      ::InvalidateRect(hwnd, NULL, true);
     }
 
     void BaseWindow::show(int show)
