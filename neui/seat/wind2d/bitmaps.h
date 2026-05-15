@@ -1,12 +1,15 @@
 #pragma once
 
 #include "base.h"
+#include "wic.h"
 #include <fmt/format.h>
 
 namespace neui
 {
   namespace d2d
   {
+
+
     class Context
     {
     public:

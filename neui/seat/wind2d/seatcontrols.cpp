@@ -189,6 +189,7 @@ namespace neui
 
     void BaseWindow::destroy()
     {
+      this->renderer.reset();
       if (hwnd)
       {
         ::DestroyWindow(hwnd);
@@ -591,6 +592,23 @@ namespace neui
               return 0;
             }
             break;
+          case WM_SIZE:
+          {
+            RECT rect;
+            GetClientRect(self->getHWND(), &rect);
+
+            Rect r{ rect.left,rect.top,rect.right - rect.left,rect.bottom - rect.top };
+
+            neui::Size size{ (int)rect.right, (int)rect.bottom };
+
+            if (!self->renderer)
+            {
+              self->renderer = gfx::d2d::make(self->getHWND(), r);
+            }
+            self->renderer->resize(size);
+            InvalidateRect(hwnd, NULL, FALSE);
+          }
+            break;
           case WM_PAINT:
             if (self->viewHandle.wantsEvent(event::Paint::type_v))
             {
@@ -604,6 +622,7 @@ namespace neui
               event::Paint n(self->renderer, 0);
 
               self->viewHandle.sendEvent(n);
+              UpdateWindow(hwnd);
               if (n.reschedule)
               {
                 self->retrigger = true;

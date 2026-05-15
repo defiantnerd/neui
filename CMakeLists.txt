@@ -141,6 +141,7 @@ add_library(wind2d
 
 # target_link_libraries(wind2d PRIVATE fmt::fmt)
 target_link_libraries(wind2d PRIVATE commonlib)
+target_link_libraries(wind2d PRIVATE windowsapp)
 
 
 target_include_directories(wind2d
@@ -197,8 +198,11 @@ target_include_directories(neui
   neui
 )
 
+# main.cpp
 add_executable(main WIN32
 	main.cpp
+	oui.h
+	oui.cpp
 )
 
 declare_dpiawareness(main)
@@ -209,6 +213,25 @@ target_include_directories(main
   neui
 )
 
+# ------------------------------------------
+# testoui
+
+add_executable(testoui WIN32
+	testoui.cpp
+	oui.h
+	oui.cpp
+)
+
+declare_dpiawareness(testoui)
+compatible_with_win10(testoui)
+
+target_include_directories(testoui
+  PRIVATE
+  neui
+)
+
+target_link_libraries(testoui PRIVATE neui)
+
 
 # find_package(fmt CONFIG REQUIRED)
 
@@ -218,9 +241,9 @@ target_include_directories(main
 
 target_link_libraries(main PRIVATE neui)
 
-if (WIN32)
-target_link_options(main PRIVATE -mwindows)
-endif()
+#if (WIN32)
+#target_link_options(main PRIVATE -mwindows)
+#endif()
 
 
 add_executable(tvg WIN32

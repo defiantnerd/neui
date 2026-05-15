@@ -7,6 +7,7 @@
 
 namespace neui
 {
+#if 0 // remove
   /*
   *   A ITextureRef interface is being used to access the native Texture Object
   */
@@ -31,6 +32,8 @@ namespace neui
     std::unique_ptr<ITextureRef> impl;
   };
 
+#endif
+
   class Image;
 
   class IBitmap
@@ -51,16 +54,12 @@ namespace neui
 
   class Bitmap : public IBitmap
   {
-  public:
+  protected:
     Bitmap();
+  public:
+    ~Bitmap() override = default;
     void load(const std::string& s);
     void load(const char* s);
-  };
-
-  class BitmapRef
-  {
-  public:
-
   };
 
   class IBitmapManager
@@ -69,7 +68,7 @@ namespace neui
     virtual void setResolution(int dpi, int scale) = 0;
     virtual void keepCache() = 0;
     virtual void flushCache() = 0;
-    virtual BitmapRef getBitmap(const char* resource) = 0;
+    virtual IBitmap* getBitmap(const char* resource) = 0;
 
 
   };

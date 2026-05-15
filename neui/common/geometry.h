@@ -292,6 +292,54 @@ namespace neui
       return *this;
     }
 
+    Rect& alignInOuterBox(const Rect& outer, int ninealign)
+    {
+      switch (ninealign)
+      {
+      case 0:
+      case 1: // north-west
+        x = outer.x;
+        y = outer.y;
+        break;
+      case 2: // north
+        x = outer.x + ((outer.w - w) / 2);
+        y = outer.y;
+        break;
+      case 3: // north-east
+        x = outer.x + outer.w - w;
+        y = outer.y;
+        break;
+      case 4: // west
+        x = outer.x;
+        y = outer.y + ((outer.h - h) / 2);
+        break;
+      case 5: // center
+        x = outer.x + ((outer.w - w) / 2);
+        y = outer.y + ((outer.h - h) / 2);
+        break;
+      case 6: // east
+        x = outer.x + outer.w - w;
+        y = outer.y + ((outer.h - h) / 2);
+        break;
+      case 7: // south-west
+        x = outer.x;
+        y = outer.y + (outer.h - h);
+        break;
+      case 8: // south
+        x = outer.x + ((outer.w - w) / 2);
+        y = outer.y + (outer.h - h);
+        break;
+      case 9: // south-east
+        x = outer.x + outer.w - w;
+        y = outer.y + (outer.h - h);
+        break;
+      default:
+        // don't do anything
+        break;
+      }
+      return *this;
+    }
+
     int x = 0;
     int y = 0;
     int w = 0;

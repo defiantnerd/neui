@@ -8,7 +8,7 @@
 
 namespace neui
 {
-  using Asset = tvg::Asset;
+  // using Asset = tvg::Asset;
 
   //template<typename T, typename... Args>
   //RefPtr<T> make(Args&& ...args)

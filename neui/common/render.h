@@ -13,6 +13,9 @@
 
 namespace neui
 {
+  class XAsset {
+  public:
+  };
   using Asset = tvg::Asset;
   /*
       IRenderer is an interface class returned by a graphical context

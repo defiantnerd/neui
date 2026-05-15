@@ -24,7 +24,7 @@ namespace neui
   class IWidgetContainer
   {
   public:
-    virtual void removeFromContainer(IWidget* widget) = 0;
+    virtual void removeFromContainer(IWidget* widget_object_t) = 0;
     virtual ~IWidgetContainer() = default;
   };
 
@@ -52,8 +52,8 @@ namespace neui
   enum class SeatInstantiationLevel : int
   {
     none = 0,       // not instantiated
-    allocated,      // a widget index has been allocated
-    created,        // a platform control for a widget index has been created
+    allocated,      // a widget_object_t index has been allocated
+    created,        // a platform control for a widget_object_t index has been created
     active,         // active
   };
 
@@ -99,7 +99,7 @@ namespace neui
     void showOnSeat();
     void hideOnSeat();
 
-    widgettype type;
+    widgettype type = widgettype::none;
     SeatInstantiationLevel level = SeatInstantiationLevel::none;
     bool visibleOnSeat = true;
     bool enabled = true;
@@ -112,11 +112,11 @@ namespace neui
   {
   public:
 
-    void removeFromContainer(IWidget* widget) override
+    void removeFromContainer(IWidget* widget_object_t) override
     {
       for ( auto i = children.begin(); i != children.end(); ++i)      
       {
-        if (i->get() == widget)
+        if (i->get() == widget_object_t)
         {
           children.erase(i);
         }
@@ -168,7 +168,7 @@ namespace neui
 
   protected:
     std::vector<std::shared_ptr<IWidget>> children;
-    void foreachChildren(std::function<void(std::shared_ptr<IWidget>& widget)> func)
+    void foreachChildren(std::function<void(std::shared_ptr<IWidget>& widget_object_t)> func)
     {
       for (auto&& c : children)
       {

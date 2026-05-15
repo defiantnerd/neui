@@ -2,11 +2,12 @@
 #include <map>
 #include "bitmap.h"
 #include "../common/mujson.h"
+#include "wind2d/base.h"
 #include "wind2d/wic.h"
+#include "wind2d/seatimpl.h"
 
 namespace neui
 {
-
   /*
     bitmap types
 
@@ -27,14 +28,37 @@ namespace neui
     {"bitmap":"stuff.png","type":"9","border":"2,2,4,4"}
     {"bitmap":"animation.png","type":"stitch","frames":"5","frametime":"100"}
     */
-
+  
   class BitmapManager
   {
   public:
-    
+    BitmapManager()
+    {
+      // imagePool = new ImagePool(d2dfactories);
+    }
+    ~BitmapManager()
+    {
+      delete imagePool;
+      // bitmaps.clear();
+    }
+    void loadBitmap(const std::wstring& name, const std::wstring& filePath)
+    {
+      imagePool->loadPNGFromFile(name, filePath);
+    }
+    ID2D1Bitmap* getBitmap(ID2D1DeviceContext* deviceContext, const std::wstring& name)
+    {
+      ID2D1Bitmap* ref = nullptr;
+      auto result = imagePool->ConvertAndCreateLockedBitmap(deviceContext, name, &ref);
+      if (ref && result)
+        return ref;
+      return nullptr;
+    }
   private:
-    std::map<std::string, D2D1BitmapRef> bitmaps;
+    // std::map<std::string, ID2D1Bitmap*> bitmaps;
+    win::ImagePool* imagePool = nullptr;
   };
+
+  BitmapManager bitmapManager;
 
   Bitmap::Bitmap()
     : IBitmap()
@@ -57,6 +81,7 @@ namespace neui
       else
       {
         // load simply the bitmap
+        // bitmapManager.
       }
     }
 

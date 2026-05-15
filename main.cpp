@@ -91,6 +91,7 @@ int run()
   );
 
   blaba->setText("bla");
+//   neui::Asset b("some.png");
 
   auto window = make<AppWindow>(
     "My Application Window",

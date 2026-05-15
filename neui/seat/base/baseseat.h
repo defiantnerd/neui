@@ -63,7 +63,7 @@ namespace neui
   class ISeatImpl
   {
   public:    
-    virtual std::unique_ptr<ITextureRef> loadTexture(const uint8_t* mem, size_t len) = 0;
+//     virtual std::unique_ptr<ITextureRef> loadTexture(const uint8_t* mem, size_t len) = 0;
     virtual ~ISeatImpl() = default;
   };
 

@@ -125,17 +125,22 @@ namespace neui
         {
           UINT width = LOWORD(lParam);
           UINT height = HIWORD(lParam);
+
+          auto result = BaseWindow::handleWindowMessage(message, wParam, lParam);
           enumWin32ChildWindows(hwnd, [&](HWND window)->void
           {
             SendMessage(window, WMTT_PARENT_WM_SIZE, wParam, lParam);
           });
-          auto result = BaseWindow::handleWindowMessage(message, wParam, lParam);
+          UpdateLayeredWindow(hwnd, NULL, NULL, NULL, NULL, NULL, 0, NULL, ULW_OPAQUE);
+          this->invalidate();
           return result;
         }
         break;
-#if 0
+#if 1
         case WM_PAINT:
         {
+          return BaseWindow::handleWindowMessage(message, wParam, lParam);
+          /*
           PAINTSTRUCT ps;
           HDC hdc = BeginPaint(hwnd, &ps);
           // TODO: Add any drawing code that uses hdc here...
@@ -146,9 +151,10 @@ namespace neui
 
           TextOut(hdc, 0, 0, ptr, ARRAYSIZE(ptr));
           EndPaint(hwnd, &ps);
+          */
         }
-#endif
         break;
+#endif
 
         case WM_DESTROY:
           PostQuitMessage(0);
