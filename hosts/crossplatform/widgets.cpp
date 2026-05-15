@@ -1,0 +1,1508 @@
+#include <cstring>
+#include <algorithm>
+#include <memory>
+#include <vector>
+
+#include "host.h"
+#include "platform.h"
+#include "../shared/shortcut_format.h"
+#ifdef _WIN32
+// Win32-specific helpers used directly from the host's API entry points
+// (icon application, accel-table build/translate). The macOS port replaces
+// these with platform_* shims (see plans/macos-port.md).
+#include "../shared/win32/icon_win32.h"
+#include "../shared/win32/accel_table_win32.h"
+#endif
+
+namespace xpl_host
+{
+  extern std::vector<std::unique_ptr<Session>> sessions;
+
+  // Widget id layout: upper 16 = owning session id, lower 16 = tree slot.
+  // The lower-16 slot index is what the Tree<> uses; the upper 16 lets the
+  // boundary validate that a handle from session A isn't being applied to
+  // session B (relevant for audio plugins where many sessions live in one
+  // process). Internal Session methods assume the widget belongs to them
+  // and only mask the lower 16; the boundary helpers below enforce that.
+
+  static uint32_t WidgetToIndex(neui_widget_t widget)
+  {
+    return widget.id & 0xffff;
+  }
+
+  static neui_widget_t IndexToWidget(uint32_t session_id, uint32_t idx)
+  {
+    return { ((session_id & 0xffff) << 16) | (idx & 0xffff) };
+  }
+
+  static Session* get_session(neui_session_t session)
+  {
+    uint32_t idx = (session.session & 0xffff) - 1;
+    if (idx < sessions.size())
+      return sessions[idx].get();
+    return nullptr;
+  }
+
+  // True if `widget` is either a sentinel (widget_root / widget_none) or a
+  // properly-packed handle whose session id matches `session_id`. The
+  // sentinels pass through because clients legitimately use widget_root as
+  // the parent argument and widget_none as the "no widget" return value.
+  static bool widget_belongs_to_session(neui_widget_t widget, uint32_t session_id)
+  {
+    if (widget.id == 0)          return true;   // widget_root
+    if (widget.id == UINT32_MAX) return true;   // widget_none
+    return ((widget.id >> 16) & 0xffff) == (session_id & 0xffff);
+  }
+
+  // Resolve the session for an API call that operates on a specific widget.
+  // Returns nullptr if the session is invalid OR the widget belongs to a
+  // different session - the call is silently dropped (as for an invalid
+  // session today).
+  static Session* get_session_for_widget(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session(session);
+    if (!s) return nullptr;
+    if (!widget_belongs_to_session(widget, s->_session_id)) return nullptr;
+    return s;
+  }
+
+  // -------------------------------------------------------------------------
+  // Recursive helpers
+
+  // Mark all non-frame, non-menubar descendants as visible.
+  static void show_children_recursive(Session* s, uint32_t parent_idx)
+  {
+    uint32_t idx = s->_widgets.child(parent_idx);
+    while (idx != 0) {
+      if (s->_widgets.exists(idx)) {
+        auto& wd = s->_widgets[idx];
+        if (!wd.is_frame() && !wd.is_menubar())
+          wd.visible = true;
+        show_children_recursive(s, idx);
+      }
+      idx = s->_widgets.next(idx);
+    }
+  }
+
+  // Recursively fire ondestroy for a widget and all its descendants (depth-first).
+  static void destroy_recursive(Session* s, uint32_t idx,
+                                 neui_widget_client_t* client_api, void* token)
+  {
+    {
+      auto* wd = s->get_widget(idx);
+      if (!wd) return;
+      uint32_t child = s->_widgets.child(idx);
+      while (child != 0) {
+        uint32_t next = s->_widgets.next(child);
+        destroy_recursive(s, child, client_api, token);
+        child = next;
+      }
+    }
+
+    auto* wd = s->get_widget(idx);
+    if (!wd) return;
+
+    // Release render context and native window.
+    if (wd->render_ctx && s->_backend) {
+      s->_asset_manager.release_context(wd->render_ctx, s->_backend);
+      s->_backend->destroy_context(wd->render_ctx);
+      wd->render_ctx = nullptr;
+    }
+    if (wd->native_handle) {
+      platform_destroy_window(*wd);
+      wd->native_handle = nullptr;
+    }
+
+    // Let the widget class clean up its own resources (e.g. MenubarWidget tears
+    // down HMENU handles and removes itself from _menubars).
+    wd->on_destroy(s);
+
+    if (client_api && client_api->ondestroy)
+      client_api->ondestroy(token, IndexToWidget(s->_session_id, idx), wd->userdata);
+
+    s->_widgets.remove(idx);
+  }
+
+  // -------------------------------------------------------------------------
+  // Widget factory - creates the right derived type for each widget type string.
+
+  static std::unique_ptr<WidgetData> make_widget(const char* type)
+  {
+    if (!strcmp(type, NEUI_W_APPWINDOW) ||
+        !strcmp(type, NEUI_W_PLUGWINDOW) ||
+        !strcmp(type, NEUI_W_DIALOG))
+      return std::make_unique<FrameWidget>();
+    if (!strcmp(type, NEUI_W_LABEL))
+      return std::make_unique<LabelWidget>();
+    if (!strcmp(type, NEUI_W_BUTTON))
+      return std::make_unique<ButtonWidget>();
+    if (!strcmp(type, NEUI_W_INPUTBOX))
+      return std::make_unique<InputBoxWidget>();
+    if (!strcmp(type, NEUI_W_CHECKBOX) || !strcmp(type, NEUI_W_CHECKBOX3))
+      return std::make_unique<CheckboxWidget>();
+    if (!strcmp(type, NEUI_W_LISTBOX))
+      return std::make_unique<ListItemsWidget>();
+    if (!strcmp(type, NEUI_W_COMBOBOX))
+      return std::make_unique<ComboBoxWidget>();
+    if (!strcmp(type, NEUI_W_MULTILINE))
+      return std::make_unique<MultilineWidget>();
+    if (!strcmp(type, NEUI_W_TREEVIEW))
+      return std::make_unique<TreeviewWidget>();
+    if (!strcmp(type, NEUI_W_MENUBAR))
+      return std::make_unique<MenubarWidget>();
+    if (!strcmp(type, NEUI_W_IMAGE))
+      return std::make_unique<ImageWidget>();
+    if (!strcmp(type, NEUI_W_SLIDER))
+      return std::make_unique<SliderWidget>();
+    if (!strcmp(type, NEUI_W_KNOB))
+      return std::make_unique<KnobWidget>();
+    return std::make_unique<WidgetData>(); // fallback for unknown types
+  }
+
+  // -------------------------------------------------------------------------
+  // Widget API
+
+  static neui_widget_t NEUI_ABI w_create(neui_session_t session,
+                                          neui_widget_t parent,
+                                          const char* type,
+                                          int x, int y, int width, int height,
+                                          void* userdata)
+  {
+    auto* s = get_session_for_widget(session, parent);
+    if (!s || !type) return { UINT32_MAX };
+
+    uint32_t parent_idx = (parent.id == UINT32_MAX) ? 0 : WidgetToIndex(parent);
+
+    auto obj = make_widget(type);
+    obj->type      = type;
+    obj->x         = x;
+    obj->y         = y;
+    obj->width     = width;
+    obj->height    = height;
+    obj->userdata  = userdata;
+    obj->visible   = false;
+    obj->session   = s;
+    obj->session_id = session.session;
+    obj->isroot    = obj->is_frame() || obj->is_menubar();
+
+    obj->tab_stop  = !strcmp(type, NEUI_W_BUTTON)   ||
+                     !strcmp(type, NEUI_W_INPUTBOX)  ||
+                     !strcmp(type, NEUI_W_CHECKBOX)  ||
+                     !strcmp(type, NEUI_W_CHECKBOX3) ||
+                     !strcmp(type, NEUI_W_LISTBOX)   ||
+                     !strcmp(type, NEUI_W_COMBOBOX)  ||
+                     !strcmp(type, NEUI_W_MULTILINE) ||
+                     !strcmp(type, NEUI_W_TREEVIEW)  ||
+                     !strcmp(type, NEUI_W_SLIDER)    ||
+                     !strcmp(type, NEUI_W_KNOB);
+
+    obj->emit_events = !strcmp(type, NEUI_W_BUTTON)   ||
+                       !strcmp(type, NEUI_W_INPUTBOX)  ||
+                       !strcmp(type, NEUI_W_CHECKBOX)  ||
+                       !strcmp(type, NEUI_W_CHECKBOX3) ||
+                       !strcmp(type, NEUI_W_LISTBOX)   ||
+                       !strcmp(type, NEUI_W_COMBOBOX)  ||
+                       !strcmp(type, NEUI_W_MULTILINE) ||
+                       !strcmp(type, NEUI_W_TREEVIEW)  ||
+                       !strcmp(type, NEUI_W_SLIDER)    ||
+                       !strcmp(type, NEUI_W_KNOB);
+
+    uint32_t idx = s->_widgets.add_child(parent_idx, std::move(obj));
+    if (idx == 0) return { UINT32_MAX };
+
+    s->_widgets[idx].index     = idx;
+    s->_widgets[idx].widget_id = IndexToWidget(s->_session_id, idx).id;
+
+    // Map implicit type variants onto platform-neutral attributes so internal
+    // behavior can be driven uniformly.
+    if (!strcmp(type, NEUI_W_CHECKBOX3))
+      neui_detail::ensure_attrs(s->_widgets[idx].attrs)
+        .set_int(NEUI_ATTR_TRISTATE, 1);
+    if (!strcmp(type, NEUI_W_MULTILINE))
+      neui_detail::ensure_attrs(s->_widgets[idx].attrs)
+        .set_int(NEUI_ATTR_MULTILINE, 1);
+
+    // MENUBAR: create the native menu handle immediately.
+    if (s->_widgets[idx].is_menubar()) {
+      auto& mb = dynamic_cast<MenubarWidget&>(s->_widgets[idx]);
+      mb.hmenu = platform_menubar_create(IndexToWidget(s->_session_id, idx).id);
+      s->_menubars.push_back(idx);
+    }
+
+    return IndexToWidget(s->_session_id, idx);
+  }
+
+  static void NEUI_ABI w_destroy(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+
+    neui_widget_client_t* client_api = nullptr;
+    void* token = s->get_token();
+    {
+      auto* wd = s->get_widget(idx);
+      if (wd && wd->session) {
+        neui_client_t* client = s->_widgets[idx].session->_client;
+        if (client)
+          client_api = static_cast<neui_widget_client_t*>(
+            client->get_interface(token, NEUI_API_WIDGETS));
+      }
+    }
+    destroy_recursive(s, idx, client_api, token);
+  }
+
+  static void NEUI_ABI w_show(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+
+    if (wd.is_frame()) {
+      if (!wd.native_handle) {
+        if (wd.is_dialog()) {
+          // Resolve owner HWND (if any) before creating the dialog HWND so
+          // CreateWindowEx can wire the parent slot correctly.
+          void* owner_native = nullptr;
+          if (wd.owner_index != 0 && s->_widgets.exists(wd.owner_index))
+            owner_native = s->_widgets[wd.owner_index].native_handle;
+          platform_create_dialog(s, idx, wd, owner_native);
+        } else if (!strcmp(wd.type, NEUI_W_APPWINDOW)) {
+          platform_create_appwindow(s, idx, wd);
+        } else {
+          platform_create_plugwindow(s, idx, wd);
+        }
+      }
+      if (wd.native_handle) {
+        // Attach any MENUBAR children to the frame window.
+        uint32_t child = s->_widgets.child(idx);
+        while (child != 0) {
+          if (s->_widgets.exists(child)) {
+            auto& cwd = s->_widgets[child];
+            if (cwd.is_menubar()) {
+              auto& mb = dynamic_cast<MenubarWidget&>(cwd);
+              if (mb.hmenu)
+                platform_menubar_attach(wd.native_handle, mb.hmenu);
+            }
+          }
+          child = s->_widgets.next(child);
+        }
+        show_children_recursive(s, idx);
+        platform_show_window(wd.native_handle);
+
+        // Block input on the owner while the dialog is up - unless the
+        // client opted into modeless via NEUI_ATTR_MODAL = 0.
+        if (wd.is_dialog() && wd.owner_index != 0 &&
+            s->_widgets.exists(wd.owner_index)) {
+          bool is_modal = !wd.attrs ||
+                          wd.attrs->get_int(NEUI_ATTR_MODAL, 1) != 0;
+          void* owner_native = s->_widgets[wd.owner_index].native_handle;
+          if (owner_native && is_modal)
+            platform_set_window_enabled(owner_native, false);
+        }
+      }
+    } else {
+      wd.visible = true;
+    }
+  }
+
+  static void NEUI_ABI w_hide(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+
+    if (wd.is_frame() && wd.native_handle)
+      platform_hide_window(wd.native_handle);
+    else
+      wd.visible = false;
+  }
+
+  static void NEUI_ABI w_set_pos(neui_session_t session, neui_widget_t widget,
+                                  int x, int y, int width, int height)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+
+    wd.x = x; wd.y = y; wd.width = width; wd.height = height;
+
+    if (wd.is_frame() && wd.native_handle)
+      platform_set_window_pos(wd.native_handle, x, y, width, height, wd.dpi);
+  }
+
+  static void NEUI_ABI w_set_size(neui_session_t session, neui_widget_t widget,
+                                   int width, int height)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+
+    wd.width = width; wd.height = height;
+
+    if (wd.is_frame() && wd.native_handle)
+      platform_set_window_pos(wd.native_handle, wd.x, wd.y, width, height, wd.dpi);
+  }
+
+  static void NEUI_ABI w_set_emit_events(neui_session_t session,
+                                          neui_widget_t widget, bool enabled)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (s->_widgets.exists(idx))
+      s->_widgets[idx].emit_events = enabled;
+  }
+
+  static void NEUI_ABI w_set_text(neui_session_t session,
+                                   neui_widget_t widget, const char* text)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    wd.text = text ? text : "";
+
+    // Frame windows: push the text into the native title bar when live.
+    if (wd.is_frame() && wd.native_handle)
+      platform_set_window_title(wd.native_handle, wd.text.c_str());
+  }
+
+  static int NEUI_ABI w_get_text(neui_session_t session,
+                                  neui_widget_t widget,
+                                  char* buf, int buflen)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return -1;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return -1;
+
+    const auto& text = s->_widgets[idx].text;
+    int need = static_cast<int>(text.size()) + 1;
+    if (buf && buflen > 0) {
+      int copy = std::min(buflen - 1, static_cast<int>(text.size()));
+      memcpy(buf, text.c_str(), copy);
+      buf[copy] = '\0';
+    }
+    return need;
+  }
+
+  static neui_widget_t NEUI_ABI w_get_first_child(neui_session_t session,
+                                                    neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return { UINT32_MAX };
+    uint32_t idx = WidgetToIndex(widget);
+    uint32_t child = s->_widgets.child(idx);
+    return child ? IndexToWidget(s->_session_id, child) : neui_widget_t{ UINT32_MAX };
+  }
+
+  static neui_widget_t NEUI_ABI w_get_next_sibling(neui_session_t session,
+                                                     neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return { UINT32_MAX };
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return { UINT32_MAX };
+    uint32_t next = s->_widgets.next(idx);
+    return next ? IndexToWidget(s->_session_id, next) : neui_widget_t{ UINT32_MAX };
+  }
+
+  static void NEUI_ABI w_set_focus(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    s->set_focus(WidgetToIndex(widget));
+  }
+
+  static void NEUI_ABI w_set_check(neui_session_t session,
+                                    neui_widget_t widget,
+                                    neui_check_state_t state)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto* cb = dynamic_cast<CheckboxWidget*>(&s->_widgets[idx]);
+    if (cb) cb->check_state = static_cast<int>(state);
+  }
+
+  static neui_check_state_t NEUI_ABI w_get_check(neui_session_t session,
+                                                   neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return NEUI_CHECK_UNCHECKED;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return NEUI_CHECK_UNCHECKED;
+    auto* cb = dynamic_cast<CheckboxWidget*>(&s->_widgets[idx]);
+    if (!cb) return NEUI_CHECK_UNCHECKED;
+    return static_cast<neui_check_state_t>(cb->check_state);
+  }
+
+  static void* NEUI_ABI w_get_native_handle(neui_session_t session,
+                                              neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return nullptr;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return nullptr;
+    return s->_widgets[idx].native_handle;
+  }
+
+  static void NEUI_ABI w_set_tab_stop(neui_session_t session,
+                                       neui_widget_t widget, bool enabled)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (s->_widgets.exists(idx))
+      s->_widgets[idx].tab_stop = enabled;
+  }
+
+  static void NEUI_ABI w_set_owner(neui_session_t session,
+                                     neui_widget_t dialog, neui_widget_t owner)
+  {
+    auto* s = get_session_for_widget(session, dialog);
+    if (!s) return;
+    if (!widget_belongs_to_session(owner, s->_session_id)) return;
+    s->widget_set_owner(dialog, owner);
+  }
+
+  static void NEUI_ABI w_get_pos(neui_session_t session, neui_widget_t widget,
+                                  int* x, int* y)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    if (x) *x = wd.x;
+    if (y) *y = wd.y;
+  }
+
+  static void NEUI_ABI w_get_size(neui_session_t session, neui_widget_t widget,
+                                   int* width, int* height)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    if (width)  *width  = wd.width;
+    if (height) *height = wd.height;
+  }
+
+  static int NEUI_ABI w_popup_menu(neui_session_t session, neui_widget_t anchor,
+                                    int x, int y, const char* const* items)
+  {
+    auto* s = get_session_for_widget(session, anchor);
+    if (!s) return 0;
+    uint32_t aidx = WidgetToIndex(anchor);
+    if (!s->_widgets.exists(aidx)) return 0;
+    if (!items) return 0;
+    std::vector<std::string> v;
+    for (int i = 0; items[i] != nullptr; ++i) v.emplace_back(items[i]);
+    return s->open_popup_menu(aidx, x, y, v);
+  }
+
+  neui_widget_api_t widgets_api = {
+    w_create,
+    w_destroy,
+    w_show,
+    w_hide,
+    w_set_pos,
+    w_set_size,
+    w_set_emit_events,
+    w_set_text,
+    w_get_text,
+    w_get_first_child,
+    w_get_next_sibling,
+    w_set_focus,
+    w_set_check,
+    w_get_check,
+    w_get_native_handle,
+    w_set_tab_stop,
+    w_set_owner,
+    w_get_pos,
+    w_get_size,
+    w_popup_menu,
+  };
+
+  // -------------------------------------------------------------------------
+  // Attribute API
+
+  static int NEUI_ABI a_set_int(neui_session_t session, neui_widget_t widget,
+                                 const char* key, int32_t value)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s || !key) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    auto& wd = s->_widgets[idx];
+    neui_detail::ensure_attrs(wd.attrs).set_int(key, value);
+
+    // Live-update of size constraints on frames. Win32 reads attrs directly
+    // in WM_GETMINMAXINFO so its impl is a no-op; macOS pushes via
+    // setContentMin/MaxSize: at the call site.
+    if (wd.is_frame() && wd.native_handle &&
+        (!strcmp(key, NEUI_ATTR_MIN_WIDTH)  ||
+         !strcmp(key, NEUI_ATTR_MIN_HEIGHT) ||
+         !strcmp(key, NEUI_ATTR_MAX_WIDTH)  ||
+         !strcmp(key, NEUI_ATTR_MAX_HEIGHT)))
+    {
+      int min_w = wd.attrs ? wd.attrs->get_int(NEUI_ATTR_MIN_WIDTH,  0) : 0;
+      int min_h = wd.attrs ? wd.attrs->get_int(NEUI_ATTR_MIN_HEIGHT, 0) : 0;
+      int max_w = wd.attrs ? wd.attrs->get_int(NEUI_ATTR_MAX_WIDTH,  0) : 0;
+      int max_h = wd.attrs ? wd.attrs->get_int(NEUI_ATTR_MAX_HEIGHT, 0) : 0;
+      platform_apply_size_constraints(wd.native_handle,
+                                       min_w, min_h, max_w, max_h);
+    }
+    return 1;
+  }
+
+  static int32_t NEUI_ABI a_get_int(neui_session_t session, neui_widget_t widget,
+                                     const char* key, int32_t default_value)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s || !key) return default_value;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return default_value;
+    const auto& wd = s->_widgets[idx];
+    if (!wd.attrs) return default_value;
+    return wd.attrs->get_int(key, default_value);
+  }
+
+  static int NEUI_ABI a_set_string(neui_session_t session, neui_widget_t widget,
+                                    const char* key, const char* value)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s || !key) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    auto& wd = s->_widgets[idx];
+    neui_detail::ensure_attrs(wd.attrs).set_string(key, value);
+
+    // Live re-application for behavior-bearing keys. Each platform layer's
+    // platform_set_window_icon does the right thing: Win32 manages the
+    // owned HICON via wd.native_icon; macOS sets NSApp.applicationIconImage.
+    if (wd.is_frame() && wd.native_handle &&
+        !strcmp(key, NEUI_ATTR_ICON_PATH))
+    {
+      platform_set_window_icon(wd, value);
+    }
+    return 1;
+  }
+
+  static const char* NEUI_ABI a_get_string(neui_session_t session,
+                                            neui_widget_t widget, const char* key)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s || !key) return nullptr;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return nullptr;
+    const auto& wd = s->_widgets[idx];
+    if (!wd.attrs) return nullptr;
+    return wd.attrs->get_string(key);
+  }
+
+  static int NEUI_ABI a_has(neui_session_t session, neui_widget_t widget,
+                             const char* key)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s || !key) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    const auto& wd = s->_widgets[idx];
+    return (wd.attrs && wd.attrs->has(key)) ? 1 : 0;
+  }
+
+  static int NEUI_ABI a_remove(neui_session_t session, neui_widget_t widget,
+                                const char* key)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s || !key) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    auto& wd = s->_widgets[idx];
+    if (!wd.attrs) return 0;
+    return wd.attrs->remove(key) ? 1 : 0;
+  }
+
+  static int NEUI_ABI a_set_float(neui_session_t session, neui_widget_t widget,
+                                   const char* key, float value)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s || !key) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    auto& wd = s->_widgets[idx];
+
+    // Clamp + snap NEUI_PARAM_VALUE on entry so attribute storage and
+    // anything reading it back (paint, mouse hit-testing) stay coherent.
+    float stored = value;
+    if (!strcmp(key, NEUI_PARAM_VALUE)) {
+      if (stored < 0.0f) stored = 0.0f;
+      if (stored > 1.0f) stored = 1.0f;
+      int steps = wd.attrs ? wd.attrs->get_int(NEUI_ATTR_STEPS, 0) : 0;
+      if (steps >= 2) {
+        int sidx = static_cast<int>(stored * static_cast<float>(steps - 1) + 0.5f);
+        if (sidx < 0) sidx = 0;
+        if (sidx >= steps) sidx = steps - 1;
+        stored = static_cast<float>(sidx) / static_cast<float>(steps - 1);
+      }
+    }
+    neui_detail::ensure_attrs(wd.attrs).set_float(key, stored);
+    return 1;
+  }
+
+  static float NEUI_ABI a_get_float(neui_session_t session, neui_widget_t widget,
+                                     const char* key, float default_value)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s || !key) return default_value;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return default_value;
+    const auto& wd = s->_widgets[idx];
+    if (!wd.attrs) return default_value;
+    return wd.attrs->get_float(key, default_value);
+  }
+
+  static int NEUI_ABI a_set_session_int(neui_session_t session,
+                                         const char* key, int32_t value)
+  {
+    auto* s = get_session(session);
+    if (!s || !key) return 0;
+    s->_session_attrs.set_int(key, value);
+    if (!strcmp(key, NEUI_ATTR_THEME_MODE)) {
+      // Live-apply: recompute the effective palette and trigger the same
+      // refresh path as a system theme change so frames repaint.
+      s->on_theme_changed();
+    }
+    return 1;
+  }
+
+  static int32_t NEUI_ABI a_get_session_int(neui_session_t session,
+                                             const char* key,
+                                             int32_t default_value)
+  {
+    auto* s = get_session(session);
+    if (!s || !key) return default_value;
+    return s->_session_attrs.get_int(key, default_value);
+  }
+
+  neui_attr_api_t attrs_api = {
+    NEUI_VERSION,
+    a_set_int,
+    a_get_int,
+    a_set_string,
+    a_get_string,
+    a_has,
+    a_remove,
+    a_set_float,
+    a_get_float,
+    a_set_session_int,
+    a_get_session_int,
+  };
+
+  // -------------------------------------------------------------------------
+  // Items API (ListItemsWidget)
+
+  static void NEUI_ABI i_clear(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto* lb = dynamic_cast<ListItemsWidget*>(&s->_widgets[idx]);
+    if (lb) lb->items.clear();
+  }
+
+  static uint32_t NEUI_ABI i_add(neui_session_t session, neui_widget_t widget,
+                                  const char* text, void* userdata)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return UINT32_MAX;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return UINT32_MAX;
+    auto* lb = dynamic_cast<ListItemsWidget*>(&s->_widgets[idx]);
+    if (!lb) return UINT32_MAX;
+    ListItemsWidget::Item item;
+    item.text = text ? text : "";
+    item.userdata = userdata;
+    lb->items.push_back(std::move(item));
+    return static_cast<uint32_t>(lb->items.size() - 1);
+  }
+
+  static void NEUI_ABI i_remove(neui_session_t session, neui_widget_t widget,
+                                 uint32_t index)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto* lb = dynamic_cast<ListItemsWidget*>(&s->_widgets[idx]);
+    if (!lb) return;
+    if (index < lb->items.size())
+      lb->items.erase(lb->items.begin() + index);
+  }
+
+  static uint32_t NEUI_ABI i_count(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    auto* lb = dynamic_cast<ListItemsWidget*>(&s->_widgets[idx]);
+    if (!lb) return 0;
+    return static_cast<uint32_t>(lb->items.size());
+  }
+
+  static int NEUI_ABI i_get_text(neui_session_t session, neui_widget_t widget,
+                                  uint32_t index, char* buf, int buflen)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return -1;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return -1;
+    auto* lb = dynamic_cast<ListItemsWidget*>(&s->_widgets[idx]);
+    if (!lb || index >= lb->items.size()) return -1;
+    const auto& text = lb->items[index].text;
+    int need = static_cast<int>(text.size()) + 1;
+    if (buf && buflen > 0) {
+      int copy = std::min(buflen - 1, static_cast<int>(text.size()));
+      memcpy(buf, text.c_str(), copy);
+      buf[copy] = '\0';
+    }
+    return need;
+  }
+
+  static void NEUI_ABI i_set_text(neui_session_t session, neui_widget_t widget,
+                                   uint32_t index, const char* text)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto* lb = dynamic_cast<ListItemsWidget*>(&s->_widgets[idx]);
+    if (!lb) return;
+    if (index < lb->items.size())
+      lb->items[index].text = text ? text : "";
+  }
+
+  static void* NEUI_ABI i_get_userdata(neui_session_t session,
+                                        neui_widget_t widget, uint32_t index)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return nullptr;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return nullptr;
+    auto* lb = dynamic_cast<ListItemsWidget*>(&s->_widgets[idx]);
+    if (!lb) return nullptr;
+    return index < lb->items.size() ? lb->items[index].userdata : nullptr;
+  }
+
+  static uint32_t NEUI_ABI i_get_selected(neui_session_t session,
+                                            neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return UINT32_MAX;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return UINT32_MAX;
+    auto* lb = dynamic_cast<ListItemsWidget*>(&s->_widgets[idx]);
+    if (!lb) return UINT32_MAX;
+    return lb->selected_item;
+  }
+
+  static void NEUI_ABI i_set_selected(neui_session_t session,
+                                       neui_widget_t widget, uint32_t index)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto* lb = dynamic_cast<ListItemsWidget*>(&s->_widgets[idx]);
+    if (lb) lb->selected_item = index;
+  }
+
+  neui_items_api_t items_api = {
+    i_clear,
+    i_add,
+    i_remove,
+    i_count,
+    i_get_text,
+    i_set_text,
+    i_get_userdata,
+    i_get_selected,
+    i_set_selected,
+  };
+
+  // -------------------------------------------------------------------------
+  // Tree API (MenubarWidget and TreeviewWidget)
+
+  static std::string make_menu_text(const char* text, const char* shortcut)
+  {
+    std::string s = text ? text : "";
+    if (shortcut && *shortcut) { s += '\t'; s += shortcut; }
+    return s;
+  }
+
+  static neui_item_t NEUI_ABI t_add(neui_session_t session,
+                                     neui_widget_t widget,
+                                     neui_item_t parent,
+                                     const char* text, void* userdata)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return { UINT32_MAX };
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return { UINT32_MAX };
+    auto& wd = s->_widgets[idx];
+
+    // ---- menubar ----
+    if (wd.is_menubar()) {
+      auto& mb = dynamic_cast<MenubarWidget&>(wd);
+      if (!mb.hmenu) return { UINT32_MAX };
+      uint32_t neui_id = mb.next_menu_item_id++;
+      MenubarWidget::MenuItemData data;
+      data.text           = text ? text : "";
+      data.enabled        = true;
+      data.userdata       = userdata;
+      data.parent_item_id = parent.id;
+
+      if (parent.id == 0) {
+        void* popup = platform_menubar_add_popup(mb.hmenu, data.text.c_str());
+        data.parent_hmenu = mb.hmenu;
+        data.submenu      = popup;
+        data.cmd_id       = 0;
+      } else {
+        auto pit = mb.menu_items.find(parent.id);
+        void* parent_popup = (pit != mb.menu_items.end() && pit->second.submenu)
+                             ? pit->second.submenu
+                             : mb.hmenu;
+        uint32_t cmd_id = mb.next_menu_cmd_id++;
+        data.parent_hmenu = parent_popup;
+        data.submenu      = nullptr;
+        data.cmd_id       = cmd_id;
+
+        if (strcmp(data.text.c_str(), "-") == 0) {
+          data.is_separator = true;
+          platform_menubar_add_separator(parent_popup, cmd_id);
+        } else {
+          platform_menubar_add_item(parent_popup, cmd_id, data.text.c_str());
+          mb.menu_cmd_map[cmd_id] = neui_id;
+        }
+      }
+
+      mb.menu_items[neui_id] = std::move(data);
+      mb.menu_item_ids_ordered.push_back(neui_id);
+
+      void* frame = s->find_parent_native_handle(idx);
+      if (frame) platform_menubar_refresh(frame);
+      return { neui_id };
+    }
+
+    // ---- treeview ----
+    auto& tv = dynamic_cast<TreeviewWidget&>(wd);
+    uint32_t id = tv.next_tree_id++;
+    TreeviewWidget::TreeItem item;
+    item.parent_id = parent.id;
+    item.text      = text ? text : "";
+    item.userdata  = userdata;
+    tv.tree_items[id] = std::move(item);
+    tv.tree_items_ordered.push_back(id);
+    return { id };
+  }
+
+  // Forward decl - body is below near t_set_shortcut.
+  static void rebuild_menubar_accel(MenubarWidget& mb);
+
+  static void NEUI_ABI t_remove(neui_session_t session,
+                                 neui_widget_t widget, neui_item_t item)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+
+    if (wd.is_menubar()) {
+      auto& mb = dynamic_cast<MenubarWidget&>(wd);
+      auto it = mb.menu_items.find(item.id);
+      if (it == mb.menu_items.end()) return;
+      auto& data = it->second;
+      if (data.submenu) {
+        platform_menubar_remove_popup(data.parent_hmenu, data.submenu);
+      } else {
+        platform_menubar_remove_item(data.parent_hmenu, data.cmd_id);
+        mb.menu_cmd_map.erase(data.cmd_id);
+      }
+      bool had_shortcut = (data.shortcut_key != NEUI_KEY_NONE);
+      mb.menu_item_ids_ordered.erase(
+        std::remove(mb.menu_item_ids_ordered.begin(),
+                    mb.menu_item_ids_ordered.end(), item.id),
+        mb.menu_item_ids_ordered.end());
+      mb.menu_items.erase(it);
+      if (had_shortcut) rebuild_menubar_accel(mb);
+      void* frame = s->find_parent_native_handle(idx);
+      if (frame) platform_menubar_refresh(frame);
+      return;
+    }
+
+    auto& tv = dynamic_cast<TreeviewWidget&>(wd);
+    tv.tree_items.erase(item.id);
+    tv.tree_items_ordered.erase(
+      std::remove(tv.tree_items_ordered.begin(), tv.tree_items_ordered.end(),
+                  item.id),
+      tv.tree_items_ordered.end());
+  }
+
+  static void NEUI_ABI t_clear(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+
+    if (wd.is_menubar()) {
+      auto& mb = dynamic_cast<MenubarWidget&>(wd);
+      for (auto& kv : mb.menu_items) {
+        if (kv.second.submenu)
+          platform_menubar_destroy(kv.second.submenu);
+      }
+      mb.menu_items.clear();
+      mb.menu_cmd_map.clear();
+      mb.menu_item_ids_ordered.clear();
+      mb.next_menu_item_id = 1;
+      mb.next_menu_cmd_id  = 0x8000;
+      // Drop the accelerator table - no items, no shortcuts.
+#ifdef _WIN32
+      if (mb.native_accel) {
+        DestroyAcceleratorTable(static_cast<HACCEL>(mb.native_accel));
+        mb.native_accel = nullptr;
+      }
+#else
+      // TODO(macos): NSMenuItem.keyEquivalent is set per-item; nothing
+      // to tear down here. See plans/macos-port.md.
+      mb.native_accel = nullptr;
+#endif
+      platform_menubar_destroy(mb.hmenu);
+      mb.hmenu = platform_menubar_create(IndexToWidget(s->_session_id, idx).id);
+      void* frame = s->find_parent_native_handle(idx);
+      if (frame) platform_menubar_attach(frame, mb.hmenu);
+      return;
+    }
+
+    auto& tv = dynamic_cast<TreeviewWidget&>(wd);
+    tv.tree_items.clear();
+    tv.tree_items_ordered.clear();
+    tv.next_tree_id = 1;
+  }
+
+  static int NEUI_ABI t_get_text(neui_session_t session, neui_widget_t widget,
+                                  neui_item_t item, char* buf, int buflen)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return -1;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return -1;
+    auto& wd = s->_widgets[idx];
+
+    const std::string* text = nullptr;
+    if (wd.is_menubar()) {
+      auto& mb = dynamic_cast<MenubarWidget&>(wd);
+      auto it = mb.menu_items.find(item.id);
+      if (it == mb.menu_items.end()) return -1;
+      text = &it->second.text;
+    } else {
+      auto& tv = dynamic_cast<TreeviewWidget&>(wd);
+      auto it = tv.tree_items.find(item.id);
+      if (it == tv.tree_items.end()) return -1;
+      text = &it->second.text;
+    }
+
+    int need = static_cast<int>(text->size()) + 1;
+    if (buf && buflen > 0) {
+      int copy = std::min(buflen - 1, static_cast<int>(text->size()));
+      memcpy(buf, text->c_str(), copy);
+      buf[copy] = '\0';
+    }
+    return need;
+  }
+
+  static void NEUI_ABI t_set_text(neui_session_t session, neui_widget_t widget,
+                                   neui_item_t item, const char* text)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+
+    if (wd.is_menubar()) {
+      auto& mb = dynamic_cast<MenubarWidget&>(wd);
+      auto it = mb.menu_items.find(item.id);
+      if (it == mb.menu_items.end()) return;
+      it->second.text = text ? text : "";
+      if (!it->second.submenu && !it->second.is_separator) {
+        std::string dt = make_menu_text(it->second.text.c_str(),
+                                        it->second.shortcut.c_str());
+        platform_menubar_set_item_text(it->second.parent_hmenu,
+                                       it->second.cmd_id, dt.c_str());
+        void* frame = s->find_parent_native_handle(idx);
+        if (frame) platform_menubar_refresh(frame);
+      }
+      return;
+    }
+
+    auto& tv = dynamic_cast<TreeviewWidget&>(wd);
+    auto it = tv.tree_items.find(item.id);
+    if (it != tv.tree_items.end())
+      it->second.text = text ? text : "";
+  }
+
+  static void* NEUI_ABI t_get_userdata(neui_session_t session,
+                                        neui_widget_t widget, neui_item_t item)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return nullptr;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return nullptr;
+    auto& wd = s->_widgets[idx];
+
+    if (wd.is_menubar()) {
+      auto& mb = dynamic_cast<MenubarWidget&>(wd);
+      auto it = mb.menu_items.find(item.id);
+      return it != mb.menu_items.end() ? it->second.userdata : nullptr;
+    }
+    auto& tv = dynamic_cast<TreeviewWidget&>(wd);
+    auto it = tv.tree_items.find(item.id);
+    return it != tv.tree_items.end() ? it->second.userdata : nullptr;
+  }
+
+  static void NEUI_ABI t_set_enabled(neui_session_t session,
+                                      neui_widget_t widget,
+                                      neui_item_t item, bool enabled)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+
+    if (wd.is_menubar()) {
+      auto& mb = dynamic_cast<MenubarWidget&>(wd);
+      auto it = mb.menu_items.find(item.id);
+      if (it == mb.menu_items.end()) return;
+      it->second.enabled = enabled;
+      if (it->second.submenu) {
+        platform_menubar_enable_popup(it->second.parent_hmenu,
+                                      it->second.submenu, enabled);
+      } else {
+        platform_menubar_enable_item(it->second.parent_hmenu,
+                                     it->second.cmd_id, enabled);
+      }
+      void* frame = s->find_parent_native_handle(idx);
+      if (frame) platform_menubar_refresh(frame);
+      return;
+    }
+
+    auto& tv = dynamic_cast<TreeviewWidget&>(wd);
+    auto it = tv.tree_items.find(item.id);
+    if (it != tv.tree_items.end())
+      it->second.enabled = enabled;
+  }
+
+  static bool NEUI_ABI t_get_enabled(neui_session_t session,
+                                      neui_widget_t widget, neui_item_t item)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return false;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return false;
+    auto& wd = s->_widgets[idx];
+
+    if (wd.is_menubar()) {
+      auto& mb = dynamic_cast<MenubarWidget&>(wd);
+      auto it = mb.menu_items.find(item.id);
+      return it != mb.menu_items.end() && it->second.enabled;
+    }
+    auto& tv = dynamic_cast<TreeviewWidget&>(wd);
+    auto it = tv.tree_items.find(item.id);
+    return it != tv.tree_items.end() && it->second.enabled;
+  }
+
+  bool Session::try_translate_accel(void* msg_ptr)
+  {
+#ifdef _WIN32
+    auto* msg = static_cast<MSG*>(msg_ptr);
+    if (!msg) return false;
+    HWND root = msg->hwnd ? GetAncestor(msg->hwnd, GA_ROOT) : nullptr;
+    if (!root) return false;
+    for (uint32_t mb_idx : _menubars) {
+      if (!_widgets.exists(mb_idx)) continue;
+      auto* mb = dynamic_cast<MenubarWidget*>(&_widgets[mb_idx]);
+      if (!mb || !mb->native_accel) continue;
+      void* frame = find_parent_native_handle(mb_idx);
+      if (!frame || frame != static_cast<void*>(root)) continue;
+      if (TranslateAcceleratorW(root,
+                                static_cast<HACCEL>(mb->native_accel), msg))
+        return true;
+    }
+    return false;
+#else
+    // macOS: NSMenuItem.keyEquivalent triggers the action selector directly,
+    // there's no separate accel-table to translate. The platform layer hands
+    // the keystroke to the menu before the responder chain. See plans/macos-port.md.
+    (void)msg_ptr;
+    return false;
+#endif
+  }
+
+  // Rebuild the menubar's accelerator table from its current item shortcuts.
+  // Win32: builds an HACCEL the message pump translates. macOS: per-item
+  // NSMenuItem.keyEquivalent - set by t_set_shortcut directly via a future
+  // platform_menubar_set_item_shortcut, no centralised rebuild needed.
+  static void rebuild_menubar_accel(MenubarWidget& mb)
+  {
+#ifdef _WIN32
+    std::vector<neui_detail::AccelEntry> entries;
+    entries.reserve(mb.menu_items.size());
+    for (const auto& kv : mb.menu_items) {
+      const auto& d = kv.second;
+      if (d.submenu || d.is_separator) continue;
+      if (d.shortcut_key != NEUI_KEY_NONE)
+        entries.push_back({ d.shortcut_mods, d.shortcut_key, d.cmd_id });
+      // Standard platform-alias shortcuts (e.g. Ctrl+Shift+Z for REDO).
+      neui_detail::append_builtin_command_aliases(
+        d.menu_cmd, d.shortcut_mods, d.shortcut_key, d.cmd_id, entries);
+    }
+    HACCEL old = static_cast<HACCEL>(mb.native_accel);
+    HACCEL neu = neui_detail::build_accel_table(entries);
+    mb.native_accel = neu;
+    if (old) DestroyAcceleratorTable(old);
+#else
+    (void)mb;
+#endif
+  }
+
+  static void NEUI_ABI t_set_shortcut(neui_session_t session,
+                                       neui_widget_t widget,
+                                       neui_item_t item,
+                                       uint32_t modifiers, uint32_t key)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+
+    if (wd.is_menubar()) {
+      auto& mb = dynamic_cast<MenubarWidget&>(wd);
+      auto it = mb.menu_items.find(item.id);
+      if (it == mb.menu_items.end()) return;
+      it->second.shortcut_mods = modifiers;
+      it->second.shortcut_key  = key;
+      it->second.shortcut      =
+        neui_detail::format_shortcut_label_win(modifiers, key);
+      if (!it->second.submenu && !it->second.is_separator) {
+        std::string dt = make_menu_text(it->second.text.c_str(),
+                                        it->second.shortcut.c_str());
+        platform_menubar_set_item_text(it->second.parent_hmenu,
+                                       it->second.cmd_id, dt.c_str());
+        // Per-item shortcut binding. Win32 ignores it (HACCEL is rebuilt
+        // centrally); macOS uses it to set NSMenuItem.keyEquivalent +
+        // keyEquivalentModifierMask. Always called on every platform -
+        // the no-op on Win32 keeps the call site uniform.
+        platform_menubar_set_item_shortcut(it->second.parent_hmenu,
+                                            it->second.cmd_id,
+                                            modifiers, key);
+        void* frame = s->find_parent_native_handle(idx);
+        if (frame) platform_menubar_refresh(frame);
+      }
+      rebuild_menubar_accel(mb);
+      return;
+    }
+    // Treeview: shortcut is ignored (no accelerator semantics for tree items).
+  }
+
+  static neui_item_t NEUI_ABI t_get_first_child(neui_session_t session,
+                                                  neui_widget_t widget,
+                                                  neui_item_t parent)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return { UINT32_MAX };
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return { UINT32_MAX };
+    auto* tv = dynamic_cast<TreeviewWidget*>(&s->_widgets[idx]);
+    if (!tv) return { UINT32_MAX };
+    // Walk the insertion-ordered list to preserve add() order.
+    for (uint32_t id : tv->tree_items_ordered) {
+      auto it = tv->tree_items.find(id);
+      if (it != tv->tree_items.end() && it->second.parent_id == parent.id)
+        return { id };
+    }
+    return { UINT32_MAX };
+  }
+
+  static neui_item_t NEUI_ABI t_get_next_sibling(neui_session_t session,
+                                                   neui_widget_t widget,
+                                                   neui_item_t item)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return { UINT32_MAX };
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return { UINT32_MAX };
+    auto* tv = dynamic_cast<TreeviewWidget*>(&s->_widgets[idx]);
+    if (!tv) return { UINT32_MAX };
+    auto it = tv->tree_items.find(item.id);
+    if (it == tv->tree_items.end()) return { UINT32_MAX };
+    uint32_t parent_id = it->second.parent_id;
+    bool found_self = false;
+    for (uint32_t id : tv->tree_items_ordered) {
+      if (id == item.id) { found_self = true; continue; }
+      if (!found_self) continue;
+      auto sit = tv->tree_items.find(id);
+      if (sit != tv->tree_items.end() && sit->second.parent_id == parent_id)
+        return { id };
+    }
+    return { UINT32_MAX };
+  }
+
+  static neui_item_t NEUI_ABI t_get_selected(neui_session_t session,
+                                               neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return { UINT32_MAX };
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return { UINT32_MAX };
+    auto* tv = dynamic_cast<TreeviewWidget*>(&s->_widgets[idx]);
+    if (!tv) return { UINT32_MAX };
+    return { tv->selected_tree_item };
+  }
+
+  static void NEUI_ABI t_set_selected(neui_session_t session,
+                                       neui_widget_t widget, neui_item_t item)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto* tv = dynamic_cast<TreeviewWidget*>(&s->_widgets[idx]);
+    if (tv) tv->selected_tree_item = item.id;
+  }
+
+  static void NEUI_ABI t_set_menu_cmd(neui_session_t session,
+                                       neui_widget_t widget,
+                                       neui_item_t item, uint32_t command)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    if (!wd.is_menubar()) return;   // treeview ignores menu_cmd
+    auto& mb = dynamic_cast<MenubarWidget&>(wd);
+    auto it = mb.menu_items.find(item.id);
+    if (it != mb.menu_items.end()) it->second.menu_cmd = command;
+  }
+
+  neui_tree_api_t tree_api = {
+    t_add,
+    t_remove,
+    t_clear,
+    t_get_text,
+    t_set_text,
+    t_get_userdata,
+    t_set_enabled,
+    t_get_enabled,
+    t_set_shortcut,
+    t_get_first_child,
+    t_get_next_sibling,
+    t_get_selected,
+    t_set_selected,
+    t_set_menu_cmd,
+  };
+
+  // -------------------------------------------------------------------------
+  // Clipboard API
+
+  static int NEUI_ABI cb_set_text(neui_session_t session, const char* utf8)
+  {
+    (void)session;
+    if (!utf8) return 0;
+    return platform_clipboard_set_text(
+             utf8, static_cast<uint32_t>(strlen(utf8))) ? 1 : 0;
+  }
+
+  static int NEUI_ABI cb_get_text(neui_session_t session, char* buf, int buflen)
+  {
+    (void)session;
+    return platform_clipboard_get_text(buf, buflen);
+  }
+
+  static bool NEUI_ABI cb_has_text(neui_session_t session)
+  {
+    (void)session;
+    return platform_clipboard_has_text();
+  }
+
+  static neui_clipboard_item_t NEUI_ABI cb_read(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    if (!s) return neui_clipboard_item_none;
+    if (!platform_clipboard_has_text())
+      return neui_clipboard_item_none;
+    int n = platform_clipboard_get_text(nullptr, 0);
+    if (n <= 0) return neui_clipboard_item_none;
+    std::vector<char> buf(static_cast<size_t>(n));
+    if (platform_clipboard_get_text(buf.data(), n) <= 0)
+      return neui_clipboard_item_none;
+    uint32_t id = s->_clipboard_items.allocate();
+    auto* item = s->_clipboard_items.get(id);
+    // Store including the null terminator so item_get_format can return the
+    // same byte count as the system get_text shortcut.
+    item->set_format(NEUI_CLIPBOARD_MIME_TEXT, buf.data(),
+                     static_cast<uint32_t>(n));
+    return { id };
+  }
+
+  static neui_clipboard_item_t NEUI_ABI cb_create_item(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    if (!s) return neui_clipboard_item_none;
+    return { s->_clipboard_items.allocate() };
+  }
+
+  static void NEUI_ABI cb_release(neui_session_t session,
+                                   neui_clipboard_item_t item)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    s->_clipboard_items.release(item.id);
+  }
+
+  static int NEUI_ABI cb_write(neui_session_t session,
+                                neui_clipboard_item_t item)
+  {
+    auto* s = get_session(session);
+    if (!s) return 0;
+    auto* it = s->_clipboard_items.get(item.id);
+    if (!it) return 0;
+    if (!it->has_format(NEUI_CLIPBOARD_MIME_TEXT)) return 0;
+    int n = it->get_format(NEUI_CLIPBOARD_MIME_TEXT, nullptr, 0);
+    if (n <= 0) return 0;
+    std::vector<char> buf(static_cast<size_t>(n));
+    it->get_format(NEUI_CLIPBOARD_MIME_TEXT, buf.data(), n);
+    // Stored bytes may or may not include a trailing null; pass the count
+    // without the trailing null if present.
+    uint32_t length = static_cast<uint32_t>(n);
+    if (length > 0 && buf[length - 1] == '\0') length -= 1;
+    return platform_clipboard_set_text(buf.data(), length) ? 1 : 0;
+  }
+
+  static int NEUI_ABI cb_item_set_format(neui_session_t session,
+                                          neui_clipboard_item_t item,
+                                          const char* mime,
+                                          const void* data, uint32_t length)
+  {
+    auto* s = get_session(session);
+    if (!s || !mime) return 0;
+    // v1: only NEUI_CLIPBOARD_MIME_TEXT is honoured.
+    if (strcmp(mime, NEUI_CLIPBOARD_MIME_TEXT) != 0) return 0;
+    auto* it = s->_clipboard_items.get(item.id);
+    if (!it) return 0;
+    it->set_format(mime, data, length);
+    return 1;
+  }
+
+  static int NEUI_ABI cb_item_get_format(neui_session_t session,
+                                          neui_clipboard_item_t item,
+                                          const char* mime,
+                                          void* buf, int buflen)
+  {
+    auto* s = get_session(session);
+    if (!s || !mime) return -1;
+    auto* it = s->_clipboard_items.get(item.id);
+    if (!it) return -1;
+    return it->get_format(mime, buf, buflen);
+  }
+
+  static bool NEUI_ABI cb_item_has_format(neui_session_t session,
+                                           neui_clipboard_item_t item,
+                                           const char* mime)
+  {
+    auto* s = get_session(session);
+    if (!s || !mime) return false;
+    auto* it = s->_clipboard_items.get(item.id);
+    return it && it->has_format(mime);
+  }
+
+  neui_clipboard_api_t clipboard_api = {
+    NEUI_VERSION,
+    cb_set_text,
+    cb_get_text,
+    cb_has_text,
+    cb_read,
+    cb_create_item,
+    cb_release,
+    cb_write,
+    cb_item_set_format,
+    cb_item_get_format,
+    cb_item_has_format,
+  };
+
+  // -------------------------------------------------------------------------
+  // Commands API
+
+  bool Session::invoke_focused_command(uint32_t cmd)
+  {
+    if (cmd == NEUI_CMD_NONE || cmd >= NEUI_CMD_USER_BASE) return false;
+    if (_focused_widget == 0 || !_widgets.exists(_focused_widget)) return false;
+    return _widgets[_focused_widget].perform_command(cmd);
+  }
+
+  bool Session::invoke_command(neui_widget_t widget, uint32_t cmd)
+  {
+    if (cmd == NEUI_CMD_NONE || cmd >= NEUI_CMD_USER_BASE) return false;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!_widgets.exists(idx)) return false;
+    return _widgets[idx].perform_command(cmd);
+  }
+
+  bool Session::can_focused_perform_command(uint32_t cmd)
+  {
+    if (cmd == NEUI_CMD_NONE || cmd >= NEUI_CMD_USER_BASE) return false;
+    if (_focused_widget == 0 || !_widgets.exists(_focused_widget)) return false;
+    return _widgets[_focused_widget].can_perform_command(cmd);
+  }
+
+  static int NEUI_ABI cmd_invoke_focused(neui_session_t session, uint32_t cmd)
+  {
+    auto* s = get_session(session);
+    return (s && s->invoke_focused_command(cmd)) ? 1 : 0;
+  }
+
+  static int NEUI_ABI cmd_invoke(neui_session_t session, neui_widget_t widget,
+                                  uint32_t cmd)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    return (s && s->invoke_command(widget, cmd)) ? 1 : 0;
+  }
+
+  neui_commands_api_t commands_api = {
+    NEUI_VERSION,
+    cmd_invoke_focused,
+    cmd_invoke,
+  };
+
+} // namespace xpl_host

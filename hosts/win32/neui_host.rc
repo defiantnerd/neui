@@ -1,0 +1,15 @@
+// Application resource script.
+//
+// Embeds neui_example.manifest as a CREATEPROCESS_MANIFEST_RESOURCE_ID
+// (= 1) of type RT_MANIFEST (= 24). The Windows loader reads this
+// resource at process startup so the manifest's compatibility section,
+// DPI awareness, and UTF-8 ACP declarations are honoured.
+//
+// We do this via an .rc file (rather than link.exe's /MANIFESTINPUT)
+// because MSBuild's auto-manifest generation produces a competing
+// MANIFEST resource - combining the two causes link.exe to fail with
+// "duplicate resource. type:MANIFEST, name:1, …".
+
+#include <winuser.h>
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "neui_example.manifest"
