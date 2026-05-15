@@ -13,3 +13,14 @@
 #include <winuser.h>
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "neui_example.manifest"
+
+// Example bitmaps embedded as user-defined "PNG" resources. The name is
+// the same string the example passes to set_text() on the IMAGE widget;
+// the xpl host's platform_load_image looks them up via
+// FindResourceW(L"\"name\"", L"PNG") and decodes from the embedded
+// buffer via WIC. rc.exe quirk: quoted resource names are stored with
+// the literal quote characters baked into the name, so retrieval has to
+// wrap the lookup string in quotes too. `@2x` is auto-picked by the
+// asset manager on HiDPI monitors.
+"myimage.png"     PNG "myimage.png"
+"myimage@2x.png"  PNG "myimage@2x.png"

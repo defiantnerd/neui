@@ -56,15 +56,22 @@ if(MSVC)
   target_link_options(neui_example PRIVATE "/MANIFEST:NO")
   set_property(TARGET neui_example APPEND PROPERTY
     LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+  # Rebuild the .rc whenever a file it embeds changes (manifest or PNGs).
+  set_property(SOURCE examples/neui_example.rc APPEND PROPERTY OBJECT_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage@2x.png")
 elseif(WIN32)
   add_executable(neui_example WIN32 examples/main.cpp)
 elseif(APPLE)
   # Bundle so AppKit can install the menubar / activate normally. The
-  # example's `myimage.png` is copied into Contents/Resources so the
-  # bundle works when launched from anywhere (Xcode, Finder, `open`),
-  # not just from the project root via terminal where cwd matches.
+  # example images are copied into Contents/Resources so the bundle works
+  # when launched from anywhere (Xcode, Finder, `open`), not just from the
+  # project root via terminal where cwd matches. `myimage@2x.png` is the
+  # HiDPI variant - the asset manager picks it automatically on Retina.
   set(NEUI_EXAMPLE_RESOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/myimage.png")
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage@2x.png")
   add_executable(neui_example MACOSX_BUNDLE
     examples/main.cpp
     ${NEUI_EXAMPLE_RESOURCES})
@@ -73,6 +80,11 @@ elseif(APPLE)
 else()
   add_executable(neui_example examples/main.cpp)
 endif()
+
+# Windows: PNGs are embedded into the executable as user-defined "PNG"
+# resources by examples/neui_example.rc. The xpl host's
+# platform_load_image looks them up via FindResourceW(name, L"PNG")
+# before falling back to disk - no runtime file dependency on the example.
 
 # Link the appropriate hosts. The win32 host is omitted on non-Windows;
 # the xpl host is built everywhere.

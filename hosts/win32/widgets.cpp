@@ -1,7 +1,6 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <wincodec.h>
 #include <neui/neui.h>
 #include <cstring>
 #include <memory>
@@ -12,12 +11,11 @@
 #include "../../backends/d2d/d2d_backend.h"
 #include "../shared/win32/clipboard_win32.h"
 #include "../shared/win32/icon_win32.h"
+#include "../shared/win32/image_loader_win32.h"
 #include "../shared/win32/accel_table_win32.h"
 #include "../shared/shortcut_format.h"
 #include "../shared/widget_paint_knob.h"
 #include <commctrl.h>
-
-#pragma comment(lib, "Windowscodecs")
 
 namespace win32_host
 {
@@ -163,55 +161,12 @@ namespace win32_host
   }
 
   // -------------------------------------------------------------------------
-  // Image asset helpers
+  // Image asset helpers - thin wrapper over the shared WIC decoder in
+  // hosts/shared/win32/image_loader_win32.h (resource-first, then disk).
 
-  static IWICImagingFactory* g_wic = nullptr;
-
-  static bool ensure_wic()
-  {
-    if (g_wic) return true;
-    return SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
-                                       CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&g_wic)));
-  }
-
-  // Returns a heap-allocated BGRA8 premultiplied pixel buffer, or nullptr on failure.
   static uint8_t* load_wic_pixels(const char* path, uint32_t* w_out, uint32_t* h_out)
   {
-    if (!ensure_wic() || !path || !w_out || !h_out) return nullptr;
-    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
-    if (n <= 1) return nullptr;
-    std::wstring wpath(n - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, &wpath[0], n);
-
-    IWICBitmapDecoder*     dec  = nullptr;
-    IWICBitmapFrameDecode* frm  = nullptr;
-    IWICFormatConverter*   conv = nullptr;
-    uint8_t*               buf  = nullptr;
-
-    if (FAILED(g_wic->CreateDecoderFromFilename(wpath.c_str(), nullptr, GENERIC_READ,
-                                                 WICDecodeMetadataCacheOnLoad, &dec))) goto done;
-    if (FAILED(dec->GetFrame(0, &frm))) goto done;
-    if (FAILED(g_wic->CreateFormatConverter(&conv))) goto done;
-    if (FAILED(conv->Initialize(frm, GUID_WICPixelFormat32bppPBGRA,
-                                 WICBitmapDitherTypeNone, nullptr, 0.0,
-                                 WICBitmapPaletteTypeMedianCut))) goto done;
-    {
-      UINT w = 0, h = 0;
-      conv->GetSize(&w, &h);
-      if (w && h) {
-        buf = new uint8_t[static_cast<size_t>(w) * h * 4];
-        if (FAILED(conv->CopyPixels(nullptr, w * 4, w * h * 4, buf))) {
-          delete[] buf; buf = nullptr;
-        } else {
-          *w_out = w; *h_out = h;
-        }
-      }
-    }
-  done:
-    if (conv) conv->Release();
-    if (frm)  frm->Release();
-    if (dec)  dec->Release();
-    return buf;
+    return neui_detail::load_image_bgra8_w32(path, w_out, h_out);
   }
 
   // Resolve @2x / @3x filename variants. Returns the best available path, or "".

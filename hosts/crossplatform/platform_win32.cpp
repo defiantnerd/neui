@@ -5,13 +5,13 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <wincodec.h>
 #include <imm.h>
 #include <string>
 
 #include "host.h"
 #include "platform.h"
 #include "../../backends/d2d/d2d_backend.h"
+#include "../shared/win32/image_loader_win32.h"
 #include "../shared/win32/icon_win32.h"
 #include "../shared/win32/theme_provider_win32.h"
 #include "../shared/theme_palette.h"
@@ -23,7 +23,6 @@
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
 
-#pragma comment(lib, "Windowscodecs")
 #pragma comment(lib, "imm32")
 
 namespace xpl_host
@@ -1448,78 +1447,18 @@ namespace xpl_host
   }
 
   // -------------------------------------------------------------------------
-  // Image loading via Windows Imaging Component (WIC)
-
-  static IWICImagingFactory* g_wic_factory = nullptr;
-
-  static bool ensure_wic_factory()
-  {
-    if (g_wic_factory) return true;
-    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
-                                   CLSCTX_INPROC_SERVER,
-                                   IID_PPV_ARGS(&g_wic_factory));
-    return SUCCEEDED(hr);
-  }
+  // Image loading - thin wrapper over the shared WIC decoder in
+  // hosts/shared/win32/image_loader_win32.h (resource-first, then disk).
 
   uint8_t* platform_load_image(const char* path,
                                 uint32_t* width_out, uint32_t* height_out)
   {
-    if (!path || !width_out || !height_out) return nullptr;
-    if (!ensure_wic_factory()) return nullptr;
-
-    // Convert UTF-8 path to wide string.
-    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
-    if (n <= 1) return nullptr;
-    std::wstring wpath(n - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, &wpath[0], n);
-
-    IWICBitmapDecoder*     decoder   = nullptr;
-    IWICBitmapFrameDecode* frame     = nullptr;
-    IWICFormatConverter*   converter = nullptr;
-    uint8_t*               result    = nullptr;
-
-    HRESULT hr = g_wic_factory->CreateDecoderFromFilename(
-      wpath.c_str(), nullptr, GENERIC_READ,
-      WICDecodeMetadataCacheOnLoad, &decoder);
-    if (FAILED(hr)) goto cleanup;
-
-    hr = decoder->GetFrame(0, &frame);
-    if (FAILED(hr)) goto cleanup;
-
-    hr = g_wic_factory->CreateFormatConverter(&converter);
-    if (FAILED(hr)) goto cleanup;
-
-    hr = converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA,
-                                WICBitmapDitherTypeNone, nullptr, 0.0,
-                                WICBitmapPaletteTypeMedianCut);
-    if (FAILED(hr)) goto cleanup;
-
-    {
-      UINT w = 0, h = 0;
-      converter->GetSize(&w, &h);
-      if (w == 0 || h == 0) goto cleanup;
-
-      uint32_t stride = w * 4;
-      uint32_t size   = stride * h;
-      result = new uint8_t[size];
-
-      hr = converter->CopyPixels(nullptr, stride, size, result);
-      if (FAILED(hr)) { delete[] result; result = nullptr; goto cleanup; }
-
-      *width_out  = w;
-      *height_out = h;
-    }
-
-  cleanup:
-    if (converter) converter->Release();
-    if (frame)     frame->Release();
-    if (decoder)   decoder->Release();
-    return result;
+    return neui_detail::load_image_bgra8_w32(path, width_out, height_out);
   }
 
   void platform_free_image(uint8_t* pixels)
   {
-    delete[] pixels;
+    neui_detail::free_image_bgra8_w32(pixels);
   }
 
   // -------------------------------------------------------------------------
