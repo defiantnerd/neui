@@ -17,6 +17,15 @@
 
 int main(int argc, wchar_t** argv);
 
+namespace win32_host
+{
+  // Defined in widgets.cpp; rebuilds the section's window region from its
+  // current size + text + alignment. Called here on WM_SIZE so a resize
+  // (or DPI change, which propagates through WM_SIZE) refreshes the
+  // region in physical pixels.
+  void apply_section_region_w32(WidgetData& wd);
+}
+
 // DWMWA_USE_IMMERSIVE_DARK_MODE attribute id varies by Windows version.
 // Win11 / late-Win10: 20. Early Win10 1809-1909: 19. We try 20 first and
 // fall back to 19 if the call fails.
@@ -351,6 +360,10 @@ namespace win32_host
                         static_cast<uint32_t>(LOWORD(lParam)),
                         static_cast<uint32_t>(HIWORD(lParam)));
       }
+      // SECTION region tracks physical-pixel widget size, so a resize
+      // must rebuild it before the next paint.
+      if (wd && wd->type && !strcmp(wd->type, NEUI_W_SECTION))
+        apply_section_region_w32(*wd);
       return 0;
     }
     case WM_ERASEBKGND:

@@ -15,6 +15,8 @@
 #include "../shared/win32/accel_table_win32.h"
 #include "../shared/shortcut_format.h"
 #include "../shared/widget_paint_knob.h"
+#include "../shared/widget_paint_section.h"
+#include "../shared/theme_palette.h"
 #include <commctrl.h>
 
 namespace win32_host
@@ -479,6 +481,89 @@ namespace win32_host
   }
 
   // -------------------------------------------------------------------------
+  // SECTION (neui.painted seam) - non-interactive coloured backdrop with
+  // an optional title chip. paint_section_w32 delegates to the shared
+  // helper so the visual matches the xpl host. apply_section_region_w32
+  // installs a window region (body rect + chip rect, in physical px) so
+  // the title band's non-chip area is truly transparent and the parent
+  // frame's pixels show through underneath.
+
+  static void paint_section_w32(neui_render_backend_t* backend,
+                                 neui_render_ctx_t      ctx,
+                                 float w, float h,
+                                 WidgetData&            wd,
+                                 bool                   /*focused*/)
+  {
+    using neui_detail::ColorRole;
+    uint32_t bg = neui_detail::shade(
+                    neui_detail::color(ColorRole::frame_bg),
+                    neui_detail::SECTION_BG_LIFT);
+    if (wd.attrs && wd.attrs->has(NEUI_ATTR_BACKGROUND))
+      bg = static_cast<uint32_t>(wd.attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
+    const char* align = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
+    neui_detail::paint_section(backend, ctx, 0.0f, 0.0f, w, h,
+                                wd.text.c_str(), bg, align,
+                                neui_detail::color(ColorRole::text_primary));
+  }
+
+  // Build and apply the section's window region so anything outside
+  // (body ∪ title chip) is clipped away. Called from PaintedWndProc on
+  // create + size, and from set_text / NEUI_ATTR_ALIGN_TEXT live updates.
+  // Logical (96 DPI) measurements are converted to physical px for the
+  // GDI region. If `text` is empty the region is the full rect (no band).
+  // Non-static so PaintedWndProc in window.cpp can call it from WM_SIZE.
+  void apply_section_region_w32(WidgetData& wd)
+  {
+    if (!wd.hwnd) return;
+    UINT dpi = wd.session ? wd.session->get_dpi_for_widget(wd.index) : 96;
+    if (dpi == 0) dpi = 96;
+    int phys_w = LogicalToPhysical(wd.width,  dpi);
+    int phys_h = LogicalToPhysical(wd.height, dpi);
+    if (phys_w <= 0 || phys_h <= 0) {
+      SetWindowRgn(wd.hwnd, nullptr, FALSE);
+      return;
+    }
+
+    if (wd.text.empty()) {
+      // No band reserved - full rect.
+      SetWindowRgn(wd.hwnd, CreateRectRgn(0, 0, phys_w, phys_h), FALSE);
+      return;
+    }
+
+    auto* backend = neui_d2d_backend::get_backend();
+    float tw = (backend && backend->measure_text)
+                 ? backend->measure_text(nullptr, wd.text.c_str(), -1,
+                                          neui_detail::SECTION_LABEL_FONT)
+                 : 0.0f;
+    const char* align = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
+    auto chip = neui_detail::section_chip_rect(
+                  0.0f,
+                  static_cast<float>(wd.width),
+                  static_cast<float>(wd.height),
+                  tw, align);
+
+    // Round to nearest physical pixel; chip width is clamped to widget
+    // width by the helper so chip_right cannot overflow phys_w.
+    auto to_phys = [dpi](float logical) {
+      return LogicalToPhysical(static_cast<int>(logical + 0.5f), dpi);
+    };
+    int band_h_phys = to_phys(chip.band_h);
+    int chip_l = to_phys(chip.chip_x);
+    int chip_r = to_phys(chip.chip_x + chip.chip_w);
+    if (band_h_phys > phys_h) band_h_phys = phys_h;
+    if (chip_l < 0)           chip_l      = 0;
+    if (chip_r > phys_w)      chip_r      = phys_w;
+
+    HRGN body = CreateRectRgn(0, band_h_phys, phys_w, phys_h);
+    HRGN chip_rgn = CreateRectRgn(chip_l, 0, chip_r, band_h_phys);
+    CombineRgn(body, body, chip_rgn, RGN_OR);
+    DeleteObject(chip_rgn);
+    // SetWindowRgn takes ownership of `body`; do not delete it ourselves.
+    // bRedraw=FALSE so we don't loop when called from inside WM_PAINT.
+    SetWindowRgn(wd.hwnd, body, FALSE);
+  }
+
+  // -------------------------------------------------------------------------
 
   static HWND CreateChildHwnd(WidgetData& wd, HWND parent_hwnd, UINT parent_dpi)
   {
@@ -516,6 +601,31 @@ namespace win32_host
       if (hwnd) {
         SetWindowSubclass(hwnd, ChildSubclassProc, 1, reinterpret_cast<DWORD_PTR>(&wd));
         wd.has_subclass = true;
+      }
+      return hwnd;
+    }
+
+    // Section: non-interactive painted container. No tab stop, no mouse
+    // hook. WS_CLIPSIBLINGS so the section's paint stays clipped out of
+    // its child siblings' rects (children parent to the frame and sit on
+    // top of the section in z-order). After the HWND exists, the window
+    // region is installed so the band's non-chip area is transparent.
+    if (!strcmp(wd.type, NEUI_W_SECTION)) {
+      DWORD style = WS_CHILD | WS_CLIPSIBLINGS;
+      if (wd.visible) style |= WS_VISIBLE;
+      wd.paint_fn = &paint_section_w32;
+      HWND hwnd = CreateWindowExW(0, L"neui.painted", L"", style,
+        LogicalToPhysical(wd.x, parent_dpi),
+        LogicalToPhysical(wd.y, parent_dpi),
+        LogicalToPhysical(wd.width, parent_dpi),
+        LogicalToPhysical(wd.height, parent_dpi),
+        parent_hwnd,
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(wd.index)),
+        get_hinstance(),
+        &wd);
+      if (hwnd) {
+        wd.hwnd = hwnd;
+        apply_section_region_w32(wd);
       }
       return hwnd;
     }
@@ -1040,6 +1150,13 @@ namespace win32_host
     if (w.type && !strcmp(w.type, NEUI_W_IMAGE)) {
       // For image widgets the text is the image filename - reload the bitmap.
       if (w.hwnd) load_image_bitmap(w, get_dpi_for_widget(index));
+    } else if (w.type && !strcmp(w.type, NEUI_W_SECTION)) {
+      // Section: text is the header title; chip width and the window
+      // region both depend on it. Rebuild + repaint.
+      if (w.hwnd) {
+        apply_section_region_w32(w);
+        InvalidateRect(w.hwnd, nullptr, FALSE);
+      }
     } else {
       // Apply immediately if the HWND already exists; otherwise stored for deferred creation
       ApplyText(w.hwnd, w.text);
@@ -2324,6 +2441,15 @@ namespace win32_host
     // Live re-application for behavior-bearing keys.
     if (w->isroot && w->hwnd && !strcmp(key, NEUI_ATTR_ICON_PATH)) {
       neui_detail::apply_window_icon(w->hwnd, value, &w->native_icon);
+    }
+    // Section: align change moves the title chip, so the window region
+    // has to be rebuilt before the next paint. Also covers background
+    // changes via the InvalidateRect (region geometry doesn't depend on
+    // colour, but a repaint is needed to pick up the new fill).
+    if (w->hwnd && w->type && !strcmp(w->type, NEUI_W_SECTION) &&
+        !strcmp(key, NEUI_ATTR_ALIGN_TEXT)) {
+      apply_section_region_w32(*w);
+      InvalidateRect(w->hwnd, nullptr, FALSE);
     }
     return 1;
   }
