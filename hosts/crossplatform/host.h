@@ -158,6 +158,15 @@ namespace xpl_host
     void paint(neui_render_backend_t* backend, neui_render_ctx_t ctx, bool is_focused) override;
   };
 
+  // SECTION - non-interactive visual container. Paints a colored backdrop
+  // behind its children; optionally draws `text` as a header label at the
+  // top (alignment via NEUI_ATTR_ALIGN_TEXT). Background color from
+  // NEUI_ATTR_BACKGROUND, falling back to ColorRole::panel_bg.
+  class SectionWidget   : public WidgetData {
+  public:
+    void paint(neui_render_backend_t* backend, neui_render_ctx_t ctx, bool is_focused) override;
+  };
+
   // MULTILINE - multi-line text editor with caret + selection + vertical scroll.
   // Newlines in the stored text string are physical line breaks ('\n').
   class MultilineWidget : public WidgetData {

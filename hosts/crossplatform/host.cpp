@@ -585,6 +585,80 @@ namespace xpl_host
                          neui_detail::color(ColorRole::focus_ring));
   }
 
+  // SECTION - non-interactive visual container. Layout is two regions:
+  //   * Body: the full rect below a fixed-height header band, filled with
+  //     the section colour (NEUI_ATTR_BACKGROUND override, else a theme-
+  //     derived shade lighter than frame_bg so the section reads as a
+  //     raised panel).
+  //   * Header band: a SECTION_HEADER_H-tall strip across the top. Only
+  //     the "title chip" - the bounding box of the title text plus
+  //     horizontal padding - is filled with the section colour; the rest
+  //     of the band is left untouched, so the parent's pixels show
+  //     through. Effect: the title sits in a coloured tab attached to
+  //     the body, with transparent gaps on whichever sides the
+  //     NEUI_ATTR_ALIGN_TEXT alignment leaves empty.
+  // Horizontal alignment is NEUI_ATTR_ALIGN_TEXT ("left"|"center"|"right";
+  // default "center"). With no `text`, no band is reserved and the body
+  // fills the entire widget rect.
+  static constexpr float SECTION_LABEL_PAD_X = 8.0f;
+  static constexpr float SECTION_LABEL_FONT  = 12.0f;
+  static constexpr float SECTION_HEADER_H    = 22.0f;
+  static constexpr int   SECTION_BG_LIFT     = 24;   // shade delta over frame_bg
+
+  void SectionWidget::paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
+                             bool /*is_focused*/)
+  {
+    using neui_detail::ColorRole;
+    float fx = static_cast<float>(x);
+    float fy = static_cast<float>(y);
+    float fw = static_cast<float>(width);
+    float fh = static_cast<float>(height);
+
+    uint32_t bg = neui_detail::shade(
+                    neui_detail::color(ColorRole::frame_bg), SECTION_BG_LIFT);
+    if (attrs && attrs->has(NEUI_ATTR_BACKGROUND))
+      bg = static_cast<uint32_t>(attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
+
+    // Untitled section: one flat fill, no band reserved.
+    if (text.empty() || !backend->draw_text || !backend->measure_text) {
+      backend->fill_rect(ctx, fx, fy, fw, fh, bg);
+      return;
+    }
+
+    float band_h = (SECTION_HEADER_H < fh) ? SECTION_HEADER_H : fh;
+
+    // Body fills the rect below the band with the section colour.
+    if (fh > band_h)
+      backend->fill_rect(ctx, fx, fy + band_h, fw, fh - band_h, bg);
+
+    // Title chip - tight bounding box around the text, sized exactly to
+    // text-width + 2*pad. Position depends on NEUI_ATTR_ALIGN_TEXT.
+    float tw = backend->measure_text(ctx, text.c_str(), -1, SECTION_LABEL_FONT);
+    float chip_w = tw + 2.0f * SECTION_LABEL_PAD_X;
+    if (chip_w > fw) chip_w = fw;
+
+    const char* align = attrs ? attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
+    float chip_x;
+    if (align && !strcmp(align, "left")) {
+      chip_x = fx;
+    } else if (align && !strcmp(align, "right")) {
+      chip_x = fx + fw - chip_w;
+    } else {
+      // Default and "center": chip centred over the section's painted area.
+      chip_x = fx + (fw - chip_w) * 0.5f;
+    }
+    backend->fill_rect(ctx, chip_x, fy, chip_w, band_h, bg);
+
+    // Title text - vertically centred in the band by the backend's
+    // paragraph alignment, horizontally inside the chip's padded interior.
+    float text_x = chip_x + SECTION_LABEL_PAD_X;
+    float text_w = chip_w - 2.0f * SECTION_LABEL_PAD_X;
+    if (text_w < 0.0f) text_w = 0.0f;
+    backend->draw_text(ctx, text_x, fy, text_w, band_h,
+                       text.c_str(), SECTION_LABEL_FONT,
+                       neui_detail::color(ColorRole::text_primary));
+  }
+
   void ButtonWidget::paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
                             bool is_focused)
   {

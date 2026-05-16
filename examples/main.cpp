@@ -12,8 +12,8 @@
 //   "neui.host.macos"          - native AppKit controls (macOS only)
 //   "neui.host.crossplatform"  - pluggable-backend host (D2D on Windows, CG on macOS)
 #ifdef _WIN32
-#define ACTIVE_HOST "neui.host.crossplatform"
-#define ACTIVE_HOSTx "neui.host.win32"
+#define ACTIVE_HOSTx "neui.host.crossplatform"
+#define ACTIVE_HOST "neui.host.win32"
 #elif defined(__APPLE__)
 #define ACTIVE_HOSTx "neui.host.crossplatform"
 #define ACTIVE_HOST "neui.host.macos"
@@ -74,6 +74,10 @@ struct AppState {
   // Modal "About" dialog (created on demand by Help > About).
   uint32_t           about_dlg_id = 0;
   uint32_t           about_ok_id  = 0;
+  // SECTION demo: a non-interactive coloured backdrop with an optional
+  // header label; children paint on top via normal tree traversal.
+  uint32_t           section_id    = 0;
+  uint32_t           section_btn_id = 0;
 };
 
 // Open a modal "About" dialog owned by the main window. The dialog has a
@@ -129,6 +133,10 @@ static neui_widget_client_t widget_client = {
     switch (event->type) {
 
     case NEUI_EVENT_MOUSE_BUTTON_CLICK:
+      if (app && event->data.mouse.widget.id == app->section_btn_id) {
+        dbglog("section button clicked - section is non-interactive, children still work\n");
+        return true;
+      }
       if (app && event->data.mouse.widget.id == app->button_id) {
         neui_session_t sess  = { app->session };
         neui_widget_t  input = { app->input_id };
@@ -475,6 +483,35 @@ int main(int argc, char** argv) {
   auto img = app.widgets->create(sess, win, NEUI_W_IMAGE, 215, 160, 200, 150, nullptr);
   app.widgets->set_text(sess, img, "myimage.png");
 
+  // --- SECTION demo: visual grouping container ---------------------------
+  // A non-interactive coloured backdrop with an optional header label.
+  // Children (the label + button below) are created with the section as
+  // their parent so they belong to the section in the widget tree, and
+  // paint on top of it via normal depth-first traversal. The section has
+  // emit_events=false so clicks on its bare area pass through to anything
+  // beneath. By default the background is a theme-derived shade that sits
+  // lighter than the frame's clear colour, and the header text is centred
+  // within a band at the top. To override either, set NEUI_ATTR_BACKGROUND
+  // (int ARGB) or NEUI_ATTR_ALIGN_TEXT ("left"|"center"|"right").
+  auto section = app.widgets->create(sess, win, NEUI_W_SECTION,
+                                      215, 320, 200, 260, nullptr);
+  app.section_id = section.id;
+  app.widgets->set_text(sess, section, "Section widget");
+  app.attrs->set_string(sess, section, NEUI_ATTR_ALIGN_TEXT, "left");
+  // app.attrs->set_int   (sess, section, NEUI_ATTR_BACKGROUND, 0xFF2A3340);
+
+  // Children of the section. Coordinates are absolute in the frame's
+  // logical-pixel space (not relative to the section); the parent-child
+  // relationship governs ownership and paint order.
+  auto sec_label = app.widgets->create(sess, section, NEUI_W_LABEL,
+                                        225, 348, 180, 20, nullptr);
+  app.widgets->set_text(sess, sec_label, "Children paint on top:");
+
+  auto sec_btn = app.widgets->create(sess, section, NEUI_W_BUTTON,
+                                      225, 376, 180, 28, nullptr);
+  app.widgets->set_text(sess, sec_btn, "Click me");
+  app.section_btn_id = sec_btn.id;
+
   // --- Far-right column (x=635, width=230): slider + knob -----------------
 
   auto slider_label = app.widgets->create(sess, win, NEUI_W_LABEL,
@@ -558,6 +595,9 @@ int main(int argc, char** argv) {
   app.widgets->destroy(sess, slider2_label);
   app.widgets->destroy(sess, slider);
   app.widgets->destroy(sess, slider_label);
+  app.widgets->destroy(sess, sec_btn);
+  app.widgets->destroy(sess, sec_label);
+  app.widgets->destroy(sess, section);
   app.widgets->destroy(sess, img);
   app.widgets->destroy(sess, treev);
   app.widgets->destroy(sess, tree_label);

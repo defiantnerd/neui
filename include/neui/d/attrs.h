@@ -50,7 +50,10 @@ extern "C" {
 // Supersedes neui_widget_api_t::set_tab_stop.
 #define NEUI_ATTR_TAB_STOP  "neui.attr.tab_stop"
 
-// string: "left", "center", "right" (LABEL, BUTTON).
+// string: "left", "center", "right" (LABEL, BUTTON, SECTION).
+// On SECTION this selects the horizontal position of the optional header
+// label drawn in the band at the top of the section rectangle. Default
+// for SECTION is "center" (when the attribute is unset).
 #define NEUI_ATTR_ALIGN_TEXT "neui.attr.align_text"
 
 // int (logical pixels): minimum/maximum drag-resize bounds for a frame

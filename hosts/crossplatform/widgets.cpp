@@ -134,6 +134,8 @@ namespace xpl_host
       return std::make_unique<FrameWidget>();
     if (!strcmp(type, NEUI_W_LABEL))
       return std::make_unique<LabelWidget>();
+    if (!strcmp(type, NEUI_W_SECTION))
+      return std::make_unique<SectionWidget>();
     if (!strcmp(type, NEUI_W_BUTTON))
       return std::make_unique<ButtonWidget>();
     if (!strcmp(type, NEUI_W_INPUTBOX))

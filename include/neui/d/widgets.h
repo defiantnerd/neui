@@ -84,6 +84,7 @@ typedef struct neui_widget_api {
 #define NEUI_W_IMAGE      "neui.std.image"
 #define NEUI_W_SLIDER     "neui.std.slider"
 #define NEUI_W_KNOB       "neui.std.knob"
+#define NEUI_W_SECTION    "neui.std.section"
 
 #ifdef __cplusplus
 }
