@@ -686,9 +686,10 @@ namespace xpl_host
     if (!s || !key) return 0;
     s->_session_attrs.set_int(key, value);
     if (!strcmp(key, NEUI_ATTR_THEME_MODE)) {
-      // Live-apply: recompute the effective palette and trigger the same
-      // refresh path as a system theme change so frames repaint.
-      s->on_theme_changed();
+      // Live-apply: recompute the effective palette, refresh the frozen
+      // snapshot, and repaint every frame (the user explicitly switched
+      // modes, so even FOLLOW=0 frames need to update).
+      s->on_theme_changed(true);
     }
     return 1;
   }

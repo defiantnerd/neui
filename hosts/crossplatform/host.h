@@ -638,7 +638,19 @@ namespace xpl_host
     // palette via current_palette() without needing a Session pointer.
     neui_detail::Palette            _effective_palette{};
 
-    void on_theme_changed();
+    // Snapshot of _effective_palette taken at session creation and
+    // refreshed only when NEUI_ATTR_THEME_MODE changes - not on system
+    // theme flips. paint_frame swaps the global override to this for
+    // frames whose NEUI_ATTR_FOLLOW_SYSTEM_THEME is 0 / unset, so those
+    // frames render a stable palette independent of the OS theme.
+    neui_detail::Palette            _frozen_palette{};
+
+    // Recompute _effective_palette. When `from_mode_change` is true the
+    // call originated from a NEUI_ATTR_THEME_MODE flip, so _frozen_palette
+    // is refreshed and ALL frames are invalidated (even FOLLOW=0). When
+    // false the call originated from a system theme listener and only
+    // FOLLOW=1 frames are touched.
+    void on_theme_changed(bool from_mode_change = false);
     void recompute_effective_palette();
   };
 

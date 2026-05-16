@@ -236,8 +236,12 @@ namespace xpl_host
 
     // Initialise this session's effective palette and point the global
     // override at it so current_palette() returns the session-resolved
-    // palette during paint.
+    // palette during paint. _frozen_palette is initialised to the same
+    // snapshot - it only updates on NEUI_ATTR_THEME_MODE changes after
+    // this point, so FOLLOW=0 frames render against a palette frozen
+    // at creation time.
     recompute_effective_palette();
+    _frozen_palette = _effective_palette;
     neui_detail::set_active_palette_override(&_effective_palette);
 
     // Optional client-side theme-change callback.
@@ -294,7 +298,7 @@ namespace xpl_host
 #endif
   }
 
-  void Session::on_theme_changed()
+  void Session::on_theme_changed(bool from_mode_change)
   {
     // Recompute this session's effective palette from the (just-updated)
     // system palette + our NEUI_ATTR_THEME_MODE, then re-point the
@@ -302,38 +306,60 @@ namespace xpl_host
     recompute_effective_palette();
     neui_detail::set_active_palette_override(&_effective_palette);
 
-    // Invalidate every frame so paint_frame pulls fresh palette values.
+    // NEUI_ATTR_THEME_MODE flip: the user explicitly requested a new
+    // mode, so refresh the frozen snapshot too. A system theme flip
+    // leaves _frozen_palette untouched (FOLLOW=0 frames are frozen).
+    if (from_mode_change)
+      _frozen_palette = _effective_palette;
+
+    // Invalidate frames that opted into theme tracking (see loop below).
+    // The session-level effective palette has already been recomputed; we
+    // just need to drive the side effects on opted-in frames.
 #ifdef _WIN32
-    // xpl host always tracks the system theme - but a session forced to
-    // LIGHT / DARK overrides that. Use the EFFECTIVE palette's is_dark
-    // so menus + title bar follow the session's preference, not the OS's.
+    // app-dark preference governs popup menus (uxtheme private API).
+    // Mirrors the EFFECTIVE palette's is_dark so menus follow the
+    // session's NEUI_ATTR_THEME_MODE forced light/dark, not the OS's.
     bool is_dark = neui_detail::current_palette().is_dark;
     neui_detail::set_app_dark_preference(is_dark);
 #endif
 
+    // System theme flip: only touch frames that opted into tracking via
+    // NEUI_ATTR_FOLLOW_SYSTEM_THEME = 1. Mode flip: every frame is
+    // touched (the user explicitly switched modes, so even FOLLOW=0
+    // frames - whose frozen palette just shifted - need to repaint).
     uint32_t idx = _widgets.child(0);
     while (idx != 0) {
       if (_widgets.exists(idx)) {
         auto& wd = _widgets[idx];
         if (wd.native_handle) {
+          bool follow = wd.attrs &&
+                        wd.attrs->get_int(NEUI_ATTR_FOLLOW_SYSTEM_THEME, 0) != 0;
+          // DWM dark title bar + uxtheme HMENU dark stay gated by
+          // FOLLOW=1 - those are active theme-tracking side effects that
+          // FOLLOW=0 frames opt out of, regardless of what triggered
+          // this call.
+          if (follow) {
 #ifdef _WIN32
-          neui_detail::apply_dark_window_mode(
-              static_cast<HWND>(wd.native_handle), is_dark);
-          // Also flip the title bar via DWM so it matches the menu and
-          // the painted client area in dark mode. (The win32 host does
-          // this in apply_theme_to_frame_w32; xpl needs it here.)
-          BOOL dark_attr = is_dark ? TRUE : FALSE;
-          // DWMWA_USE_IMMERSIVE_DARK_MODE is 20 on Win11 / late Win10,
-          // 19 on early Win10 1809-1909. Try the new one first.
-          if (FAILED(DwmSetWindowAttribute(
+            neui_detail::apply_dark_window_mode(
+                static_cast<HWND>(wd.native_handle), is_dark);
+            BOOL dark_attr = is_dark ? TRUE : FALSE;
+            // DWMWA_USE_IMMERSIVE_DARK_MODE is 20 on Win11 / late Win10,
+            // 19 on early Win10 1809-1909. Try the new one first.
+            if (FAILED(DwmSetWindowAttribute(
+                    static_cast<HWND>(wd.native_handle),
+                    20, &dark_attr, sizeof(dark_attr)))) {
+              DwmSetWindowAttribute(
                   static_cast<HWND>(wd.native_handle),
-                  20, &dark_attr, sizeof(dark_attr)))) {
-            DwmSetWindowAttribute(
-                static_cast<HWND>(wd.native_handle),
-                19, &dark_attr, sizeof(dark_attr));
-          }
+                  19, &dark_attr, sizeof(dark_attr));
+            }
 #endif
-          platform_invalidate(wd.native_handle);
+          }
+          // Invalidate when the frame's effective palette actually
+          // shifted: FOLLOW=1 frames repaint on system theme flips,
+          // FOLLOW=0 frames repaint on mode flips (their frozen
+          // palette just changed).
+          if (follow || from_mode_change)
+            platform_invalidate(wd.native_handle);
         }
       }
       idx = _widgets.next(idx);
@@ -1385,9 +1411,28 @@ namespace xpl_host
   void Session::paint_frame(neui_render_ctx_t ctx, uint32_t parent_index)
   {
     if (!_backend || !ctx) return;
-    // Clear to the system-theme frame colour. NEUI_ATTR_BACKGROUND on the
-    // frame widget overrides if set (cheap per-paint lookup; the AttrBag is
-    // null on most frames so the branch is a single pointer test).
+    // Choose the palette for this frame BEFORE reading any colour: the
+    // begin_frame clear, the widget paints, the combo / popup overlays,
+    // and the focus outline all flow through current_palette(). Frames
+    // with NEUI_ATTR_FOLLOW_SYSTEM_THEME = 1 use the live tracking
+    // palette; the rest use the snapshot taken at session creation /
+    // last NEUI_ATTR_THEME_MODE flip, which is invariant to OS theme.
+    const neui_detail::Palette* prev_override =
+      neui_detail::active_palette_override_ptr();
+    bool follow = false;
+    if (parent_index < UINT32_MAX) {
+      WidgetData* fw = get_widget(parent_index);
+      if (fw && fw->attrs &&
+          fw->attrs->get_int(NEUI_ATTR_FOLLOW_SYSTEM_THEME, 0) != 0)
+        follow = true;
+    }
+    neui_detail::set_active_palette_override(
+      follow ? &_effective_palette : &_frozen_palette);
+
+    // Clear to the (now-selected) frame colour. NEUI_ATTR_BACKGROUND on
+    // the frame widget overrides if set (cheap per-paint lookup; the
+    // AttrBag is null on most frames so the branch is a single pointer
+    // test).
     uint32_t clear = neui_detail::color(neui_detail::ColorRole::frame_bg);
     if (parent_index < UINT32_MAX) {
       WidgetData* fw = get_widget(parent_index);
@@ -1419,6 +1464,11 @@ namespace xpl_host
     // Popup-menu overlay sits on top of the combo overlay.
     paint_popup_menu(ctx);
     _backend->end_frame(ctx);
+
+    // Restore the previous override so non-paint callers (event
+    // handlers, theme provider, other frames painted in the same pump
+    // iteration) see the session's default tracking palette again.
+    neui_detail::set_active_palette_override(prev_override);
   }
 
   // -------------------------------------------------------------------------

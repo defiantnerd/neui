@@ -333,10 +333,11 @@ int main(int argc, char** argv) {
   auto win = app.widgets->create(sess, widget_none, NEUI_W_APPWINDOW, 100, 100, 890, 645, nullptr);
   app.win_id = win.id;
   app.widgets->set_text(sess, win, "neui example");
-  // Opt the win32 host into system-theme tracking so the title bar +
-  // native controls + painted widgets follow Windows light/dark + accent.
-  // The xpl host follows the system unconditionally; setting this attr
-  // there is harmless (ignored).
+  // Opt this frame into system-theme tracking on both hosts: title bar +
+  // (win32) native controls + painted widgets follow OS light/dark and
+  // accent, and the frame invalidates on every system theme flip.
+  // Without this attr, the frame keeps OS-default chrome and (xpl) a
+  // frozen palette captured at session creation.
   app.attrs->set_int(sess, win, NEUI_ATTR_FOLLOW_SYSTEM_THEME, 1);
   // Window icon. On Windows the icon loader checks the embedded "PNG"
   // resource first (same resource pool as the IMAGE widget), then falls

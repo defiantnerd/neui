@@ -99,23 +99,23 @@ extern "C" {
 #define NEUI_ATTR_THEME_MODE "neui.attr.theme_mode"
 
 // int (bool): per-frame opt-in (APPWINDOW / PLUGWINDOW / DIALOG) for
-// system theme tracking on hosts that don't follow it automatically.
-//   0 / unset (default) - host preserves today's behaviour: native
+// system theme tracking. Honoured on both the win32 native host and the
+// crossplatform (self-painted) host.
+//   0 / unset (default) - host preserves OS-default chrome: native
 //                          controls render OS-default style; painted
 //                          widgets clear to COLOR_WINDOW; title bar
-//                          stays the system default.
-//   1                   - host applies the shared theme palette to its
-//                          painted-widget seam, hooks WM_CTLCOLOR*
-//                          handlers on native text controls, custom-
-//                          draws ListBox / TreeView, and requests
-//                          DWMWA_USE_IMMERSIVE_DARK_MODE on the title
-//                          bar. Live-reapplied when the system theme
-//                          changes.
-// Note: the crossplatform (self-painted) host always tracks the system
-// theme - there is no OS-default look to preserve - and ignores this
-// attribute. The opt-in exists so the win32 host stays backwards
-// compatible for clients (notably DAW-hosted audio plugins) where the
-// host application owns the look-and-feel and the OS theme is irrelevant.
+//                          stays the system default; theme changes do
+//                          not invalidate the frame.
+//   1                   - host applies the shared theme palette: title
+//                          bar via DWMWA_USE_IMMERSIVE_DARK_MODE, dark
+//                          mode on the HMENU strip, and on the win32
+//                          host the WM_CTLCOLOR* handlers + custom-
+//                          draw for ListBox / TreeView. Live-reapplied
+//                          when the system theme changes (the frame
+//                          invalidates on every system flip).
+// Opt-in exists so frames stay backwards compatible for clients
+// (notably DAW-hosted audio plugins) where the host application owns
+// the look-and-feel and the OS theme is irrelevant.
 #define NEUI_ATTR_FOLLOW_SYSTEM_THEME "neui.attr.follow_system_theme"
 
 // string: "horizontal" (default) or "vertical". Applies to SLIDER. Read at

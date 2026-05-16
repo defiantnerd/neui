@@ -1099,10 +1099,13 @@ namespace xpl_host
                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
-    // xpl host always tracks the system theme; opt this frame in to dark
-    // mode for the title bar (DWM) and the native HMENU (uxtheme private
-    // entry points). on_theme_changed re-applies on every system flip.
-    {
+    // System-theme side effects (DWM dark title bar, uxtheme HMENU dark
+    // mode) are gated by NEUI_ATTR_FOLLOW_SYSTEM_THEME = 1 on this frame.
+    // Default (unset / 0) keeps the OS-default chrome - same contract as
+    // the win32 native host. The painted client area still pulls colours
+    // from current_palette(); a frame that wants a frozen non-system look
+    // can pair this with NEUI_ATTR_THEME_MODE = LIGHT / DARK on the session.
+    if (wd.attrs && wd.attrs->get_int(NEUI_ATTR_FOLLOW_SYSTEM_THEME, 0) != 0) {
       bool is_dark = neui_detail::current_palette().is_dark;
       neui_detail::set_app_dark_preference(is_dark);
       neui_detail::apply_dark_window_mode(hwnd, is_dark);
