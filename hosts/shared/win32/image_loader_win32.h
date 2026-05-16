@@ -43,12 +43,20 @@ namespace neui_detail
     return fac;
   }
 
-  // Decode `path` into a heap-allocated BGRA8-premultiplied buffer.
+  // Decode `path` into a heap-allocated BGRA8 buffer.
+  // `pixel_format` selects the WIC output format:
+  //   - GUID_WICPixelFormat32bppPBGRA (default) - premultiplied alpha,
+  //     correct for D2D / cg bitmap upload (the asset manager).
+  //   - GUID_WICPixelFormat32bppBGRA            - straight alpha, needed
+  //     for the BITMAPV5HEADER + CreateIconIndirect path in icon_win32.h
+  //     so GDI doesn't re-multiply premultiplied edges.
   // Caller releases via `free_image_bgra8_w32` (delete[]).
   // Returns nullptr on failure.
   inline uint8_t* load_image_bgra8_w32(const char* path,
                                         uint32_t* width_out,
-                                        uint32_t* height_out)
+                                        uint32_t* height_out,
+                                        const WICPixelFormatGUID& pixel_format
+                                          = GUID_WICPixelFormat32bppPBGRA)
   {
     if (!path || !width_out || !height_out) return nullptr;
     IWICImagingFactory* wic = wic_factory_w32();
@@ -103,7 +111,7 @@ namespace neui_detail
     hr = wic->CreateFormatConverter(&converter);
     if (FAILED(hr)) goto cleanup;
 
-    hr = converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA,
+    hr = converter->Initialize(frame, pixel_format,
                                 WICBitmapDitherTypeNone, nullptr, 0.0,
                                 WICBitmapPaletteTypeMedianCut);
     if (FAILED(hr)) goto cleanup;

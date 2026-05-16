@@ -12,8 +12,8 @@
 //   "neui.host.macos"          - native AppKit controls (macOS only)
 //   "neui.host.crossplatform"  - pluggable-backend host (D2D on Windows, CG on macOS)
 #ifdef _WIN32
-#define ACTIVE_HOSTx "neui.host.crossplatform"
-#define ACTIVE_HOST "neui.host.win32"
+#define ACTIVE_HOST "neui.host.crossplatform"
+#define ACTIVE_HOSTx "neui.host.win32"
 #elif defined(__APPLE__)
 #define ACTIVE_HOSTx "neui.host.crossplatform"
 #define ACTIVE_HOST "neui.host.macos"
@@ -86,7 +86,7 @@ static void open_about_dialog(AppState* app)
   neui_widget_t  owner = { app->win_id };
 
   auto dlg = app->widgets->create(sess, widget_none, NEUI_W_DIALOG,
-                                   240, 240, 320, 130, nullptr);
+                                   240, 240, 336, 140, nullptr);
   app->widgets->set_text  (sess, dlg, "About");
   app->widgets->set_owner (sess, dlg, owner);
 
@@ -330,6 +330,12 @@ int main(int argc, char** argv) {
   // The xpl host follows the system unconditionally; setting this attr
   // there is harmless (ignored).
   app.attrs->set_int(sess, win, NEUI_ATTR_FOLLOW_SYSTEM_THEME, 1);
+  // Window icon. On Windows the icon loader checks the embedded "PNG"
+  // resource first (same resource pool as the IMAGE widget), then falls
+  // back to a file on disk. On macOS the image loader falls back to the
+  // app bundle's Resources/. Either way `"myimage.png"` resolves without
+  // a runtime file dependency.
+  app.attrs->set_string(sess, win, NEUI_ATTR_ICON_PATH, "myimage.png");
 
   // --- Menu bar ---
 

@@ -11,76 +11,25 @@
 #include <windows.h>
 #include <wincodec.h>
 #include <cstdint>
+#include <cstring>
 #include <string>
 
-#pragma comment(lib, "Windowscodecs")
+#include "image_loader_win32.h"
 
 // Win32 icon loader shared between hosts. Tries LoadImageW for .ico files
-// first (best quality - multi-resolution); falls back to WIC decoding for
+// on disk first (best quality - multi-resolution containers); falls
+// through to the shared image loader (resource-first then file) for
 // PNG/BMP/JPG/etc. Header-only / inline so both hosts can include it
 // without ODR conflicts.
 
 namespace neui_detail
 {
-  // Load an HICON from a file. Caller must DestroyIcon when done.
-  // Returns nullptr on failure.
-  inline HICON load_icon_from_file_w(const wchar_t* path)
+  // Build an HICON from a straight-alpha BGRA8 pixel buffer (`w` x `h`,
+  // top-down, stride = w*4). Returns nullptr on failure. Caller is
+  // responsible for the pixel buffer; we copy into a DIB section.
+  inline HICON hicon_from_bgra8(uint32_t w, uint32_t h, const uint8_t* pixels)
   {
-    if (!path || !*path) return nullptr;
-
-    // 1) Native-icon fast path: handles .ico (multi-resolution containers).
-    if (HICON h = (HICON)LoadImageW(nullptr, path, IMAGE_ICON,
-                                     0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE))
-      return h;
-
-    // 2) WIC fallback: decode any common bitmap format and synthesise an
-    //    HICON via CreateIconIndirect.
-    IWICImagingFactory* factory = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
-                                  CLSCTX_INPROC_SERVER,
-                                  IID_PPV_ARGS(&factory));
-    if (FAILED(hr) || !factory) return nullptr;
-
-    IWICBitmapDecoder* decoder = nullptr;
-    hr = factory->CreateDecoderFromFilename(path, nullptr,
-                                             GENERIC_READ,
-                                             WICDecodeMetadataCacheOnLoad,
-                                             &decoder);
-    if (FAILED(hr) || !decoder) { factory->Release(); return nullptr; }
-
-    IWICBitmapFrameDecode* frame = nullptr;
-    hr = decoder->GetFrame(0, &frame);
-    if (FAILED(hr) || !frame) {
-      decoder->Release(); factory->Release(); return nullptr;
-    }
-
-    IWICFormatConverter* conv = nullptr;
-    hr = factory->CreateFormatConverter(&conv);
-    if (FAILED(hr) || !conv) {
-      frame->Release(); decoder->Release(); factory->Release();
-      return nullptr;
-    }
-
-    // Use straight (non-premultiplied) BGRA so the V5 alpha-mask path on
-    // CreateIconIndirect renders identically across taskbar / alt-tab /
-    // titlebar contexts. Premultiplied input would darken edges where
-    // GDI re-multiplies internally.
-    hr = conv->Initialize(frame, GUID_WICPixelFormat32bppBGRA,
-                           WICBitmapDitherTypeNone, nullptr, 0.0,
-                           WICBitmapPaletteTypeMedianCut);
-    if (FAILED(hr)) {
-      conv->Release(); frame->Release();
-      decoder->Release(); factory->Release();
-      return nullptr;
-    }
-
-    UINT w = 0, h = 0;
-    conv->GetSize(&w, &h);
-    if (w == 0 || h == 0) {
-      conv->Release(); frame->Release();
-      decoder->Release(); factory->Release();
-      return nullptr;
-    }
+    if (!w || !h || !pixels) return nullptr;
 
     // 32bpp DIB section with explicit channel masks so the alpha channel is
     // honoured by GDI. Top-down (-h) so we can copy without flipping.
@@ -96,8 +45,8 @@ namespace neui_detail
     bi.bV5BlueMask    = 0x000000FF;
     bi.bV5AlphaMask   = 0xFF000000;
 
-    HDC screen = GetDC(nullptr);
-    void* bits = nullptr;
+    HDC   screen = GetDC(nullptr);
+    void* bits   = nullptr;
     HBITMAP hbm_color = CreateDIBSection(screen,
                                           reinterpret_cast<BITMAPINFO*>(&bi),
                                           DIB_RGB_COLORS,
@@ -105,21 +54,10 @@ namespace neui_detail
     ReleaseDC(nullptr, screen);
     if (!hbm_color || !bits) {
       if (hbm_color) DeleteObject(hbm_color);
-      conv->Release(); frame->Release();
-      decoder->Release(); factory->Release();
       return nullptr;
     }
 
-    UINT stride = w * 4;
-    UINT bytes  = stride * h;
-    hr = conv->CopyPixels(nullptr, stride, bytes,
-                           static_cast<BYTE*>(bits));
-    if (FAILED(hr)) {
-      DeleteObject(hbm_color);
-      conv->Release(); frame->Release();
-      decoder->Release(); factory->Release();
-      return nullptr;
-    }
+    memcpy(bits, pixels, static_cast<size_t>(w) * h * 4);
 
     // Empty 1-bit mask - alpha channel in the color bitmap drives transparency.
     HBITMAP hbm_mask = CreateBitmap(static_cast<int>(w), static_cast<int>(h),
@@ -133,11 +71,45 @@ namespace neui_detail
 
     if (hbm_mask)  DeleteObject(hbm_mask);
     if (hbm_color) DeleteObject(hbm_color);
+    return hicon;
+  }
 
-    conv->Release();
-    frame->Release();
-    decoder->Release();
-    factory->Release();
+  // Load an HICON by name. Tries (in order):
+  //   1. .ico on disk via LoadImageW + LR_LOADFROMFILE - preserves the
+  //      multi-resolution container format only this path can read.
+  //   2. Embedded standard ICON resource (RT_GROUP_ICON / RT_ICON, what
+  //      rc.exe produces from `name ICON "file.ico"`) via LoadImageW on
+  //      the EXE module - also multi-resolution. The name is wrapped in
+  //      literal quotes to match the rc.exe quirk where quoted name
+  //      strings are stored with the '"' characters baked in.
+  //   3. Embedded user-defined "PNG" resource via the shared image
+  //      loader, then synthesise HICON (single-resolution).
+  //   4. Other bitmap formats on disk via the shared image loader.
+  // Caller must DestroyIcon when done. Returns nullptr on failure.
+  inline HICON load_icon_from_file_w(const wchar_t* wpath, const char* utf8_path)
+  {
+    if (wpath && *wpath) {
+      if (HICON h = (HICON)LoadImageW(nullptr, wpath, IMAGE_ICON,
+                                       0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE))
+        return h;
+
+      if (HMODULE hMod = GetModuleHandleW(nullptr)) {
+        std::wstring res_name = L"\"" + std::wstring(wpath) + L"\"";
+        if (HICON h = (HICON)LoadImageW(hMod, res_name.c_str(), IMAGE_ICON,
+                                         0, 0, LR_DEFAULTSIZE))
+          return h;
+      }
+    }
+
+    // Straight (non-premultiplied) BGRA - the BITMAPV5 mask path on
+    // CreateIconIndirect would otherwise darken edges where GDI
+    // re-multiplies premultiplied input internally.
+    uint32_t w = 0, h = 0;
+    uint8_t* pixels = load_image_bgra8_w32(utf8_path, &w, &h,
+                                            GUID_WICPixelFormat32bppBGRA);
+    if (!pixels) return nullptr;
+    HICON hicon = hicon_from_bgra8(w, h, pixels);
+    free_image_bgra8_w32(pixels);
     return hicon;
   }
 
@@ -154,7 +126,7 @@ namespace neui_detail
       if (n > 0) {
         std::wstring w(static_cast<size_t>(n - 1), L'\0');
         MultiByteToWideChar(CP_UTF8, 0, utf8_path, -1, &w[0], n);
-        neu = load_icon_from_file_w(w.c_str());
+        neu = load_icon_from_file_w(w.c_str(), utf8_path);
       }
     }
 
