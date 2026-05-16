@@ -1183,9 +1183,11 @@ namespace xpl_host
     }
 
     // Click position relative to the start of the text (matches paint()'s pad=4).
+    // event.mouse.x is frame-local; abs_x is the widget's frame-local
+    // origin, so the difference is widget-local.
     const float pad = 4.0f;
     float click_x = static_cast<float>(event->data.mouse.x)
-                    - static_cast<float>(x) - pad;
+                    - static_cast<float>(abs_x) - pad;
 
     // Find the byte offset of the character boundary closest to click_x.
     // Uses midpoint snapping: a click past the midpoint of a character maps
@@ -1333,16 +1335,28 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // Painting
 
+  // Walk the widget tree, painting children of `parent_index` and
+  // recursing into each child. Each child's `wd.x` / `wd.y` is interpreted
+  // as relative to its parent (the win32 host's natural HWND-relative
+  // semantics); the absolute frame position is accumulated through
+  // (parent_abs_x, parent_abs_y) and cached on each widget as
+  // (abs_x, abs_y) for hit-test and event-coord conversion. Painting
+  // happens with the renderer transform set so the child paints at its
+  // own (x, y) which maps to the correct absolute position - so widget
+  // paint code can stay coordinate-agnostic.
   static void paint_widgets_recursive(neui_render_backend_t* backend,
                                       neui_render_ctx_t ctx,
                                       neui_detail::Tree<WidgetData>& widgets,
                                       uint32_t parent_index,
+                                      int parent_abs_x, int parent_abs_y,
                                       uint32_t focused_widget)
   {
     uint32_t idx = widgets.child(parent_index);
     while (idx != 0) {
       if (widgets.exists(idx)) {
         auto& wd = widgets[idx];
+        wd.abs_x = parent_abs_x + wd.x;
+        wd.abs_y = parent_abs_y + wd.y;
         if (!wd.native_handle && !wd.is_menubar() && wd.visible && wd.width > 0 && wd.height > 0) {
           // Fire WIDGET_PREUPDATE to opted-in widgets so the client can
           // refresh attribute-driven state (e.g. NEUI_PARAM_VALUE) before
@@ -1355,7 +1369,14 @@ namespace xpl_host
           }
           wd.paint(backend, ctx, idx == focused_widget);
         }
-        paint_widgets_recursive(backend, ctx, widgets, idx, focused_widget);
+        // Translate so the child's descendants - which store coords
+        // relative to the child - draw at the correct absolute position.
+        if (backend->push_transform) backend->push_transform(ctx);
+        if (backend->translate)
+          backend->translate(ctx, static_cast<float>(wd.x), static_cast<float>(wd.y));
+        paint_widgets_recursive(backend, ctx, widgets, idx,
+                                wd.abs_x, wd.abs_y, focused_widget);
+        if (backend->pop_transform) backend->pop_transform(ctx);
       }
       idx = widgets.next(idx);
     }
@@ -1379,7 +1400,11 @@ namespace xpl_host
     // the painters. The logical focus is preserved so input routing snaps
     // back when the frame regains OS focus.
     uint32_t focus_for_paint = _os_focused ? _focused_widget : 0;
-    paint_widgets_recursive(_backend, ctx, _widgets, parent_index, focus_for_paint);
+    // Frame is the root of the absolute coord space - start the walk at
+    // (0, 0). The frame's own widget rect isn't painted by this walk
+    // (the begin_frame above did the clear); recursion enters its
+    // children directly.
+    paint_widgets_recursive(_backend, ctx, _widgets, parent_index, 0, 0, focus_for_paint);
     // Draw the open combo overlay on top of all other widgets.
     if (_open_combo != 0 && _widgets.exists(_open_combo)) {
       // Only paint if the combo belongs to this frame.
@@ -1713,13 +1738,15 @@ namespace xpl_host
   // Compute value [0..1] from a mouse coord on the slider.
   static float slider_value_from_pos(const SliderWidget& s, int mx, int my)
   {
+    // mx, my are frame-local (event.mouse coords); subtract the widget's
+    // frame-local origin (abs_x / abs_y) to get widget-local.
     if (!s.is_vertical) {
-      float lx = static_cast<float>(mx - s.x) - 4.0f - SLIDER_THUMB_W * 0.5f;
+      float lx = static_cast<float>(mx - s.abs_x) - 4.0f - SLIDER_THUMB_W * 0.5f;
       float travel = static_cast<float>(s.width) - 8.0f - SLIDER_THUMB_W;
       if (travel <= 0.0f) return 0.0f;
       return clamp01(lx / travel);
     } else {
-      float ly = static_cast<float>(my - s.y) - 4.0f - SLIDER_THUMB_W * 0.5f;
+      float ly = static_cast<float>(my - s.abs_y) - 4.0f - SLIDER_THUMB_W * 0.5f;
       float travel = static_cast<float>(s.height) - 8.0f - SLIDER_THUMB_W;
       if (travel <= 0.0f) return 0.0f;
       return clamp01(1.0f - (ly / travel));
@@ -1894,9 +1921,10 @@ namespace xpl_host
     if (event->type == NEUI_EVENT_MOUSE_RBUTTON_DOWN && session) {
       // Right-click context menu. Position the popup at the cursor in the
       // knob's local coordinate system (the popup overlay handles the
-      // anchor → frame-absolute conversion).
-      int local_x = event->data.mouse.x - x;
-      int local_y = event->data.mouse.y - y;
+      // anchor → frame-absolute conversion). event.mouse coords are
+      // frame-local; subtract the widget's frame-local origin to get local.
+      int local_x = event->data.mouse.x - abs_x;
+      int local_y = event->data.mouse.y - abs_y;
       static const std::vector<std::string> k_items = {
         "Reset to default",
       };
@@ -1910,9 +1938,10 @@ namespace xpl_host
       return true;
     }
 
-    // Centre of the knob in widget-frame logical pixels.
-    float cx = static_cast<float>(x) + static_cast<float>(width)  * 0.5f;
-    float cy = static_cast<float>(y) + static_cast<float>(height) * 0.5f;
+    // Centre of the knob in frame-local logical pixels (matches the space
+    // of event.mouse.x / event.mouse.y).
+    float cx = static_cast<float>(abs_x) + static_cast<float>(width)  * 0.5f;
+    float cy = static_cast<float>(abs_y) + static_cast<float>(height) * 0.5f;
 
     if (dragging) {
       if (event->type == NEUI_EVENT_MOUSE_BUTTON_UP ||
@@ -2178,12 +2207,12 @@ namespace xpl_host
 
     // ---- Scrollbar click (button down, x in scrollbar column) ---------------
     if (show_sb && event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN) {
-      int sb_left = x + width - SCROLLBAR_W;   // separator x in widget space
+      int sb_left = abs_x + width - SCROLLBAR_W;   // separator x in frame coords
       if (event->data.mouse.x >= sb_left) {
         SbGeom   sb           = compute_sb(height, full_vis, n, scroll_offset);
         uint32_t scroll_range = n - static_cast<uint32_t>(full_vis);
         // Local y relative to the track (1px top margin).
-        float local_y = static_cast<float>(event->data.mouse.y - y) - 1.0f;
+        float local_y = static_cast<float>(event->data.mouse.y - abs_y) - 1.0f;
 
         if (local_y >= sb.thumb_top && local_y < sb.thumb_top + sb.thumb_h) {
           // Hit the thumb - start drag.
@@ -2209,7 +2238,7 @@ namespace xpl_host
     if (event->type != NEUI_EVENT_MOUSE_BUTTON_DOWN) return false;
     if (items.empty()) return true;
 
-    int rel_y = event->data.mouse.y - y;
+    int rel_y = event->data.mouse.y - abs_y;
     if (rel_y < 0) return true;
     uint32_t clicked = scroll_offset + static_cast<uint32_t>(rel_y / LIST_ITEM_H);
     if (clicked >= n) return true;
@@ -2240,8 +2269,10 @@ namespace xpl_host
 
   bool ComboBoxWidget::hit_test(float px, float py) const
   {
-    // Only the top bar (collapsed height) is interactive; the rest is the drop area.
-    return px >= x && px < x + width && py >= y && py < y + COMBO_COLLAPSED_H;
+    // Only the top bar (collapsed height) is interactive; the rest is the
+    // drop area. Bounds are in frame-local coords (same space as px/py).
+    return px >= abs_x && px < abs_x + width &&
+           py >= abs_y && py < abs_y + COMBO_COLLAPSED_H;
   }
 
   int ComboBoxWidget::max_drop_visible() const
@@ -2312,8 +2343,11 @@ namespace xpl_host
     if (n == 0) return;
     if (scroll_offset >= n) scroll_offset = n - 1;
 
-    float ox = static_cast<float>(x);
-    float oy = static_cast<float>(y + COMBO_COLLAPSED_H);
+    // The overlay is painted by Session::paint_frame OUTSIDE the
+    // paint_widgets_recursive walk, so the renderer transform is at the
+    // frame's identity here - we must use absolute coords, not local x/y.
+    float ox = static_cast<float>(abs_x);
+    float oy = static_cast<float>(abs_y + COMBO_COLLAPSED_H);
     float ow = static_cast<float>(width);
     float oh = static_cast<float>(mdv * LIST_ITEM_H);
 
@@ -2715,8 +2749,8 @@ namespace xpl_host
 
     uint32_t n       = static_cast<uint32_t>(cb->items.size());
     int      full_vis = std::max(1, cb->max_drop_visible());
-    float ox = static_cast<float>(cb->x);
-    float oy = static_cast<float>(cb->y + COMBO_COLLAPSED_H);
+    float ox = static_cast<float>(cb->abs_x);
+    float oy = static_cast<float>(cb->abs_y + COMBO_COLLAPSED_H);
     float ow = static_cast<float>(cb->width);
     float oh = static_cast<float>(full_vis * LIST_ITEM_H);
 
@@ -2775,8 +2809,8 @@ namespace xpl_host
     if (!cb) return false;
 
     int   full_vis = std::max(1, cb->max_drop_visible());
-    float ox = static_cast<float>(cb->x);
-    float oy = static_cast<float>(cb->y + COMBO_COLLAPSED_H);
+    float ox = static_cast<float>(cb->abs_x);
+    float oy = static_cast<float>(cb->abs_y + COMBO_COLLAPSED_H);
     float ow = static_cast<float>(cb->width);
     float oh = static_cast<float>(full_vis * LIST_ITEM_H);
 
@@ -2835,8 +2869,8 @@ namespace xpl_host
     if (!cb) return false;
 
     int   full_vis = std::max(1, cb->max_drop_visible());
-    float ox = static_cast<float>(cb->x);
-    float oy = static_cast<float>(cb->y + COMBO_COLLAPSED_H);
+    float ox = static_cast<float>(cb->abs_x);
+    float oy = static_cast<float>(cb->abs_y + COMBO_COLLAPSED_H);
     float ow = static_cast<float>(cb->width);
     float oh = static_cast<float>(full_vis * LIST_ITEM_H);
 
@@ -3583,11 +3617,11 @@ namespace xpl_host
 
     // ---- scrollbar click ----
     if (show_sb && event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN) {
-      int sb_left = x + width - SCROLLBAR_W;
+      int sb_left = abs_x + width - SCROLLBAR_W;
       if (event->data.mouse.x >= sb_left) {
         SbGeom sb = compute_sb(height, vis, n_lines, scroll_offset);
         uint32_t range = n_lines - static_cast<uint32_t>(vis);
-        float local_y = static_cast<float>(event->data.mouse.y - y) - 1.0f;
+        float local_y = static_cast<float>(event->data.mouse.y - abs_y) - 1.0f;
         if (local_y >= sb.thumb_top && local_y < sb.thumb_top + sb.thumb_h) {
           sb_dragging = true;
           sb_drag_start_y      = event->data.mouse.y;
@@ -3614,14 +3648,14 @@ namespace xpl_host
     // Mouse interaction breaks the typing/deleting run for undo grouping.
     if (is_down) history.reset_action();
 
-    int rel_y = event->data.mouse.y - y - ML_PAD_Y;
+    int rel_y = event->data.mouse.y - abs_y - ML_PAD_Y;
     int row   = rel_y / ML_LINE_H;
     if (row < 0) row = 0;
     int line = static_cast<int>(scroll_offset) + row;
     if (line >= static_cast<int>(n_lines))
       line = static_cast<int>(n_lines) - 1;
 
-    float click_x = static_cast<float>(event->data.mouse.x - x - ML_PAD_X);
+    float click_x = static_cast<float>(event->data.mouse.x - abs_x - ML_PAD_X);
     if (click_x < 0.0f) click_x = 0.0f;
     int new_pos = ml_pos_from_col(*this, starts, line, click_x);
 
@@ -4015,11 +4049,11 @@ namespace xpl_host
 
     // ---- scrollbar click ------------------------------------------------
     if (show_sb && event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN) {
-      int sb_left = x + width - SCROLLBAR_W;
+      int sb_left = abs_x + width - SCROLLBAR_W;
       if (event->data.mouse.x >= sb_left) {
         SbGeom sb = compute_sb(height, full_vis, n, scroll_offset);
         uint32_t range = n - static_cast<uint32_t>(full_vis);
-        float local_y = static_cast<float>(event->data.mouse.y - y) - 1.0f;
+        float local_y = static_cast<float>(event->data.mouse.y - abs_y) - 1.0f;
         if (local_y >= sb.thumb_top && local_y < sb.thumb_top + sb.thumb_h) {
           sb_dragging = true;
           sb_drag_start_y = event->data.mouse.y;
@@ -4039,7 +4073,7 @@ namespace xpl_host
 
     // ---- double-click in content area → ACTIVATED ----------------------
     if (event->type == NEUI_EVENT_MOUSE_BUTTON_DBLCLICK) {
-      int rel_y = event->data.mouse.y - y;
+      int rel_y = event->data.mouse.y - abs_y;
       if (rel_y < 0) return false;
       uint32_t row = scroll_offset + static_cast<uint32_t>(rel_y / TREE_ROW_H);
       if (row >= n) return false;
@@ -4065,14 +4099,14 @@ namespace xpl_host
 
     // ---- single click in content area ----------------------------------
     if (event->type != NEUI_EVENT_MOUSE_BUTTON_DOWN) return false;
-    int rel_y = event->data.mouse.y - y;
+    int rel_y = event->data.mouse.y - abs_y;
     if (rel_y < 0) return true;
     uint32_t row = scroll_offset + static_cast<uint32_t>(rel_y / TREE_ROW_H);
     if (row >= n) return true;
 
     const VisRow& vr = rows[row];
     int indent_px  = TREE_LEFT_PAD + vr.depth * TREE_INDENT;
-    int chevron_x0 = x + indent_px;
+    int chevron_x0 = abs_x + indent_px;
     int chevron_x1 = chevron_x0 + TREE_CHEVRON_W;
 
     // Chevron click toggles expansion and does NOT change selection.

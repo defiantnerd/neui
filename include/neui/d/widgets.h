@@ -19,10 +19,15 @@ typedef struct neui_widget_client {
 } neui_widget_client_t;
 
 typedef struct neui_widget_api {
+  // Create a widget under `parent`. (x, y) are logical pixels at 96 DPI,
+  // relative to the parent's top-left (top-level children of a frame are
+  // therefore frame-local). (width, height) are the widget's size in
+  // logical pixels.
   neui_widget_t      (NEUI_ABI *create)(neui_session_t session, neui_widget_t parent, const char* type, int x, int y, int width, int height, void* userdata);
   void               (NEUI_ABI *destroy)(neui_session_t session, neui_widget_t widget);
   void               (NEUI_ABI *show)(neui_session_t session, neui_widget_t widget);
   void               (NEUI_ABI *hide)(neui_session_t session, neui_widget_t widget);
+  // (x, y) are parent-relative logical pixels, same convention as create().
   void               (NEUI_ABI *set_pos)(neui_session_t session, neui_widget_t widget, int x, int y, int width, int height);
   void               (NEUI_ABI *set_size)(neui_session_t session, neui_widget_t widget, int width, int height);
   void               (NEUI_ABI *set_emit_events)(neui_session_t session, neui_widget_t widget, bool enabled);
@@ -51,8 +56,9 @@ typedef struct neui_widget_api {
   // Read back current widget geometry. Coordinates are logical pixels at
   // 96 DPI (matching set_pos / set_size / create). For frames the position
   // is relative to the screen / parent frame; for child widgets it is
-  // relative to the parent's client area. Out-pointers may be NULL to
-  // ignore individual fields. No-op if the widget does not exist.
+  // relative to the parent widget's top-left (the same parent-relative
+  // space create / set_pos use). Out-pointers may be NULL to ignore
+  // individual fields. No-op if the widget does not exist.
   void               (NEUI_ABI *get_pos)(neui_session_t session, neui_widget_t widget, int* x, int* y);
   void               (NEUI_ABI *get_size)(neui_session_t session, neui_widget_t widget, int* width, int* height);
   // Show a popup menu anchored to a widget. (x, y) are in the anchor's

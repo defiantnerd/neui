@@ -649,10 +649,11 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
     return NSZeroRect;
 
   // caret_rect_local is in widget-local logical coords (top-left). Translate
-  // by the widget's frame origin to get view-local coords (still top-left
-  // since the view is isFlipped=YES).
-  NSRect view_r = NSMakeRect((CGFloat)(cx + fwd.x),
-                              (CGFloat)(cy + fwd.y),
+  // by the widget's frame-local absolute origin (abs_x / abs_y, computed by
+  // the paint walk - the widget's stored x/y is parent-relative) to get
+  // view-local coords (still top-left since the view is isFlipped=YES).
+  NSRect view_r = NSMakeRect((CGFloat)(cx + fwd.abs_x),
+                              (CGFloat)(cy + fwd.abs_y),
                               1.0,
                               (CGFloat)ch);
   // convertRect:toView:nil un-flips into window coords (NSWindow uses

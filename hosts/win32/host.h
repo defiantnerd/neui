@@ -211,6 +211,13 @@ namespace win32_host {
     WidgetData* get_widget(uint32_t index);
     bool dispatch_event(neui_event_t* event);  // returns client's onevent return value
     void create_child_windows(uint32_t parent_index);
+    // Reposition + resize every descendant HWND of `parent_index` to match
+    // `new_dpi` (in physical px = LogicalToPhysical(logical, new_dpi)),
+    // refresh painted widgets' D2D context DPI, and rebuild section
+    // regions. wd.dpi is updated on every descendant so subsequent
+    // create_child_windows calls have the right scaling. Used by the
+    // frame's WM_DPICHANGED handler.
+    void cascade_dpi(uint32_t parent_index, UINT new_dpi);
     uint32_t get_dpi_for_widget(uint32_t index);
     HWND find_parent_hwnd(uint32_t widget_index);     // walk up tree to find nearest HWND
     bool dispatch_menu_event(UINT cmd_id);             // route WM_COMMAND (lParam==0) to menu items

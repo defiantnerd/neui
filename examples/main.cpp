@@ -500,15 +500,15 @@ int main(int argc, char** argv) {
   app.attrs->set_string(sess, section, NEUI_ATTR_ALIGN_TEXT, "left");
   // app.attrs->set_int   (sess, section, NEUI_ATTR_BACKGROUND, 0xFF2A3340);
 
-  // Children of the section. Coordinates are absolute in the frame's
-  // logical-pixel space (not relative to the section); the parent-child
-  // relationship governs ownership and paint order.
+  // Children of the section. Coordinates are relative to the section's
+  // top-left (the section is at frame-coords 215, 320, so (10, 28) below
+  // lands at frame-coords (225, 348)). Same semantics on both hosts.
   auto sec_label = app.widgets->create(sess, section, NEUI_W_LABEL,
-                                        225, 348, 180, 20, nullptr);
+                                        10, 28, 180, 20, nullptr);
   app.widgets->set_text(sess, sec_label, "Children paint on top:");
 
   auto sec_btn = app.widgets->create(sess, section, NEUI_W_BUTTON,
-                                      225, 376, 180, 28, nullptr);
+                                      10, 56, 180, 28, nullptr);
   app.widgets->set_text(sess, sec_btn, "Click me");
   app.section_btn_id = sec_btn.id;
 

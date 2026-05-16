@@ -222,8 +222,10 @@ namespace xpl_host
       return;
 
     // Widget logical x/y → frame-client logical px → physical px via DPI.
-    float lx_in_frame = lx + static_cast<float>(wd->x);
-    float ly_in_frame = ly + static_cast<float>(wd->y);
+    // The widget's stored x/y is parent-relative; abs_x / abs_y is the
+    // cached frame-local position (recomputed during the paint walk).
+    float lx_in_frame = lx + static_cast<float>(wd->abs_x);
+    float ly_in_frame = ly + static_cast<float>(wd->abs_y);
     UINT  dpi          = frame_wd->dpi ? frame_wd->dpi : 96;
     int   px_x         = MulDiv(static_cast<int>(lx_in_frame), static_cast<int>(dpi), 96);
     int   px_y         = MulDiv(static_cast<int>(ly_in_frame), static_cast<int>(dpi), 96);

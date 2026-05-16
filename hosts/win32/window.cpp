@@ -351,6 +351,12 @@ namespace win32_host
         wd->paint_ctx = backend->create_context(hwnd,
                                                  static_cast<uint32_t>(rc.right),
                                                  static_cast<uint32_t>(rc.bottom));
+        // Stash the HWND's DPI so create_child_windows can scale this
+        // widget's own children (relevant for container painted widgets
+        // like NEUI_W_SECTION). Without this, parent_wd.dpi stays at the
+        // default 96 and inner children are created with logical coords
+        // treated as physical px.
+        wd->dpi = GetDpiForWindow(hwnd);
       }
       return 0;
     }
@@ -846,14 +852,20 @@ namespace win32_host
     case WM_DPICHANGED:
       {
         if (wd) {
-          wd->dpi = HIWORD(wParam);
+          UINT new_dpi = HIWORD(wParam);
+          wd->dpi = new_dpi;
           // Recreate DPI font and reapply to all children
           if (wd->hfont) {
             DeleteObject(wd->hfont);
             wd->hfont = nullptr;
           }
           if (wd->session) {
-            wd->session->create_child_windows(wd->index);  // recreates font, reapplies WM_SETFONT
+            // Resize every descendant HWND to the new physical px first,
+            // then run create_child_windows to refresh fonts. Order matters:
+            // create_child_windows reapplies WM_SETFONT to existing HWNDs,
+            // which must already be at the right size for text to lay out.
+            wd->session->cascade_dpi(wd->index, new_dpi);
+            wd->session->create_child_windows(wd->index);
           }
           const RECT* r = reinterpret_cast<const RECT*>(lParam);
           SetWindowPos(hwnd, nullptr,

@@ -778,6 +778,61 @@ namespace win32_host
     return 96;
   }
 
+  void Session::cascade_dpi(uint32_t parent_index, UINT new_dpi)
+  {
+    if (new_dpi == 0) new_dpi = 96;
+    uint32_t child_idx = _widgets.child(parent_index);
+    while (child_idx != 0) {
+      if (_widgets.exists(child_idx)) {
+        auto& wd = _widgets[child_idx];
+        if (wd.hwnd) {
+          wd.dpi = new_dpi;
+          // Drop the cached DPI font on every container that has one
+          // (typically painted widgets that act as parents - SECTION
+          // most importantly). The follow-up create_child_windows will
+          // recreate it at the new DPI; without this the stale font
+          // would be re-broadcast to grandchildren via WM_SETFONT.
+          if (wd.hfont) {
+            DeleteObject(wd.hfont);
+            wd.hfont = nullptr;
+          }
+          // Reposition + resize this child to its logical geometry at the
+          // new DPI. wd.x / wd.y are parent-relative logical pixels; the
+          // new physical px land at the right spot in the parent HWND's
+          // (already-resized) client area.
+          int new_x = LogicalToPhysical(wd.x, new_dpi);
+          int new_y = LogicalToPhysical(wd.y, new_dpi);
+          int new_w = LogicalToPhysical(wd.width,  new_dpi);
+          int new_h = LogicalToPhysical(wd.height, new_dpi);
+          SetWindowPos(wd.hwnd, nullptr, new_x, new_y, new_w, new_h,
+                       SWP_NOZORDER | SWP_NOACTIVATE);
+          // Painted widgets (KNOB, SECTION, IMAGE) own a per-widget D2D
+          // context whose DPI must be reset so DrawText / fill_rect map
+          // logical → physical at the new ratio. The SetWindowPos above
+          // already fires WM_SIZE which handles the swap-chain resize.
+          auto* backend = neui_d2d_backend::get_backend();
+          if (backend && backend->update_dpi) {
+            if (wd.paint_ctx) backend->update_dpi(wd.paint_ctx, new_dpi);
+            if (wd.image_ctx) backend->update_dpi(wd.image_ctx, new_dpi);
+          }
+          // Section: window region was computed in old physical px;
+          // recompute against the new DPI.
+          if (wd.type && !strcmp(wd.type, NEUI_W_SECTION))
+            apply_section_region_w32(wd);
+          // Image: reload the bitmap at the new logical→physical scale
+          // (matches the WM_DPICHANGED branch in create_child_windows).
+          if (wd.type && !strcmp(wd.type, NEUI_W_IMAGE) && wd.image_ctx) {
+            float new_scale = static_cast<float>(new_dpi) / 96.0f;
+            if (new_scale != wd.image_scale)
+              load_image_bitmap(wd, new_dpi);
+          }
+        }
+        cascade_dpi(child_idx, new_dpi);
+      }
+      child_idx = _widgets.next(child_idx);
+    }
+  }
+
   void Session::create_child_windows(uint32_t parent_index)
   {
     if (!_widgets.exists(parent_index)) return;

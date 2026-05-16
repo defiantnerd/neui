@@ -31,6 +31,14 @@ namespace xpl_host
     uint32_t    index      = 0;
     const char* type       = nullptr;
     int x = 0, y = 0, width = 0, height = 0;
+    // Frame-local absolute position, recomputed top-down each paint by
+    // paint_widgets_recursive. Used for hit-test and any non-paint site
+    // that needs the widget's position in frame coordinates (event mouse
+    // coords are frame-local, so widget-local conversion subtracts these).
+    // Valid after the first paint; before that they read 0 and any hit-
+    // test happens to land on the frame's top-left, which is acceptable
+    // because input cannot arrive before the window is first painted.
+    int abs_x = 0, abs_y = 0;
     bool isroot      = false;
     bool visible     = false;
     bool emit_events = false;
@@ -76,9 +84,12 @@ namespace xpl_host
     virtual bool on_mouse_event(neui_event_t* event) { return false; }
 
     // Returns true if (px, py) is inside this widget's interactive area.
-    // Default: full bounding rect. Override to restrict (e.g. ComboBox top bar only).
+    // (px, py) are frame-local logical pixels (the same space as mouse
+    // event coords). Default: full bounding rect using the cached absolute
+    // position. Override to restrict (e.g. ComboBox top bar only).
     virtual bool hit_test(float px, float py) const {
-      return px >= x && px < x + width && py >= y && py < y + height;
+      return px >= abs_x && px < abs_x + width &&
+             py >= abs_y && py < abs_y + height;
     }
 
     // Called before this widget is removed from the tree.
