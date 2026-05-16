@@ -602,6 +602,15 @@ namespace xpl_host
     {
       platform_set_window_icon(wd, value);
     }
+    // Self-painted widgets read string attrs (e.g. NEUI_ATTR_ALIGN_TEXT
+    // on SECTION, NEUI_ATTR_VALUE_TEXT on KNOB) each paint, so a runtime
+    // change has to invalidate the owning frame. Frames go through the
+    // icon_path branch above for their one live-update key; everything
+    // else just invalidates the parent frame.
+    if (!wd.is_frame()) {
+      if (void* frame = s->find_parent_native_handle(idx))
+        platform_invalidate(frame);
+    }
     return 1;
   }
 

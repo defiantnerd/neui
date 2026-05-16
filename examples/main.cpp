@@ -78,6 +78,9 @@ struct AppState {
   // header label; children paint on top via normal tree traversal.
   uint32_t           section_id    = 0;
   uint32_t           section_btn_id = 0;
+  // Combobox that drives the section's NEUI_ATTR_ALIGN_TEXT attribute,
+  // letting the user pick which side the title chip sits on.
+  uint32_t           align_combo_id = 0;
 };
 
 // Open a modal "About" dialog owned by the main window. The dialog has a
@@ -169,6 +172,19 @@ static neui_widget_client_t widget_client = {
       }
       neui_session_t sess   = { app->session };
       neui_widget_t  widget = event->data.item.widget;
+      // Alignment combo: userdata is the literal NEUI_ATTR_ALIGN_TEXT
+      // value ("left" / "center" / "right"). Push it onto the section
+      // and let the xpl host's a_set_string invalidate the repaint.
+      if (app && widget.id == app->align_combo_id && app->section_id != 0) {
+        const char* attr_val = static_cast<const char*>(
+          app->items->get_userdata(sess, widget, idx));
+        if (attr_val) {
+          neui_widget_t section = { app->section_id };
+          app->attrs->set_string(sess, section, NEUI_ATTR_ALIGN_TEXT, attr_val);
+          dbglog("section align -> %s\n", attr_val);
+        }
+        return true;
+      }
       char buf[256];
       app->items->get_text(sess, widget, idx, buf, (int)sizeof(buf));
       void* udata = app->items->get_userdata(sess, widget, idx);
@@ -494,16 +510,31 @@ int main(int argc, char** argv) {
   // lighter than the frame's clear colour, and the header text is centred
   // within a band at the top. To override either, set NEUI_ATTR_BACKGROUND
   // (int ARGB) or NEUI_ATTR_ALIGN_TEXT ("left"|"center"|"right").
+  //
+  // Alignment combobox: sits above the section and drives its
+  // NEUI_ATTR_ALIGN_TEXT live. Userdata on each item is the literal
+  // attribute string so the ITEM_SELECTED handler can apply it directly.
+  // Combo height includes the dropdown overlay's vertical room (the
+  // collapsed bar is COMBO_COLLAPSED_H = 22 px; the rest is reserved
+  // for the open dropdown).
+  auto align_combo = app.widgets->create(sess, win, NEUI_W_COMBOBOX,
+                                          215, 320, 200, 80, nullptr);
+  app.align_combo_id = align_combo.id;
+  app.items->add(sess, align_combo, "left",   (void*)"left");
+  app.items->add(sess, align_combo, "middle", (void*)"center");
+  app.items->add(sess, align_combo, "right",  (void*)"right");
+  app.items->set_selected(sess, align_combo, 0);  // matches section's initial "left"
+
   auto section = app.widgets->create(sess, win, NEUI_W_SECTION,
-                                      215, 320, 200, 260, nullptr);
+                                      215, 350, 200, 230, nullptr);
   app.section_id = section.id;
   app.widgets->set_text(sess, section, "Section widget");
   app.attrs->set_string(sess, section, NEUI_ATTR_ALIGN_TEXT, "left");
   // app.attrs->set_int   (sess, section, NEUI_ATTR_BACKGROUND, 0xFF2A3340);
 
   // Children of the section. Coordinates are relative to the section's
-  // top-left (the section is at frame-coords 215, 320, so (10, 28) below
-  // lands at frame-coords (225, 348)). Same semantics on both hosts.
+  // top-left (the section is at frame-coords 215, 350, so (10, 28) below
+  // lands at frame-coords (225, 378)). Same semantics on both hosts.
   auto sec_label = app.widgets->create(sess, section, NEUI_W_LABEL,
                                         10, 28, 180, 20, nullptr);
   app.widgets->set_text(sess, sec_label, "Children paint on top:");
@@ -599,6 +630,7 @@ int main(int argc, char** argv) {
   app.widgets->destroy(sess, sec_btn);
   app.widgets->destroy(sess, sec_label);
   app.widgets->destroy(sess, section);
+  app.widgets->destroy(sess, align_combo);
   app.widgets->destroy(sess, img);
   app.widgets->destroy(sess, treev);
   app.widgets->destroy(sess, tree_label);

@@ -561,6 +561,23 @@ namespace win32_host
     // SetWindowRgn takes ownership of `body`; do not delete it ourselves.
     // bRedraw=FALSE so we don't loop when called from inside WM_PAINT.
     SetWindowRgn(wd.hwnd, body, FALSE);
+
+    // The region may have SHRUNK relative to its previous shape (e.g.
+    // the chip just moved from "left" to "center", so the strip the chip
+    // used to occupy at the left of the band is now outside the region).
+    // Windows does not auto-repaint the parent in pixels a child window
+    // just stopped covering, so the old chip's frame_bg "ghost" lingers
+    // there. Invalidate the parent in the section's full bounding rect;
+    // WS_CLIPCHILDREN on the frame clips the parent's paint to the area
+    // OUTSIDE the section's (new) region, so only the newly-exposed
+    // pixels actually repaint.
+    if (HWND parent = GetParent(wd.hwnd)) {
+      RECT sec_rect;
+      GetWindowRect(wd.hwnd, &sec_rect);
+      MapWindowPoints(HWND_DESKTOP, parent,
+                      reinterpret_cast<POINT*>(&sec_rect), 2);
+      InvalidateRect(parent, &sec_rect, TRUE);
+    }
   }
 
   // -------------------------------------------------------------------------
