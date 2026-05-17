@@ -283,12 +283,18 @@ namespace xpl_host
   class KnobWidget : public WidgetData {
   public:
     bool  dragging        = false;
-    float drag_prev_angle = 0.0f;  // last cursor angle (rad) relative to centre
+    float drag_prev_angle = 0.0f;  // last cursor angle (rad) relative to centre (rotational mode)
     // Unsnapped accumulator carried across drag samples. Without this, every
     // frame's small angular delta would be rounded to zero by the per-set
     // snap when NEUI_ATTR_STEPS is configured, making the drag feel "stuck"
     // until a single big motion crossed a half-step threshold.
     float drag_continuous = 0.0f;
+    // Cached NEUI_ATTR_KNOB_MODE at mouse-down so the per-frame mouse-move
+    // path doesn't pay the attribute-lookup cost. Live changes to the attr
+    // take effect on the NEXT drag.
+    int   drag_mode       = 0;
+    int   drag_prev_x     = 0;     // previous mouse X (horizontal slider mode)
+    int   drag_prev_y     = 0;     // previous mouse Y (vertical slider mode)
 
     void paint(neui_render_backend_t*, neui_render_ctx_t, bool is_focused) override;
     bool on_keydown(uint32_t keycode, uint32_t modifiers) override;

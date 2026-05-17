@@ -155,6 +155,16 @@ extern "C" {
 // reflects the latest value just before the disc is drawn.
 #define NEUI_ATTR_VALUE_TEXT "neui.attr.value_text"
 
+// int: drag interaction style of the KNOB widget.
+//   NEUI_KNOB_MODE_ROTATIONAL = 0 (default) - cursor angle around the
+//                                              knob centre drives the value
+//                                              (classic rotary feel).
+//   NEUI_KNOB_MODE_VERTICAL   = 1            - vertical drag; up increases.
+//   NEUI_KNOB_MODE_HORIZONTAL = 2            - horizontal drag; right increases.
+// Cached on mouse-down for the duration of the drag, so reading is O(1)
+// per WM_MOUSEMOVE; changes mid-drag apply on the next drag.
+#define NEUI_ATTR_KNOB_MODE "neui.attr.knob_mode"
+
 // ---- Live parameter slots (drive rendering of SLIDER, KNOB, future
 // value-bearing widgets). Float, normalized to [0..1]; out-of-range
 // values are clamped on set. Programmatic set does NOT fire
@@ -172,6 +182,13 @@ enum {
   NEUI_THEME_MODE_AUTO  = 0,   // follow the OS light/dark setting
   NEUI_THEME_MODE_LIGHT = 1,   // force light palette
   NEUI_THEME_MODE_DARK  = 2,   // force dark palette
+};
+
+// Values for NEUI_ATTR_KNOB_MODE.
+enum {
+  NEUI_KNOB_MODE_ROTATIONAL = 0,   // cursor angle around the centre (default)
+  NEUI_KNOB_MODE_VERTICAL   = 1,   // vertical drag, up increases
+  NEUI_KNOB_MODE_HORIZONTAL = 2,   // horizontal drag, right increases
 };
 
 typedef struct neui_attr_api {

@@ -359,9 +359,12 @@ namespace win32_host
   // sensitivity is the natural 1/radius (small circles move the value
   // faster than wide ones). Shift = 1/5 sensitivity, wheel for nudges,
   // double-click = reset to NEUI_PARAM_DEFAULT.
-  static constexpr float KNOB_W32_SWEEP_RAD   = 4.71238898f;   // 1.5 * PI (270°)
-  static constexpr float KNOB_W32_DEAD_ZONE_R = 4.0f;          // logical px
-  static constexpr float KNOB_W32_FINE_SCALE  = 0.2f;          // Shift = 1/5 sensitivity
+  static constexpr float KNOB_W32_SWEEP_RAD     = 4.71238898f; // 1.5 * PI (270°)
+  static constexpr float KNOB_W32_DEAD_ZONE_R   = 4.0f;        // logical px
+  static constexpr float KNOB_W32_FINE_SCALE    = 0.2f;        // Shift = 1/5 sensitivity
+  // Slider modes (vertical / horizontal NEUI_ATTR_KNOB_MODE): logical-pixel
+  // sweep distance for a full [0..1] traversal.
+  static constexpr float KNOB_W32_SLIDER_SWEEP_PX = 200.0f;
 
   static float wrap_pi_w32(float d)
   {
@@ -451,14 +454,27 @@ namespace win32_host
     float my = static_cast<float>(MulDiv(GET_Y_LPARAM(lParam), 96, static_cast<int>(dpi)));
 
     if (msg == WM_LBUTTONDOWN) {
-      float dx = mx - cx;
-      float dy = my - cy;
-      if (dx*dx + dy*dy < KNOB_W32_DEAD_ZONE_R * KNOB_W32_DEAD_ZONE_R) {
-        // Click bang in the centre: don't start a drag we can't track.
-        return;
+      // Cache the drag mode for the duration of this drag so WM_MOUSEMOVE
+      // doesn't pay the attribute-lookup cost. Live changes to the attr
+      // take effect on the NEXT drag.
+      wd.paint_drag_mode = wd.attrs
+        ? wd.attrs->get_int(NEUI_ATTR_KNOB_MODE, NEUI_KNOB_MODE_ROTATIONAL)
+        : NEUI_KNOB_MODE_ROTATIONAL;
+      int imx = static_cast<int>(mx);
+      int imy = static_cast<int>(my);
+      if (wd.paint_drag_mode == NEUI_KNOB_MODE_ROTATIONAL) {
+        float dx = mx - cx;
+        float dy = my - cy;
+        if (dx*dx + dy*dy < KNOB_W32_DEAD_ZONE_R * KNOB_W32_DEAD_ZONE_R) {
+          // Click bang in the centre: don't start a drag we can't track.
+          return;
+        }
+        wd.paint_drag_prev_angle = std::atan2(dy, dx);
+      } else {
+        wd.paint_drag_prev_x = imx;
+        wd.paint_drag_prev_y = imy;
       }
-      wd.paint_dragging        = true;
-      wd.paint_drag_prev_angle = std::atan2(dy, dx);
+      wd.paint_dragging = true;
       // Seed the continuous accumulator with the current snapped value so
       // small per-frame deltas accumulate into step crossings rather than
       // being rounded back to the same snapped value each sample.
@@ -471,24 +487,39 @@ namespace win32_host
       return;
     }
     if (msg == WM_MOUSEMOVE && wd.paint_dragging) {
-      float dx = mx - cx;
-      float dy = my - cy;
-      float r2 = dx*dx + dy*dy;
-      if (r2 < KNOB_W32_DEAD_ZONE_R * KNOB_W32_DEAD_ZONE_R) {
-        // Inside dead zone - angle is unstable. Drop this sample, but
-        // don't end the drag; the user may slip back out.
-        return;
+      bool  fine     = (wParam & MK_SHIFT) != 0;
+      float fine_mul = fine ? KNOB_W32_FINE_SCALE : 1.0f;
+      float delta_v  = 0.0f;
+      int   imx      = static_cast<int>(mx);
+      int   imy      = static_cast<int>(my);
+      if (wd.paint_drag_mode == NEUI_KNOB_MODE_VERTICAL) {
+        // Up = increase: negative pixel delta -> positive value delta.
+        delta_v = -static_cast<float>(imy - wd.paint_drag_prev_y) *
+                  (fine_mul / KNOB_W32_SLIDER_SWEEP_PX);
+        wd.paint_drag_prev_y = imy;
+      } else if (wd.paint_drag_mode == NEUI_KNOB_MODE_HORIZONTAL) {
+        delta_v = static_cast<float>(imx - wd.paint_drag_prev_x) *
+                  (fine_mul / KNOB_W32_SLIDER_SWEEP_PX);
+        wd.paint_drag_prev_x = imx;
+      } else {
+        float dx = mx - cx;
+        float dy = my - cy;
+        float r2 = dx*dx + dy*dy;
+        if (r2 < KNOB_W32_DEAD_ZONE_R * KNOB_W32_DEAD_ZONE_R) {
+          // Inside dead zone - angle is unstable. Drop this sample, but
+          // don't end the drag; the user may slip back out.
+          return;
+        }
+        float cur_angle = std::atan2(dy, dx);
+        delta_v = wrap_pi_w32(cur_angle - wd.paint_drag_prev_angle) *
+                  (fine_mul / KNOB_W32_SWEEP_RAD);
+        wd.paint_drag_prev_angle = cur_angle;
       }
-      float cur_angle = std::atan2(dy, dx);
-      float delta     = wrap_pi_w32(cur_angle - wd.paint_drag_prev_angle);
-      bool fine = (wParam & MK_SHIFT) != 0;
-      float scale = (fine ? KNOB_W32_FINE_SCALE : 1.0f) / KNOB_W32_SWEEP_RAD;
       // Accumulate continuously so small per-frame deltas survive across
       // step snapping; only the snapped value is published externally.
-      wd.paint_drag_continuous += delta * scale;
+      wd.paint_drag_continuous += delta_v;
       wd.paint_drag_continuous = clamp01_w32(wd.paint_drag_continuous);
       widget_set_value_user_w32(wd, wd.paint_drag_continuous);
-      wd.paint_drag_prev_angle = cur_angle;
       return;
     }
   }

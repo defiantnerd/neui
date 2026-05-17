@@ -152,11 +152,16 @@ namespace win32_host {
 
     // Drag state for value-bearing painted widgets. KNOB uses prev_angle
     // (frame-to-frame angular delta) and continuous (an unsnapped
-    // accumulator that survives across STEPS-snap rounding). Other fields
-    // are kept for future painted controls that want y-based dragging.
+    // accumulator that survives across STEPS-snap rounding). prev_x / prev_y
+    // are the previous-frame cursor positions used by the vertical /
+    // horizontal slider modes of the KNOB (NEUI_ATTR_KNOB_MODE). paint_drag_mode
+    // caches the resolved mode at mouse-down so WM_MOUSEMOVE doesn't pay the
+    // attribute-lookup cost; live changes apply on the next drag.
     bool  paint_dragging        = false;
-    int   paint_drag_start_y    = 0;
-    float paint_drag_prev_angle = 0.0f;  // last cursor angle (rad) relative to centre
+    int   paint_drag_mode       = 0;
+    int   paint_drag_prev_x     = 0;
+    int   paint_drag_prev_y     = 0;
+    float paint_drag_prev_angle = 0.0f;  // last cursor angle (rad) relative to centre (rotational mode)
     float paint_drag_continuous = 0.0f;  // continuous unsnapped value during drag
   };
 

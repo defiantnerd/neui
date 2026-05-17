@@ -638,6 +638,9 @@ namespace xpl_host
     float fh = static_cast<float>(height);
     backend->fill_rect(ctx, fx, fy, fw, fh,
                        neui_detail::color(ColorRole::panel_bg));
+    if (backend->draw_rect)
+      backend->draw_rect(ctx, fx, fy, fw, fh, 1.0f,
+                         neui_detail::color(ColorRole::border));
     if (!text.empty() && backend->draw_text) {
       float text_x = fx;
       if (backend->measure_text) {
@@ -1920,9 +1923,13 @@ namespace xpl_host
 
   // Angular-drag constants (shared between xpl and win32 knob handlers).
   // Total sweep matches the visual sweep in paint_knob (-135°..+135°).
-  static constexpr float KNOB_SWEEP_RAD   = 4.71238898f;   // 1.5 * PI (270°)
-  static constexpr float KNOB_DEAD_ZONE_R = 4.0f;          // logical px
-  static constexpr float KNOB_FINE_SCALE  = 0.2f;          // Shift = 1/5 sensitivity
+  static constexpr float KNOB_SWEEP_RAD     = 4.71238898f; // 1.5 * PI (270°)
+  static constexpr float KNOB_DEAD_ZONE_R   = 4.0f;        // logical px
+  static constexpr float KNOB_FINE_SCALE    = 0.2f;        // Shift = 1/5 sensitivity
+  // Slider modes (vertical / horizontal NEUI_ATTR_KNOB_MODE): pixels of
+  // drag to span the full [0..1] range. ~200 logical px is a common
+  // DAW-host feel.
+  static constexpr float KNOB_SLIDER_SWEEP_PX = 200.0f;
 
   // Wrap a delta angle into [-PI, +PI] so frame-by-frame tracking is robust
   // around the atan2 wraparound at ±π (e.g. cursor crossing 9 o'clock).
@@ -1990,25 +1997,40 @@ namespace xpl_host
         return true;
       }
       if (event->type == NEUI_EVENT_MOUSE_MOVE) {
-        float dx = static_cast<float>(event->data.mouse.x) - cx;
-        float dy = static_cast<float>(event->data.mouse.y) - cy;
-        float r2 = dx*dx + dy*dy;
-        if (r2 < KNOB_DEAD_ZONE_R * KNOB_DEAD_ZONE_R) {
-          // Inside dead zone - angle is unstable. Drop this sample, but
-          // don't end the drag; the user may slip back out.
-          return true;
+        int   mx   = event->data.mouse.x;
+        int   my   = event->data.mouse.y;
+        bool  fine = (event->data.mouse.buttonmap & NEUI_MK_SHIFT) != 0;
+        float fine_mul = fine ? KNOB_FINE_SCALE : 1.0f;
+        float delta_v  = 0.0f;
+        if (drag_mode == NEUI_KNOB_MODE_VERTICAL) {
+          // Up = increase: negative pixel delta -> positive value delta.
+          delta_v = -static_cast<float>(my - drag_prev_y) *
+                    (fine_mul / KNOB_SLIDER_SWEEP_PX);
+          drag_prev_y = my;
+        } else if (drag_mode == NEUI_KNOB_MODE_HORIZONTAL) {
+          delta_v = static_cast<float>(mx - drag_prev_x) *
+                    (fine_mul / KNOB_SLIDER_SWEEP_PX);
+          drag_prev_x = mx;
+        } else {
+          float dx = static_cast<float>(mx) - cx;
+          float dy = static_cast<float>(my) - cy;
+          float r2 = dx*dx + dy*dy;
+          if (r2 < KNOB_DEAD_ZONE_R * KNOB_DEAD_ZONE_R) {
+            // Inside dead zone - angle is unstable. Drop this sample, but
+            // don't end the drag; the user may slip back out.
+            return true;
+          }
+          float cur_angle = std::atan2(dy, dx);
+          delta_v = wrap_pi(cur_angle - drag_prev_angle) *
+                    (fine_mul / KNOB_SWEEP_RAD);
+          drag_prev_angle = cur_angle;
         }
-        float cur_angle = std::atan2(dy, dx);
-        float delta     = wrap_pi(cur_angle - drag_prev_angle);
-        bool fine = (event->data.mouse.buttonmap & NEUI_MK_SHIFT) != 0;
-        float scale = (fine ? KNOB_FINE_SCALE : 1.0f) / KNOB_SWEEP_RAD;
         // Accumulate continuously so small per-frame deltas survive across
         // step snapping. The external attribute only changes when the
         // continuous value crosses into the next step.
-        drag_continuous += delta * scale;
+        drag_continuous += delta_v;
         drag_continuous = clamp01(drag_continuous);
         widget_set_value_user(*this, drag_continuous);
-        drag_prev_angle = cur_angle;
         repaint();
         return true;
       }
@@ -2016,15 +2038,27 @@ namespace xpl_host
     }
 
     if (event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN) {
-      float dx = static_cast<float>(event->data.mouse.x) - cx;
-      float dy = static_cast<float>(event->data.mouse.y) - cy;
-      float r2 = dx*dx + dy*dy;
-      if (r2 < KNOB_DEAD_ZONE_R * KNOB_DEAD_ZONE_R) {
-        // Click bang in the centre: don't start a drag we can't track.
-        return true;
+      // Cache the drag mode for the duration of this drag so the per-frame
+      // mouse-move path doesn't pay attribute-lookup cost.
+      drag_mode = attrs ? attrs->get_int(NEUI_ATTR_KNOB_MODE,
+                                          NEUI_KNOB_MODE_ROTATIONAL)
+                        : NEUI_KNOB_MODE_ROTATIONAL;
+      int mx = event->data.mouse.x;
+      int my = event->data.mouse.y;
+      if (drag_mode == NEUI_KNOB_MODE_ROTATIONAL) {
+        float dx = static_cast<float>(mx) - cx;
+        float dy = static_cast<float>(my) - cy;
+        float r2 = dx*dx + dy*dy;
+        if (r2 < KNOB_DEAD_ZONE_R * KNOB_DEAD_ZONE_R) {
+          // Click bang in the centre: don't start a drag we can't track.
+          return true;
+        }
+        drag_prev_angle = std::atan2(dy, dx);
+      } else {
+        drag_prev_x = mx;
+        drag_prev_y = my;
       }
-      dragging        = true;
-      drag_prev_angle = std::atan2(dy, dx);
+      dragging = true;
       // Seed the continuous accumulator with the current snapped value so
       // the first delta moves us off it (rather than starting from 0).
       drag_continuous = widget_get_value(*this);
