@@ -121,12 +121,14 @@ namespace win32_host
       },
       this);
 
-    // Initialise this session's effective palette from the current system
-    // palette + the (yet-to-be-set) theme mode default of AUTO. Point the
-    // process-wide override at it so paint code reads our effective
-    // palette via current_palette() without needing a Session pointer.
+    // Initialise this session's effective palette. We do NOT permanently
+    // install &_effective_palette as the process-wide override - that
+    // races "last-constructed wins" across multiple Sessions in the same
+    // process. Every code path that reads current_palette() while
+    // attached to this session scopes the override explicitly via
+    // ScopedPaletteOverride (paint, on_theme_changed, theme-bearing
+    // entry points in window.cpp).
     recompute_effective_palette();
-    neui_detail::set_active_palette_override(&_effective_palette);
 
     // Optional client-side theme-change callback.
     _theme_client = static_cast<neui_theme_client_t*>(
@@ -143,8 +145,9 @@ namespace win32_host
       neui_detail::unregister_theme_listener(_theme_listener_handle);
       _theme_listener_handle = 0;
     }
-    // If we still own the active palette override, clear it so future
-    // current_palette() callers fall back to the system palette.
+    // Defensive: in case a scope guard somewhere failed to restore (or
+    // an extension installed a permanent pointer), clear the override
+    // when it currently points into this session.
     if (neui_detail::active_palette_override_ptr() == &_effective_palette)
       neui_detail::set_active_palette_override(nullptr);
   }
@@ -243,10 +246,11 @@ namespace win32_host
   void Session::on_theme_changed()
   {
     // Recompute this session's effective palette from the (just-updated)
-    // system palette + our NEUI_ATTR_THEME_MODE, then re-point the
-    // process-wide override at it.
+    // system palette + our NEUI_ATTR_THEME_MODE. Scope the override to
+    // this session for the duration of the work below so multi-session
+    // listeners that fire in sequence don't read each other's palette.
     recompute_effective_palette();
-    neui_detail::set_active_palette_override(&_effective_palette);
+    neui_detail::ScopedPaletteOverride scope(&_effective_palette);
 
     // Invalidate the cached HBRUSH table - it's keyed by palette version
     // and brush_for_role() will rebuild lazily on next WM_CTLCOLOR.

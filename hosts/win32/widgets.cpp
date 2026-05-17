@@ -856,6 +856,28 @@ namespace win32_host
             if (new_scale != wd.image_scale)
               load_image_bitmap(wd, new_dpi);
           }
+          // Native control refresh belt-and-suspenders: most native
+          // controls auto-recompute row layout when WM_SETFONT arrives
+          // from the follow-up create_child_windows pass, but a handful
+          // need explicit messages or cache stale values across DPI
+          // flips. These are cheap; no-op when the message is ignored.
+          if (wd.type) {
+            // TreeView: force item-height recompute from font. Without
+            // this the rows can keep the old DPI's metrics until the
+            // first item is added/removed.
+            if (!strcmp(wd.type, NEUI_W_TREEVIEW))
+              SendMessageW(wd.hwnd, TVM_SETITEMHEIGHT,
+                           static_cast<WPARAM>(-1), 0);
+            // ListBox / ComboBox: invalidate so the new font is picked
+            // up across already-laid-out items. SetWindowPos above
+            // invalidates on size change, but a same-size DPI flip
+            // (rare, but possible across identical-DPI monitors with
+            // different scaling preferences) wouldn't trigger it.
+            if (!strcmp(wd.type, NEUI_W_LISTBOX)  ||
+                !strcmp(wd.type, NEUI_W_COMBOBOX) ||
+                !strcmp(wd.type, NEUI_W_MULTILINE))
+              InvalidateRect(wd.hwnd, nullptr, TRUE);
+          }
         }
         cascade_dpi(child_idx, new_dpi);
       }
@@ -1059,6 +1081,11 @@ namespace win32_host
     if (w.native_icon) {
       DestroyIcon(w.native_icon);
       w.native_icon = nullptr;
+    }
+    if (w.section_ctl_bg_brush) {
+      DeleteObject(w.section_ctl_bg_brush);
+      w.section_ctl_bg_brush      = nullptr;
+      w.section_ctl_bg_brush_argb = 0;
     }
     // D2D bitmap and context are freed in ImageWndProc WM_DESTROY (triggered by
     // DestroyWindow above). Guard here in case the HWND was already gone.
@@ -2505,6 +2532,18 @@ namespace win32_host
     auto* w = get_widget_ptr(session, widget);
     if (!w || !key) return 0;
     neui_detail::ensure_attrs(w->attrs).set_int(key, value);
+
+    // Live re-application for paint-affecting int attrs on self-painted
+    // widgets. NEUI_ATTR_BACKGROUND drives body fill (SECTION), the
+    // begin_frame clear (KNOB / IMAGE), so a runtime change needs a
+    // repaint. Region geometry doesn't depend on colour, so SECTION can
+    // skip apply_section_region_w32 here.
+    if (w->hwnd && w->type && !strcmp(key, NEUI_ATTR_BACKGROUND) &&
+        (!strcmp(w->type, NEUI_W_SECTION) ||
+         !strcmp(w->type, NEUI_W_KNOB)    ||
+         !strcmp(w->type, NEUI_W_IMAGE))) {
+      InvalidateRect(w->hwnd, nullptr, FALSE);
+    }
     return 1;
   }
 

@@ -163,6 +163,27 @@ namespace neui_detail
     return mutable_current_palette();
   }
 
+  // RAII helper: scope a palette override so any current_palette() read
+  // inside the scope reflects `p`, and the override restores to its
+  // previous value when the guard goes out of scope. Critical for
+  // multi-session correctness: every entry point that reads
+  // current_palette() while attached to a specific Session should wrap
+  // its work in one of these (paint_frame is the canonical example;
+  // on_theme_changed and platform frame-creation are the others). Without
+  // it, two sessions' permanent overrides would race "last-set-wins".
+  class ScopedPaletteOverride {
+    const Palette* prev_;
+  public:
+    explicit ScopedPaletteOverride(const Palette* p)
+      : prev_(active_palette_override_ptr())
+    {
+      set_active_palette_override(p);
+    }
+    ~ScopedPaletteOverride() { set_active_palette_override(prev_); }
+    ScopedPaletteOverride(const ScopedPaletteOverride&) = delete;
+    ScopedPaletteOverride& operator=(const ScopedPaletteOverride&) = delete;
+  };
+
   inline uint32_t color(const Palette& p, ColorRole r)
   {
     return p.colors[(size_t)r];

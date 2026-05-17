@@ -652,6 +652,12 @@ namespace xpl_host
     // FOLLOW=1 frames are touched.
     void on_theme_changed(bool from_mode_change = false);
     void recompute_effective_palette();
+
+    // Public accessor used by entry points that need to scope the
+    // process-wide palette override to THIS session before reading
+    // current_palette() (e.g. the platform frame-creation path).
+    const neui_detail::Palette* effective_palette_ptr() const
+    { return &_effective_palette; }
   };
 
   // -------------------------------------------------------------------------

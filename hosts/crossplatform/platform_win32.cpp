@@ -263,10 +263,14 @@ namespace xpl_host
   static LRESULT CALLBACK XplWndProc(HWND hwnd, UINT msg,
                                       WPARAM wParam, LPARAM lParam)
   {
-    // Native menu-bar dark-mode owner-draw. xpl host always tracks the
-    // system theme so we always handle these UAH messages.
+    // Native menu-bar dark-mode owner-draw. The owner-draw helper reads
+    // current_palette(), so scope the override to this session's
+    // effective palette first (multi-session correctness).
     if (msg == neui_detail::k_wm_uah_drawmenu ||
         msg == neui_detail::k_wm_uah_drawmenuitem) {
+      auto* wud = get_wud(hwnd);
+      neui_detail::ScopedPaletteOverride scope(
+        (wud && wud->session) ? wud->session->effective_palette_ptr() : nullptr);
       LRESULT r = 0;
       if (neui_detail::handle_uah_menubar_message(hwnd, msg, wParam, lParam, r))
         return r;
@@ -1106,6 +1110,10 @@ namespace xpl_host
     // from current_palette(); a frame that wants a frozen non-system look
     // can pair this with NEUI_ATTR_THEME_MODE = LIGHT / DARK on the session.
     if (wd.attrs && wd.attrs->get_int(NEUI_ATTR_FOLLOW_SYSTEM_THEME, 0) != 0) {
+      // Scope the override to THIS session so the is_dark read reflects
+      // its effective palette (not a sibling session's last write).
+      neui_detail::ScopedPaletteOverride scope(
+        wd.session ? wd.session->effective_palette_ptr() : nullptr);
       bool is_dark = neui_detail::current_palette().is_dark;
       neui_detail::set_app_dark_preference(is_dark);
       neui_detail::apply_dark_window_mode(hwnd, is_dark);

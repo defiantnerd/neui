@@ -234,15 +234,17 @@ namespace xpl_host
       },
       this);
 
-    // Initialise this session's effective palette and point the global
-    // override at it so current_palette() returns the session-resolved
-    // palette during paint. _frozen_palette is initialised to the same
-    // snapshot - it only updates on NEUI_ATTR_THEME_MODE changes after
-    // this point, so FOLLOW=0 frames render against a palette frozen
-    // at creation time.
+    // Initialise this session's effective + frozen palettes. We
+    // intentionally do NOT permanently install &_effective_palette as
+    // the process-wide override: in a multi-session process that's a
+    // "last constructed wins" race. Every code path that needs the
+    // session's palette scopes it via ScopedPaletteOverride (paint_frame
+    // manually, on_theme_changed + platform frame creation explicitly).
+    // _frozen_palette starts as a snapshot of _effective_palette and only
+    // updates on NEUI_ATTR_THEME_MODE flips, so FOLLOW=0 frames render
+    // against a palette frozen at creation time.
     recompute_effective_palette();
     _frozen_palette = _effective_palette;
-    neui_detail::set_active_palette_override(&_effective_palette);
 
     // Optional client-side theme-change callback.
     _theme_client = static_cast<neui_theme_client_t*>(
@@ -259,7 +261,11 @@ namespace xpl_host
       neui_detail::unregister_theme_listener(_theme_listener_handle);
       _theme_listener_handle = 0;
     }
-    if (neui_detail::active_palette_override_ptr() == &_effective_palette)
+    // Defensive: in case a scope guard somewhere failed to restore (or
+    // an extension installed a permanent pointer), clear the override
+    // when it currently points into this session.
+    auto* cur = neui_detail::active_palette_override_ptr();
+    if (cur == &_effective_palette || cur == &_frozen_palette)
       neui_detail::set_active_palette_override(nullptr);
   }
 
@@ -301,10 +307,11 @@ namespace xpl_host
   void Session::on_theme_changed(bool from_mode_change)
   {
     // Recompute this session's effective palette from the (just-updated)
-    // system palette + our NEUI_ATTR_THEME_MODE, then re-point the
-    // process-wide override at it.
+    // system palette + our NEUI_ATTR_THEME_MODE. Scope the override to
+    // this session for the duration of the work below so multi-session
+    // listeners that fire in sequence don't read each other's palette.
     recompute_effective_palette();
-    neui_detail::set_active_palette_override(&_effective_palette);
+    neui_detail::ScopedPaletteOverride scope(&_effective_palette);
 
     // NEUI_ATTR_THEME_MODE flip: the user explicitly requested a new
     // mode, so refresh the frozen snapshot too. A system theme flip

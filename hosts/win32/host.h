@@ -141,6 +141,15 @@ namespace win32_host {
     paint_fn_t        paint_fn        = nullptr;
     painted_msg_fn_t  painted_msg_fn  = nullptr;
 
+    // SECTION-only: brush matching the section's body fill, used by
+    // PaintedWndProc's WM_CTLCOLORSTATIC / WM_CTLCOLORBTN so STATIC text
+    // children (labels, checkbox/radio text) paint over the section bg
+    // instead of the system default. Recreated lazily when the resolved
+    // ARGB changes (palette flip or NEUI_ATTR_BACKGROUND edit). Freed in
+    // widget_destroy.
+    HBRUSH    section_ctl_bg_brush      = nullptr;
+    uint32_t  section_ctl_bg_brush_argb = 0;
+
     // Drag state for value-bearing painted widgets. KNOB uses prev_angle
     // (frame-to-frame angular delta) and continuous (an unsnapped
     // accumulator that survives across STEPS-snap rounding). Other fields
@@ -292,6 +301,13 @@ namespace win32_host {
     // Recompute _effective_palette from the current system palette and
     // the session's NEUI_ATTR_THEME_MODE; refresh the palette override.
     void recompute_effective_palette();
+
+    // Public accessor used by entry points that need to scope the
+    // process-wide palette override to THIS session before reading
+    // current_palette() (apply_theme_to_frame_w32, WM_CTLCOLOR brush
+    // lookup, etc.). See ScopedPaletteOverride.
+    const neui_detail::Palette* effective_palette_ptr() const
+    { return &_effective_palette; }
 
     // Read-only view of the owning session id. Used by widget-id packing /
     // validation in widgets.cpp.

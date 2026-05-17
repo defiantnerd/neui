@@ -7,6 +7,7 @@
 #pragma comment(lib, "uxtheme.lib")
 #include "../../backends/d2d/d2d_backend.h"
 #include "../shared/theme_palette.h"
+#include "../shared/widget_paint_section.h"
 #include "../shared/win32/theme_brushes_win32.h"
 #include "../shared/win32/theme_provider_win32.h"
 #include "../shared/win32/dark_menu_win32.h"
@@ -57,6 +58,12 @@ namespace win32_host
     if (!wd.hwnd) return;
     bool follow = wd.attrs &&
                   wd.attrs->get_int(NEUI_ATTR_FOLLOW_SYSTEM_THEME, 0) != 0;
+    // Scope the override to this session before reading is_dark - the
+    // function is called from frame creation and from on_theme_changed,
+    // and in multi-session apps a sibling session's last write could
+    // otherwise leak in.
+    neui_detail::ScopedPaletteOverride scope(
+      wd.session ? wd.session->effective_palette_ptr() : nullptr);
     bool want_dark = follow && neui_detail::current_palette().is_dark;
     BOOL dark = want_dark ? TRUE : FALSE;
     HRESULT hr = DwmSetWindowAttribute(wd.hwnd,
@@ -94,6 +101,9 @@ namespace win32_host
                  || !strcmp(wd.type, NEUI_W_PLUGWINDOW)
                  || !strcmp(wd.type, NEUI_W_DIALOG))) return;
     bool follow = wd.session->frame_follows_theme(&wd);
+    // Scope the palette override to this widget's session before reading
+    // is_dark (multi-session correctness).
+    neui_detail::ScopedPaletteOverride scope(wd.session->effective_palette_ptr());
     bool is_dark = follow && neui_detail::current_palette().is_dark;
 
     // Pick the theme class. DarkMode_Explorer drives dark scrollbars,
@@ -447,6 +457,46 @@ namespace win32_host
       // message pump) doesn't reinterpret them as focus navigation. Tab /
       // Shift+Tab stay with the dialog manager - we don't set DLGC_WANTTAB.
       return DLGC_WANTARROWS;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN: {
+      // STATIC controls (labels, checkbox/radio text) parented to a
+      // SECTION HWND ask their parent for a background brush. The frame's
+      // AppWindowProc handles this for direct frame children; we mirror
+      // that here so labels inside a section match the section's body
+      // fill instead of falling back to DefWindowProc's system default
+      // (which doesn't track the theme palette).
+      if (wd && wd->session && wd->type && !strcmp(wd->type, NEUI_W_SECTION)) {
+        using neui_detail::ColorRole;
+        neui_detail::ScopedPaletteOverride scope(
+          wd->session->effective_palette_ptr());
+
+        // Resolve the section's body colour the same way paint_section_w32
+        // does so the static's bg lines up exactly.
+        uint32_t bg_argb;
+        if (wd->attrs && wd->attrs->has(NEUI_ATTR_BACKGROUND)) {
+          bg_argb = static_cast<uint32_t>(
+            wd->attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
+        } else {
+          bg_argb = neui_detail::shade(
+            neui_detail::color(ColorRole::frame_bg),
+            neui_detail::SECTION_BG_LIFT);
+        }
+
+        if (!wd->section_ctl_bg_brush ||
+            wd->section_ctl_bg_brush_argb != bg_argb) {
+          if (wd->section_ctl_bg_brush) DeleteObject(wd->section_ctl_bg_brush);
+          wd->section_ctl_bg_brush      = neui_detail::brush_from_argb(bg_argb);
+          wd->section_ctl_bg_brush_argb = bg_argb;
+        }
+
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, neui_detail::colorref_from_argb(
+                            neui_detail::color(ColorRole::text_primary)));
+        return reinterpret_cast<LRESULT>(wd->section_ctl_bg_brush);
+      }
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
     case WM_DESTROY: {
       if (wd && backend && wd->paint_ctx) {
         backend->destroy_context(wd->paint_ctx);
@@ -469,6 +519,10 @@ namespace win32_host
     if ((msg == neui_detail::k_wm_uah_drawmenu ||
          msg == neui_detail::k_wm_uah_drawmenuitem) &&
         wd && wd->session && wd->session->frame_follows_theme(wd)) {
+      // Scope the palette override to this session so the owner-draw
+      // helper reads our palette (not a sibling session's last write).
+      neui_detail::ScopedPaletteOverride scope(
+        wd->session->effective_palette_ptr());
       LRESULT r = 0;
       if (neui_detail::handle_uah_menubar_message(hwnd, msg, wParam, lParam, r))
         return r;
@@ -772,6 +826,8 @@ namespace win32_host
         // When the frame opts into the theme, paint the palette panel_bg
         // ourselves so the gaps between native controls match the theme.
         if (wd && wd->session && wd->session->frame_follows_theme(wd)) {
+          neui_detail::ScopedPaletteOverride scope(
+            wd->session->effective_palette_ptr());
           HDC hdc = reinterpret_cast<HDC>(wParam);
           RECT rc; GetClientRect(hwnd, &rc);
           FillRect(hdc, &rc,
@@ -883,6 +939,8 @@ namespace win32_host
         if (wd && wd->session &&
             wd->session->frame_follows_theme(child_wd ? child_wd : wd)) {
           using neui_detail::ColorRole;
+          neui_detail::ScopedPaletteOverride scope(
+            wd->session->effective_palette_ptr());
           SetBkMode(hdc, TRANSPARENT);
           SetTextColor(hdc, neui_detail::colorref_from_argb(
                               neui_detail::color(ColorRole::text_primary)));
@@ -899,6 +957,8 @@ namespace win32_host
         if (wd && wd->session &&
             wd->session->frame_follows_theme(child_wd ? child_wd : wd)) {
           using neui_detail::ColorRole;
+          neui_detail::ScopedPaletteOverride scope(
+            wd->session->effective_palette_ptr());
           SetBkColor(hdc,   neui_detail::colorref_from_argb(neui_detail::color(ColorRole::control_bg)));
           SetTextColor(hdc, neui_detail::colorref_from_argb(neui_detail::color(ColorRole::text_primary)));
           return reinterpret_cast<LRESULT>(neui_detail::brush_for_role(ColorRole::control_bg));
@@ -913,6 +973,8 @@ namespace win32_host
         if (wd && wd->session &&
             wd->session->frame_follows_theme(child_wd ? child_wd : wd)) {
           using neui_detail::ColorRole;
+          neui_detail::ScopedPaletteOverride scope(
+            wd->session->effective_palette_ptr());
           SetBkColor(hdc,   neui_detail::colorref_from_argb(neui_detail::color(ColorRole::control_bg)));
           SetTextColor(hdc, neui_detail::colorref_from_argb(neui_detail::color(ColorRole::text_primary)));
           return reinterpret_cast<LRESULT>(neui_detail::brush_for_role(ColorRole::control_bg));
@@ -927,6 +989,8 @@ namespace win32_host
         if (wd && wd->session &&
             wd->session->frame_follows_theme(child_wd ? child_wd : wd)) {
           using neui_detail::ColorRole;
+          neui_detail::ScopedPaletteOverride scope(
+            wd->session->effective_palette_ptr());
           SetBkMode(hdc, TRANSPARENT);
           SetTextColor(hdc, neui_detail::colorref_from_argb(neui_detail::color(ColorRole::text_primary)));
           return reinterpret_cast<LRESULT>(neui_detail::brush_for_role(ColorRole::panel_bg));
