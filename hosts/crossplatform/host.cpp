@@ -581,27 +581,10 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // Widget paint
 
-  // Returns a stable, visually distinct ARGB color for a widget index.
-  // The per-widget hue (relative R/G/B balance) is stable across modes,
-  // so a given label keeps its identity; only the lightness shifts to
-  // remain readable against the per-mode text colour:
-  //   dark mode   → medium-dark band (~0x30..0x4F per channel) with white text
-  //   light mode  → light pastel band (~0xC8..0xE7 per channel) with dark text
-  static uint32_t widget_stub_color(uint32_t idx)
-  {
-    uint32_t h  = idx * 2654435761u;
-    uint8_t hr  = (h >> 16) & 0x7F;
-    uint8_t hg  = (h >>  8) & 0x7F;
-    uint8_t hb  =  h        & 0x7F;
-    bool is_dark = neui_detail::current_palette().is_dark;
-    uint8_t base = is_dark ? 0x30 : 0xC8;
-    uint8_t r = base + (hr >> 2);
-    uint8_t g = base + (hg >> 2);
-    uint8_t b = base + (hb >> 2);
-    return 0xFF000000u | (uint32_t(r) << 16) | (uint32_t(g) << 8) | b;
-  }
-
-  // Base paint: fill background, draw text, draw focus outline.
+  // Base paint: draw text over the parent's painted background, then the
+  // focus outline. Used by LabelWidget. Mirrors the native Win32 STATIC,
+  // which gets its background from the parent's WM_CTLCOLORSTATIC brush
+  // (frame's panel_bg or the enclosing SECTION's body colour).
   void WidgetData::paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
                           bool is_focused)
   {
@@ -610,7 +593,6 @@ namespace xpl_host
     float fy = static_cast<float>(y);
     float fw = static_cast<float>(width);
     float fh = static_cast<float>(height);
-    backend->fill_rect(ctx, fx, fy, fw, fh, widget_stub_color(index));
     if (!text.empty() && backend->draw_text)
       backend->draw_text(ctx, fx + 4.0f, fy, fw - 8.0f, fh, text.c_str(), 12.0f,
                          neui_detail::color(ColorRole::text_primary));
@@ -654,7 +636,8 @@ namespace xpl_host
     float fy = static_cast<float>(y);
     float fw = static_cast<float>(width);
     float fh = static_cast<float>(height);
-    backend->fill_rect(ctx, fx, fy, fw, fh, widget_stub_color(index));
+    backend->fill_rect(ctx, fx, fy, fw, fh,
+                       neui_detail::color(ColorRole::panel_bg));
     if (!text.empty() && backend->draw_text) {
       float text_x = fx;
       if (backend->measure_text) {
@@ -1558,7 +1541,6 @@ namespace xpl_host
     float fy = static_cast<float>(y);
     float fw = static_cast<float>(width);
     float fh = static_cast<float>(height);
-    backend->fill_rect(ctx, fx, fy, fw, fh, widget_stub_color(index));
     uint32_t mark_col   = neui_detail::color(ColorRole::text_primary);
     uint32_t indet_col  = neui_detail::color(ColorRole::text_secondary);
     if (backend->draw_rect)
