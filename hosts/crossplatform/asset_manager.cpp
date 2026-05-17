@@ -40,13 +40,18 @@ namespace neui_detail
       return base + suffix + ext;
     };
 
+    // Preferred candidates by scale, then a higher-res fallback so a
+    // deployment that ships only @2x (or @3x) still loads on a 96-DPI
+    // display - the bitmap is downscaled at draw time. The fallback
+    // entries are no-ops at higher scales because the same paths already
+    // appear earlier in the list and the loop returns on the first hit.
     std::vector<std::string> candidates;
     if (scale > 2.0f) {
       candidates = { try_path("@3x"), try_path("@2x"), name };
     } else if (scale > 1.0f) {
-      candidates = { try_path("@2x"), name };
+      candidates = { try_path("@2x"), name, try_path("@3x") };
     } else {
-      candidates = { name };
+      candidates = { name, try_path("@2x"), try_path("@3x") };
     }
 
     for (auto& p : candidates) {

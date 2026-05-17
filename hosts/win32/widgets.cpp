@@ -172,7 +172,10 @@ namespace win32_host
   }
 
   // Resolve @2x / @3x filename variants. Returns the best available path, or "".
-  // scale > 2.0 → try @3x → @2x → base; scale > 1.0 → try @2x → base; else base.
+  // Preference order matches DPI scale; if no preferred variant nor the base
+  // file exists, the higher-resolution variants are tried as a last-resort
+  // fallback so a deployment that ships only @2x assets still loads on a
+  // 96-DPI screen (the bitmap is then downscaled at draw time).
   static std::string resolve_image_path(const std::string& name, float scale)
   {
     auto dot = name.rfind('.');
@@ -194,6 +197,16 @@ namespace win32_host
       if (try_load(base + "@2x" + ext)) return base + "@2x" + ext;
     }
     if (try_load(name)) return name;
+    // Final fallback: try the higher-res variants the scale branch above
+    // didn't already attempt. Lets a deployment ship only @2x (or @3x)
+    // assets without a base file - on a 96-DPI screen the bitmap then
+    // displays at its native pixel density, downscaled at draw time.
+    if (scale <= 1.0f) {
+      if (try_load(base + "@2x" + ext)) return base + "@2x" + ext;
+    }
+    if (scale <= 2.0f) {
+      if (try_load(base + "@3x" + ext)) return base + "@3x" + ext;
+    }
     return {};
   }
 

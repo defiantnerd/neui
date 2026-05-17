@@ -569,6 +569,14 @@ namespace xpl_host
       platform_apply_size_constraints(wd.native_handle,
                                        min_w, min_h, max_w, max_h);
     }
+    // Self-painted widgets read int attrs each paint (NEUI_ATTR_BACKGROUND,
+    // NEUI_ATTR_TRISTATE, NEUI_ATTR_STEPS etc.), so a runtime change has
+    // to invalidate the owning frame. Frames handle their own side
+    // effects above (size constraints).
+    if (!wd.is_frame()) {
+      if (void* frame = s->find_parent_native_handle(idx))
+        platform_invalidate(frame);
+    }
     return 1;
   }
 
@@ -673,6 +681,14 @@ namespace xpl_host
       }
     }
     neui_detail::ensure_attrs(wd.attrs).set_float(key, stored);
+    // Float attrs feed live paint state (NEUI_PARAM_VALUE on KNOB /
+    // SLIDER, NEUI_ATTR_ROTATION on IMAGE, etc.). Invalidate the owning
+    // frame so the next paint pulls fresh values. Frames don't currently
+    // read any float attr in paint, but skip them for symmetry.
+    if (!wd.is_frame()) {
+      if (void* frame = s->find_parent_native_handle(idx))
+        platform_invalidate(frame);
+    }
     return 1;
   }
 

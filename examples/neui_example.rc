@@ -24,3 +24,11 @@ CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "neui_example.manifest"
 // asset manager on HiDPI monitors.
 "myimage.png"     PNG "myimage.png"
 "myimage@2x.png"  PNG "myimage@2x.png"
+
+// Animal photos used by the image-source combobox in the example.
+// Shipped only as @2x (the user supplied HiDPI JPGs); at 96 DPI the
+// asset-resolver's @2x fallback picks these up. The "PNG" type tag is
+// just a label - WIC sniffs the actual bytes, so JPG decodes fine.
+"lemur@2x.jpg"    PNG "lemur@2x.jpg"
+"lion@2x.jpg"     PNG "lion@2x.jpg"
+"panda@2x.jpg"    PNG "panda@2x.jpg"

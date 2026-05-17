@@ -81,6 +81,9 @@ struct AppState {
   // Combobox that drives the section's NEUI_ATTR_ALIGN_TEXT attribute,
   // letting the user pick which side the title chip sits on.
   uint32_t           align_combo_id = 0;
+  // Combobox above the rotation slider that swaps the rotating IMAGE's
+  // source file at runtime (Lemur / Lion / Panda).
+  uint32_t           image_combo_id = 0;
 };
 
 // Open a modal "About" dialog owned by the main window. The dialog has a
@@ -172,6 +175,19 @@ static neui_widget_client_t widget_client = {
       }
       neui_session_t sess   = { app->session };
       neui_widget_t  widget = event->data.item.widget;
+      // Image combo: userdata is the literal source filename. Push it
+      // onto the rotating IMAGE widget; xpl repaints on next paint and
+      // win32's widget_set_text reloads the bitmap immediately.
+      if (app && widget.id == app->image_combo_id && app->rot_image_id != 0) {
+        const char* filename = static_cast<const char*>(
+          app->items->get_userdata(sess, widget, idx));
+        if (filename) {
+          neui_widget_t img = { app->rot_image_id };
+          app->widgets->set_text(sess, img, filename);
+          dbglog("image source -> %s\n", filename);
+        }
+        return true;
+      }
       // Alignment combo: userdata is the literal NEUI_ATTR_ALIGN_TEXT
       // value ("left" / "center" / "right"). Push it onto the section
       // and let the xpl host's a_set_string invalidate the repaint.
@@ -421,28 +437,37 @@ int main(int argc, char** argv) {
   app.items->add(sess, list, "Nu",      (void*)13);
   app.items->set_selected(sess, list, 0);
 
-  // --- Left column, lower section: rotation slider + rotating image ------
-  // Demonstrates the renderer transform stack: the slider's
-  // NEUI_EVENT_VALUE_CHANGED handler writes NEUI_ATTR_ROTATION on the image,
-  // and ImageWidget::paint applies the rotation around the image centre via
-  // push_transform / translate / rotate / pop_transform.
-  auto rot_label = app.widgets->create(sess, win, NEUI_W_LABEL,
-                                        5, 295, 195, 20, nullptr);
-  app.widgets->set_text(sess, rot_label, "Rotation:");
+  // --- Left column, lower section: image-source combo + rotation slider +
+  // rotating image. Demonstrates two live attribute paths on the IMAGE
+  // widget: NEUI_ATTR_ROTATION (driven by the slider) and the widget's
+  // text source filename (driven by the image combo). Both update the
+  // same widget on each paint.
+  auto image_label = app.widgets->create(sess, win, NEUI_W_LABEL,
+                                          5, 290, 195, 20, nullptr);
+  app.widgets->set_text(sess, image_label, "Image:");
+
+  // Combo height = COMBO_COLLAPSED_H (22) + room for the 3-item dropdown.
+  // Only the top 22 px is visually rendered when collapsed; siblings
+  // sitting in the lower phantom area (the slider just below) are fine.
+  auto image_combo = app.widgets->create(sess, win, NEUI_W_COMBOBOX,
+                                          5, 313, 195, 76, nullptr);
+  app.image_combo_id = image_combo.id;
+  // Userdata is the literal filename so the ITEM_SELECTED handler can
+  // pass it straight to widgets->set_text(rot_image, ...).
+  app.items->add(sess, image_combo, "Lemur", (void*)"lemur.jpg");
+  app.items->add(sess, image_combo, "Lion",  (void*)"lion.jpg");
+  app.items->add(sess, image_combo, "Panda", (void*)"panda.jpg");
+  app.items->set_selected(sess, image_combo, 0);  // default: Lemur
 
   auto rot_slider = app.widgets->create(sess, win, NEUI_W_SLIDER,
-                                         5, 320, 195, 28, nullptr);
+                                         5, 345, 195, 28, nullptr);
   app.rot_slider_id = rot_slider.id;
   if (app.attrs)
     app.attrs->set_float(sess, rot_slider, NEUI_PARAM_VALUE, 0.0f);
 
-  auto rot_img_label = app.widgets->create(sess, win, NEUI_W_LABEL,
-                                            5, 360, 195, 20, nullptr);
-  app.widgets->set_text(sess, rot_img_label, "Rotating image:");
-
   auto rot_image = app.widgets->create(sess, win, NEUI_W_IMAGE,
-                                        5, 385, 195, 195, nullptr);
-  app.widgets->set_text(sess, rot_image, "myimage.png");
+                                        5, 380, 195, 200, nullptr);
+  app.widgets->set_text(sess, rot_image, "lemur.jpg");
   app.rot_image_id = rot_image.id;
   if (app.attrs)
     app.attrs->set_float(sess, rot_image, NEUI_ATTR_ROTATION, 0.0f);
