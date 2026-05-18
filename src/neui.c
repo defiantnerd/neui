@@ -2,10 +2,6 @@
 #include <string.h>
 #include "neui/neui.h"
 
-void neui_hello(void) {
-    printf("Hello from neui library!\n");
-}
-
 // ---------------------------------------------------------------------------
 // Host registry
 // ---------------------------------------------------------------------------

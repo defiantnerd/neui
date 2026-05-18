@@ -23,9 +23,6 @@
 extern "C" {
 #endif
 
-
-  void neui_hello(void);
-
   // Register a host implementation under a given identifier.
   // Called by the host at startup, before main() runs.
   void neui_register(const char* id, neui_api_t* api);

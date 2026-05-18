@@ -12,8 +12,8 @@
 //   "neui.host.macos"          - native AppKit controls (macOS only)
 //   "neui.host.crossplatform"  - pluggable-backend host (D2D on Windows, CG on macOS)
 #ifdef _WIN32
-#define ACTIVE_HOST "neui.host.crossplatform"
-#define ACTIVE_HOSTx "neui.host.win32"
+#define ACTIVE_HOSTx "neui.host.crossplatform"
+#define ACTIVE_HOST "neui.host.win32"
 #elif defined(__APPLE__)
 #define ACTIVE_HOSTx "neui.host.crossplatform"
 #define ACTIVE_HOST "neui.host.macos"
@@ -338,7 +338,6 @@ int main(int argc, char** argv) {
   (void)argc; (void)argv;
   AppState app;
 
-  neui_hello();
   neui_register_xplhost();
 #ifdef __APPLE__
   neui_register_macoshost();
