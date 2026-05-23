@@ -85,25 +85,17 @@ namespace win32_host {
     // Menu bar (NEUI_W_MENUBAR): HMENU created immediately; no HWND
     HMENU hmenu = nullptr;
 
-    // Image (NEUI_W_IMAGE): per-widget D2D render context and bitmap.
-    // Two source modes, mutually exclusive (last-set-wins):
-    //   * Path source (legacy): text holds the file path; image_bitmap /
-    //     image_pixels / image_* dimensions cache the per-widget upload.
-    //   * Asset source (NEUI_API_ASSETS): image_asset holds the handle;
-    //     pixels live in W32AssetManager and the per-ctx GPU bitmap
-    //     uploads on first paint (see ImageWndProc WM_PAINT).
-    // image_asset != asset_none means the asset path is live; setting
-    // it via widget_set_asset clears text + the legacy fields below,
-    // and vice-versa.
-    neui_render_ctx_t image_ctx    = nullptr;  // D2D context bound to the image HWND
-    void*             image_bitmap = nullptr;  // opaque D2D bitmap (from create_bitmap) - legacy path source
-    float             image_scale  = 0.0f;     // HiDPI scale at which the bitmap was loaded
-    uint32_t          image_width_px  = 0;     // physical pixel dimensions of the source
-    uint32_t          image_height_px = 0;     //   image, used for aspect-preserving fit
-    uint32_t          image_bitmap_generation = 0;  // ctx generation at upload; re-upload on mismatch (device-loss)
-    std::vector<uint8_t> image_pixels;         // CPU copy of the loaded BGRA8 (premultiplied) pixels
-                                               //   - kept so we can re-upload after D2DERR_RECREATE_TARGET
-    neui_asset_t      image_asset  = asset_none; // public-asset source; takes precedence when != asset_none
+    // Image (NEUI_W_IMAGE): sole widget-local source is the asset handle.
+    // Two source kinds, mutually exclusive:
+    //   * Client-supplied (widget_set_asset): client owns the handle and
+    //     calls assets->destroy when done. image_asset_owned = false.
+    //   * Widget-owned-from-path (widget_set_text): the widget allocated
+    //     a W32AssetManager slot internally and must release it on
+    //     re-set / set_asset / widget_destroy. image_asset_owned = true.
+    // Invariant: image_asset_owned == true implies image_asset != asset_none
+    // and the slot lives in this session's _asset_manager.
+    neui_asset_t image_asset       = asset_none;
+    bool         image_asset_owned = false;
 
     // Treeview item data
     struct TreeItemData {

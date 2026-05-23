@@ -16,7 +16,6 @@ namespace win32_host
   HINSTANCE get_hinstance();
   void register_classes();
   LRESULT CALLBACK AppWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-  LRESULT CALLBACK ImageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   LRESULT CALLBACK PaintedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   LRESULT CALLBACK ChildSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 

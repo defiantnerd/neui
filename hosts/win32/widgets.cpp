@@ -40,6 +40,11 @@ namespace win32_host
   // Forward declarations used by helpers higher up in this file.
   static int NEUI_ABI popup_menu(neui_session_t session, neui_widget_t anchor,
                                   int x, int y, const char* const* items);
+  // Pack (session_id, slot) into a neui_asset_t handle. Defined later in
+  // this TU (alongside the rest of the asset API); forward-declared here
+  // because widget_set_text / cascade_dpi / create_child_windows all
+  // allocate internal asset slots for the legacy path-source IMAGE branch.
+  static neui_asset_t pack_asset_w32(uint32_t session_id, uint32_t slot);
 
   neui_widget_t IndexToWidget(uint32_t session_id, uint32_t idx)
   {
@@ -163,105 +168,35 @@ namespace win32_host
     return CreateFontIndirectW(&ncm.lfMessageFont);
   }
 
-  // -------------------------------------------------------------------------
-  // Image asset helpers - thin wrapper over the shared WIC decoder in
-  // hosts/shared/win32/image_loader_win32.h (resource-first, then disk).
-
-  static uint8_t* load_wic_pixels(const char* path, uint32_t* w_out, uint32_t* h_out)
+  // Re-allocate an IMAGE widget's internally-owned asset slot at a new
+  // DPI scale so the @2x / @3x variant re-picks. No-op for client-owned
+  // assets (the client chose the scale at create_from_file time) and
+  // when the resolved variant scale hasn't changed (cheap fast path
+  // across DPI flips that don't cross an @Nx boundary).
+  static void reload_image_asset_for_dpi_w32(WidgetData& wd, UINT new_dpi)
   {
-    return neui_detail::load_image_bgra8_w32(path, w_out, h_out);
-  }
+    if (!wd.image_asset_owned)              return;
+    if (wd.image_asset.id == asset_none.id) return;
+    if (!wd.session)                        return;
+    if (wd.text.empty())                    return;
 
-  // Resolve @2x / @3x filename variants. Returns the best available path, or "".
-  // Preference order matches DPI scale; if no preferred variant nor the base
-  // file exists, the higher-resolution variants are tried as a last-resort
-  // fallback so a deployment that ships only @2x assets still loads on a
-  // 96-DPI screen (the bitmap is then downscaled at draw time).
-  static std::string resolve_image_path(const std::string& name, float scale)
-  {
-    auto dot = name.rfind('.');
-    std::string base = (dot == std::string::npos) ? name : name.substr(0, dot);
-    std::string ext  = (dot == std::string::npos) ? "" : name.substr(dot);
+    float new_scale = static_cast<float>(new_dpi) / 96.0f;
+    uint32_t slot = wd.image_asset.id & 0xffff;
+    auto* entry = wd.session->_asset_manager.get_slot(slot);
+    if (entry && new_scale == entry->scale) return;
 
-    auto try_load = [&](const std::string& path) -> bool {
-      uint32_t w = 0, h = 0;
-      uint8_t* raw = load_wic_pixels(path.c_str(), &w, &h);
-      if (!raw) return false;
-      delete[] raw;
-      return true;
-    };
-
-    if (scale > 2.0f) {
-      if (try_load(base + "@3x" + ext)) return base + "@3x" + ext;
-      if (try_load(base + "@2x" + ext)) return base + "@2x" + ext;
-    } else if (scale > 1.0f) {
-      if (try_load(base + "@2x" + ext)) return base + "@2x" + ext;
-    }
-    if (try_load(name)) return name;
-    // Final fallback: try the higher-res variants the scale branch above
-    // didn't already attempt. Lets a deployment ship only @2x (or @3x)
-    // assets without a base file - on a 96-DPI screen the bitmap then
-    // displays at its native pixel density, downscaled at draw time.
-    if (scale <= 1.0f) {
-      if (try_load(base + "@2x" + ext)) return base + "@2x" + ext;
-    }
-    if (scale <= 2.0f) {
-      if (try_load(base + "@3x" + ext)) return base + "@3x" + ext;
-    }
-    return {};
-  }
-
-  // Load (or reload) the D2D image bitmap for an image widget.
-  // Requires wd.image_ctx to already be set (done in ImageWndProc WM_CREATE).
-  static void load_image_bitmap(WidgetData& wd, UINT parent_dpi)
-  {
     auto* backend = neui_d2d_backend::get_backend();
-    if (!backend || !wd.image_ctx) return;
+    wd.session->_asset_manager.release_slot(slot, backend);
+    wd.image_asset        = asset_none;
+    wd.image_asset_owned  = false;
 
-    // Release old D2D bitmap.
-    if (wd.image_bitmap) {
-      backend->destroy_bitmap(wd.image_ctx, wd.image_bitmap);
-      wd.image_bitmap     = nullptr;
-      wd.image_scale      = 0.0f;
-      wd.image_width_px   = 0;
-      wd.image_height_px  = 0;
-      wd.image_pixels.clear();
-      wd.image_bitmap_generation = 0;
+    uint32_t new_slot = wd.session->_asset_manager.allocate_from_file(
+      wd.text, new_scale);
+    if (new_slot != 0) {
+      wd.image_asset       = pack_asset_w32(wd.session->session_id(), new_slot);
+      wd.image_asset_owned = true;
     }
-    if (wd.text.empty()) return;
-
-    float scale = static_cast<float>(parent_dpi) / 96.0f;
-    std::string path = resolve_image_path(wd.text, scale);
-    if (path.empty()) return;
-
-    // Determine actual scale of the resolved path.
-    auto dot  = wd.text.rfind('.');
-    std::string base = (dot == std::string::npos) ? wd.text : wd.text.substr(0, dot);
-    std::string ext  = (dot == std::string::npos) ? "" : wd.text.substr(dot);
-    float actual_scale = (path == base + "@3x" + ext) ? 3.0f
-                       : (path == base + "@2x" + ext) ? 2.0f
-                       : 1.0f;
-
-    uint32_t w = 0, h = 0;
-    uint8_t* pixels = load_wic_pixels(path.c_str(), &w, &h);
-    if (!pixels) return;
-
-    wd.image_bitmap     = backend->create_bitmap(wd.image_ctx, w, h, pixels, actual_scale);
-    wd.image_width_px   = w;
-    wd.image_height_px  = h;
-    wd.image_scale      = actual_scale;
-    // Stash a CPU copy so we can re-upload the bitmap if the D2D target
-    // gets recreated underneath us (device-loss / mode change). Without
-    // this the IMAGE widget would go blank on next paint with no way back
-    // short of re-reading from disk. ~4 bytes per pixel - same memory the
-    // WIC loader already produced, just retained.
-    wd.image_pixels.assign(pixels,
-                            pixels + static_cast<size_t>(w) * h * 4);
-    wd.image_bitmap_generation = backend->get_context_generation
-      ? backend->get_context_generation(wd.image_ctx) : 0u;
-    delete[] pixels;
-
-    if (wd.hwnd) InvalidateRect(wd.hwnd, nullptr, TRUE);
+    if (wd.hwnd) InvalidateRect(wd.hwnd, nullptr, FALSE);
   }
 
   // -------------------------------------------------------------------------
@@ -635,6 +570,119 @@ namespace win32_host
   }
 
   // -------------------------------------------------------------------------
+  // IMAGE (neui.painted seam) - non-interactive aspect-fitted bitmap.
+  // Source is the widget's image_asset; both legacy path-source
+  // (allocated internally by widget_set_text) and client-supplied
+  // handles flow through here. PaintedWndProc has already cleared the
+  // surface to the resolved background (NEUI_ATTR_BACKGROUND > theme
+  // panel_bg > system COLOR_WINDOW), so we just lazy-upload the GPU
+  // bitmap and draw it.
+
+  static void paint_image_w32(neui_render_backend_t* backend,
+                               neui_render_ctx_t      ctx,
+                               float w, float h,
+                               WidgetData&            wd,
+                               bool                   /*focused*/)
+  {
+    if (wd.image_asset.id == asset_none.id) return;
+    if (!wd.session) return;
+
+    // Outer transform + clip mirror paint_customdraw_w32 so client-set
+    // rotation can't draw outside the widget rect.
+    if (backend->push_transform) backend->push_transform(ctx);
+    if (backend->push_clip)      backend->push_clip(ctx, 0.0f, 0.0f, w, h);
+
+    uint32_t asset_sess = (wd.image_asset.id >> 16) & 0xffff;
+    if (asset_sess != (wd.session->session_id() & 0xffff)) {
+      if (backend->pop_clip)      backend->pop_clip(ctx);
+      if (backend->pop_transform) backend->pop_transform(ctx);
+      return;
+    }
+
+    uint32_t slot = wd.image_asset.id & 0xffff;
+    auto* entry = wd.session->_asset_manager.get_slot(slot);
+    if (!entry) {
+      if (backend->pop_clip)      backend->pop_clip(ctx);
+      if (backend->pop_transform) backend->pop_transform(ctx);
+      return;
+    }
+
+    // Lazy GPU upload per (asset, ctx) pair with device-loss check
+    // (mirrors w32_painter_draw_asset_thunk).
+    const uint32_t gen = backend->get_context_generation
+      ? backend->get_context_generation(ctx) : 0u;
+    auto it = entry->bitmaps.find(ctx);
+    if (it != entry->bitmaps.end() && it->second.generation != gen) {
+      if (backend->destroy_bitmap && it->second.bmp)
+        backend->destroy_bitmap(ctx, it->second.bmp);
+      entry->bitmaps.erase(it);
+      it = entry->bitmaps.end();
+    }
+    if (it == entry->bitmaps.end()) {
+      if (!backend->create_bitmap) {
+        if (backend->pop_clip)      backend->pop_clip(ctx);
+        if (backend->pop_transform) backend->pop_transform(ctx);
+        return;
+      }
+      void* bmp = backend->create_bitmap(ctx,
+                                          entry->width_px, entry->height_px,
+                                          entry->pixels.data(),
+                                          entry->scale);
+      if (!bmp) {
+        if (backend->pop_clip)      backend->pop_clip(ctx);
+        if (backend->pop_transform) backend->pop_transform(ctx);
+        return;
+      }
+      it = entry->bitmaps.emplace(ctx, W32CtxBitmap{ bmp, gen }).first;
+    }
+
+    // Aspect-preserving fit: scale the source to touch one of the widget
+    // bounds and centre on the other axis (letterbox / pillarbox).
+    float dst_x = 0.0f, dst_y = 0.0f, dst_w = w, dst_h = h;
+    float img_w_log = (entry->scale > 0.0f)
+      ? static_cast<float>(entry->width_px)  / entry->scale : 0.0f;
+    float img_h_log = (entry->scale > 0.0f)
+      ? static_cast<float>(entry->height_px) / entry->scale : 0.0f;
+    if (img_w_log > 0.0f && img_h_log > 0.0f && w > 0.0f && h > 0.0f) {
+      float widget_aspect = w / h;
+      float image_aspect  = img_w_log / img_h_log;
+      if (image_aspect > widget_aspect) {
+        dst_w = w;
+        dst_h = w / image_aspect;
+        dst_x = 0.0f;
+        dst_y = (h - dst_h) * 0.5f;
+      } else {
+        dst_h = h;
+        dst_w = h * image_aspect;
+        dst_y = 0.0f;
+        dst_x = (w - dst_w) * 0.5f;
+      }
+    }
+
+    // Optional rotation around the destination centre (the aspect-fitted
+    // rect, so rotation doesn't wobble when the image is letterboxed).
+    float rot = (wd.attrs ? wd.attrs->get_float(NEUI_ATTR_ROTATION, 0.0f) : 0.0f);
+    bool rotated = (rot != 0.0f) && backend->push_transform != nullptr;
+    if (rotated) {
+      float cx = dst_x + dst_w * 0.5f;
+      float cy = dst_y + dst_h * 0.5f;
+      backend->push_transform(ctx);
+      backend->translate(ctx,  cx,  cy);
+      backend->rotate   (ctx, rot);
+      backend->translate(ctx, -cx, -cy);
+    }
+
+    if (backend->draw_bitmap)
+      backend->draw_bitmap(ctx, it->second.bmp,
+                            0.0f, 0.0f, 0.0f, 0.0f,
+                            dst_x, dst_y, dst_w, dst_h);
+
+    if (rotated)                  backend->pop_transform(ctx);
+    if (backend->pop_clip)        backend->pop_clip(ctx);
+    if (backend->pop_transform)   backend->pop_transform(ctx);
+  }
+
+  // -------------------------------------------------------------------------
   // SECTION (neui.painted seam) - non-interactive coloured backdrop with
   // an optional title chip. paint_section_w32 delegates to the shared
   // helper so the visual matches the xpl host. apply_section_region_w32
@@ -738,11 +786,15 @@ namespace win32_host
 
   static HWND CreateChildHwnd(WidgetData& wd, HWND parent_hwnd, UINT parent_dpi)
   {
-    // Image widget uses a custom WndProc (not a standard control class).
+    // Image widget: shared "neui.painted" class; paint_fn does aspect-fit
+    // + rotation + draw_bitmap. Non-interactive (no subclass, no
+    // painted_msg_fn, emit_events stays false), so it matches the SECTION
+    // shape rather than KNOB / CUSTOMDRAW.
     if (!strcmp(wd.type, NEUI_W_IMAGE)) {
       DWORD style = WS_CHILD;
       if (wd.visible) style |= WS_VISIBLE;
-      return CreateWindowExW(0, L"neui.image", L"", style,
+      wd.paint_fn = &paint_image_w32;
+      HWND hwnd = CreateWindowExW(0, L"neui.painted", L"", style,
         LogicalToPhysical(wd.x, parent_dpi),
         LogicalToPhysical(wd.y, parent_dpi),
         LogicalToPhysical(wd.width, parent_dpi),
@@ -751,6 +803,8 @@ namespace win32_host
         reinterpret_cast<HMENU>(static_cast<UINT_PTR>(wd.index)),
         get_hinstance(),
         &wd);
+      if (hwnd) wd.hwnd = hwnd;
+      return hwnd;
     }
 
     // Knob (and future painted controls) use the shared "neui.painted" class.
@@ -1001,26 +1055,22 @@ namespace win32_host
           int new_h = LogicalToPhysical(wd.height, new_dpi);
           SetWindowPos(wd.hwnd, nullptr, new_x, new_y, new_w, new_h,
                        SWP_NOZORDER | SWP_NOACTIVATE);
-          // Painted widgets (KNOB, SECTION, IMAGE) own a per-widget D2D
-          // context whose DPI must be reset so DrawText / fill_rect map
-          // logical → physical at the new ratio. The SetWindowPos above
-          // already fires WM_SIZE which handles the swap-chain resize.
+          // Painted widgets (KNOB, SECTION, IMAGE, CUSTOMDRAW) own a
+          // per-widget D2D context whose DPI must be reset so DrawText
+          // / fill_rect map logical → physical at the new ratio. The
+          // SetWindowPos above already fires WM_SIZE which handles the
+          // swap-chain resize.
           auto* backend = neui_d2d_backend::get_backend();
-          if (backend && backend->update_dpi) {
-            if (wd.paint_ctx) backend->update_dpi(wd.paint_ctx, new_dpi);
-            if (wd.image_ctx) backend->update_dpi(wd.image_ctx, new_dpi);
-          }
+          if (backend && backend->update_dpi && wd.paint_ctx)
+            backend->update_dpi(wd.paint_ctx, new_dpi);
           // Section: window region was computed in old physical px;
           // recompute against the new DPI.
           if (wd.type && !strcmp(wd.type, NEUI_W_SECTION))
             apply_section_region_w32(wd);
-          // Image: reload the bitmap at the new logical→physical scale
-          // (matches the WM_DPICHANGED branch in create_child_windows).
-          if (wd.type && !strcmp(wd.type, NEUI_W_IMAGE) && wd.image_ctx) {
-            float new_scale = static_cast<float>(new_dpi) / 96.0f;
-            if (new_scale != wd.image_scale)
-              load_image_bitmap(wd, new_dpi);
-          }
+          // Image: re-pick the @Nx asset variant if the new DPI scale
+          // crosses a boundary (no-op for client-owned assets).
+          if (wd.type && !strcmp(wd.type, NEUI_W_IMAGE))
+            reload_image_asset_for_dpi_w32(wd, new_dpi);
           // Native control refresh belt-and-suspenders: most native
           // controls auto-recompute row layout when WM_SETFONT arrives
           // from the follow-up create_child_windows pass, but a handful
@@ -1126,16 +1176,11 @@ namespace win32_host
         if (child.hwnd && parent_wd.hfont) {
           SendMessageW(child.hwnd, WM_SETFONT, (WPARAM)parent_wd.hfont, TRUE);
         }
-        // Reload image bitmap when DPI changes.
-        if (child.hwnd && child.type && !strcmp(child.type, NEUI_W_IMAGE)) {
-          float new_scale = static_cast<float>(parent_dpi) / 96.0f;
-          if (new_scale != child.image_scale) {
-            auto* backend = neui_d2d_backend::get_backend();
-            if (backend && child.image_ctx)
-              backend->update_dpi(child.image_ctx, parent_dpi);
-            load_image_bitmap(child, parent_dpi);
-          }
-        }
+        // Re-pick the IMAGE asset variant if the parent's DPI scale
+        // crossed a boundary since the slot was allocated (no-op for
+        // client-owned assets).
+        if (child.hwnd && child.type && !strcmp(child.type, NEUI_W_IMAGE))
+          reload_image_asset_for_dpi_w32(child, parent_dpi);
         create_child_windows(child_idx);
       }
       child_idx = _widgets.next(child_idx);
@@ -1236,6 +1281,15 @@ namespace win32_host
       RemoveWindowSubclass(w.hwnd, ChildSubclassProc, 1);
       w.has_subclass = false;
     }
+    // IMAGE internal asset slot (if any) is the widget's responsibility
+    // to release. Per-ctx GPU bitmaps cached against paint_ctx are
+    // dropped by PaintedWndProc::WM_DESTROY via release_context.
+    if (w.image_asset_owned && w.image_asset.id != asset_none.id) {
+      _asset_manager.release_slot(w.image_asset.id & 0xffff,
+                                   neui_d2d_backend::get_backend());
+      w.image_asset       = asset_none;
+      w.image_asset_owned = false;
+    }
     if (w.hwnd) {
       DestroyWindow(w.hwnd);
       w.hwnd = nullptr;
@@ -1252,17 +1306,6 @@ namespace win32_host
       DeleteObject(w.section_ctl_bg_brush);
       w.section_ctl_bg_brush      = nullptr;
       w.section_ctl_bg_brush_argb = 0;
-    }
-    // D2D bitmap and context are freed in ImageWndProc WM_DESTROY (triggered by
-    // DestroyWindow above). Guard here in case the HWND was already gone.
-    if (w.image_bitmap || w.image_ctx) {
-      auto* backend = neui_d2d_backend::get_backend();
-      if (backend) {
-        if (w.image_bitmap) backend->destroy_bitmap(w.image_ctx, w.image_bitmap);
-        if (w.image_ctx)    backend->destroy_context(w.image_ctx);
-      }
-      w.image_bitmap = nullptr;
-      w.image_ctx    = nullptr;
     }
     if (w.hmenu) {
       DestroyMenu(w.hmenu);
@@ -1426,11 +1469,27 @@ namespace win32_host
     auto& w = _widgets[index];
     w.text = text ? text : "";
     if (w.type && !strcmp(w.type, NEUI_W_IMAGE)) {
-      // For image widgets the text is the image filename. set_text and
-      // set_asset are mutually clearing: assigning a path here drops
-      // any bound asset handle so the legacy path source becomes live.
-      w.image_asset = asset_none;
-      if (w.hwnd) load_image_bitmap(w, get_dpi_for_widget(index));
+      // IMAGE source: text path is allocated as an internally-owned asset
+      // slot via the session's W32AssetManager. The slot is released on
+      // re-set (here), on widget_set_asset, and on widget_destroy.
+      // Client-supplied asset handles (image_asset_owned == false) are
+      // simply dropped - the client still owns them via assets->destroy.
+      auto* backend = neui_d2d_backend::get_backend();
+      if (w.image_asset_owned && w.image_asset.id != asset_none.id) {
+        _asset_manager.release_slot(w.image_asset.id & 0xffff, backend);
+      }
+      w.image_asset       = asset_none;
+      w.image_asset_owned = false;
+
+      if (!w.text.empty()) {
+        float scale = static_cast<float>(get_dpi_for_widget(index)) / 96.0f;
+        uint32_t slot = _asset_manager.allocate_from_file(w.text, scale);
+        if (slot != 0) {
+          w.image_asset       = pack_asset_w32(_session_id, slot);
+          w.image_asset_owned = true;
+        }
+      }
+      if (w.hwnd) InvalidateRect(w.hwnd, nullptr, FALSE);
     } else if (w.type && !strcmp(w.type, NEUI_W_SECTION)) {
       // Section: text is the header title; chip width and the window
       // region both depend on it. Rebuild + repaint.
@@ -2559,17 +2618,12 @@ namespace win32_host
     return nullptr;
   }
 
-  // Bind an asset handle as the IMAGE widget's source. Drops any
-  // previous path-loaded bitmap (the legacy image_pixels / image_bitmap
-  // pair) so the asset becomes the sole source - matches set_text's
-  // mutual-clearing contract.
-  //
-  // The per-ctx GPU upload for the asset is owned by the session's
-  // W32AssetManager and lazily materialised on first paint by the
-  // helper in ImageWndProc::WM_PAINT. The IMAGE widget's image_ctx is
-  // used as the cache key, so on widget destroy the ImageWndProc
-  // WM_DESTROY path must call _asset_manager.release_context to drop
-  // the now-orphaned per-ctx bitmap entry.
+  // Bind an asset handle as the IMAGE widget's source. Releases the
+  // widget's internally-owned slot (allocated by widget_set_text) if
+  // any, then stores the client-supplied handle so paint_image_w32
+  // resolves it on the next frame. The per-ctx GPU upload happens
+  // lazily on first paint and is cleaned up by PaintedWndProc's
+  // WM_DESTROY via _asset_manager.release_context.
   void Session::widget_set_asset(neui_widget_t widget, neui_asset_t asset)
   {
     uint32_t index = WidgetToIndex(widget);
@@ -2577,30 +2631,23 @@ namespace win32_host
     auto& w = _widgets[index];
     if (!w.type || strcmp(w.type, NEUI_W_IMAGE) != 0) return;
 
-    // Reject cross-session handles (matches the painter's draw_asset
-    // contract). asset_none always passes - it's the documented clear.
+    // Reject cross-session handles before touching state - keeps a
+    // rejected call a true no-op. asset_none always passes (documented
+    // clear).
     if (asset.id != asset_none.id &&
         ((asset.id >> 16) & 0xffff) != (_session_id & 0xffff)) {
       return;
     }
 
-    // Drop the legacy path-source bitmap if any. The handle path will
-    // upload on first paint via the asset manager; we don't pre-upload
-    // here because the widget may not have shown yet (image_ctx can be
-    // null pre-show).
-    auto* backend = neui_d2d_backend::get_backend();
-    if (w.image_bitmap && w.image_ctx && backend && backend->destroy_bitmap) {
-      backend->destroy_bitmap(w.image_ctx, w.image_bitmap);
+    // Release the previous internal slot (only ours to free; client-
+    // supplied handles stay owned by the client).
+    if (w.image_asset_owned && w.image_asset.id != asset_none.id) {
+      _asset_manager.release_slot(w.image_asset.id & 0xffff,
+                                   neui_d2d_backend::get_backend());
     }
-    w.image_bitmap = nullptr;
-    w.image_pixels.clear();
-    w.image_scale = 0.0f;
-    w.image_width_px = 0;
-    w.image_height_px = 0;
-    w.image_bitmap_generation = 0;
-
-    w.image_asset = asset;
-    w.text.clear();  // mutual-clear: asset path is now live, drop the path source
+    w.image_asset       = asset;
+    w.image_asset_owned = false;
+    w.text.clear();  // mutual-clear: asset path is live, drop the path
 
     if (w.hwnd) InvalidateRect(w.hwnd, nullptr, FALSE);
   }
