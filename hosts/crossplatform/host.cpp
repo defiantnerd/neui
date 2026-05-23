@@ -8,6 +8,7 @@
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_section.h"
 #include "../shared/theme_palette.h"
+#include "../shared/painter.h"
 #ifdef _WIN32
 #include "../shared/win32/theme_provider_win32.h"
 #include "../shared/win32/dark_menu_win32.h"
@@ -120,6 +121,7 @@ namespace xpl_host
   extern neui_attr_api_t      attrs_api;
   extern neui_clipboard_api_t clipboard_api;
   extern neui_commands_api_t  commands_api;
+  extern neui_asset_api_t     asset_api;
 
   // -------------------------------------------------------------------------
   // Session management
@@ -159,6 +161,7 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_ATTRS))     return &attrs_api;
     if (!strcmp(iface, NEUI_API_CLIPBOARD)) return &clipboard_api;
     if (!strcmp(iface, NEUI_API_COMMANDS))  return &commands_api;
+    if (!strcmp(iface, NEUI_API_ASSETS))    return &asset_api;
     return nullptr;
   }
 
@@ -1874,6 +1877,94 @@ namespace xpl_host
   }
 
   // ---- KnobWidget ----------------------------------------------------------
+
+  // Thunk: resolves a neui_asset_t against the session's AssetManager and
+  // draws it via backend->draw_bitmap. Wired into neui_painter::draw_asset
+  // _thunk so the curated painter API can dispatch asset draws without
+  // exposing the raw bitmap pointer to clients.
+  static void NEUI_ABI xpl_painter_draw_asset_thunk(
+      void* host_token,
+      neui_render_backend_t* backend,
+      neui_render_ctx_t ctx,
+      neui_asset_t asset,
+      float x, float y, float w, float h)
+  {
+    auto* s = static_cast<Session*>(host_token);
+    if (!s || !backend || !ctx) return;
+    if (asset.id == asset_none.id) return;
+    // Reject cross-session handles.
+    if (((asset.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return;
+    uint32_t slot = asset.id & 0xffff;
+    auto* entry = s->_asset_manager.get_slot(slot);
+    if (!entry) return;
+    // Lazy GPU upload for this (asset, ctx) pair, with device-loss check.
+    // If the backend has bumped its per-ctx generation (D2D after
+    // D2DERR_RECREATE_TARGET) any cached handle is dangling - drop it
+    // and re-upload against the new target.
+    const uint32_t gen = backend->get_context_generation
+      ? backend->get_context_generation(ctx) : 0u;
+    auto it = entry->bitmaps.find(ctx);
+    if (it != entry->bitmaps.end() && it->second.generation != gen) {
+      if (backend->destroy_bitmap && it->second.bmp)
+        backend->destroy_bitmap(ctx, it->second.bmp);
+      entry->bitmaps.erase(it);
+      it = entry->bitmaps.end();
+    }
+    if (it == entry->bitmaps.end()) {
+      if (!backend->create_bitmap) return;
+      void* bmp = backend->create_bitmap(ctx,
+                                          entry->width_px, entry->height_px,
+                                          entry->pixels.data(),
+                                          entry->scale);
+      if (!bmp) return;
+      it = entry->bitmaps.emplace(ctx,
+                                   neui_detail::CtxBitmap{ bmp, gen }).first;
+    }
+    if (backend->draw_bitmap)
+      backend->draw_bitmap(ctx, it->second.bmp,
+                            0.0f, 0.0f, 0.0f, 0.0f,    // full bitmap
+                            x, y, w, h);
+  }
+
+  // CUSTOMDRAW - hands the curated painter API to the client and lets
+  // them draw. We translate so (0, 0) is the widget's top-left (the
+  // recursive paint walk only pushes a translate when descending INTO
+  // this widget's children, so our own paint runs in parent space) and
+  // clip to the widget's bounds so a client that overdraws can't corrupt
+  // sibling widgets. State changes the client leaves on the stack are
+  // unwound by the matching pops below.
+  void CustomDrawWidget::paint(neui_render_backend_t* backend,
+                                neui_render_ctx_t ctx, bool is_focused)
+  {
+    if (!session) return;
+
+    const float fw = static_cast<float>(width);
+    const float fh = static_cast<float>(height);
+
+    if (backend->push_transform) backend->push_transform(ctx);
+    if (backend->translate)
+      backend->translate(ctx, static_cast<float>(x), static_cast<float>(y));
+    if (backend->push_clip) backend->push_clip(ctx, 0.0f, 0.0f, fw, fh);
+
+    neui_painter painter{};
+    painter.backend          = backend;
+    painter.ctx              = ctx;
+    painter.host_token       = session;
+    painter.draw_asset_thunk = &xpl_painter_draw_asset_thunk;
+
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_WIDGET_PAINT;
+    ev.data.paint.widget.id  = widget_id;
+    ev.data.paint.painter_api = &neui_detail::k_painter_api;
+    ev.data.paint.p           = &painter;
+    ev.data.paint.width       = fw;
+    ev.data.paint.height      = fh;
+    ev.data.paint.focused     = is_focused;
+    session->dispatch_event(&ev);
+
+    if (backend->pop_clip) backend->pop_clip(ctx);
+    if (backend->pop_transform) backend->pop_transform(ctx);
+  }
 
   void KnobWidget::paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
                           bool is_focused)

@@ -17,6 +17,7 @@
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_section.h"
 #include "../shared/theme_palette.h"
+#include "../shared/painter.h"
 #include <commctrl.h>
 
 namespace win32_host
@@ -224,6 +225,8 @@ namespace win32_host
       wd.image_scale      = 0.0f;
       wd.image_width_px   = 0;
       wd.image_height_px  = 0;
+      wd.image_pixels.clear();
+      wd.image_bitmap_generation = 0;
     }
     if (wd.text.empty()) return;
 
@@ -246,8 +249,17 @@ namespace win32_host
     wd.image_bitmap     = backend->create_bitmap(wd.image_ctx, w, h, pixels, actual_scale);
     wd.image_width_px   = w;
     wd.image_height_px  = h;
+    wd.image_scale      = actual_scale;
+    // Stash a CPU copy so we can re-upload the bitmap if the D2D target
+    // gets recreated underneath us (device-loss / mode change). Without
+    // this the IMAGE widget would go blank on next paint with no way back
+    // short of re-reading from disk. ~4 bytes per pixel - same memory the
+    // WIC loader already produced, just retained.
+    wd.image_pixels.assign(pixels,
+                            pixels + static_cast<size_t>(w) * h * 4);
+    wd.image_bitmap_generation = backend->get_context_generation
+      ? backend->get_context_generation(wd.image_ctx) : 0u;
     delete[] pixels;
-    wd.image_scale = actual_scale;
 
     if (wd.hwnd) InvalidateRect(wd.hwnd, nullptr, TRUE);
   }
@@ -525,6 +537,104 @@ namespace win32_host
   }
 
   // -------------------------------------------------------------------------
+  // CUSTOMDRAW (neui.painted seam) - hands the curated painter API to the
+  // client via NEUI_EVENT_WIDGET_PAINT. The transform / clip pushes isolate
+  // client state changes so a missing pop doesn't corrupt the next frame.
+  // paint_fn runs after PaintedWndProc's begin_frame, so the surface is
+  // already cleared to the resolved background colour (NEUI_ATTR_BACKGROUND
+  // > theme panel_bg > system COLOR_WINDOW).
+
+  // Resolves a neui_asset_t against the session's W32AssetManager and
+  // draws via backend->draw_bitmap. Wired into neui_painter::draw_asset
+  // _thunk so the curated painter API can dispatch asset draws without
+  // exposing the raw bitmap pointer to clients.
+  static void NEUI_ABI w32_painter_draw_asset_thunk(
+      void* host_token,
+      neui_render_backend_t* backend,
+      neui_render_ctx_t ctx,
+      neui_asset_t asset,
+      float x, float y, float w, float h)
+  {
+    auto* s = static_cast<Session*>(host_token);
+    if (!s || !backend || !ctx) return;
+    if (asset.id == asset_none.id) return;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return;
+    uint32_t slot = asset.id & 0xffff;
+    auto* entry = s->_asset_manager.get_slot(slot);
+    if (!entry) return;
+    // Lazy GPU upload per (asset, ctx) pair, with device-loss check. If
+    // D2D had to recreate the target (D2DERR_RECREATE_TARGET), the
+    // backend has bumped the per-ctx generation and the cached handle is
+    // dangling - drop it and re-upload against the new target.
+    const uint32_t gen = backend->get_context_generation
+      ? backend->get_context_generation(ctx) : 0u;
+    auto it = entry->bitmaps.find(ctx);
+    if (it != entry->bitmaps.end() && it->second.generation != gen) {
+      if (backend->destroy_bitmap && it->second.bmp)
+        backend->destroy_bitmap(ctx, it->second.bmp);
+      entry->bitmaps.erase(it);
+      it = entry->bitmaps.end();
+    }
+    if (it == entry->bitmaps.end()) {
+      if (!backend->create_bitmap) return;
+      void* bmp = backend->create_bitmap(ctx,
+                                          entry->width_px, entry->height_px,
+                                          entry->pixels.data(),
+                                          entry->scale);
+      if (!bmp) return;
+      it = entry->bitmaps.emplace(ctx, W32CtxBitmap{ bmp, gen }).first;
+    }
+    if (backend->draw_bitmap)
+      backend->draw_bitmap(ctx, it->second.bmp,
+                            0.0f, 0.0f, 0.0f, 0.0f, // full bitmap
+                            x, y, w, h);
+  }
+
+  static void paint_customdraw_w32(neui_render_backend_t* backend,
+                                    neui_render_ctx_t      ctx,
+                                    float w, float h,
+                                    WidgetData&            wd,
+                                    bool                   focused)
+  {
+    if (!wd.session) return;
+
+    if (backend->push_transform) backend->push_transform(ctx);
+    if (backend->push_clip)      backend->push_clip(ctx, 0.0f, 0.0f, w, h);
+
+    neui_painter painter{};
+    painter.backend          = backend;
+    painter.ctx              = ctx;
+    painter.host_token       = wd.session;
+    painter.draw_asset_thunk = &w32_painter_draw_asset_thunk;
+
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_WIDGET_PAINT;
+    ev.data.paint.widget.id   = wd.widget_id;
+    ev.data.paint.painter_api = &neui_detail::k_painter_api;
+    ev.data.paint.p           = &painter;
+    ev.data.paint.width       = w;
+    ev.data.paint.height      = h;
+    ev.data.paint.focused     = focused;
+    wd.session->dispatch_event(&ev);
+
+    if (backend->pop_clip)      backend->pop_clip(ctx);
+    if (backend->pop_transform) backend->pop_transform(ctx);
+  }
+
+  // Minimal mouse hook for CUSTOMDRAW: the ChildSubclassProc already
+  // dispatches MOUSE_* events to the client (emit_events is auto-set), so
+  // the only thing we need PaintedWndProc to do is route focus on click so
+  // arrow keys / typed input reach the client through the same subclass's
+  // WM_KEYDOWN / WM_CHAR path. Everything else is no-op.
+  static void painted_msg_customdraw_w32(WidgetData& wd, UINT msg,
+                                          WPARAM /*wParam*/, LPARAM /*lParam*/)
+  {
+    if (msg == WM_LBUTTONDOWN && wd.hwnd) {
+      SetFocus(wd.hwnd);
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // SECTION (neui.painted seam) - non-interactive coloured backdrop with
   // an optional title chip. paint_section_w32 delegates to the shared
   // helper so the visual matches the xpl host. apply_section_region_w32
@@ -650,6 +760,30 @@ namespace win32_host
       if (wd.visible) style |= WS_VISIBLE;
       wd.paint_fn       = &paint_knob_w32;
       wd.painted_msg_fn = &painted_msg_knob_w32;
+      HWND hwnd = CreateWindowExW(0, L"neui.painted", L"", style,
+        LogicalToPhysical(wd.x, parent_dpi),
+        LogicalToPhysical(wd.y, parent_dpi),
+        LogicalToPhysical(wd.width, parent_dpi),
+        LogicalToPhysical(wd.height, parent_dpi),
+        parent_hwnd,
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(wd.index)),
+        get_hinstance(),
+        &wd);
+      if (hwnd) {
+        SetWindowSubclass(hwnd, ChildSubclassProc, 1, reinterpret_cast<DWORD_PTR>(&wd));
+        wd.has_subclass = true;
+      }
+      return hwnd;
+    }
+
+    // Client custom-draw widget: shared painted-class HWND, paint_fn emits
+    // WIDGET_PAINT to the client, ChildSubclassProc emits standard mouse /
+    // key events (emit_events auto-set in widget_create above).
+    if (!strcmp(wd.type, NEUI_W_CUSTOMDRAW)) {
+      DWORD style = WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS;
+      if (wd.visible) style |= WS_VISIBLE;
+      wd.paint_fn       = &paint_customdraw_w32;
+      wd.painted_msg_fn = &painted_msg_customdraw_w32;
       HWND hwnd = CreateWindowExW(0, L"neui.painted", L"", style,
         LogicalToPhysical(wd.x, parent_dpi),
         LogicalToPhysical(wd.y, parent_dpi),
@@ -1021,16 +1155,17 @@ namespace win32_host
     // depends on event delivery (selection notifications, value changes,
     // etc.). Matches the xpl host and the auto-set list in CLAUDE.md so
     // both hosts behave the same out of the box.
-    widget_data->emit_events = type && (!strcmp(type, NEUI_W_BUTTON)    ||
-                                        !strcmp(type, NEUI_W_INPUTBOX)  ||
-                                        !strcmp(type, NEUI_W_CHECKBOX)  ||
-                                        !strcmp(type, NEUI_W_CHECKBOX3) ||
-                                        !strcmp(type, NEUI_W_LISTBOX)   ||
-                                        !strcmp(type, NEUI_W_COMBOBOX)  ||
-                                        !strcmp(type, NEUI_W_MULTILINE) ||
-                                        !strcmp(type, NEUI_W_TREEVIEW)  ||
-                                        !strcmp(type, NEUI_W_SLIDER)    ||
-                                        !strcmp(type, NEUI_W_KNOB));
+    widget_data->emit_events = type && (!strcmp(type, NEUI_W_BUTTON)     ||
+                                        !strcmp(type, NEUI_W_INPUTBOX)   ||
+                                        !strcmp(type, NEUI_W_CHECKBOX)   ||
+                                        !strcmp(type, NEUI_W_CHECKBOX3)  ||
+                                        !strcmp(type, NEUI_W_LISTBOX)    ||
+                                        !strcmp(type, NEUI_W_COMBOBOX)   ||
+                                        !strcmp(type, NEUI_W_MULTILINE)  ||
+                                        !strcmp(type, NEUI_W_TREEVIEW)   ||
+                                        !strcmp(type, NEUI_W_SLIDER)     ||
+                                        !strcmp(type, NEUI_W_KNOB)       ||
+                                        !strcmp(type, NEUI_W_CUSTOMDRAW));
     widget_data->userdata    = userdata;
     widget_data->session     = this;
     widget_data->session_id  = _session_id;
@@ -2459,6 +2594,22 @@ namespace win32_host
   }
 
   // ---------------------------------------------------------------------------
+  // Invalidate (request repaint)
+
+  // Request a repaint of `widget`. For HWND-backed widgets this is
+  // InvalidateRect(NULL) which coalesces with any other pending paints
+  // until the next WM_PAINT. No-op when the HWND doesn't exist yet
+  // (deferred-HWND path - the widget will paint correctly on first show).
+  static void NEUI_ABI invalidate(neui_session_t session, neui_widget_t widget)
+  {
+    auto s = get_session_for_widget(session, widget);
+    if (!s) return;
+    auto* wd = s->get_widget(WidgetToIndex(widget));
+    if (!wd || !wd->hwnd) return;
+    InvalidateRect(wd->hwnd, nullptr, FALSE);
+  }
+
+  // ---------------------------------------------------------------------------
   // Popup menu (context menu, free of the menubar)
 
   static int NEUI_ABI popup_menu(neui_session_t session, neui_widget_t anchor,
@@ -2544,6 +2695,7 @@ namespace win32_host
     get_pos,
     get_size,
     popup_menu,
+    invalidate,
   };
 
   // -------------------------------------------------------------------------
@@ -2570,9 +2722,10 @@ namespace win32_host
     // repaint. Region geometry doesn't depend on colour, so SECTION can
     // skip apply_section_region_w32 here.
     if (w->hwnd && w->type && !strcmp(key, NEUI_ATTR_BACKGROUND) &&
-        (!strcmp(w->type, NEUI_W_SECTION) ||
-         !strcmp(w->type, NEUI_W_KNOB)    ||
-         !strcmp(w->type, NEUI_W_IMAGE))) {
+        (!strcmp(w->type, NEUI_W_SECTION)    ||
+         !strcmp(w->type, NEUI_W_KNOB)       ||
+         !strcmp(w->type, NEUI_W_IMAGE)      ||
+         !strcmp(w->type, NEUI_W_CUSTOMDRAW))) {
       InvalidateRect(w->hwnd, nullptr, FALSE);
     }
     return 1;
@@ -2837,5 +2990,96 @@ namespace win32_host
     cb_item_set_format,
     cb_item_get_format,
     cb_item_has_format,
+  };
+
+  // ---------------------------------------------------------------------------
+  // Asset API (NEUI_API_ASSETS) - session-scoped media handles backed by
+  // the win32-host W32AssetManager. Cross-session handles are rejected.
+
+  static neui_asset_t pack_asset_w32(uint32_t session_id, uint32_t slot)
+  {
+    return { ((session_id & 0xffff) << 16) | (slot & 0xffff) };
+  }
+
+  static neui_asset_t NEUI_ABI as_create_bitmap(neui_session_t session,
+                                                  uint32_t width_px,
+                                                  uint32_t height_px,
+                                                  const uint8_t* bgra,
+                                                  float scale)
+  {
+    auto* s = get_session(session);
+    if (!s) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_bitmap(width_px, height_px,
+                                                       bgra, scale);
+    if (slot == 0) return asset_none;
+    return pack_asset_w32(s->session_id(), slot);
+  }
+
+  static neui_asset_t NEUI_ABI as_create_from_file(neui_session_t session,
+                                                     const char* path_utf8)
+  {
+    auto* s = get_session(session);
+    if (!s || !path_utf8) return asset_none;
+    // Pick the highest DPI scale across the session's frames as the
+    // preference for @Nx variant resolution. Falls back to 1.0 if no
+    // frame HWND has been created yet (deferred-show case).
+    float scale = 1.0f;
+    HDC screen = GetDC(nullptr);
+    if (screen) {
+      UINT dpi = GetDeviceCaps(screen, LOGPIXELSX);
+      ReleaseDC(nullptr, screen);
+      if (dpi > 0) {
+        float s_now = static_cast<float>(dpi) / 96.0f;
+        if (s_now > scale) scale = s_now;
+      }
+    }
+    uint32_t slot = s->_asset_manager.allocate_from_file(path_utf8, scale);
+    if (slot == 0) return asset_none;
+    return pack_asset_w32(s->session_id(), slot);
+  }
+
+  static void NEUI_ABI as_destroy(neui_session_t session, neui_asset_t asset)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    if (asset.id == asset_none.id) return;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return;
+    s->_asset_manager.release_slot(asset.id & 0xffff,
+                                    neui_d2d_backend::get_backend());
+  }
+
+  static bool NEUI_ABI as_get_size(neui_session_t session, neui_asset_t asset,
+                                     float* out_w, float* out_h)
+  {
+    auto* s = get_session(session);
+    if (!s) return false;
+    if (asset.id == asset_none.id) return false;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return false;
+    auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
+    if (!e || e->scale <= 0.0f) return false;
+    if (out_w) *out_w = static_cast<float>(e->width_px)  / e->scale;
+    if (out_h) *out_h = static_cast<float>(e->height_px) / e->scale;
+    return true;
+  }
+
+  static neui_asset_kind_t NEUI_ABI as_get_kind(neui_session_t session,
+                                                  neui_asset_t asset)
+  {
+    auto* s = get_session(session);
+    if (!s) return NEUI_ASSET_KIND_NONE;
+    if (asset.id == asset_none.id) return NEUI_ASSET_KIND_NONE;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff))
+      return NEUI_ASSET_KIND_NONE;
+    auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
+    return e ? e->kind : NEUI_ASSET_KIND_NONE;
+  }
+
+  neui_asset_api_t asset_api = {
+    NEUI_VERSION,
+    as_create_bitmap,
+    as_create_from_file,
+    as_destroy,
+    as_get_size,
+    as_get_kind,
   };
 }

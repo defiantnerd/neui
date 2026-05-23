@@ -389,6 +389,18 @@ namespace xpl_host
                bool is_focused) override;
   };
 
+  // CUSTOMDRAW - client-rendered surface. Emits NEUI_EVENT_WIDGET_PAINT
+  // each paint with backend + ctx + size + focus; the framework wraps the
+  // dispatch in push_transform / push_clip(widget bounds) / pop_clip /
+  // pop_transform so the client can't corrupt sibling widget rendering.
+  // Standard mouse/key events still flow to the client through the normal
+  // event path (emit_events auto-set in widgets.cpp).
+  class CustomDrawWidget : public WidgetData {
+  public:
+    void paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
+               bool is_focused) override;
+  };
+
   // MENUBAR - native menu bar handle + all item bookkeeping
   class MenubarWidget : public WidgetData {
   public:

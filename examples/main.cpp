@@ -54,6 +54,7 @@ struct AppState {
   neui_items_api_t*  items     = nullptr;
   neui_tree_api_t*   tree      = nullptr;
   neui_attr_api_t*   attrs     = nullptr;
+  neui_asset_api_t*  assets    = nullptr;
   uint32_t           session   = 0;
   uint32_t           win_id    = 0;
   uint32_t           input_id  = 0;
@@ -71,6 +72,18 @@ struct AppState {
   uint32_t           rot_slider_id  = 0;   // controls the rotating image below
   uint32_t           rot_image_id   = 0;
   uint32_t           value_label_id = 0;
+  // CUSTOMDRAW demo: a client-painted meter that tracks the continuous
+  // knob's value. The client handles NEUI_EVENT_WIDGET_PAINT to draw, and
+  // calls widgets->invalidate(...) from NEUI_EVENT_VALUE_CHANGED so the
+  // meter repaints as the knob moves.
+  uint32_t           customdraw_id  = 0;
+  float              customdraw_v   = 0.5f;  // last-known knob value (drawn each paint)
+  uint32_t           customdraw_frames = 0;  // frame counter overlaid as text
+  // Asset handle for the meter's background. Loaded once at startup via
+  // NEUI_API_ASSETS, drawn via painter->draw_asset on every paint. The
+  // host owns the CPU pixels + per-ctx GPU cache; the client only sees
+  // the handle. asset_none.id sentinels "not loaded".
+  neui_asset_t       customdraw_bg  = asset_none;
   // Modal "About" dialog (created on demand by Help > About).
   uint32_t           about_dlg_id = 0;
   uint32_t           about_ok_id  = 0;
@@ -231,6 +244,69 @@ static neui_widget_client_t widget_client = {
       dbglog("keychar: 0x%04x\n", event->data.key.keycode);
       return false;
 
+    case NEUI_EVENT_WIDGET_PAINT: {
+      // Client-side draw for NEUI_W_CUSTOMDRAW. The event hands us a
+      // curated painter API + opaque handle, the widget-local size in
+      // logical px, and the focus state. Origin (0, 0) is the widget's
+      // top-left - the framework has already pushed a translate + clip
+      // for us, so we can't accidentally overdraw siblings.
+      if (!app) return false;
+      if (event->data.paint.widget.id != app->customdraw_id) return false;
+
+      neui_painter_api_t* pa = event->data.paint.painter_api;
+      neui_painter_t*     p  = event->data.paint.p;
+      float w       = event->data.paint.width;
+      float h       = event->data.paint.height;
+      bool  focused = event->data.paint.focused;
+      float v       = app->customdraw_v;
+
+      // Backdrop: draw the preloaded bitmap asset if available, else a
+      // flat dark fill. This is the proof point for NEUI_API_ASSETS -
+      // the asset was loaded once at app startup; we're just handing the
+      // host a handle each frame.
+      if (app->customdraw_bg.id != asset_none.id)
+        pa->draw_asset(p, app->customdraw_bg, 0.0f, 0.0f, w, h);
+      else
+        pa->fill_rect(p, 0.0f, 0.0f, w, h, 0xFF1B2230u);
+
+      // 1-px border so the widget's bounds are visible.
+      uint32_t border = focused ? 0xFF66CCFFu : 0xFF3A4255u;
+      pa->draw_rect(p, 0.5f, 0.5f, w - 1.0f, h - 1.0f, 1.0f, border);
+
+      // Meter bar: vertical level proportional to v. Anchored at the
+      // bottom so it grows upward like a VU meter.
+      const float pad     = 8.0f;
+      float meter_x  = pad;
+      float meter_y  = pad;
+      float meter_w  = w - 2.0f * pad;
+      float meter_h  = h - 2.0f * pad - 22.0f;  // leave 22px for caption
+      if (meter_h > 0.0f && meter_w > 0.0f) {
+        // Semi-transparent trough so the asset background reads through.
+        pa->fill_rect(p, meter_x, meter_y, meter_w, meter_h, 0xA00E1420u);
+        float fill_h = meter_h * v;
+        if (fill_h > 0.0f) {
+          // Green-to-red shift past 0.75 so the demo shows colour logic
+          // driven by the same state the framework just handed back.
+          uint32_t fill = (v > 0.85f) ? 0xFFE25555u
+                       : (v > 0.65f) ? 0xFFE2C055u
+                                     : 0xFF55C26Cu;
+          pa->fill_rect(p, meter_x,
+                            meter_y + (meter_h - fill_h),
+                            meter_w, fill_h, fill);
+        }
+      }
+
+      // Caption: value + frame counter (the counter proves invalidate()
+      // actually re-fires the paint).
+      char buf[64];
+      snprintf(buf, sizeof(buf), "%.2f  (frame %u)", v, app->customdraw_frames);
+      pa->draw_text(p, pad, h - 20.0f, w - 2.0f * pad, 18.0f,
+                     buf, 12.0f, 0xFFE0E0E0u);
+
+      ++app->customdraw_frames;
+      return true;
+    }
+
     case NEUI_EVENT_WIDGET_PREUPDATE: {
       // Refresh the knob's NEUI_ATTR_VALUE_TEXT just before paint reads it.
       // This is the recommended pattern: the framework "pulls" updated
@@ -269,6 +345,15 @@ static neui_widget_client_t widget_client = {
         neui_session_t sess  = { app->session };
         neui_widget_t  label = { app->value_label_id };
         app->widgets->set_text(sess, label, buf);
+      }
+      // Mirror the continuous knob's value into the CUSTOMDRAW meter and
+      // ask the framework to repaint it. This is the canonical "client
+      // drives custom widget" loop: state change -> invalidate -> paint.
+      if (wid == app->knob_id && app->customdraw_id != 0 && app->widgets) {
+        app->customdraw_v = v;
+        neui_session_t sess = { app->session };
+        neui_widget_t  cd   = { app->customdraw_id };
+        app->widgets->invalidate(sess, cd);
       }
       // Rotation slider drives the image's NEUI_ATTR_ROTATION attribute.
       // The framework's transform stack picks it up on the next paint.
@@ -352,6 +437,7 @@ int main(int argc, char** argv) {
   app.items   = (neui_items_api_t*) neui->get_interface(sess, NEUI_API_ITEMS);
   app.tree    = (neui_tree_api_t*)  neui->get_interface(sess, NEUI_API_TREE);
   app.attrs   = (neui_attr_api_t*)  neui->get_interface(sess, NEUI_API_ATTRS);
+  app.assets  = (neui_asset_api_t*) neui->get_interface(sess, NEUI_API_ASSETS);
 
   // Window: four columns - left = input + listbox, middle = combobox + checkboxes,
   //   right = treeview, far-right = slider + knob (continuous + 16-step variants).
@@ -626,6 +712,25 @@ int main(int argc, char** argv) {
   app.value_label_id = value_label.id;
   app.widgets->set_text(sess, value_label, "(drag to change)");
 
+  // CUSTOMDRAW demo: a client-painted meter tied to the continuous knob.
+  // Placed under the treeview (x=420, w=200) with a 10 px gap above and
+  // ~10 px padding to the client-area bottom (the rotating image at y=580
+  // is the existing layout's lower waterline). The framework hands us
+  // the render backend + ctx each paint; we draw a vertical level bar
+  // plus a frame counter. invalidate() is fired from the knob's
+  // VALUE_CHANGED handler above.
+  auto customdraw = app.widgets->create(sess, win, NEUI_W_CUSTOMDRAW,
+                                         420, 295, 200, 275, nullptr);
+  app.customdraw_id = customdraw.id;
+  app.customdraw_v  = 0.5f;
+
+  // Preload the meter background bitmap via NEUI_API_ASSETS. Note: this
+  // happens BEFORE any paint - clients no longer need a render context
+  // to obtain a usable asset handle. The host owns CPU pixels + per-ctx
+  // GPU upload cache behind the opaque neui_asset_t.
+  if (app.assets)
+    app.customdraw_bg = app.assets->create_from_file(sess, "myimage.png");
+
 #if 0
   // Enable event emission on interactive controls
   app.widgets->set_emit_events(sess, input,  true);
@@ -642,6 +747,9 @@ int main(int argc, char** argv) {
 
   neui->run(sess);  // calling the main loop
 
+  if (app.assets && app.customdraw_bg.id != asset_none.id)
+    app.assets->destroy(sess, app.customdraw_bg);
+  app.widgets->destroy(sess, customdraw);
   app.widgets->destroy(sess, value_label);
   app.widgets->destroy(sess, knob2);
   app.widgets->destroy(sess, knob2_label);

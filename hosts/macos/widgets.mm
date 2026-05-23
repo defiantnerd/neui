@@ -359,6 +359,16 @@ namespace macos_host
     return 0;
   }
 
+  // Stub on the native macOS host - the NEUI_W_CUSTOMDRAW widget is not
+  // implemented here (would need a per-widget NEUIView subclass that
+  // brackets a CG begin_frame / end_frame around a WIDGET_PAINT dispatch).
+  // Clients targeting CUSTOMDRAW on macOS should switch to the xpl host
+  // by selecting "neui.host.crossplatform". Existing widgets get repainted
+  // when AppKit decides they're dirty; this is a no-op for them today.
+  static void  NEUI_ABI w_invalidate(neui_session_t, neui_widget_t)
+  {
+  }
+
   neui_widget_api_t widgets_api = {
     w_create, w_destroy, w_show, w_hide,
     w_set_pos, w_set_size, w_set_emit_events,
@@ -371,6 +381,7 @@ namespace macos_host
     w_set_owner,
     w_get_pos, w_get_size,
     w_popup_menu,
+    w_invalidate,
   };
 
   // -------------------------------------------------------------------------
@@ -1031,6 +1042,33 @@ namespace macos_host
   neui_commands_api_t commands_api = {
     NEUI_VERSION,
     cmd_invoke_focused, cmd_invoke,
+  };
+
+  // Asset API stubs. The native macOS host does not yet implement
+  // NEUI_W_CUSTOMDRAW (would need a per-widget NEUIView that brackets
+  // begin_frame / end_frame around a WIDGET_PAINT dispatch), and the
+  // existing native widgets here (NSButton / NSTextField / ...) don't
+  // consume client-supplied asset handles. The vtable is wired in so
+  // get_interface(NEUI_API_ASSETS) returns a valid pointer for ABI
+  // consistency; every method returns "invalid". Clients targeting
+  // CUSTOMDRAW + assets on macOS should select the xpl host
+  // ("neui.host.crossplatform"), which has a full implementation.
+  static neui_asset_t NEUI_ABI a_create_bitmap  (neui_session_t, uint32_t, uint32_t,
+                                                  const uint8_t*, float)         { return asset_none; }
+  static neui_asset_t NEUI_ABI a_create_from_file(neui_session_t, const char*)   { return asset_none; }
+  static void         NEUI_ABI a_destroy        (neui_session_t, neui_asset_t)   {}
+  static bool         NEUI_ABI a_get_size       (neui_session_t, neui_asset_t,
+                                                  float*, float*)                { return false; }
+  static neui_asset_kind_t NEUI_ABI a_get_kind  (neui_session_t, neui_asset_t)
+  { return NEUI_ASSET_KIND_NONE; }
+
+  neui_asset_api_t asset_api = {
+    NEUI_VERSION,
+    a_create_bitmap,
+    a_create_from_file,
+    a_destroy,
+    a_get_size,
+    a_get_kind,
   };
 
 } // namespace macos_host

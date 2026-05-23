@@ -3,6 +3,9 @@
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
+#include <shellapi.h>   // CommandLineToArgvW (was transitively pulled in
+                         // before WIN32_LEAN_AND_MEAN started excluding it
+                         // via the asset_manager_w32.h include chain).
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "uxtheme.lib")
 #include "../../backends/d2d/d2d_backend.h"
@@ -266,6 +269,25 @@ namespace win32_host
         }
         backend->begin_frame(wd->image_ctx, clear_argb);
 
+        // Re-upload the bitmap if the context recreated its device since
+        // we last uploaded (D2DERR_RECREATE_TARGET). begin_frame above
+        // already rebuilt the target and bumped the generation, so the
+        // mismatch is detectable here. The cached image_pixels carries
+        // the CPU-side BGRA we need to re-upload.
+        if (backend->get_context_generation && !wd->image_pixels.empty()) {
+          const uint32_t gen = backend->get_context_generation(wd->image_ctx);
+          if (gen != wd->image_bitmap_generation) {
+            if (wd->image_bitmap)
+              backend->destroy_bitmap(wd->image_ctx, wd->image_bitmap);
+            wd->image_bitmap = backend->create_bitmap(
+              wd->image_ctx,
+              wd->image_width_px, wd->image_height_px,
+              wd->image_pixels.data(),
+              wd->image_scale);
+            wd->image_bitmap_generation = gen;
+          }
+        }
+
         if (wd->image_bitmap) {
           RECT rc;
           GetClientRect(hwnd, &rc);
@@ -499,6 +521,12 @@ namespace win32_host
     }
     case WM_DESTROY: {
       if (wd && backend && wd->paint_ctx) {
+        // Drop any asset-manager GPU bitmaps keyed on this ctx before
+        // tearing it down (CUSTOMDRAW assets create per-ctx uploads on
+        // first draw; without this, the cache would hold dangling
+        // bitmap pointers for the rest of the session).
+        if (wd->session)
+          wd->session->_asset_manager.release_context(wd->paint_ctx, backend);
         backend->destroy_context(wd->paint_ctx);
         wd->paint_ctx = nullptr;
       }

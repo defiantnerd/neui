@@ -5,6 +5,7 @@
 #include "../shared/attrs.h"
 #include "../shared/clipboard_item.h"
 #include "../shared/theme_palette.h"
+#include "asset_manager_w32.h"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -90,6 +91,9 @@ namespace win32_host {
     float             image_scale  = 0.0f;     // HiDPI scale at which the bitmap was loaded
     uint32_t          image_width_px  = 0;     // physical pixel dimensions of the source
     uint32_t          image_height_px = 0;     //   image, used for aspect-preserving fit
+    uint32_t          image_bitmap_generation = 0;  // ctx generation at upload; re-upload on mismatch (device-loss)
+    std::vector<uint8_t> image_pixels;         // CPU copy of the loaded BGRA8 (premultiplied) pixels
+                                               //   - kept so we can re-upload after D2DERR_RECREATE_TARGET
 
     // Treeview item data
     struct TreeItemData {
@@ -295,6 +299,12 @@ namespace win32_host {
     // Per-session attribute storage (NEUI_ATTR_THEME_MODE etc.). Session
     // attrs are independent of the per-widget AttrBag.
     neui_detail::AttrBag            _session_attrs;
+
+    // Session-scoped asset table backing the public neui_asset_api_t
+    // (NEUI_API_ASSETS). Loaded outside the paint loop; per-paint GPU
+    // upload happens lazily inside paint_customdraw_w32's draw_asset
+    // thunk. Released on session destroy via clear().
+    W32AssetManager                 _asset_manager;
 
     // Effective palette derived from the system palette + this session's
     // NEUI_ATTR_THEME_MODE. Recomputed in recompute_effective_palette()

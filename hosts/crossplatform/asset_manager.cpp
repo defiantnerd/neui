@@ -91,17 +91,28 @@ namespace neui_detail
 
     AssetEntry& e = it->second;
 
-    // Find or create the GPU bitmap for this render context.
+    // Find or create the GPU bitmap for this render context. If the
+    // backend has had to recreate its device-dependent state since we
+    // cached the handle (D2D's D2DERR_RECREATE_TARGET path), the cached
+    // pointer is dangling - drop it and re-upload against the new target.
+    const uint32_t gen = backend->get_context_generation
+      ? backend->get_context_generation(ctx) : 0u;
     auto bmp_it = e.bitmaps.find(ctx);
+    if (bmp_it != e.bitmaps.end() && bmp_it->second.generation != gen) {
+      if (backend->destroy_bitmap && bmp_it->second.bmp)
+        backend->destroy_bitmap(ctx, bmp_it->second.bmp);
+      e.bitmaps.erase(bmp_it);
+      bmp_it = e.bitmaps.end();
+    }
     if (bmp_it == e.bitmaps.end()) {
       void* bmp = backend->create_bitmap(ctx,
                                           e.width_px, e.height_px,
                                           e.pixels.data(),
                                           e.scale);
       if (!bmp) return nullptr;
-      bmp_it = e.bitmaps.emplace(ctx, bmp).first;
+      bmp_it = e.bitmaps.emplace(ctx, CtxBitmap{ bmp, gen }).first;
     }
-    return bmp_it->second;
+    return bmp_it->second.bmp;
   }
 
   bool AssetManager::get_logical_size(const std::string& name, float scale,
@@ -130,14 +141,108 @@ namespace neui_detail
     return true;
   }
 
+  // --- Handle-based asset allocation --------------------------------------
+
+  uint32_t AssetManager::allocate_bitmap(uint32_t width_px, uint32_t height_px,
+                                          const uint8_t* bgra_premul, float scale)
+  {
+    if (width_px == 0 || height_px == 0 || !bgra_premul) return 0;
+    if (scale <= 0.0f) scale = 1.0f;
+
+    auto entry = std::make_unique<AssetEntry>();
+    entry->kind      = NEUI_ASSET_KIND_BITMAP;
+    entry->width_px  = width_px;
+    entry->height_px = height_px;
+    entry->scale     = scale;
+    entry->pixels.assign(bgra_premul,
+                          bgra_premul + static_cast<size_t>(width_px) * height_px * 4);
+
+    // Slot 0 is intentionally unused so a returned 0 means "failure".
+    if (_handles.empty()) _handles.emplace_back(nullptr);
+
+    uint32_t slot;
+    if (!_free_slots.empty()) {
+      slot = _free_slots.back();
+      _free_slots.pop_back();
+      _handles[slot] = std::move(entry);
+    } else {
+      slot = static_cast<uint32_t>(_handles.size());
+      _handles.emplace_back(std::move(entry));
+    }
+    return slot;
+  }
+
+  uint32_t AssetManager::allocate_from_file(const std::string& name, float scale)
+  {
+    if (name.empty()) return 0;
+    if (scale <= 0.0f) scale = 1.0f;
+
+    std::string resolved = resolve_path(name, scale);
+    if (resolved.empty()) return 0;
+
+    AssetEntry tmp;
+    std::string base, ext;
+    split_ext(name, base, ext);
+    if      (resolved == base + "@3x" + ext) tmp.scale = 3.0f;
+    else if (resolved == base + "@2x" + ext) tmp.scale = 2.0f;
+    else                                      tmp.scale = 1.0f;
+
+    if (!load_pixels(resolved, tmp)) return 0;
+    tmp.kind = NEUI_ASSET_KIND_BITMAP;
+
+    auto entry = std::make_unique<AssetEntry>(std::move(tmp));
+
+    if (_handles.empty()) _handles.emplace_back(nullptr);
+
+    uint32_t slot;
+    if (!_free_slots.empty()) {
+      slot = _free_slots.back();
+      _free_slots.pop_back();
+      _handles[slot] = std::move(entry);
+    } else {
+      slot = static_cast<uint32_t>(_handles.size());
+      _handles.emplace_back(std::move(entry));
+    }
+    return slot;
+  }
+
+  void AssetManager::release_slot(uint32_t slot, neui_render_backend_t* backend)
+  {
+    if (slot == 0 || slot >= _handles.size()) return;
+    auto& entry = _handles[slot];
+    if (!entry) return;
+    if (backend && backend->destroy_bitmap) {
+      for (auto& [ctx, cached] : entry->bitmaps)
+        if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
+    }
+    entry.reset();
+    _free_slots.push_back(slot);
+  }
+
+  AssetEntry* AssetManager::get_slot(uint32_t slot)
+  {
+    if (slot == 0 || slot >= _handles.size()) return nullptr;
+    return _handles[slot].get();
+  }
+
+  // --- Context lifecycle --------------------------------------------------
+
   void AssetManager::release_context(neui_render_ctx_t ctx, neui_render_backend_t* backend)
   {
     if (!ctx || !backend || !backend->destroy_bitmap) return;
     for (auto& [path, entry] : _cache) {
       auto it = entry.bitmaps.find(ctx);
       if (it != entry.bitmaps.end()) {
-        backend->destroy_bitmap(ctx, it->second);
+        if (it->second.bmp) backend->destroy_bitmap(ctx, it->second.bmp);
         entry.bitmaps.erase(it);
+      }
+    }
+    for (auto& entry : _handles) {
+      if (!entry) continue;
+      auto it = entry->bitmaps.find(ctx);
+      if (it != entry->bitmaps.end()) {
+        if (it->second.bmp) backend->destroy_bitmap(ctx, it->second.bmp);
+        entry->bitmaps.erase(it);
       }
     }
   }
@@ -146,11 +251,18 @@ namespace neui_detail
   {
     if (backend && backend->destroy_bitmap) {
       for (auto& [path, entry] : _cache) {
-        for (auto& [ctx, bmp] : entry.bitmaps)
-          backend->destroy_bitmap(ctx, bmp);
+        for (auto& [ctx, cached] : entry.bitmaps)
+          if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
+      }
+      for (auto& entry : _handles) {
+        if (!entry) continue;
+        for (auto& [ctx, cached] : entry->bitmaps)
+          if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
       }
     }
     _cache.clear();
+    _handles.clear();
+    _free_slots.clear();
   }
 
 } // namespace neui_detail

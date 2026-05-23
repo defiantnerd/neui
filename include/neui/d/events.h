@@ -47,6 +47,7 @@ extern "C" {
     NEUI_EVENT_CHECKBOX_CHANGED         = DEF_WIDGET_EVENT(4),  // fired when checkbox state changes
     NEUI_EVENT_RESIZE                   = DEF_WIDGET_EVENT(5),  // frame client area resized
     NEUI_EVENT_VALUE_CHANGED            = DEF_WIDGET_EVENT(6),  // slider/knob value changed by user
+    NEUI_EVENT_WIDGET_PAINT             = DEF_WIDGET_EVENT(7),  // NEUI_W_CUSTOMDRAW: client draws via backend/ctx
 
     NEUI_EVENT_ITEM_SELECTED            = DEF_ITEM_EVENT(1),  // fired when selection changes in listbox/combobox
 
@@ -155,6 +156,36 @@ extern "C" {
     uint8_t*      data;
   } neui_event_custom_t;
 
+  // Forward-declarations for the curated paint surface. Clients that
+  // handle NEUI_EVENT_WIDGET_PAINT include <neui/d/painter.h> (or just
+  // <neui/neui.h>) to call painter_api->* functions on the handle.
+  struct neui_painter;
+  struct neui_painter_api;
+
+  // Fired during paint for NEUI_W_CUSTOMDRAW widgets. The client draws
+  // through `painter_api` with the opaque `p` handle. Origin (0, 0) is
+  // the widget's top-left in logical pixels; width/height are the
+  // widget size at 96 DPI (use painter_api->get_scale_factor(p) for the
+  // physical scale). The framework wraps the callback in
+  // push_transform / push_clip(widget bounds) / pop_clip / pop_transform
+  // so client state changes are isolated from sibling widgets and from
+  // the rest of the frame.
+  //
+  // The painter forwards to the active render backend but exposes only
+  // the draw-safe subset - context lifecycle and raw bitmap APIs are
+  // host-internal. Load bitmaps outside the paint callback via
+  // get_interface(session, NEUI_API_ASSETS) and draw them through
+  // painter_api->draw_asset.
+  typedef struct neui_event_paint
+  {
+    neui_widget_t              widget;
+    struct neui_painter_api*   painter_api;  // curated drawing surface
+    struct neui_painter*       p;             // opaque handle (paint-call scoped)
+    float                      width;         // widget size, logical pixels
+    float                      height;
+    bool                       focused;
+  } neui_event_paint_t;
+
   typedef struct neui_event {
     neui_event_type_t type;
     union {
@@ -168,6 +199,7 @@ extern "C" {
       neui_event_resize_t    resize;
       neui_event_preupdate_t preupdate;
       neui_event_value_t     value;
+      neui_event_paint_t     paint;
       neui_event_custom_t    custom;
     } data;
 

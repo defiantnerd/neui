@@ -22,6 +22,18 @@ namespace neui_d2d_backend
     ID2D1SolidColorBrush*  brush       = nullptr;
     uint32_t               dpi         = 96;
 
+    // Re-create state. The hwnd + size are stashed at create_context time
+    // and kept in sync by d2d_resize / d2d_update_dpi. If D2D returns
+    // D2DERR_RECREATE_TARGET from EndDraw the target is gone but the
+    // context pointer stays valid, so the next begin_frame can rebuild
+    // the target in place. `generation` is bumped whenever the target is
+    // recreated; clients that cache target-bound resources (ID2D1Bitmap
+    // handles) check this to discover that their caches are stale.
+    HWND                   hwnd        = nullptr;
+    uint32_t               width       = 0;
+    uint32_t               height      = 0;
+    uint32_t               generation  = 1;
+
     // Path API state. The path is constructed via move_to/line_to/arc;
     // figure_open tracks whether BeginFigure has been called without a
     // matching EndFigure. fill_path / stroke_path close the figure and the
@@ -105,6 +117,40 @@ namespace neui_d2d_backend
 
   // ---------------------------------------------------------------------------
 
+  // Build target + brush for the context's stored hwnd / size / dpi.
+  // Used by both d2d_create_context and the device-loss recovery path in
+  // d2d_begin_frame; populates ctx->target and ctx->brush on success and
+  // leaves them null on failure. Does not touch ctx->generation - callers
+  // bump that when they want the recreation to be visible to bitmap caches.
+  static bool d2d_build_target(D2DContext* ctx)
+  {
+    if (!ctx || !ctx->hwnd || ctx->width == 0 || ctx->height == 0) return false;
+    if (!ensure_factory()) return false;
+
+    auto props = D2D1::RenderTargetProperties();
+    props.dpiX = static_cast<float>(ctx->dpi);
+    props.dpiY = static_cast<float>(ctx->dpi);
+
+    auto hwnd_props = D2D1::HwndRenderTargetProperties(
+      ctx->hwnd,
+      D2D1::SizeU(ctx->width, ctx->height)
+    );
+
+    ID2D1HwndRenderTarget* target = nullptr;
+    HRESULT hr = g_factory->CreateHwndRenderTarget(props, hwnd_props, &target);
+    if (FAILED(hr)) return false;
+
+    target->SetDpi(static_cast<float>(ctx->dpi), static_cast<float>(ctx->dpi));
+
+    ID2D1SolidColorBrush* brush = nullptr;
+    hr = target->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &brush);
+    if (FAILED(hr)) { target->Release(); return false; }
+
+    ctx->target = target;
+    ctx->brush  = brush;
+    return true;
+  }
+
   static neui_render_ctx_t d2d_create_context(void* native_handle,
                                                uint32_t width, uint32_t height)
   {
@@ -113,30 +159,12 @@ namespace neui_d2d_backend
     HWND hwnd = reinterpret_cast<HWND>(native_handle);
     UINT dpi  = GetDpiForWindow(hwnd);
 
-    auto props = D2D1::RenderTargetProperties();
-    props.dpiX = static_cast<float>(dpi);
-    props.dpiY = static_cast<float>(dpi);
-
-    auto hwnd_props = D2D1::HwndRenderTargetProperties(
-      hwnd,
-      D2D1::SizeU(width, height)
-    );
-
-    ID2D1HwndRenderTarget* target = nullptr;
-    HRESULT hr = g_factory->CreateHwndRenderTarget(props, hwnd_props, &target);
-    if (FAILED(hr)) return nullptr;
-
-    // Set DPI explicitly so coordinate mapping is consistent.
-    target->SetDpi(static_cast<float>(dpi), static_cast<float>(dpi));
-
-    ID2D1SolidColorBrush* brush = nullptr;
-    hr = target->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &brush);
-    if (FAILED(hr)) { target->Release(); return nullptr; }
-
     auto* ctx  = new D2DContext();
-    ctx->target = target;
-    ctx->brush  = brush;
+    ctx->hwnd   = hwnd;
+    ctx->width  = width;
+    ctx->height = height;
     ctx->dpi    = dpi;
+    if (!d2d_build_target(ctx)) { delete ctx; return nullptr; }
     return ctx;
   }
 
@@ -154,14 +182,27 @@ namespace neui_d2d_backend
   static void d2d_resize(neui_render_ctx_t raw, uint32_t width, uint32_t height)
   {
     auto* ctx = static_cast<D2DContext*>(raw);
-    if (!ctx || !ctx->target) return;
-    ctx->target->Resize(D2D1::SizeU(width, height));
+    if (!ctx) return;
+    ctx->width  = width;
+    ctx->height = height;
+    if (ctx->target) ctx->target->Resize(D2D1::SizeU(width, height));
+    // If target is null we're in the lost-device window between EndDraw
+    // returning D2DERR_RECREATE_TARGET and the next begin_frame; the new
+    // size is already stashed and will be used when begin_frame rebuilds.
   }
 
   static void d2d_begin_frame(neui_render_ctx_t raw, uint32_t clear_argb)
   {
     auto* ctx = static_cast<D2DContext*>(raw);
-    if (!ctx || !ctx->target) return;
+    if (!ctx) return;
+    if (!ctx->target) {
+      // Previous frame's EndDraw lost the device. Try to rebuild in place
+      // and bump generation so cached target-bound bitmaps get re-uploaded
+      // on first use. If rebuild fails (e.g. driver still in a bad state)
+      // we silently skip this frame; the next begin_frame will try again.
+      if (!d2d_build_target(ctx)) return;
+      ctx->generation++;
+    }
     ctx->target->BeginDraw();
     // Reset transform stack to identity each frame so a missing pop in
     // a previous frame can't bleed across frame boundaries.
@@ -177,10 +218,22 @@ namespace neui_d2d_backend
     if (!ctx || !ctx->target) return;
     HRESULT hr = ctx->target->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
-      // Render target lost (e.g. mode change). Recreate on next paint.
-      ctx->target->Release(); ctx->target = nullptr;
-      ctx->brush->Release();  ctx->brush  = nullptr;
+      // Device lost (mode change, GPU reset, driver crash, ...). Release
+      // target + brush; ID2D1Bitmap handles created against this target
+      // are now dangling for draw purposes but still safe to Release().
+      // We don't touch them here - the asset manager (one per session)
+      // owns the cache and will drop stale entries the next time it sees
+      // a different get_context_generation result. The next begin_frame
+      // rebuilds the target using the stored hwnd / size / dpi.
+      if (ctx->target) { ctx->target->Release(); ctx->target = nullptr; }
+      if (ctx->brush)  { ctx->brush->Release();  ctx->brush  = nullptr; }
     }
+  }
+
+  static uint32_t d2d_get_context_generation(neui_render_ctx_t raw)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    return ctx ? ctx->generation : 0u;
   }
 
   static void d2d_fill_rect(neui_render_ctx_t raw,
@@ -215,9 +268,13 @@ namespace neui_d2d_backend
   static void d2d_update_dpi(neui_render_ctx_t raw, uint32_t dpi)
   {
     auto* ctx = static_cast<D2DContext*>(raw);
-    if (!ctx || !ctx->target) return;
+    if (!ctx) return;
     ctx->dpi = dpi;
-    ctx->target->SetDpi(static_cast<float>(dpi), static_cast<float>(dpi));
+    // Mirror the new DPI onto the live target if present; if we're in the
+    // lost-device window the rebuild in d2d_begin_frame will use the
+    // stashed value.
+    if (ctx->target)
+      ctx->target->SetDpi(static_cast<float>(dpi), static_cast<float>(dpi));
   }
 
   static void d2d_draw_text(neui_render_ctx_t raw,
@@ -616,6 +673,7 @@ namespace neui_d2d_backend
     d2d_translate,
     d2d_rotate,
     d2d_scale,
+    d2d_get_context_generation,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

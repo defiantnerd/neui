@@ -82,6 +82,20 @@ typedef struct neui_render_backend {
   // Pop the most recently pushed clip rectangle.
   void (NEUI_ABI *pop_clip)(neui_render_ctx_t ctx);
 
+  // --- Internal use only (not reachable through neui_painter_api_t) ------
+  //
+  // create_bitmap / destroy_bitmap / draw_bitmap operate on raw context-
+  // bound handles and are intended for the host's own image / asset
+  // pipeline. Clients writing NEUI_W_CUSTOMDRAW widgets get a curated
+  // surface through neui_painter_api_t in <neui/d/painter.h>, and load
+  // bitmaps via neui_asset_api_t in <neui/d/assets.h> (get_interface
+  // (sess, NEUI_API_ASSETS)). The painter resolves neui_asset_t handles
+  // against the session's asset manager and forwards to draw_bitmap
+  // below - clients never see the void* handle.
+  //
+  // Calling these from a paint callback would either leak GPU resources
+  // (per-frame uploads) or operate on the wrong context entirely.
+
   // Create an opaque bitmap handle from raw BGRA8 (premultiplied) pixel data.
   // width_px / height_px are physical pixel dimensions.
   // scale is the HiDPI factor of the image (1.0 = @1x, 2.0 = @2x, 3.0 = @3x);
@@ -103,6 +117,8 @@ typedef struct neui_render_backend {
   void (NEUI_ABI *draw_bitmap)(neui_render_ctx_t ctx, void* bitmap,
                                 float src_x, float src_y, float src_w, float src_h,
                                 float dst_x, float dst_y, float dst_w, float dst_h);
+
+  // --- End internal-use block --------------------------------------------
 
   // --- Path API (stateful per context) -----------------------------------
   //
@@ -157,6 +173,17 @@ typedef struct neui_render_backend {
   void (NEUI_ABI *translate)     (neui_render_ctx_t ctx, float dx, float dy);
   void (NEUI_ABI *rotate)        (neui_render_ctx_t ctx, float radians);
   void (NEUI_ABI *scale)         (neui_render_ctx_t ctx, float sx, float sy);
+
+  // Monotonically-increasing per-context counter. Bumped whenever the
+  // backend has had to recreate its device-dependent state (e.g. D2D's
+  // D2DERR_RECREATE_TARGET after a GPU mode change or driver reset).
+  // Callers that cache device-dependent handles created via create_bitmap
+  // can compare the cached generation against this value to detect that
+  // their cached handles have become dangling and need re-upload. The
+  // ctx pointer itself remains valid - only the resources hanging off
+  // it have been re-issued. Backends that never invalidate (CG, null)
+  // return a constant (typically 0).
+  uint32_t (NEUI_ABI *get_context_generation)(neui_render_ctx_t ctx);
 
 } neui_render_backend_t;
 

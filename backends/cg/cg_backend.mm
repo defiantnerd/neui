@@ -531,6 +531,16 @@ namespace neui_cg_backend
     CGContextScaleCTM(st->cg_ctx, sx, sy);
   }
 
+  // CoreGraphics contexts are recreated per draw cycle via set_current_frame
+  // and never silently invalidate the way a D3D-backed D2D target can, so
+  // there's no generation to advance. Cached target-bound resources are
+  // already keyed by the per-frame CGContextRef, so a constant satisfies
+  // the asset manager's stale-cache check.
+  static uint32_t cg_get_context_generation(neui_render_ctx_t)
+  {
+    return 0u;
+  }
+
   // ---------------------------------------------------------------------------
 
   static neui_render_backend_t backend = {
@@ -563,6 +573,7 @@ namespace neui_cg_backend
     cg_translate,
     cg_rotate,
     cg_scale,
+    cg_get_context_generation,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

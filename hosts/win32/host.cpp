@@ -4,6 +4,7 @@
 
 #include "host.h"
 #include "window.h"
+#include "../../backends/d2d/d2d_backend.h"
 #include "../shared/win32/clipboard_listener_win32.h"
 #include "../shared/win32/theme_provider_win32.h"
 #include "../shared/win32/theme_brushes_win32.h"
@@ -26,6 +27,7 @@ namespace win32_host
   extern neui_attr_api_t      attrs_api;
   extern neui_clipboard_api_t clipboard_api;
   extern neui_commands_api_t  commands_api;
+  extern neui_asset_api_t     asset_api;
 
   neui_session_t create_session(neui_client_t* client, void* token)
   {
@@ -63,6 +65,7 @@ namespace win32_host
     if (!strcmp(iface, NEUI_API_ATTRS))     return &win32_host::attrs_api;
     if (!strcmp(iface, NEUI_API_CLIPBOARD)) return &win32_host::clipboard_api;
     if (!strcmp(iface, NEUI_API_COMMANDS))  return &win32_host::commands_api;
+    if (!strcmp(iface, NEUI_API_ASSETS))    return &win32_host::asset_api;
     return nullptr;
   }
 
@@ -137,6 +140,13 @@ namespace win32_host
 
   Session::~Session()
   {
+    // Asset manager owns CPU pixels plus a per-paint-ctx GPU upload
+    // cache. By the time we get here every HWND has been destroyed and
+    // PaintedWndProc::WM_DESTROY has already dropped per-ctx entries,
+    // but a defensive clear() with the backend ensures any straggler
+    // GPU bitmap is freed before the manager destructs.
+    _asset_manager.clear(neui_d2d_backend::get_backend());
+
     if (_clipboard_listener_handle != 0) {
       neui_detail::unregister_clipboard_listener(_clipboard_listener_handle);
       _clipboard_listener_handle = 0;

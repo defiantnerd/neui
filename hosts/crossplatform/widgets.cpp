@@ -158,6 +158,8 @@ namespace xpl_host
       return std::make_unique<SliderWidget>();
     if (!strcmp(type, NEUI_W_KNOB))
       return std::make_unique<KnobWidget>();
+    if (!strcmp(type, NEUI_W_CUSTOMDRAW))
+      return std::make_unique<CustomDrawWidget>();
     return std::make_unique<WidgetData>(); // fallback for unknown types
   }
 
@@ -187,27 +189,29 @@ namespace xpl_host
     obj->session_id = session.session;
     obj->isroot    = obj->is_frame() || obj->is_menubar();
 
-    obj->tab_stop  = !strcmp(type, NEUI_W_BUTTON)   ||
-                     !strcmp(type, NEUI_W_INPUTBOX)  ||
-                     !strcmp(type, NEUI_W_CHECKBOX)  ||
-                     !strcmp(type, NEUI_W_CHECKBOX3) ||
-                     !strcmp(type, NEUI_W_LISTBOX)   ||
-                     !strcmp(type, NEUI_W_COMBOBOX)  ||
-                     !strcmp(type, NEUI_W_MULTILINE) ||
-                     !strcmp(type, NEUI_W_TREEVIEW)  ||
-                     !strcmp(type, NEUI_W_SLIDER)    ||
-                     !strcmp(type, NEUI_W_KNOB);
+    obj->tab_stop  = !strcmp(type, NEUI_W_BUTTON)    ||
+                     !strcmp(type, NEUI_W_INPUTBOX)   ||
+                     !strcmp(type, NEUI_W_CHECKBOX)   ||
+                     !strcmp(type, NEUI_W_CHECKBOX3)  ||
+                     !strcmp(type, NEUI_W_LISTBOX)    ||
+                     !strcmp(type, NEUI_W_COMBOBOX)   ||
+                     !strcmp(type, NEUI_W_MULTILINE)  ||
+                     !strcmp(type, NEUI_W_TREEVIEW)   ||
+                     !strcmp(type, NEUI_W_SLIDER)     ||
+                     !strcmp(type, NEUI_W_KNOB)       ||
+                     !strcmp(type, NEUI_W_CUSTOMDRAW);
 
-    obj->emit_events = !strcmp(type, NEUI_W_BUTTON)   ||
-                       !strcmp(type, NEUI_W_INPUTBOX)  ||
-                       !strcmp(type, NEUI_W_CHECKBOX)  ||
-                       !strcmp(type, NEUI_W_CHECKBOX3) ||
-                       !strcmp(type, NEUI_W_LISTBOX)   ||
-                       !strcmp(type, NEUI_W_COMBOBOX)  ||
-                       !strcmp(type, NEUI_W_MULTILINE) ||
-                       !strcmp(type, NEUI_W_TREEVIEW)  ||
-                       !strcmp(type, NEUI_W_SLIDER)    ||
-                       !strcmp(type, NEUI_W_KNOB);
+    obj->emit_events = !strcmp(type, NEUI_W_BUTTON)    ||
+                       !strcmp(type, NEUI_W_INPUTBOX)   ||
+                       !strcmp(type, NEUI_W_CHECKBOX)   ||
+                       !strcmp(type, NEUI_W_CHECKBOX3)  ||
+                       !strcmp(type, NEUI_W_LISTBOX)    ||
+                       !strcmp(type, NEUI_W_COMBOBOX)   ||
+                       !strcmp(type, NEUI_W_MULTILINE)  ||
+                       !strcmp(type, NEUI_W_TREEVIEW)   ||
+                       !strcmp(type, NEUI_W_SLIDER)     ||
+                       !strcmp(type, NEUI_W_KNOB)       ||
+                       !strcmp(type, NEUI_W_CUSTOMDRAW);
 
     uint32_t idx = s->_widgets.add_child(parent_idx, std::move(obj));
     if (idx == 0) return { UINT32_MAX };
@@ -517,6 +521,19 @@ namespace xpl_host
     return s->open_popup_menu(aidx, x, y, v);
   }
 
+  static void NEUI_ABI w_invalidate(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    // Map any widget invalidation to a frame-level repaint - on the xpl
+    // host the entire frame paints in one pass, so per-widget invalidation
+    // would have to invalidate the frame anyway.
+    if (void* frame = s->find_parent_native_handle(idx))
+      platform_invalidate(frame);
+  }
+
   neui_widget_api_t widgets_api = {
     w_create,
     w_destroy,
@@ -538,6 +555,7 @@ namespace xpl_host
     w_get_pos,
     w_get_size,
     w_popup_menu,
+    w_invalidate,
   };
 
   // -------------------------------------------------------------------------
@@ -1531,6 +1549,100 @@ namespace xpl_host
     NEUI_VERSION,
     cmd_invoke_focused,
     cmd_invoke,
+  };
+
+  // ---------------------------------------------------------------------------
+  // Asset API (NEUI_API_ASSETS) - session-scoped media handles backed by
+  // the AssetManager's handle table. Handles encode the session id in the
+  // upper 16 bits like neui_widget_t; cross-session handles are dropped.
+
+  static neui_asset_t pack_asset(uint32_t session_id, uint32_t slot)
+  {
+    return { ((session_id & 0xffff) << 16) | (slot & 0xffff) };
+  }
+
+  static neui_asset_t NEUI_ABI as_create_bitmap(neui_session_t session,
+                                                  uint32_t width_px,
+                                                  uint32_t height_px,
+                                                  const uint8_t* bgra,
+                                                  float scale)
+  {
+    auto* s = get_session(session);
+    if (!s) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_bitmap(width_px, height_px,
+                                                       bgra, scale);
+    if (slot == 0) return asset_none;
+    return pack_asset(s->_session_id, slot);
+  }
+
+  static neui_asset_t NEUI_ABI as_create_from_file(neui_session_t session,
+                                                     const char* path_utf8)
+  {
+    auto* s = get_session(session);
+    if (!s || !path_utf8) return asset_none;
+    // Use the highest DPI of any frame in this session as a best-guess
+    // for which @Nx variant to prefer. Falls back to 1.0 if no frames yet.
+    float scale = 1.0f;
+    if (s->_backend && s->_backend->get_scale_factor) {
+      uint32_t child = s->_widgets.child(0);
+      while (child != 0) {
+        if (s->_widgets.exists(child)) {
+          auto& wd = s->_widgets[child];
+          if (wd.render_ctx) {
+            float ws = s->_backend->get_scale_factor(wd.render_ctx);
+            if (ws > scale) scale = ws;
+          }
+        }
+        child = s->_widgets.next(child);
+      }
+    }
+    uint32_t slot = s->_asset_manager.allocate_from_file(path_utf8, scale);
+    if (slot == 0) return asset_none;
+    return pack_asset(s->_session_id, slot);
+  }
+
+  static void NEUI_ABI as_destroy(neui_session_t session, neui_asset_t asset)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    if (asset.id == asset_none.id) return;
+    if (((asset.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return;
+    s->_asset_manager.release_slot(asset.id & 0xffff, s->_backend);
+  }
+
+  static bool NEUI_ABI as_get_size(neui_session_t session, neui_asset_t asset,
+                                     float* out_w, float* out_h)
+  {
+    auto* s = get_session(session);
+    if (!s) return false;
+    if (asset.id == asset_none.id) return false;
+    if (((asset.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return false;
+    auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
+    if (!e || e->scale <= 0.0f) return false;
+    if (out_w) *out_w = static_cast<float>(e->width_px)  / e->scale;
+    if (out_h) *out_h = static_cast<float>(e->height_px) / e->scale;
+    return true;
+  }
+
+  static neui_asset_kind_t NEUI_ABI as_get_kind(neui_session_t session,
+                                                  neui_asset_t asset)
+  {
+    auto* s = get_session(session);
+    if (!s) return NEUI_ASSET_KIND_NONE;
+    if (asset.id == asset_none.id) return NEUI_ASSET_KIND_NONE;
+    if (((asset.id >> 16) & 0xffff) != (s->_session_id & 0xffff))
+      return NEUI_ASSET_KIND_NONE;
+    auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
+    return e ? e->kind : NEUI_ASSET_KIND_NONE;
+  }
+
+  neui_asset_api_t asset_api = {
+    NEUI_VERSION,
+    as_create_bitmap,
+    as_create_from_file,
+    as_destroy,
+    as_get_size,
+    as_get_kind,
   };
 
 } // namespace xpl_host

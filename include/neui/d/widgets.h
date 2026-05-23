@@ -72,6 +72,13 @@ typedef struct neui_widget_api {
   int                (NEUI_ABI *popup_menu)(neui_session_t session, neui_widget_t anchor,
                                              int x, int y,
                                              const char* const* items);
+  // Request a repaint of `widget`. On NEUI_W_CUSTOMDRAW (and other painted
+  // widgets) this re-fires the paint pass so the client can redraw with
+  // updated state; on native widgets it asks the OS to repaint the control.
+  // No-op if the widget has no native surface yet (before show()) or the
+  // widget does not exist. Coalesces with any other pending invalidations
+  // - one repaint per event-loop tick at most.
+  void               (NEUI_ABI *invalidate)(neui_session_t session, neui_widget_t widget);
 } neui_widget_api_t;
 
 #define NEUI_W_APPWINDOW  "neui.std.appwindow"
@@ -91,6 +98,7 @@ typedef struct neui_widget_api {
 #define NEUI_W_SLIDER     "neui.std.slider"
 #define NEUI_W_KNOB       "neui.std.knob"
 #define NEUI_W_SECTION    "neui.std.section"
+#define NEUI_W_CUSTOMDRAW "neui.std.customdraw"
 
 #ifdef __cplusplus
 }
