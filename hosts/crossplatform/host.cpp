@@ -1264,22 +1264,73 @@ namespace xpl_host
     float fh = static_cast<float>(height);
 
     using neui_detail::ColorRole;
-    if (text.empty() || !backend->create_bitmap) {
+    if (!backend->create_bitmap || !session) {
       backend->fill_rect(ctx, fx, fy, fw, fh,
                           neui_detail::color(ColorRole::control_bg_inactive));
       return;
     }
 
     float scale = backend->get_scale_factor ? backend->get_scale_factor(ctx) : 1.0f;
-    void* bmp = session->_asset_manager.get_bitmap(text, scale, backend, ctx);
+    void* bmp = nullptr;
+    float img_w = 0.0f, img_h = 0.0f;
+
+    if (asset.id != asset_none.id) {
+      // Asset branch: handle-keyed source. Mirrors xpl_painter_draw_asset
+      // _thunk - resolve the slot, lazy upload with device-loss
+      // generation check, pull intrinsic dimensions from the entry
+      // directly (no separate get_logical_size lookup needed).
+      uint32_t asset_sess = (asset.id >> 16) & 0xffff;
+      if (asset_sess == (session->get_session_id() & 0xffff)) {
+        uint32_t slot = asset.id & 0xffff;
+        auto* entry = session->_asset_manager.get_slot(slot);
+        if (entry) {
+          const uint32_t gen = backend->get_context_generation
+            ? backend->get_context_generation(ctx) : 0u;
+          auto it = entry->bitmaps.find(ctx);
+          if (it != entry->bitmaps.end() && it->second.generation != gen) {
+            if (backend->destroy_bitmap && it->second.bmp)
+              backend->destroy_bitmap(ctx, it->second.bmp);
+            entry->bitmaps.erase(it);
+            it = entry->bitmaps.end();
+          }
+          if (it == entry->bitmaps.end()) {
+            void* new_bmp = backend->create_bitmap(ctx,
+                                                    entry->width_px, entry->height_px,
+                                                    entry->pixels.data(),
+                                                    entry->scale);
+            if (new_bmp) {
+              it = entry->bitmaps.emplace(ctx,
+                                           neui_detail::CtxBitmap{ new_bmp, gen }).first;
+            }
+          }
+          if (it != entry->bitmaps.end()) {
+            bmp = it->second.bmp;
+            if (entry->scale > 0.0f) {
+              img_w = static_cast<float>(entry->width_px)  / entry->scale;
+              img_h = static_cast<float>(entry->height_px) / entry->scale;
+            }
+          }
+        }
+        // entry == nullptr means the client destroyed the asset while
+        // this widget still references it - paint empty, no draw.
+      }
+    } else if (!text.empty()) {
+      // Legacy path branch.
+      bmp = session->_asset_manager.get_bitmap(text, scale, backend, ctx);
+      if (bmp)
+        session->_asset_manager.get_logical_size(text, scale, &img_w, &img_h);
+    } else {
+      // No source bound - paint inactive fill, same as before.
+      backend->fill_rect(ctx, fx, fy, fw, fh,
+                          neui_detail::color(ColorRole::control_bg_inactive));
+      return;
+    }
 
     // Compute the destination rectangle that preserves the bitmap's
     // intrinsic aspect ratio inside the widget bounds (uniform "fit",
     // also known as letterbox / pillarbox), and centre it.
     float dst_x = fx, dst_y = fy, dst_w = fw, dst_h = fh;
-    float img_w = 0.0f, img_h = 0.0f;
-    if (bmp && session->_asset_manager.get_logical_size(text, scale, &img_w, &img_h)
-        && img_w > 0.0f && img_h > 0.0f) {
+    if (bmp && img_w > 0.0f && img_h > 0.0f) {
       float widget_aspect = fw / fh;
       float image_aspect  = img_w / img_h;
       if (image_aspect > widget_aspect) {

@@ -369,6 +369,14 @@ namespace macos_host
   {
   }
 
+  // NEUI_W_IMAGE is not implemented on the native macOS host - see
+  // plans/macos-port.md. Asset-handle support lands together with the
+  // IMAGE widget itself as part of that port; for now this is a no-op
+  // so the vtable layout stays in sync with neui_widget_api_t.
+  static void NEUI_ABI w_set_asset(neui_session_t, neui_widget_t, neui_asset_t)
+  {
+  }
+
   neui_widget_api_t widgets_api = {
     w_create, w_destroy, w_show, w_hide,
     w_set_pos, w_set_size, w_set_emit_events,
@@ -382,6 +390,7 @@ namespace macos_host
     w_get_pos, w_get_size,
     w_popup_menu,
     w_invalidate,
+    w_set_asset,
   };
 
   // -------------------------------------------------------------------------

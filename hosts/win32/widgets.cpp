@@ -1426,7 +1426,10 @@ namespace win32_host
     auto& w = _widgets[index];
     w.text = text ? text : "";
     if (w.type && !strcmp(w.type, NEUI_W_IMAGE)) {
-      // For image widgets the text is the image filename - reload the bitmap.
+      // For image widgets the text is the image filename. set_text and
+      // set_asset are mutually clearing: assigning a path here drops
+      // any bound asset handle so the legacy path source becomes live.
+      w.image_asset = asset_none;
       if (w.hwnd) load_image_bitmap(w, get_dpi_for_widget(index));
     } else if (w.type && !strcmp(w.type, NEUI_W_SECTION)) {
       // Section: text is the header title; chip width and the window
@@ -2556,6 +2559,58 @@ namespace win32_host
     return nullptr;
   }
 
+  // Bind an asset handle as the IMAGE widget's source. Drops any
+  // previous path-loaded bitmap (the legacy image_pixels / image_bitmap
+  // pair) so the asset becomes the sole source - matches set_text's
+  // mutual-clearing contract.
+  //
+  // The per-ctx GPU upload for the asset is owned by the session's
+  // W32AssetManager and lazily materialised on first paint by the
+  // helper in ImageWndProc::WM_PAINT. The IMAGE widget's image_ctx is
+  // used as the cache key, so on widget destroy the ImageWndProc
+  // WM_DESTROY path must call _asset_manager.release_context to drop
+  // the now-orphaned per-ctx bitmap entry.
+  void Session::widget_set_asset(neui_widget_t widget, neui_asset_t asset)
+  {
+    uint32_t index = WidgetToIndex(widget);
+    if (!_widgets.exists(index)) return;
+    auto& w = _widgets[index];
+    if (!w.type || strcmp(w.type, NEUI_W_IMAGE) != 0) return;
+
+    // Reject cross-session handles (matches the painter's draw_asset
+    // contract). asset_none always passes - it's the documented clear.
+    if (asset.id != asset_none.id &&
+        ((asset.id >> 16) & 0xffff) != (_session_id & 0xffff)) {
+      return;
+    }
+
+    // Drop the legacy path-source bitmap if any. The handle path will
+    // upload on first paint via the asset manager; we don't pre-upload
+    // here because the widget may not have shown yet (image_ctx can be
+    // null pre-show).
+    auto* backend = neui_d2d_backend::get_backend();
+    if (w.image_bitmap && w.image_ctx && backend && backend->destroy_bitmap) {
+      backend->destroy_bitmap(w.image_ctx, w.image_bitmap);
+    }
+    w.image_bitmap = nullptr;
+    w.image_pixels.clear();
+    w.image_scale = 0.0f;
+    w.image_width_px = 0;
+    w.image_height_px = 0;
+    w.image_bitmap_generation = 0;
+
+    w.image_asset = asset;
+    w.text.clear();  // mutual-clear: asset path is now live, drop the path source
+
+    if (w.hwnd) InvalidateRect(w.hwnd, nullptr, FALSE);
+  }
+
+  static void NEUI_ABI set_asset(neui_session_t session, neui_widget_t widget, neui_asset_t asset)
+  {
+    auto s = get_session_for_widget(session, widget);
+    if (s) s->widget_set_asset(widget, asset);
+  }
+
   // Native Win32 controls carry WS_TABSTOP at creation and native
   // WM_GETDLGCODE / IsDialogMessage handles traversal, so this is a no-op.
   // The entry exists to keep the vtable layout in sync with neui_widget_api_t.
@@ -2696,6 +2751,7 @@ namespace win32_host
     get_size,
     popup_menu,
     invalidate,
+    set_asset,
   };
 
   // -------------------------------------------------------------------------

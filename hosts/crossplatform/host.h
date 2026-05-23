@@ -382,9 +382,13 @@ namespace xpl_host
     bool on_mouse_event(neui_event_t* event) override;
   };
 
-  // IMAGE - displays an image asset; text field holds the image filename
+  // IMAGE - displays an image asset. Two source modes (last-set-wins,
+  // mutually clearing): the legacy text field holds a file path OR
+  // `asset` holds a pre-loaded NEUI_API_ASSETS handle. set_text and
+  // set_asset on this widget clear the opposite source.
   class ImageWidget : public WidgetData {
   public:
+    neui_asset_t asset = asset_none;
     void paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
                bool is_focused) override;
   };

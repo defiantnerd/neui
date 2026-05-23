@@ -269,26 +269,79 @@ namespace win32_host
         }
         backend->begin_frame(wd->image_ctx, clear_argb);
 
-        // Re-upload the bitmap if the context recreated its device since
-        // we last uploaded (D2DERR_RECREATE_TARGET). begin_frame above
-        // already rebuilt the target and bumped the generation, so the
-        // mismatch is detectable here. The cached image_pixels carries
-        // the CPU-side BGRA we need to re-upload.
-        if (backend->get_context_generation && !wd->image_pixels.empty()) {
-          const uint32_t gen = backend->get_context_generation(wd->image_ctx);
-          if (gen != wd->image_bitmap_generation) {
-            if (wd->image_bitmap)
-              backend->destroy_bitmap(wd->image_ctx, wd->image_bitmap);
-            wd->image_bitmap = backend->create_bitmap(
-              wd->image_ctx,
-              wd->image_width_px, wd->image_height_px,
-              wd->image_pixels.data(),
-              wd->image_scale);
-            wd->image_bitmap_generation = gen;
+        // Resolve the source: asset handle wins if set, else fall back
+        // to the legacy path-loaded bitmap. The two are mutually
+        // exclusive by widget_set_asset / widget_set_text contract.
+        void*    draw_bmp = nullptr;
+        uint32_t bmp_w_px = 0, bmp_h_px = 0;
+        float    bmp_scale = 0.0f;
+
+        if (wd->image_asset.id != asset_none.id) {
+          // Asset branch: resolve the slot, lazy upload per (asset, ctx)
+          // pair with device-loss generation check. Mirrors the
+          // painter's draw_asset thunk (hosts/win32/widgets.cpp:540)
+          // because the IMAGE widget owns its own image_ctx separate
+          // from any CUSTOMDRAW ctx using the same handle.
+          if (wd->session) {
+            uint32_t slot = wd->image_asset.id & 0xffff;
+            uint32_t asset_sess = (wd->image_asset.id >> 16) & 0xffff;
+            if (asset_sess == (wd->session->session_id() & 0xffff)) {
+              auto* entry = wd->session->_asset_manager.get_slot(slot);
+              if (entry) {
+                const uint32_t gen = backend->get_context_generation
+                  ? backend->get_context_generation(wd->image_ctx) : 0u;
+                auto it = entry->bitmaps.find(wd->image_ctx);
+                if (it != entry->bitmaps.end() && it->second.generation != gen) {
+                  if (backend->destroy_bitmap && it->second.bmp)
+                    backend->destroy_bitmap(wd->image_ctx, it->second.bmp);
+                  entry->bitmaps.erase(it);
+                  it = entry->bitmaps.end();
+                }
+                if (it == entry->bitmaps.end() && backend->create_bitmap) {
+                  void* bmp = backend->create_bitmap(wd->image_ctx,
+                                                      entry->width_px, entry->height_px,
+                                                      entry->pixels.data(),
+                                                      entry->scale);
+                  if (bmp) {
+                    it = entry->bitmaps.emplace(wd->image_ctx,
+                                                 win32_host::W32CtxBitmap{ bmp, gen }).first;
+                  }
+                }
+                if (it != entry->bitmaps.end()) {
+                  draw_bmp  = it->second.bmp;
+                  bmp_w_px  = entry->width_px;
+                  bmp_h_px  = entry->height_px;
+                  bmp_scale = entry->scale;
+                }
+              }
+              // Slot freed by client (destroyed asset while widget still
+              // referenced it) - leave draw_bmp null and paint nothing.
+            }
           }
+        } else if (!wd->image_pixels.empty()) {
+          // Legacy path branch: re-upload from cached CPU pixels if the
+          // backend bumped its per-ctx generation
+          // (D2DERR_RECREATE_TARGET / device-loss recovery).
+          if (backend->get_context_generation) {
+            const uint32_t gen = backend->get_context_generation(wd->image_ctx);
+            if (gen != wd->image_bitmap_generation) {
+              if (wd->image_bitmap)
+                backend->destroy_bitmap(wd->image_ctx, wd->image_bitmap);
+              wd->image_bitmap = backend->create_bitmap(
+                wd->image_ctx,
+                wd->image_width_px, wd->image_height_px,
+                wd->image_pixels.data(),
+                wd->image_scale);
+              wd->image_bitmap_generation = gen;
+            }
+          }
+          draw_bmp  = wd->image_bitmap;
+          bmp_w_px  = wd->image_width_px;
+          bmp_h_px  = wd->image_height_px;
+          bmp_scale = wd->image_scale;
         }
 
-        if (wd->image_bitmap) {
+        if (draw_bmp) {
           RECT rc;
           GetClientRect(hwnd, &rc);
           UINT dpi = GetDpiForWindow(hwnd);
@@ -298,10 +351,10 @@ namespace win32_host
           // Aspect-preserving fit: scale the source so it touches one of the
           // widget bounds and centre it (letterbox / pillarbox the other axis).
           float dst_x = 0.0f, dst_y = 0.0f, dst_w = w_log, dst_h = h_log;
-          float img_w_log = (wd->image_scale > 0.0f)
-            ? static_cast<float>(wd->image_width_px)  / wd->image_scale : 0.0f;
-          float img_h_log = (wd->image_scale > 0.0f)
-            ? static_cast<float>(wd->image_height_px) / wd->image_scale : 0.0f;
+          float img_w_log = (bmp_scale > 0.0f)
+            ? static_cast<float>(bmp_w_px) / bmp_scale : 0.0f;
+          float img_h_log = (bmp_scale > 0.0f)
+            ? static_cast<float>(bmp_h_px) / bmp_scale : 0.0f;
           if (img_w_log > 0.0f && img_h_log > 0.0f) {
             float widget_aspect = w_log / h_log;
             float image_aspect  = img_w_log / img_h_log;
@@ -330,7 +383,7 @@ namespace win32_host
             backend->translate(wd->image_ctx, -cx, -cy);
           }
 
-          backend->draw_bitmap(wd->image_ctx, wd->image_bitmap,
+          backend->draw_bitmap(wd->image_ctx, draw_bmp,
                                0.0f, 0.0f, 0.0f, 0.0f,   // full source
                                dst_x, dst_y, dst_w, dst_h);
 
@@ -342,9 +395,18 @@ namespace win32_host
     }
     case WM_DESTROY: {
       if (wd && backend) {
+        // Legacy path-source bitmap (owned by the widget) - free
+        // directly. Asset-source per-ctx bitmaps live in
+        // W32AssetManager keyed by image_ctx; release_context below
+        // drops every cached entry for this ctx so the asset
+        // manager doesn't accumulate dangling keys for the session
+        // lifetime.
         if (wd->image_bitmap) {
           backend->destroy_bitmap(wd->image_ctx, wd->image_bitmap);
           wd->image_bitmap = nullptr;
+        }
+        if (wd->session && wd->image_ctx) {
+          wd->session->_asset_manager.release_context(wd->image_ctx, backend);
         }
         if (wd->image_ctx) {
           backend->destroy_context(wd->image_ctx);

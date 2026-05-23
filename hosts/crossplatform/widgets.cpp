@@ -382,6 +382,40 @@ namespace xpl_host
     // Frame windows: push the text into the native title bar when live.
     if (wd.is_frame() && wd.native_handle)
       platform_set_window_title(wd.native_handle, wd.text.c_str());
+
+    // IMAGE widget: set_text is the path source. Drop any bound asset
+    // handle so the path becomes the live source (mutual-clear with
+    // set_asset). The paint walk will repaint on the next frame.
+    if (auto* img = dynamic_cast<ImageWidget*>(&wd))
+      img->asset = asset_none;
+  }
+
+  // Bind an asset handle as the IMAGE widget's source. Drops any path
+  // source (wd.text) so the asset becomes sole source - mirrors the
+  // win32 native host's contract and the painter's draw_asset thunk
+  // for slot resolution + cross-session rejection. asset_none clears.
+  static void NEUI_ABI w_set_asset(neui_session_t session,
+                                    neui_widget_t widget, neui_asset_t asset)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    auto* img = dynamic_cast<ImageWidget*>(&wd);
+    if (!img) return;  // non-IMAGE: no-op
+
+    if (asset.id != asset_none.id &&
+        ((asset.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) {
+      return;  // cross-session - silent reject
+    }
+
+    img->asset = asset;
+    img->text.clear();
+
+    // Trigger a repaint via the owning frame.
+    if (void* frame = s->find_parent_native_handle(idx))
+      platform_invalidate(frame);
   }
 
   static int NEUI_ABI w_get_text(neui_session_t session,
@@ -556,6 +590,7 @@ namespace xpl_host
     w_get_size,
     w_popup_menu,
     w_invalidate,
+    w_set_asset,
   };
 
   // -------------------------------------------------------------------------

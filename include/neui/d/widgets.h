@@ -1,6 +1,7 @@
 #pragma once
 
 #include <neui/neui.h>
+#include "assets.h"
 #include "events.h"
 
 #ifdef __cplusplus
@@ -79,6 +80,21 @@ typedef struct neui_widget_api {
   // widget does not exist. Coalesces with any other pending invalidations
   // - one repaint per event-loop tick at most.
   void               (NEUI_ABI *invalidate)(neui_session_t session, neui_widget_t widget);
+  // Bind a pre-loaded asset (see NEUI_API_ASSETS in <neui/d/assets.h>) as
+  // the widget's source. NEUI_W_IMAGE is the only consumer today; on
+  // other widget types this is a no-op.
+  //
+  // set_asset and set_text on an IMAGE are mutually clearing: the last
+  // call wins and the previous source is released. Pass asset_none to
+  // clear (paints empty). Cross-session handles are silently rejected.
+  //
+  // The widget does NOT retain a refcount on the asset. If the client
+  // calls assets->destroy while a widget still references the handle,
+  // subsequent paints resolve the slot to nullptr and paint as if
+  // cleared - no crash, no draw. Recommended teardown: clear the
+  // widget with set_asset(widget, asset_none) (or destroy the widget)
+  // before assets->destroy.
+  void               (NEUI_ABI *set_asset)(neui_session_t session, neui_widget_t widget, neui_asset_t asset);
 } neui_widget_api_t;
 
 #define NEUI_W_APPWINDOW  "neui.std.appwindow"

@@ -84,6 +84,11 @@ struct AppState {
   // host owns the CPU pixels + per-ctx GPU cache; the client only sees
   // the handle. asset_none.id sentinels "not loaded".
   neui_asset_t       customdraw_bg  = asset_none;
+  // Asset handle for the side-by-side IMAGE smoke test. Demonstrates
+  // feeding NEUI_W_IMAGE via the public asset API (widgets->set_asset)
+  // rather than the legacy path source (widgets->set_text). Cleaned up
+  // alongside customdraw_bg on shutdown.
+  neui_asset_t       image_via_asset = asset_none;
   // Modal "About" dialog (created on demand by Help > About).
   uint32_t           about_dlg_id = 0;
   uint32_t           about_ok_id  = 0;
@@ -610,6 +615,16 @@ int main(int argc, char** argv) {
   auto img = app.widgets->create(sess, win, NEUI_W_IMAGE, 215, 160, 200, 150, nullptr);
   app.widgets->set_text(sess, img, "myimage.png");
 
+  // Asset-driven IMAGE smoke test: pre-load via NEUI_API_ASSETS and bind
+  // the handle with widgets->set_asset. Visually identical to the
+  // path-driven IMAGE on the left; same aspect-fit, same rotation
+  // honouring NEUI_ATTR_ROTATION. The widget does not retain a refcount,
+  // so the asset stays alive on `app.image_via_asset` until shutdown.
+  auto img_asset_demo = app.widgets->create(sess, win, NEUI_W_IMAGE,
+                                             430, 160, 200, 150, nullptr);
+  app.image_via_asset = app.assets->create_from_file(sess, "myimage.png");
+  app.widgets->set_asset(sess, img_asset_demo, app.image_via_asset);
+
   // --- SECTION demo: visual grouping container ---------------------------
   // A non-interactive coloured backdrop with an optional header label.
   // Children (the label + button below) are created with the section as
@@ -749,6 +764,8 @@ int main(int argc, char** argv) {
 
   if (app.assets && app.customdraw_bg.id != asset_none.id)
     app.assets->destroy(sess, app.customdraw_bg);
+  if (app.assets && app.image_via_asset.id != asset_none.id)
+    app.assets->destroy(sess, app.image_via_asset);
   app.widgets->destroy(sess, customdraw);
   app.widgets->destroy(sess, value_label);
   app.widgets->destroy(sess, knob2);
