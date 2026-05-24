@@ -12,8 +12,8 @@
 //   "neui.host.macos"          - native AppKit controls (macOS only)
 //   "neui.host.crossplatform"  - pluggable-backend host (D2D on Windows, CG on macOS)
 #ifdef _WIN32
-#define ACTIVE_HOSTx "neui.host.crossplatform"
-#define ACTIVE_HOST "neui.host.win32"
+#define ACTIVE_HOST "neui.host.crossplatform"
+#define ACTIVE_HOSTx "neui.host.win32"
 #elif defined(__APPLE__)
 #define ACTIVE_HOSTx "neui.host.crossplatform"
 #define ACTIVE_HOST "neui.host.macos"
@@ -49,12 +49,13 @@ static void dbglog(const char* fmt, ...) {
 // neui_session_t / neui_widget_t have const members and cannot be copy-assigned,
 // so we store the raw IDs and reconstruct the handles when calling the API.
 struct AppState {
-  neui_api_t*        neui      = nullptr;
-  neui_widget_api_t* widgets   = nullptr;
-  neui_items_api_t*  items     = nullptr;
-  neui_tree_api_t*   tree      = nullptr;
-  neui_attr_api_t*   attrs     = nullptr;
-  neui_asset_api_t*  assets    = nullptr;
+  neui_api_t*           neui      = nullptr;
+  neui_widget_api_t*    widgets   = nullptr;
+  neui_items_api_t*     items     = nullptr;
+  neui_tree_api_t*      tree      = nullptr;
+  neui_attr_api_t*      attrs     = nullptr;
+  neui_asset_api_t*     assets    = nullptr;
+  neui_compound_api_t*  compound  = nullptr;
   uint32_t           session   = 0;
   uint32_t           win_id    = 0;
   uint32_t           input_id  = 0;
@@ -68,6 +69,7 @@ struct AppState {
   uint32_t           slider_id  = 0;
   uint32_t           slider2_id = 0;   // 16-step variant
   uint32_t           knob_id    = 0;
+  uint32_t           knob_b_id  = 0;   // second continuous knob, drives compound B
   uint32_t           knob2_id   = 0;   // 16-step variant
   uint32_t           rot_slider_id  = 0;   // controls the rotating image below
   uint32_t           rot_image_id   = 0;
@@ -102,6 +104,14 @@ struct AppState {
   // Combobox above the rotation slider that swaps the rotating IMAGE's
   // source file at runtime (Lemur / Lion / Panda).
   uint32_t           image_combo_id = 0;
+  // Compound-drawable demo: a CUSTOMDRAW widget whose visuals are
+  // declared as a compound asset rather than painted from a WIDGET_PAINT
+  // callback. Driven by the same knob's value; the framework reads the
+  // widget's attr bag at paint time. Compound is shared between two
+  // CUSTOMDRAW widgets to show that one shape can back many instances.
+  uint32_t           compound_widget_a = 0;
+  uint32_t           compound_widget_b = 0;
+  neui_asset_t       compound_shape    = asset_none;
 };
 
 // Open a modal "About" dialog owned by the main window. The dialog has a
@@ -339,6 +349,7 @@ static neui_widget_client_t widget_client = {
       const char* which = (wid == app->slider_id)     ? "slider"
                        : (wid == app->slider2_id)    ? "slider16"
                        : (wid == app->knob_id)       ? "knob"
+                       : (wid == app->knob_b_id)     ? "knobB"
                        : (wid == app->knob2_id)      ? "knob16"
                        : (wid == app->rot_slider_id) ? "rotation"
                                                      : "?";
@@ -359,6 +370,22 @@ static neui_widget_client_t widget_client = {
         neui_session_t sess = { app->session };
         neui_widget_t  cd   = { app->customdraw_id };
         app->widgets->invalidate(sess, cd);
+      }
+      // Compound demo: the continuous knob drives compound widget A's
+      // value attr; the rotation slider drives B's. Both widgets share
+      // ONE compound asset; the framework re-resolves each widget's
+      // template + bindings against its own attrbag and the win32 host
+      // (xpl too) invalidates the widget on attr touch when a compound
+      // is attached. So no explicit invalidate() is needed here.
+      if (wid == app->knob_id && app->compound_widget_a != 0 && app->attrs) {
+        neui_session_t sess = { app->session };
+        neui_widget_t  cw   = { app->compound_widget_a };
+        app->attrs->set_float(sess, cw, NEUI_PARAM_VALUE, v);
+      }
+      if (wid == app->knob_b_id && app->compound_widget_b != 0 && app->attrs) {
+        neui_session_t sess = { app->session };
+        neui_widget_t  cw   = { app->compound_widget_b };
+        app->attrs->set_float(sess, cw, NEUI_PARAM_VALUE, v);
       }
       // Rotation slider drives the image's NEUI_ATTR_ROTATION attribute.
       // The framework's transform stack picks it up on the next paint.
@@ -443,6 +470,7 @@ int main(int argc, char** argv) {
   app.tree    = (neui_tree_api_t*)  neui->get_interface(sess, NEUI_API_TREE);
   app.attrs   = (neui_attr_api_t*)  neui->get_interface(sess, NEUI_API_ATTRS);
   app.assets  = (neui_asset_api_t*) neui->get_interface(sess, NEUI_API_ASSETS);
+  app.compound = (neui_compound_api_t*) neui->get_interface(sess, NEUI_API_COMPOUND);
 
   // Window: four columns - left = input + listbox, middle = combobox + checkboxes,
   //   right = treeview, far-right = slider + knob (continuous + 16-step variants).
@@ -709,6 +737,16 @@ int main(int argc, char** argv) {
     // app.attrs->set_string(sess, knob, NEUI_ATTR_POLARITY, "center");
   }
 
+  // Second continuous knob, sits right of the first. Drives compound
+  // widget B's value attr; widget B reads it as its rotation binding.
+  auto knob_b = app.widgets->create(sess, win, NEUI_W_KNOB,
+                                     715, 145, 70, 95, nullptr);
+  app.knob_b_id = knob_b.id;
+  if (app.attrs) {
+    app.attrs->set_float(sess, knob_b, NEUI_PARAM_DEFAULT, 0.5f);
+    app.attrs->set_float(sess, knob_b, NEUI_PARAM_VALUE,   0.5f);
+  }
+
   auto knob2_label = app.widgets->create(sess, win, NEUI_W_LABEL,
                                            635, 250, 230, 20, nullptr);
   app.widgets->set_text(sess, knob2_label, "Knob (16 steps):");
@@ -746,6 +784,68 @@ int main(int argc, char** argv) {
   if (app.assets)
     app.customdraw_bg = app.assets->create_from_file(sess, "myimage.png");
 
+  // -------------------------------------------------------------------------
+  // Compound-drawable demo. Two CUSTOMDRAW widgets share ONE compound
+  // asset (the visual shape) but carry their own attribute values; the
+  // framework reads each widget's AttrBag at paint time. Demonstrates:
+  //   - one shape, many widgets (no per-widget paint code)
+  //   - text templates ({value} substitution)
+  //   - numeric bindings (rotation = scale * value + offset)
+  //   - alpha multiplier on layers
+  if (app.assets && app.compound) {
+    app.compound_shape = app.assets->create_compound(sess);
+    if (app.compound_shape.id != asset_none.id) {
+      neui_asset_t cs = app.compound_shape;
+
+      // Layer z=-1: aspect-fitted bitmap behind the text, rotated by value.
+      // Scale 2π so value 0..1 maps to a full rotation. offset = 0.
+      auto bg_layer = app.compound->add_layer(sess, cs,
+                                                NEUI_COMPOUND_LAYER_ASSET, -1);
+      app.compound->set_anchor(sess, cs, bg_layer,
+                                 NEUI_ANCHOR_CENTER, NEUI_ANCHOR_CENTER);
+      app.compound->set_int(sess, cs, bg_layer, "width",  80);
+      app.compound->set_int(sess, cs, bg_layer, "height", 80);
+      app.compound->set_float(sess, cs, bg_layer, "alpha", 0.6f);
+      if (app.customdraw_bg.id != asset_none.id)
+        app.compound->set_asset(sess, cs, bg_layer, "asset", app.customdraw_bg);
+      app.compound->bind(sess, cs, bg_layer, "rotation",
+                          NEUI_PARAM_VALUE, 6.2831853f, 0.0f);
+
+      // Layer z=+1: centered label showing "<name>: <value>" via template
+      // substitution. {name} and {value} resolve against the widget's
+      // AttrBag at paint time - each widget supplies its own.
+      auto txt_layer = app.compound->add_layer(sess, cs,
+                                                 NEUI_COMPOUND_LAYER_TEXT, 1);
+      app.compound->set_anchor(sess, cs, txt_layer,
+                                 NEUI_ANCHOR_BOTTOM, NEUI_ANCHOR_CENTER);
+      app.compound->set_int(sess, cs, txt_layer, "width",  NEUI_COMPOUND_FILL);
+      app.compound->set_int(sess, cs, txt_layer, "height", 22);
+      app.compound->set_string(sess, cs, txt_layer, "text", "{name}: {value}");
+      app.compound->set_float(sess, cs, txt_layer, "size", 14.0f);
+      // Leave "color" unset - the text layer falls back to the active
+      // theme's text_primary colour, so the label stays legible if the
+      // user flips the system theme at runtime.
+    }
+
+    // Two CUSTOMDRAW widgets pointing at the same compound asset. Each
+    // has its own "name" and "value" attr so the shared compound renders
+    // distinct text and (when value differs) distinct rotation.
+    auto cw_a = app.widgets->create(sess, win, NEUI_W_CUSTOMDRAW,
+                                      635, 410, 110, 110, nullptr);
+    auto cw_b = app.widgets->create(sess, win, NEUI_W_CUSTOMDRAW,
+                                      755, 410, 110, 110, nullptr);
+    app.compound_widget_a = cw_a.id;
+    app.compound_widget_b = cw_b.id;
+    app.widgets->set_asset(sess, cw_a, app.compound_shape);
+    app.widgets->set_asset(sess, cw_b, app.compound_shape);
+    if (app.attrs) {
+      app.attrs->set_string(sess, cw_a, "name",  "A");
+      app.attrs->set_float (sess, cw_a, NEUI_PARAM_VALUE, 0.5f);
+      app.attrs->set_string(sess, cw_b, "name",  "B");
+      app.attrs->set_float (sess, cw_b, NEUI_PARAM_VALUE, 0.5f);
+    }
+  }
+
 #if 0
   // Enable event emission on interactive controls
   app.widgets->set_emit_events(sess, input,  true);
@@ -762,6 +862,12 @@ int main(int argc, char** argv) {
 
   neui->run(sess);  // calling the main loop
 
+  if (app.compound_widget_a != 0)
+    app.widgets->destroy(sess, neui_widget_t{ app.compound_widget_a });
+  if (app.compound_widget_b != 0)
+    app.widgets->destroy(sess, neui_widget_t{ app.compound_widget_b });
+  if (app.assets && app.compound_shape.id != asset_none.id)
+    app.assets->destroy(sess, app.compound_shape);
   if (app.assets && app.customdraw_bg.id != asset_none.id)
     app.assets->destroy(sess, app.customdraw_bg);
   if (app.assets && app.image_via_asset.id != asset_none.id)
@@ -770,6 +876,7 @@ int main(int argc, char** argv) {
   app.widgets->destroy(sess, value_label);
   app.widgets->destroy(sess, knob2);
   app.widgets->destroy(sess, knob2_label);
+  app.widgets->destroy(sess, knob_b);
   app.widgets->destroy(sess, knob);
   app.widgets->destroy(sess, knob_label);
   app.widgets->destroy(sess, slider2);

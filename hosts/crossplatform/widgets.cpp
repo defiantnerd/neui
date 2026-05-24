@@ -402,16 +402,20 @@ namespace xpl_host
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
-    auto* img = dynamic_cast<ImageWidget*>(&wd);
-    if (!img) return;  // non-IMAGE: no-op
 
     if (asset.id != asset_none.id &&
         ((asset.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) {
       return;  // cross-session - silent reject
     }
 
-    img->asset = asset;
-    img->text.clear();
+    if (auto* img = dynamic_cast<ImageWidget*>(&wd)) {
+      img->asset = asset;
+      img->text.clear();
+    } else if (auto* cd = dynamic_cast<CustomDrawWidget*>(&wd)) {
+      cd->compound_asset = asset;
+    } else {
+      return;  // non-IMAGE/CUSTOMDRAW: no-op
+    }
 
     // Trigger a repaint via the owning frame.
     if (void* frame = s->find_parent_native_handle(idx))
@@ -1671,6 +1675,15 @@ namespace xpl_host
     return e ? e->kind : NEUI_ASSET_KIND_NONE;
   }
 
+  static neui_asset_t NEUI_ABI as_create_compound(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    if (!s) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_compound();
+    if (slot == 0) return asset_none;
+    return pack_asset(s->_session_id, slot);
+  }
+
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
     as_create_bitmap,
@@ -1678,6 +1691,244 @@ namespace xpl_host
     as_destroy,
     as_get_size,
     as_get_kind,
+    as_create_compound,
   };
+
+  // ===========================================================================
+  // Compound API (NEUI_API_COMPOUND)
+  //
+  // Operates on neui_asset_t handles created via as_create_compound. Each
+  // thunk validates the session match in the handle's upper 16 bits, looks
+  // up the AssetEntry, confirms it's a compound, then dispatches to the
+  // shared mutator helpers in hosts/shared/compound.h.
+  //
+  // Layer-id encoding: (asset_slot << 16) | layer_slot - the upper half
+  // identifies the owning compound asset so we can validate that a layer
+  // handle from one compound isn't accidentally applied to another.
+  //
+  // Mutations invalidate every widget whose attached asset matches. The
+  // walk is O(N_widgets) per mutation but mutations are typically
+  // setup-time; the steady-state cost is zero.
+
+  static neui_detail::CompoundLayer*
+  resolve_layer(neui_session_t session, neui_asset_t asset,
+                 neui_compound_layer_t layer, Session*& out_session)
+  {
+    out_session = nullptr;
+    auto* s = get_session(session);
+    if (!s) return nullptr;
+    if (asset.id == asset_none.id) return nullptr;
+    if (((asset.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return nullptr;
+    uint32_t asset_slot = asset.id & 0xffff;
+    if (neui_detail::compound_layer_asset_slot(layer) != asset_slot) return nullptr;
+    auto* e = s->_asset_manager.get_slot(asset_slot);
+    if (!e || e->kind != NEUI_ASSET_KIND_COMPOUND || !e->compound) return nullptr;
+    out_session = s;
+    return neui_detail::compound_get_layer(*e->compound,
+                                            neui_detail::compound_layer_slot(layer));
+  }
+
+  static neui_detail::CompoundAsset*
+  resolve_compound(neui_session_t session, neui_asset_t asset, Session*& out_session)
+  {
+    out_session = nullptr;
+    auto* s = get_session(session);
+    if (!s) return nullptr;
+    if (asset.id == asset_none.id) return nullptr;
+    if (((asset.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return nullptr;
+    auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_COMPOUND || !e->compound) return nullptr;
+    out_session = s;
+    return e->compound.get();
+  }
+
+  // Walk the session's widgets and invalidate any whose attached asset is
+  // this compound. Used after every compound mutation.
+  static void invalidate_widgets_using(Session* s, uint32_t asset_slot);
+
+  static neui_compound_layer_t NEUI_ABI co_add_layer(neui_session_t session,
+                                                       neui_asset_t asset,
+                                                       neui_compound_layer_kind_t kind,
+                                                       int z)
+  {
+    Session* s = nullptr;
+    auto* ca = resolve_compound(session, asset, s);
+    if (!ca) return compound_layer_none;
+    uint32_t asset_slot = asset.id & 0xffff;
+    uint32_t slot = neui_detail::compound_add_layer(*ca, kind, z);
+    invalidate_widgets_using(s, asset_slot);
+    return neui_detail::pack_compound_layer(asset_slot, slot);
+  }
+
+  static void NEUI_ABI co_remove_layer(neui_session_t session, neui_asset_t asset,
+                                         neui_compound_layer_t layer)
+  {
+    Session* s = nullptr;
+    auto* ca = resolve_compound(session, asset, s);
+    if (!ca) return;
+    if (neui_detail::compound_layer_asset_slot(layer) != (asset.id & 0xffff)) return;
+    neui_detail::compound_remove_layer(*ca, neui_detail::compound_layer_slot(layer));
+    invalidate_widgets_using(s, asset.id & 0xffff);
+  }
+
+  static void NEUI_ABI co_clear(neui_session_t session, neui_asset_t asset)
+  {
+    Session* s = nullptr;
+    auto* ca = resolve_compound(session, asset, s);
+    if (!ca) return;
+    neui_detail::compound_clear(*ca);
+    invalidate_widgets_using(s, asset.id & 0xffff);
+  }
+
+  static void NEUI_ABI co_set_z(neui_session_t session, neui_asset_t asset,
+                                  neui_compound_layer_t layer, int z)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer(session, asset, layer, s);
+    if (!L) return;
+    L->z = z;
+    invalidate_widgets_using(s, asset.id & 0xffff);
+  }
+
+  static void NEUI_ABI co_set_anchor(neui_session_t session, neui_asset_t asset,
+                                       neui_compound_layer_t layer,
+                                       neui_anchor_t parent_anchor,
+                                       neui_anchor_t self_anchor)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer(session, asset, layer, s);
+    if (!L) return;
+    L->parent_anchor = parent_anchor;
+    L->self_anchor   = self_anchor;
+    invalidate_widgets_using(s, asset.id & 0xffff);
+  }
+
+  static void NEUI_ABI co_set_int(neui_session_t session, neui_asset_t asset,
+                                    neui_compound_layer_t layer,
+                                    const char* prop, int value)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_set_int(*L, prop, value);
+    invalidate_widgets_using(s, asset.id & 0xffff);
+  }
+
+  static void NEUI_ABI co_set_float(neui_session_t session, neui_asset_t asset,
+                                      neui_compound_layer_t layer,
+                                      const char* prop, float value)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_set_float(*L, prop, value);
+    invalidate_widgets_using(s, asset.id & 0xffff);
+  }
+
+  static void NEUI_ABI co_set_string(neui_session_t session, neui_asset_t asset,
+                                       neui_compound_layer_t layer,
+                                       const char* prop, const char* value)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_set_string(*L, prop, value);
+    invalidate_widgets_using(s, asset.id & 0xffff);
+  }
+
+  static void NEUI_ABI co_set_asset(neui_session_t session, neui_asset_t asset,
+                                      neui_compound_layer_t layer,
+                                      const char* prop, neui_asset_t value)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_set_asset(*L, prop, value);
+    invalidate_widgets_using(s, asset.id & 0xffff);
+  }
+
+  static void NEUI_ABI co_bind(neui_session_t session, neui_asset_t asset,
+                                 neui_compound_layer_t layer,
+                                 const char* prop, const char* attr_key,
+                                 float scale, float offset)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_bind(*L, prop, attr_key, scale, offset);
+    invalidate_widgets_using(s, asset.id & 0xffff);
+  }
+
+  static void NEUI_ABI co_bind_asset(neui_session_t session, neui_asset_t asset,
+                                       neui_compound_layer_t layer,
+                                       const char* prop, const char* attr_key)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_bind_asset(*L, prop, attr_key);
+    invalidate_widgets_using(s, asset.id & 0xffff);
+  }
+
+  static void NEUI_ABI co_unbind(neui_session_t session, neui_asset_t asset,
+                                   neui_compound_layer_t layer, const char* prop)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_unbind(*L, prop);
+    invalidate_widgets_using(s, asset.id & 0xffff);
+  }
+
+  neui_compound_api_t compound_api = {
+    NEUI_VERSION,
+    co_add_layer,
+    co_remove_layer,
+    co_clear,
+    co_set_z,
+    co_set_anchor,
+    co_set_int,
+    co_set_float,
+    co_set_string,
+    co_set_asset,
+    co_bind,
+    co_bind_asset,
+    co_unbind,
+  };
+
+  // Recursive walk: collect frame native handles that own at least one
+  // CustomDrawWidget whose compound_asset matches asset_id, then
+  // platform_invalidate each. asset_id is the full 32-bit handle id.
+  static void invalidate_walk_xpl(Session* s, uint32_t parent_idx,
+                                    uint32_t asset_id,
+                                    std::vector<void*>& already)
+  {
+    uint32_t child = s->_widgets.child(parent_idx);
+    while (child != 0) {
+      if (s->_widgets.exists(child)) {
+        auto& wd = s->_widgets[child];
+        if (auto* cd = dynamic_cast<CustomDrawWidget*>(&wd)) {
+          if (cd->compound_asset.id == asset_id) {
+            if (void* frame = s->find_parent_native_handle(child)) {
+              if (std::find(already.begin(), already.end(), frame) == already.end()) {
+                already.push_back(frame);
+                platform_invalidate(frame);
+              }
+            }
+          }
+        }
+        invalidate_walk_xpl(s, child, asset_id, already);
+      }
+      child = s->_widgets.next(child);
+    }
+  }
+
+  static void invalidate_widgets_using(Session* s, uint32_t asset_slot)
+  {
+    if (!s) return;
+    uint32_t asset_id = ((s->_session_id & 0xffff) << 16) | (asset_slot & 0xffff);
+    std::vector<void*> already;
+    invalidate_walk_xpl(s, 0, asset_id, already);
+  }
 
 } // namespace xpl_host

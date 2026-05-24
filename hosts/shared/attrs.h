@@ -85,4 +85,24 @@ namespace neui_detail
     return slot.get();
   }
 
+  // Read an attribute as a float, promoting INT32 (i -> (float)i) and
+  // treating STRING / missing as the default. Used by compound bindings
+  // and any other consumer that wants permissive numeric reads (the
+  // typed get_int / get_float on AttrBag itself stays strict).
+  inline float attr_as_float(const AttrBag* bag, const std::string& key,
+                              float default_value)
+  {
+    if (!bag) return default_value;
+    if (bag->has(key)) {
+      float f = bag->get_float(key, 0.0f);
+      if (f != 0.0f) return f;
+      // Could be a real 0.0f stored as float, or an int. Re-probe int.
+      int32_t i = bag->get_int(key, 0);
+      if (i != 0) return static_cast<float>(i);
+      // Either an exact zero (FLOAT or INT32) or a string. Treat both as 0.0f.
+      return 0.0f;
+    }
+    return default_value;
+  }
+
 } // namespace neui_detail

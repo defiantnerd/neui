@@ -6,6 +6,8 @@
 #include <neui/d/renderer.h>
 #include <neui/d/assets.h>
 
+#include "compound.h"
+
 namespace neui_detail
 {
   // A single loaded asset: kind discriminator, CPU pixels (for bitmap
@@ -29,13 +31,16 @@ namespace neui_detail
   struct AssetEntry
   {
     neui_asset_kind_t    kind        = NEUI_ASSET_KIND_BITMAP;
-    uint32_t             width_px    = 0;   // physical pixel dimensions
+    uint32_t             width_px    = 0;   // physical pixel dimensions (bitmap only)
     uint32_t             height_px   = 0;
     float                scale       = 1.0f; // HiDPI factor loaded (1, 2, or 3)
     std::vector<uint8_t> pixels;             // BGRA8 premultiplied, width_px*height_px*4
 
     // Backend bitmap cache: one GPU resource per render context.
     std::unordered_map<neui_render_ctx_t, CtxBitmap> bitmaps;
+
+    // Populated for NEUI_ASSET_KIND_COMPOUND entries; null otherwise.
+    std::unique_ptr<CompoundAsset> compound;
   };
 
   // Internal asset manager - lifetime tied to a Session.
@@ -69,6 +74,10 @@ namespace neui_detail
     // Allocate a new asset slot from a path / resource name. Resolves
     // @2x / @3x variants via resolve_path. Returns 0 on failure.
     uint32_t allocate_from_file(const std::string& name, float scale);
+
+    // Allocate a new asset slot holding an empty CompoundAsset.
+    // Mutated through NEUI_API_COMPOUND. Returns 0 on failure.
+    uint32_t allocate_compound();
 
     // Release the slot. CPU pixels freed immediately; GPU caches dropped.
     void release_slot(uint32_t slot, neui_render_backend_t* backend);

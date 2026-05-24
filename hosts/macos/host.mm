@@ -22,6 +22,7 @@ namespace macos_host
   extern neui_clipboard_api_t clipboard_api;
   extern neui_commands_api_t  commands_api;
   extern neui_asset_api_t     asset_api;
+  extern neui_compound_api_t  compound_api;
 
   // -------------------------------------------------------------------------
 
@@ -86,6 +87,7 @@ namespace macos_host
     if (!strcmp(iface, NEUI_API_CLIPBOARD)) return &clipboard_api;
     if (!strcmp(iface, NEUI_API_COMMANDS))  return &commands_api;
     if (!strcmp(iface, NEUI_API_ASSETS))    return &asset_api;
+    if (!strcmp(iface, NEUI_API_COMPOUND))  return &compound_api;
     return nullptr;
   }
 

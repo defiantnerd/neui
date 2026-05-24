@@ -36,6 +36,8 @@ namespace neui_null_backend
   static void  null_rotate         (neui_render_ctx_t, float) {}
   static void  null_scale          (neui_render_ctx_t, float, float) {}
   static uint32_t null_get_context_generation(neui_render_ctx_t) { return 0u; }
+  static void  null_push_alpha     (neui_render_ctx_t, float) {}
+  static void  null_pop_alpha      (neui_render_ctx_t) {}
 
   static neui_render_backend_t backend = {
     NEUI_VERSION,
@@ -68,6 +70,8 @@ namespace neui_null_backend
     null_rotate,
     null_scale,
     null_get_context_generation,
+    null_push_alpha,
+    null_pop_alpha,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

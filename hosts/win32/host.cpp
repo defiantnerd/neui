@@ -28,6 +28,7 @@ namespace win32_host
   extern neui_clipboard_api_t clipboard_api;
   extern neui_commands_api_t  commands_api;
   extern neui_asset_api_t     asset_api;
+  extern neui_compound_api_t  compound_api;
 
   neui_session_t create_session(neui_client_t* client, void* token)
   {
@@ -66,6 +67,7 @@ namespace win32_host
     if (!strcmp(iface, NEUI_API_CLIPBOARD)) return &win32_host::clipboard_api;
     if (!strcmp(iface, NEUI_API_COMMANDS))  return &win32_host::commands_api;
     if (!strcmp(iface, NEUI_API_ASSETS))    return &win32_host::asset_api;
+    if (!strcmp(iface, NEUI_API_COMPOUND))  return &win32_host::compound_api;
     return nullptr;
   }
 
@@ -252,6 +254,24 @@ namespace win32_host
   // Defined in window.cpp - re-applies DWM dark mode and any other
   // frame-level theme state. Called from on_theme_changed.
   void apply_theme_to_frame_w32(WidgetData& frame_wd);
+
+  void Session::invalidate_widgets_with_compound(uint32_t asset_id)
+  {
+    // Depth-first walk - check every CUSTOMDRAW widget whose
+    // compound_asset matches; InvalidateRect on its HWND triggers
+    // PaintedWndProc::WM_PAINT which re-runs the compound paint pass.
+    auto order = _widgets.release_order();
+    for (uint32_t i : order) {
+      if (i == 0 || !_widgets.exists(i)) continue;
+      WidgetData& wd = _widgets[i];
+      if (wd.type && strcmp(wd.type, NEUI_W_CUSTOMDRAW) == 0
+          && wd.compound_asset.id == asset_id
+          && wd.hwnd)
+      {
+        InvalidateRect(wd.hwnd, nullptr, FALSE);
+      }
+    }
+  }
 
   void Session::on_theme_changed()
   {

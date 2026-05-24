@@ -74,6 +74,13 @@ namespace xpl_host
     virtual void paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
                        bool is_focused);
 
+    // Optional second paint pass invoked by paint_widgets_recursive AFTER
+    // descending into this widget's children. Used by CUSTOMDRAW + compound
+    // to paint z>=0 layers above the child-widget pass. Default no-op.
+    virtual void paint_after_children(neui_render_backend_t* /*backend*/,
+                                       neui_render_ctx_t /*ctx*/,
+                                       bool /*is_focused*/) {}
+
     // Return true if the key event was consumed (do not forward to client).
     // Called for the currently focused widget.
     virtual bool on_keydown(uint32_t keycode, uint32_t modifiers) { return false; }
@@ -399,10 +406,24 @@ namespace xpl_host
   // pop_transform so the client can't corrupt sibling widget rendering.
   // Standard mouse/key events still flow to the client through the normal
   // event path (emit_events auto-set in widgets.cpp).
+  //
+  // When `compound_asset` references a NEUI_ASSET_KIND_COMPOUND asset, the
+  // framework paints that compound (layers in (z, insertion) order) and
+  // does NOT fire WIDGET_PAINT. Clients pick either declarative compound
+  // or imperative WIDGET_PAINT for a given widget, not both.
   class CustomDrawWidget : public WidgetData {
   public:
+    neui_asset_t compound_asset = asset_none;
+
     void paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
                bool is_focused) override;
+    // Painted after the recursive child-widget descent so z>=0 compound
+    // layers can sit above children. Default implementation no-op; only
+    // CustomDrawWidget overrides because only CUSTOMDRAW carries compound
+    // layers today. (Method declared on WidgetData via a hook in host.h.)
+    void paint_after_children(neui_render_backend_t* backend,
+                                neui_render_ctx_t ctx,
+                                bool is_focused) override;
   };
 
   // MENUBAR - native menu bar handle + all item bookkeeping

@@ -1070,6 +1070,7 @@ namespace macos_host
                                                   float*, float*)                { return false; }
   static neui_asset_kind_t NEUI_ABI a_get_kind  (neui_session_t, neui_asset_t)
   { return NEUI_ASSET_KIND_NONE; }
+  static neui_asset_t NEUI_ABI a_create_compound(neui_session_t)                 { return asset_none; }
 
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
@@ -1078,6 +1079,59 @@ namespace macos_host
     a_destroy,
     a_get_size,
     a_get_kind,
+    a_create_compound,
+  };
+
+  // Compound API stub - matches the public vtable so get_interface returns
+  // a valid pointer, but every mutator no-ops. Native macOS host has no
+  // CUSTOMDRAW yet, so no widget can host a compound; clients use the xpl
+  // host on macOS for compound drawables.
+  static neui_compound_layer_t NEUI_ABI co_add_layer(neui_session_t, neui_asset_t,
+                                                       neui_compound_layer_kind_t, int)
+  { return compound_layer_none; }
+  static void NEUI_ABI co_remove_layer(neui_session_t, neui_asset_t,
+                                         neui_compound_layer_t) {}
+  static void NEUI_ABI co_clear      (neui_session_t, neui_asset_t) {}
+  static void NEUI_ABI co_set_z      (neui_session_t, neui_asset_t,
+                                        neui_compound_layer_t, int) {}
+  static void NEUI_ABI co_set_anchor (neui_session_t, neui_asset_t,
+                                        neui_compound_layer_t,
+                                        neui_anchor_t, neui_anchor_t) {}
+  static void NEUI_ABI co_set_int    (neui_session_t, neui_asset_t,
+                                        neui_compound_layer_t,
+                                        const char*, int) {}
+  static void NEUI_ABI co_set_float  (neui_session_t, neui_asset_t,
+                                        neui_compound_layer_t,
+                                        const char*, float) {}
+  static void NEUI_ABI co_set_string (neui_session_t, neui_asset_t,
+                                        neui_compound_layer_t,
+                                        const char*, const char*) {}
+  static void NEUI_ABI co_set_asset  (neui_session_t, neui_asset_t,
+                                        neui_compound_layer_t,
+                                        const char*, neui_asset_t) {}
+  static void NEUI_ABI co_bind       (neui_session_t, neui_asset_t,
+                                        neui_compound_layer_t,
+                                        const char*, const char*, float, float) {}
+  static void NEUI_ABI co_bind_asset (neui_session_t, neui_asset_t,
+                                        neui_compound_layer_t,
+                                        const char*, const char*) {}
+  static void NEUI_ABI co_unbind     (neui_session_t, neui_asset_t,
+                                        neui_compound_layer_t, const char*) {}
+
+  neui_compound_api_t compound_api = {
+    NEUI_VERSION,
+    co_add_layer,
+    co_remove_layer,
+    co_clear,
+    co_set_z,
+    co_set_anchor,
+    co_set_int,
+    co_set_float,
+    co_set_string,
+    co_set_asset,
+    co_bind,
+    co_bind_asset,
+    co_unbind,
   };
 
 } // namespace macos_host

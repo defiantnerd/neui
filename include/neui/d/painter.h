@@ -114,6 +114,14 @@ extern "C" {
     // backend context.
     void (NEUI_ABI *draw_asset)(neui_painter_t* p, neui_asset_t asset,
                                   float x, float y, float w, float h);
+
+    // ---- Alpha stack -------------------------------------------------------
+    // Multiplies a 0..1 opacity factor into every subsequent draw until
+    // popped. Pushes compose multiplicatively (pushing 0.5 under 0.5 yields
+    // an effective 0.25). Pairs must be balanced inside the paint call;
+    // the framework adds no outer alpha bracket of its own.
+    void (NEUI_ABI *push_alpha)(neui_painter_t* p, float factor);
+    void (NEUI_ABI *pop_alpha) (neui_painter_t* p);
   } neui_painter_api_t;
 
 #ifdef __cplusplus

@@ -185,6 +185,20 @@ typedef struct neui_render_backend {
   // return a constant (typically 0).
   uint32_t (NEUI_ABI *get_context_generation)(neui_render_ctx_t ctx);
 
+  // --- Alpha stack (stateful per context) --------------------------------
+  //
+  // Multiplies a 0..1 opacity factor into every subsequent draw call - text,
+  // fill, stroke, path, bitmap. Pushes compose multiplicatively: pushing
+  // 0.5 inside an already-pushed 0.5 yields an effective alpha of 0.25.
+  // pop_alpha restores the previous top. The stack is reset to empty
+  // (effective 1.0) at every begin_frame so a missing pop in one frame
+  // can't bleed across.
+  //
+  // Note: the ARGB alpha byte on individual draws is also honoured;
+  // effective = (argb_alpha / 255) * stack_top.
+  void (NEUI_ABI *push_alpha)(neui_render_ctx_t ctx, float factor);
+  void (NEUI_ABI *pop_alpha) (neui_render_ctx_t ctx);
+
 } neui_render_backend_t;
 
 #ifdef __cplusplus

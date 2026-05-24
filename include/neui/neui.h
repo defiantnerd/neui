@@ -10,6 +10,7 @@
 #include "d/keys.h"
 #include "d/widgets.h"
 #include "d/assets.h"
+#include "d/compound.h"
 #include "d/painter.h"
 #include "d/events.h"
 #include "d/items.h"

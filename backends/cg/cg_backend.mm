@@ -18,6 +18,7 @@
 
 #include <cmath>
 #include <unordered_map>
+#include <vector>
 
 #include "cg_backend.h"
 
@@ -35,6 +36,11 @@ namespace neui_cg_backend
     uint32_t         dpi           = 96;       // 96 * backing_scale, kept in sync via update_dpi
     CGMutablePathRef path          = nullptr;  // current path under construction
     CGPoint          cursor        = CGPointZero;
+
+    // Alpha stack. back() = effective cumulative opacity. Empty = 1.0.
+    // Multiplied into the alpha component of every draw colour. Reset on
+    // every begin_frame.
+    std::vector<float> alpha_stack;
   };
 
   // ---------------------------------------------------------------------------
@@ -58,12 +64,17 @@ namespace neui_cg_backend
     return static_cast<CGFloat>(comp) / 255.0f;
   }
 
-  static inline void argb_to_rgba(uint32_t argb, CGFloat out[4])
+  static inline void argb_to_rgba(uint32_t argb, CGFloat out[4], float alpha_mul = 1.0f)
   {
     out[0] = ch((argb >> 16) & 0xFF);  // R
     out[1] = ch((argb >>  8) & 0xFF);  // G
     out[2] = ch( argb        & 0xFF);  // B
-    out[3] = ch((argb >> 24) & 0xFF);  // A
+    out[3] = ch((argb >> 24) & 0xFF) * static_cast<CGFloat>(alpha_mul);  // A
+  }
+
+  static inline float current_alpha(const CGContextState* st)
+  {
+    return st->alpha_stack.empty() ? 1.0f : st->alpha_stack.back();
   }
 
   // CTFont cache - keyed by font_size * 10 (rounded to 0.1pt). Process-wide
@@ -182,6 +193,7 @@ namespace neui_cg_backend
     // Pair with cg_end_frame's restore - keeps clip / transform changes from
     // leaking past one frame even if a widget forgot a pop.
     CGContextSaveGState(st->cg_ctx);
+    st->alpha_stack.clear();
     CGFloat rgba[4];
     argb_to_rgba(clear_argb, rgba);
     CGContextSetRGBFillColor(st->cg_ctx, rgba[0], rgba[1], rgba[2], rgba[3]);
@@ -204,7 +216,7 @@ namespace neui_cg_backend
   {
     auto* st = static_cast<CGContextState*>(raw);
     if (!st || !st->cg_ctx) return;
-    CGFloat rgba[4]; argb_to_rgba(argb, rgba);
+    CGFloat rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     CGContextSetRGBFillColor(st->cg_ctx, rgba[0], rgba[1], rgba[2], rgba[3]);
     CGContextFillRect(st->cg_ctx, CGRectMake(x, y, w, h));
   }
@@ -215,7 +227,7 @@ namespace neui_cg_backend
   {
     auto* st = static_cast<CGContextState*>(raw);
     if (!st || !st->cg_ctx) return;
-    CGFloat rgba[4]; argb_to_rgba(argb, rgba);
+    CGFloat rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     CGContextSetRGBStrokeColor(st->cg_ctx, rgba[0], rgba[1], rgba[2], rgba[3]);
     CGContextSetLineWidth(st->cg_ctx, stroke_width);
     CGContextStrokeRect(st->cg_ctx, CGRectMake(x, y, w, h));
@@ -270,7 +282,7 @@ namespace neui_cg_backend
     // keeps over-long strings from bleeding into adjacent widgets.
     CGContextClipToRect(cg, CGRectMake(x, y, w, h));
 
-    CGFloat rgba[4]; argb_to_rgba(argb, rgba);
+    CGFloat rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     CGContextSetRGBFillColor(cg, rgba[0], rgba[1], rgba[2], rgba[3]);
 
     // Origin → baseline; counter-flip Y so glyphs draw upright.
@@ -405,6 +417,7 @@ namespace neui_cg_backend
     }
 
     CGContextSaveGState(st->cg_ctx);
+    CGContextSetAlpha(st->cg_ctx, current_alpha(st));
     CGContextTranslateCTM(st->cg_ctx, dst_x, dst_y + dst_h);
     CGContextScaleCTM(st->cg_ctx, 1.0, -1.0);
     CGContextDrawImage(st->cg_ctx, CGRectMake(0, 0, dst_w, dst_h), draw_img);
@@ -470,7 +483,7 @@ namespace neui_cg_backend
   {
     auto* st = static_cast<CGContextState*>(raw);
     if (!st || !st->cg_ctx || !st->path) return;
-    CGFloat rgba[4]; argb_to_rgba(argb, rgba);
+    CGFloat rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     CGContextSetRGBFillColor(st->cg_ctx, rgba[0], rgba[1], rgba[2], rgba[3]);
     CGContextAddPath(st->cg_ctx, st->path);
     CGContextFillPath(st->cg_ctx);
@@ -481,7 +494,7 @@ namespace neui_cg_backend
   {
     auto* st = static_cast<CGContextState*>(raw);
     if (!st || !st->cg_ctx || !st->path) return;
-    CGFloat rgba[4]; argb_to_rgba(argb, rgba);
+    CGFloat rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     CGContextSetRGBStrokeColor(st->cg_ctx, rgba[0], rgba[1], rgba[2], rgba[3]);
     CGContextSetLineWidth(st->cg_ctx, stroke_width);
     CGContextAddPath(st->cg_ctx, st->path);
@@ -542,6 +555,30 @@ namespace neui_cg_backend
   }
 
   // ---------------------------------------------------------------------------
+  // Alpha stack - pure software stack. Alpha is multiplied into each draw's
+  // colour at the call site (and into draw_bitmap via CGContextSetAlpha
+  // inside its already-existing SaveGState bracket), so we don't rely on
+  // CGContextSetAlpha as a global state - which would be saved/restored by
+  // an interleaving transform/clip push and break the alpha-stack invariant.
+
+  static void cg_push_alpha(neui_render_ctx_t raw, float factor)
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    if (!st) return;
+    if (factor < 0.0f) factor = 0.0f;
+    if (factor > 1.0f) factor = 1.0f;
+    float prev = st->alpha_stack.empty() ? 1.0f : st->alpha_stack.back();
+    st->alpha_stack.push_back(prev * factor);
+  }
+
+  static void cg_pop_alpha(neui_render_ctx_t raw)
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    if (!st || st->alpha_stack.empty()) return;
+    st->alpha_stack.pop_back();
+  }
+
+  // ---------------------------------------------------------------------------
 
   static neui_render_backend_t backend = {
     NEUI_VERSION,
@@ -574,6 +611,8 @@ namespace neui_cg_backend
     cg_rotate,
     cg_scale,
     cg_get_context_generation,
+    cg_push_alpha,
+    cg_pop_alpha,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

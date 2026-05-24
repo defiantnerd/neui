@@ -51,6 +51,11 @@ namespace neui_d2d_backend
     // identity on every begin_frame.
     D2D1::Matrix3x2F            current{ D2D1::Matrix3x2F::Identity() };
     std::vector<D2D1::Matrix3x2F> transform_stack;
+
+    // Alpha stack. Stores cumulative opacity factors; the back() is the
+    // effective alpha multiplier applied to every draw call. Empty stack
+    // means effective 1.0. Reset on every begin_frame.
+    std::vector<float>          alpha_stack;
   };
 
   // Process-wide D2D factory - created once, never destroyed (lives for process lifetime).
@@ -105,14 +110,19 @@ namespace neui_d2d_backend
     return logical * static_cast<float>(dpi) / 96.0f;
   }
 
-  static D2D1_COLOR_F argb_to_color(uint32_t argb)
+  static D2D1_COLOR_F argb_to_color(uint32_t argb, float alpha_mul = 1.0f)
   {
     return D2D1::ColorF(
       ((argb >> 16) & 0xFF) / 255.0f,
       ((argb >>  8) & 0xFF) / 255.0f,
       ( argb        & 0xFF) / 255.0f,
-      ((argb >> 24) & 0xFF) / 255.0f
+      ((argb >> 24) & 0xFF) / 255.0f * alpha_mul
     );
+  }
+
+  static inline float current_alpha(const D2DContext* ctx)
+  {
+    return ctx->alpha_stack.empty() ? 1.0f : ctx->alpha_stack.back();
   }
 
   // ---------------------------------------------------------------------------
@@ -208,6 +218,7 @@ namespace neui_d2d_backend
     // a previous frame can't bleed across frame boundaries.
     ctx->current = D2D1::Matrix3x2F::Identity();
     ctx->transform_stack.clear();
+    ctx->alpha_stack.clear();
     ctx->target->SetTransform(ctx->current);
     ctx->target->Clear(argb_to_color(clear_argb));
   }
@@ -242,7 +253,7 @@ namespace neui_d2d_backend
   {
     auto* ctx = static_cast<D2DContext*>(raw);
     if (!ctx || !ctx->target || !ctx->brush) return;
-    ctx->brush->SetColor(argb_to_color(argb));
+    ctx->brush->SetColor(argb_to_color(argb, current_alpha(ctx)));
     // Coordinates are logical (96 DPI); D2D target already has DPI set, so pass as-is.
     ctx->target->FillRectangle(D2D1::RectF(x, y, x + w, y + h), ctx->brush);
   }
@@ -254,7 +265,7 @@ namespace neui_d2d_backend
   {
     auto* ctx = static_cast<D2DContext*>(raw);
     if (!ctx || !ctx->target || !ctx->brush) return;
-    ctx->brush->SetColor(argb_to_color(argb));
+    ctx->brush->SetColor(argb_to_color(argb, current_alpha(ctx)));
     ctx->target->DrawRectangle(D2D1::RectF(x, y, x + w, y + h), ctx->brush, stroke_width);
   }
 
@@ -297,7 +308,7 @@ namespace neui_d2d_backend
     MultiByteToWideChar(CP_UTF8, 0, text, -1, wbuf, needed);
     int len = needed - 1;  // exclude null terminator
 
-    ctx->brush->SetColor(argb_to_color(argb));
+    ctx->brush->SetColor(argb_to_color(argb, current_alpha(ctx)));
     D2D1_RECT_F rect = D2D1::RectF(x, y, x + w, y + h);
     ctx->target->DrawText(
       wbuf, static_cast<UINT32>(len),
@@ -397,7 +408,7 @@ namespace neui_d2d_backend
 
     D2D1_RECT_F dst_rect = D2D1::RectF(dst_x, dst_y, dst_x + dst_w, dst_y + dst_h);
 
-    ctx->target->DrawBitmap(bmp, dst_rect, 1.0f,
+    ctx->target->DrawBitmap(bmp, dst_rect, current_alpha(ctx),
                              D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
                              src_rect);
   }
@@ -581,7 +592,7 @@ namespace neui_d2d_backend
     if (!ctx || !ctx->target || !ctx->brush || !ctx->path) return;
 
     finalise_path(ctx);
-    ctx->brush->SetColor(argb_to_color(argb));
+    ctx->brush->SetColor(argb_to_color(argb, current_alpha(ctx)));
     ctx->target->FillGeometry(ctx->path, ctx->brush);
   }
 
@@ -591,7 +602,7 @@ namespace neui_d2d_backend
     if (!ctx || !ctx->target || !ctx->brush || !ctx->path) return;
 
     finalise_path(ctx);
-    ctx->brush->SetColor(argb_to_color(argb));
+    ctx->brush->SetColor(argb_to_color(argb, current_alpha(ctx)));
     ctx->target->DrawGeometry(ctx->path, ctx->brush, stroke_width);
   }
 
@@ -642,6 +653,26 @@ namespace neui_d2d_backend
   }
 
   // ---------------------------------------------------------------------------
+  // Alpha stack
+
+  static void d2d_push_alpha(neui_render_ctx_t raw, float factor)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx) return;
+    if (factor < 0.0f) factor = 0.0f;
+    if (factor > 1.0f) factor = 1.0f;
+    float prev = ctx->alpha_stack.empty() ? 1.0f : ctx->alpha_stack.back();
+    ctx->alpha_stack.push_back(prev * factor);
+  }
+
+  static void d2d_pop_alpha(neui_render_ctx_t raw)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx || ctx->alpha_stack.empty()) return;
+    ctx->alpha_stack.pop_back();
+  }
+
+  // ---------------------------------------------------------------------------
 
   static neui_render_backend_t backend = {
     NEUI_VERSION,
@@ -674,6 +705,8 @@ namespace neui_d2d_backend
     d2d_rotate,
     d2d_scale,
     d2d_get_context_generation,
+    d2d_push_alpha,
+    d2d_pop_alpha,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

@@ -8,6 +8,7 @@
 #include <neui/d/renderer.h>
 #include <neui/d/assets.h>
 #include "../shared/win32/image_loader_win32.h"
+#include "../shared/compound.h"
 
 namespace win32_host
 {
@@ -37,6 +38,9 @@ namespace win32_host
     float                scale       = 1.0f;
     std::vector<uint8_t> pixels;
     std::unordered_map<neui_render_ctx_t, W32CtxBitmap> bitmaps;
+
+    // Populated for NEUI_ASSET_KIND_COMPOUND entries; null otherwise.
+    std::unique_ptr<neui_detail::CompoundAsset> compound;
   };
 
   // Session-scoped asset table backing the public neui_asset_api_t.
@@ -106,6 +110,28 @@ namespace win32_host
 
       entry->pixels.assign(raw, raw + static_cast<size_t>(w_px) * h_px * 4);
       delete[] raw;
+
+      if (_handles.empty()) _handles.emplace_back(nullptr);
+
+      uint32_t slot;
+      if (!_free_slots.empty()) {
+        slot = _free_slots.back();
+        _free_slots.pop_back();
+        _handles[slot] = std::move(entry);
+      } else {
+        slot = static_cast<uint32_t>(_handles.size());
+        _handles.emplace_back(std::move(entry));
+      }
+      return slot;
+    }
+
+    // Allocate a slot holding an empty CompoundAsset. Mutated via
+    // NEUI_API_COMPOUND. Returns 0 on failure.
+    uint32_t allocate_compound()
+    {
+      auto entry = std::make_unique<W32AssetEntry>();
+      entry->kind     = NEUI_ASSET_KIND_COMPOUND;
+      entry->compound = std::make_unique<neui_detail::CompoundAsset>();
 
       if (_handles.empty()) _handles.emplace_back(nullptr);
 

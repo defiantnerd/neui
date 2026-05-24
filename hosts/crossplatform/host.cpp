@@ -7,8 +7,10 @@
 #include "platform.h"
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_section.h"
+#include "../shared/widget_paint_compound.h"
 #include "../shared/theme_palette.h"
 #include "../shared/painter.h"
+#include "asset_manager.h"
 #ifdef _WIN32
 #include "../shared/win32/theme_provider_win32.h"
 #include "../shared/win32/dark_menu_win32.h"
@@ -122,6 +124,7 @@ namespace xpl_host
   extern neui_clipboard_api_t clipboard_api;
   extern neui_commands_api_t  commands_api;
   extern neui_asset_api_t     asset_api;
+  extern neui_compound_api_t  compound_api;
 
   // -------------------------------------------------------------------------
   // Session management
@@ -162,6 +165,7 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_CLIPBOARD)) return &clipboard_api;
     if (!strcmp(iface, NEUI_API_COMMANDS))  return &commands_api;
     if (!strcmp(iface, NEUI_API_ASSETS))    return &asset_api;
+    if (!strcmp(iface, NEUI_API_COMPOUND))  return &compound_api;
     return nullptr;
   }
 
@@ -1449,6 +1453,13 @@ namespace xpl_host
           backend->translate(ctx, static_cast<float>(wd.x), static_cast<float>(wd.y));
         paint_widgets_recursive(backend, ctx, widgets, idx,
                                 wd.abs_x, wd.abs_y, focused_widget);
+        // After-children hook: widget-local coords are active here (we
+        // translated by (wd.x, wd.y) above and have not popped yet).
+        // Used by CUSTOMDRAW + compound to paint z>=0 layers above the
+        // child-widget pass; default implementation is a no-op.
+        if (!wd.native_handle && !wd.is_menubar() && wd.visible && wd.width > 0 && wd.height > 0) {
+          wd.paint_after_children(backend, ctx, idx == focused_widget);
+        }
         if (backend->pop_transform) backend->pop_transform(ctx);
       }
       idx = widgets.next(idx);
@@ -1984,6 +1995,20 @@ namespace xpl_host
   // clip to the widget's bounds so a client that overdraws can't corrupt
   // sibling widgets. State changes the client leaves on the stack are
   // unwound by the matching pops below.
+  // Resolve a CustomDrawWidget's compound asset to its CompoundAsset
+  // storage. Returns nullptr if the slot isn't a compound or has been
+  // released; caller falls back to WIDGET_PAINT in that case.
+  static neui_detail::CompoundAsset* resolve_widget_compound(Session* s,
+                                                                neui_asset_t a)
+  {
+    if (!s) return nullptr;
+    if (a.id == asset_none.id) return nullptr;
+    if (((a.id >> 16) & 0xffff) != (s->get_session_id() & 0xffff)) return nullptr;
+    auto* e = s->_asset_manager.get_slot(a.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_COMPOUND || !e->compound) return nullptr;
+    return e->compound.get();
+  }
+
   void CustomDrawWidget::paint(neui_render_backend_t* backend,
                                 neui_render_ctx_t ctx, bool is_focused)
   {
@@ -2003,18 +2028,54 @@ namespace xpl_host
     painter.host_token       = session;
     painter.draw_asset_thunk = &xpl_painter_draw_asset_thunk;
 
-    neui_event_t ev{};
-    ev.type = NEUI_EVENT_WIDGET_PAINT;
-    ev.data.paint.widget.id  = widget_id;
-    ev.data.paint.painter_api = &neui_detail::k_painter_api;
-    ev.data.paint.p           = &painter;
-    ev.data.paint.width       = fw;
-    ev.data.paint.height      = fh;
-    ev.data.paint.focused     = is_focused;
-    session->dispatch_event(&ev);
+    if (auto* ca = resolve_widget_compound(session, compound_asset)) {
+      // Compound mode: paint z<0 layers here; z>=0 layers come from
+      // paint_after_children below. WIDGET_PAINT is suppressed.
+      neui_detail::paint_compound_below(&painter, *ca, fw, fh,
+                                          neui_detail::attrs_readonly(attrs));
+    } else {
+      neui_event_t ev{};
+      ev.type = NEUI_EVENT_WIDGET_PAINT;
+      ev.data.paint.widget.id  = widget_id;
+      ev.data.paint.painter_api = &neui_detail::k_painter_api;
+      ev.data.paint.p           = &painter;
+      ev.data.paint.width       = fw;
+      ev.data.paint.height      = fh;
+      ev.data.paint.focused     = is_focused;
+      session->dispatch_event(&ev);
+    }
 
     if (backend->pop_clip) backend->pop_clip(ctx);
     if (backend->pop_transform) backend->pop_transform(ctx);
+  }
+
+  // Called from paint_widgets_recursive after the child-widget descent.
+  // We're in widget-local coords (the recursive walk pushed
+  // translate(wd.x, wd.y)). For compound widgets, paint the z>=0 layers
+  // here so they sit above any child widgets.
+  void CustomDrawWidget::paint_after_children(neui_render_backend_t* backend,
+                                                neui_render_ctx_t ctx,
+                                                bool /*is_focused*/)
+  {
+    if (!session) return;
+    auto* ca = resolve_widget_compound(session, compound_asset);
+    if (!ca) return;
+
+    const float fw = static_cast<float>(width);
+    const float fh = static_cast<float>(height);
+
+    if (backend->push_clip) backend->push_clip(ctx, 0.0f, 0.0f, fw, fh);
+
+    neui_painter painter{};
+    painter.backend          = backend;
+    painter.ctx              = ctx;
+    painter.host_token       = session;
+    painter.draw_asset_thunk = &xpl_painter_draw_asset_thunk;
+
+    neui_detail::paint_compound_above(&painter, *ca, fw, fh,
+                                        neui_detail::attrs_readonly(attrs));
+
+    if (backend->pop_clip) backend->pop_clip(ctx);
   }
 
   void KnobWidget::paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,

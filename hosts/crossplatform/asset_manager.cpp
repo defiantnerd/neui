@@ -206,6 +206,26 @@ namespace neui_detail
     return slot;
   }
 
+  uint32_t AssetManager::allocate_compound()
+  {
+    auto entry = std::make_unique<AssetEntry>();
+    entry->kind     = NEUI_ASSET_KIND_COMPOUND;
+    entry->compound = std::make_unique<CompoundAsset>();
+
+    if (_handles.empty()) _handles.emplace_back(nullptr);
+
+    uint32_t slot;
+    if (!_free_slots.empty()) {
+      slot = _free_slots.back();
+      _free_slots.pop_back();
+      _handles[slot] = std::move(entry);
+    } else {
+      slot = static_cast<uint32_t>(_handles.size());
+      _handles.emplace_back(std::move(entry));
+    }
+    return slot;
+  }
+
   void AssetManager::release_slot(uint32_t slot, neui_render_backend_t* backend)
   {
     if (slot == 0 || slot >= _handles.size()) return;

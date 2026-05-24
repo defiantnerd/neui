@@ -123,6 +123,11 @@ namespace neui_detail {
     p->draw_asset_thunk(p->host_token, p->backend, p->ctx, asset, x, y, w, h);
   }
 
+  inline void painter_push_alpha(neui_painter_t* p, float factor)
+  { if (p && p->backend && p->backend->push_alpha) p->backend->push_alpha(p->ctx, factor); }
+  inline void painter_pop_alpha(neui_painter_t* p)
+  { if (p && p->backend && p->backend->pop_alpha)  p->backend->pop_alpha(p->ctx); }
+
   // The static api table. Each host extern-references this from its
   // paint dispatch and stamps it into neui_event_paint_t::painter_api.
   // `inline` storage makes this ODR-safe across the two TUs that include
@@ -149,6 +154,8 @@ namespace neui_detail {
     painter_rotate,
     painter_scale,
     painter_draw_asset,
+    painter_push_alpha,
+    painter_pop_alpha,
   };
 
 } // namespace neui_detail

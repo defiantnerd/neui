@@ -97,6 +97,13 @@ namespace win32_host {
     neui_asset_t image_asset       = asset_none;
     bool         image_asset_owned = false;
 
+    // CUSTOMDRAW (NEUI_W_CUSTOMDRAW): optional compound asset. When set
+    // (non-asset_none and resolves to a NEUI_ASSET_KIND_COMPOUND in this
+    // session's _asset_manager), the painted-widget WM_PAINT path renders
+    // the compound's layer stack and suppresses the client's WIDGET_PAINT
+    // event. asset_none = no compound; client paints via WIDGET_PAINT.
+    neui_asset_t compound_asset    = asset_none;
+
     // Treeview item data
     struct TreeItemData {
       HTREEITEM   hitem    = nullptr;
@@ -286,6 +293,12 @@ namespace win32_host {
     // True if the frame owning `wd` has NEUI_ATTR_FOLLOW_SYSTEM_THEME = 1.
     // Climbs the parent chain to the nearest frame.
     bool frame_follows_theme(WidgetData* wd);
+
+    // Invalidate every CUSTOMDRAW widget in this session whose
+    // compound_asset.id matches `asset_id`. Called from the compound API
+    // mutators so visible widgets repaint when their backing compound
+    // changes. asset_id is the full 32-bit handle id (session<<16 | slot).
+    void invalidate_widgets_with_compound(uint32_t asset_id);
 
   public:
     // Per-session clipboard item store and (optional) listener registration.

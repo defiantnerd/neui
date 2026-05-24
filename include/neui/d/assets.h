@@ -34,13 +34,16 @@ extern "C" {
   // formats that aren't implemented yet. NEUI_ASSET_KIND_NONE is also
   // returned for invalid handles.
   typedef enum neui_asset_kind {
-    NEUI_ASSET_KIND_NONE   = 0,
-    NEUI_ASSET_KIND_BITMAP = 1,
+    NEUI_ASSET_KIND_NONE     = 0,
+    NEUI_ASSET_KIND_BITMAP   = 1,
+    // Compound drawable: a mutable, declarative stack of typed layers
+    // (text / asset) read at paint time. Built via NEUI_API_COMPOUND.
+    NEUI_ASSET_KIND_COMPOUND = 2,
     // Reserved for future kinds. Do NOT renumber; bind new values to the
     // next unused integer so old client builds stay forward-compatible.
-    // NEUI_ASSET_KIND_SVG    = 2,
-    // NEUI_ASSET_KIND_VECTOR = 3,
-    // NEUI_ASSET_KIND_FONT   = 4,
+    // NEUI_ASSET_KIND_SVG    = 3,
+    // NEUI_ASSET_KIND_VECTOR = 4,
+    // NEUI_ASSET_KIND_FONT   = 5,
   } neui_asset_kind_t;
 
   typedef struct neui_asset_api {
@@ -88,6 +91,12 @@ extern "C" {
     // handle is invalid.
     neui_asset_kind_t (NEUI_ABI *get_kind)(neui_session_t session,
                                             neui_asset_t asset);
+
+    // Create a compound drawable asset - an empty, mutable layer stack.
+    // Populate via NEUI_API_COMPOUND. Returns asset_none on allocation
+    // failure. Hosts that don't support compound (e.g. native macOS;
+    // CUSTOMDRAW isn't implemented there) return asset_none.
+    neui_asset_t (NEUI_ABI *create_compound)(neui_session_t session);
   } neui_asset_api_t;
 
 #ifdef __cplusplus
