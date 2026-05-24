@@ -368,3 +368,12 @@ void win32_host::register_host()
 {
   neui_register(NEUI_HOST_WIN32, &win_base_api);
 }
+
+// Forced-symbol-reference for the linker. Mirror of neui_register_xplhost()
+// in hosts/crossplatform/host.cpp. Called from neui_init()
+// (src/neui.c) so clients don't have to know about it; also remains a
+// publicly callable escape hatch for fine-grained registration.
+extern "C" void neui_register_win32host()
+{
+  win32_host::register_host();
+}

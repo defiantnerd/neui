@@ -34,6 +34,14 @@ extern "C" {
   // If id is NULL, returns the first registered host, or NULL if none are registered.
   neui_api_t* neui_get_api(const char* id);
 
+  // Register every host that was compiled into this build of neuilib.
+  // Single startup entry point - clients call this once before
+  // neui_get_api() and don't need to know which host static libs the
+  // current platform produced. Registration order is native-first
+  // (win32 / macos) then xpl, so neui_get_api(NULL) returns the native
+  // host where one exists. See also: neui_register / neui_get_api.
+  void neui_init(void);
+
 #ifdef __cplusplus
 }
 #endif      

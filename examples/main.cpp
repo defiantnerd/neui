@@ -22,15 +22,6 @@
 #define ACTIVE_HOST "neui.host.crossplatform"
 #endif
 
-// Forward declaration: registers the crossplatform host with the neui registry.
-// Calling this also forces the linker to include the neui-xplhost static library.
-extern "C" void neui_register_xplhost();
-#ifdef __APPLE__
-// Native macOS host (hosts/macos/). Forced reference for the static-lib pull-in;
-// linked alongside the xpl host on macOS so users can switch ACTIVE_HOST at
-// compile time. Step 1 scaffold today - no widget impls yet.
-extern "C" void neui_register_macoshost();
-#endif
 
 static void dbglog(const char* fmt, ...) {
   char buf[1024];
@@ -455,10 +446,10 @@ int main(int argc, char** argv) {
   (void)argc; (void)argv;
   AppState app;
 
-  neui_register_xplhost();
-#ifdef __APPLE__
-  neui_register_macoshost();
-#endif
+  // One call registers every host the linked neuilib has compiled in.
+  // The per-host wrappers (neui_register_xplhost, neui_register_win32host,
+  // neui_register_macoshost) remain available for fine-grained control.
+  neui_init();
   auto neui = neui_get_api(ACTIVE_HOST);
 
   // Pass &app as token so callbacks can access widget handles and the widget API

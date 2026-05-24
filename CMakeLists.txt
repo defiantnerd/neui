@@ -29,6 +29,18 @@ endif()
 add_subdirectory("backends/null")
 add_subdirectory("hosts/crossplatform")
 
+# neui_init() (src/neui.c) is gated on these defines so it
+# only references registration wrappers for hosts that are actually being
+# built. The defines are PRIVATE: they're an implementation detail of the
+# core lib's startup helper, not part of the public C interface.
+target_compile_definitions(neui PRIVATE NEUI_HAS_XPLHOST)
+if(WIN32)
+  target_compile_definitions(neui PRIVATE NEUI_HAS_WIN32HOST)
+endif()
+if(APPLE)
+  target_compile_definitions(neui PRIVATE NEUI_HAS_MACOSHOST)
+endif()
+
 # provide public headers
 target_include_directories(neui
     PUBLIC
