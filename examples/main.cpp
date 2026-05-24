@@ -11,6 +11,12 @@
 //   "neui.host.win32"          - native Win32 controls (Windows only)
 //   "neui.host.macos"          - native AppKit controls (macOS only)
 //   "neui.host.crossplatform"  - pluggable-backend host (D2D on Windows, CG on macOS)
+//
+// NEUI_W_CUSTOMDRAW (and therefore the compound-drawable demo below) is
+// only implemented on the xpl host on macOS - the native macOS host has
+// stub vtables for the asset / compound APIs and silently no-ops
+// CUSTOMDRAW widgets. Flip the x-suffix below to select the xpl host
+// on macOS if you want to see the compound demo in action.
 #ifdef _WIN32
 #define ACTIVE_HOST "neui.host.crossplatform"
 #define ACTIVE_HOSTx "neui.host.win32"
