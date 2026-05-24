@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <neui/neui.h>
+#include <cassert>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -786,6 +787,14 @@ namespace win32_host
 
   static HWND CreateChildHwnd(WidgetData& wd, HWND parent_hwnd, UINT parent_dpi)
   {
+    // Control IDs (the HMENU arg to CreateWindowExW below) must stay in
+    // the lower half of the 16-bit WM_COMMAND space so they don't alias
+    // menu cmd_ids (which live in [0x8000, 0xFFFF] - see WidgetData's
+    // next_menu_cmd_id). 32K live widgets per session is unreachable in
+    // practice; this is a debug-only safety net.
+    assert(wd.index < 0x8000 &&
+           "widget tree-slot index would alias the menu cmd_id range");
+
     // Image widget: shared "neui.painted" class; paint_fn does aspect-fit
     // + rotation + draw_bitmap. Non-interactive (no subclass, no
     // painted_msg_fn, emit_events stays false), so it matches the SECTION
@@ -2065,7 +2074,19 @@ namespace win32_host
       } else {
         auto pit = w.menu_items.find(parent.id);
         HMENU parent_popup = (pit != w.menu_items.end() && pit->second.submenu) ? pit->second.submenu : w.hmenu;
-        UINT  cmd_id       = w.next_menu_cmd_id++;
+        // Allocate from the free list first so a churning menubar (eg. a
+        // dynamic MIDI device list) doesn't exhaust the 16-bit cmd_id
+        // space. Past 0xFFFF the WM_COMMAND wParam LOWORD would alias
+        // earlier cmd_ids and silently corrupt dispatch.
+        UINT cmd_id;
+        if (!w.free_menu_cmd_ids.empty()) {
+          cmd_id = w.free_menu_cmd_ids.back();
+          w.free_menu_cmd_ids.pop_back();
+        } else {
+          assert(w.next_menu_cmd_id <= 0xFFFF &&
+                 "menubar exhausted 16-bit cmd_id range; tree_remove items first");
+          cmd_id = w.next_menu_cmd_id++;
+        }
         data.parent_hmenu  = parent_popup;
         data.submenu       = nullptr;
         data.cmd_id        = cmd_id;
@@ -2128,6 +2149,10 @@ namespace win32_host
       } else {
         RemoveMenu(data.parent_hmenu, data.cmd_id, MF_BYCOMMAND);
         w.menu_cmd_map.erase(data.cmd_id);
+        // Recycle the cmd_id so the next tree_add can claim it before
+        // bumping next_menu_cmd_id (keeps a churning menubar from
+        // exhausting the 16-bit cmd_id range).
+        w.free_menu_cmd_ids.push_back(data.cmd_id);
       }
       w.menu_item_ids_ordered.erase(
         std::remove(w.menu_item_ids_ordered.begin(), w.menu_item_ids_ordered.end(), item.id),
@@ -2164,6 +2189,7 @@ namespace win32_host
       w.menu_item_ids_ordered.clear();
       w.next_menu_item_id = 1;
       w.next_menu_cmd_id  = 0x8000;
+      w.free_menu_cmd_ids.clear();
       if (w.native_accel) {
         DestroyAcceleratorTable(w.native_accel);
         w.native_accel = nullptr;

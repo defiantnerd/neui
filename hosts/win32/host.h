@@ -131,7 +131,13 @@ namespace win32_host {
     std::unordered_map<UINT, uint32_t>            menu_cmd_map;          // cmd_id → neui item id
     std::vector<uint32_t>                         menu_item_ids_ordered; // insertion order for navigation
     uint32_t                                      next_menu_item_id = 1;
+    // Win32 WM_COMMAND wParam carries only LOWORD; cmd_ids must stay <= 0xFFFF
+    // or they alias other items on dispatch. Control IDs live in [1, 0x7FFF]
+    // (the lower half of the 16-bit space; see CreateChildHwnd). Menu cmd_ids
+    // live in [0x8000, 0xFFFF] (the upper half) and are recycled via the free
+    // list below so a churning menubar can't exhaust the upper half.
     UINT                                          next_menu_cmd_id  = 0x8000;
+    std::vector<UINT>                             free_menu_cmd_ids;     // reusable cmd_ids freed by tree_remove
     // Owned accelerator table for this menubar (HACCEL).
     HACCEL                                        native_accel = nullptr;
 
