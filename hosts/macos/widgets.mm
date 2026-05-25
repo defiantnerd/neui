@@ -426,6 +426,24 @@ namespace macos_host
     // Other widget types: no-op until the native IMAGE path picks this up.
   }
 
+  // Stubs - state is stored on WidgetData but not yet pushed into the
+  // native control. Wiring NSControl setEnabled: is a follow-up.
+  static void NEUI_ABI w_set_enabled(neui_session_t session, neui_widget_t widget, bool enabled)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t i = WidgetToIndex(widget);
+    if (s->_widgets.exists(i)) s->_widgets[i].enabled = enabled;
+  }
+  static bool NEUI_ABI w_get_enabled(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return false;
+    uint32_t i = WidgetToIndex(widget);
+    if (s->_widgets.exists(i)) return s->_widgets[i].enabled;
+    return false;
+  }
+
   neui_widget_api_t widgets_api = {
     w_create, w_destroy, w_show, w_hide,
     w_set_pos, w_set_size, w_set_emit_events,
@@ -440,6 +458,8 @@ namespace macos_host
     w_popup_menu,
     w_invalidate,
     w_set_asset,
+    w_set_enabled,
+    w_get_enabled,
   };
 
   // -------------------------------------------------------------------------

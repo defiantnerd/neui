@@ -236,6 +236,18 @@ static neui_widget_client_t widget_client = {
       dbglog("checkbox changed: widget=0x%08x state=%s\n",
         event->data.checkbox.widget.id,
         (s >= 0 && s <= 2) ? states[s] : "?");
+      // Mirror the "Enable combobox above" checkbox into the combobox's
+      // enabled state. Demonstrates widgets->set_enabled on both hosts:
+      // win32 calls EnableWindow on the native COMBOBOX, xpl dims the
+      // painted combo and gates hit-test + tab traversal.
+      if (app && app->widgets &&
+          event->data.checkbox.widget.id == app->check_id &&
+          app->combo_id != 0) {
+        neui_session_t sess = app->session;
+        neui_widget_t  combo = { app->combo_id };
+        app->widgets->set_enabled(sess, combo,
+                                    event->data.checkbox.state == NEUI_CHECK_CHECKED);
+      }
       return true;
     }
 
@@ -606,8 +618,12 @@ int main(int argc, char** argv) {
   app.check_id  = check.id;
   app.check3_id = check3.id;
 
-  app.widgets->set_text(sess, check,  "Enable feature");
+  app.widgets->set_text(sess, check,  "Enable combobox above");
   app.widgets->set_text(sess, check3, "Allow override");
+  // Default the checkbox to checked so the combobox starts enabled. The
+  // CHECKBOX_CHANGED handler below mirrors the state into the combo via
+  // widgets->set_enabled.
+  app.widgets->set_check(sess, check, NEUI_CHECK_CHECKED);
 
   // --- Right column (x=420, width=200) - treeview ---
 

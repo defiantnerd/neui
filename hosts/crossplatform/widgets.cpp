@@ -513,6 +513,35 @@ namespace xpl_host
       s->_widgets[idx].tab_stop = enabled;
   }
 
+  static void NEUI_ABI w_set_enabled(neui_session_t session,
+                                      neui_widget_t widget, bool enabled)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    if (wd.enabled == enabled) return;
+    wd.enabled = enabled;
+    // If the disabled widget currently held focus, move focus to the next
+    // tab-stop so keyboard input stays usable.
+    if (!enabled && s->_focused_widget == idx)
+      s->focus_next(true);
+    // Repaint so the dim alpha bracket picks up the new state.
+    if (void* frame = s->find_parent_native_handle(idx))
+      platform_invalidate(frame);
+  }
+
+  static bool NEUI_ABI w_get_enabled(neui_session_t session,
+                                      neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return false;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return false;
+    return s->_widgets[idx].enabled;
+  }
+
   static void NEUI_ABI w_set_owner(neui_session_t session,
                                      neui_widget_t dialog, neui_widget_t owner)
   {
@@ -595,6 +624,8 @@ namespace xpl_host
     w_popup_menu,
     w_invalidate,
     w_set_asset,
+    w_set_enabled,
+    w_get_enabled,
   };
 
   // -------------------------------------------------------------------------

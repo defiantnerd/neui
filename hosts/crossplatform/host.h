@@ -43,6 +43,10 @@ namespace xpl_host
     bool visible     = false;
     bool emit_events = false;
     bool tab_stop    = false;   // if true, TAB / SHIFT+TAB can move focus here
+    // True = receives input + paints normally; false = paints dimmed
+    // (push_alpha(0.5) bracket around paint) and is skipped by widget_at
+    // hit-test + focus_next tab traversal. Default true.
+    bool enabled     = true;
     void*    userdata  = nullptr;
     uint32_t widget_id = 0;
     std::string text;

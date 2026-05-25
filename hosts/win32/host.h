@@ -62,6 +62,10 @@ namespace win32_host {
     bool isroot = false;
     bool visible = true;
     bool emit_events = false;
+    // True = HWND is left WS_ENABLED; false = EnableWindow(hwnd, FALSE).
+    // Default true. When the HWND has not yet been created (deferred),
+    // the flag is stored here and applied in create_child_windows.
+    bool enabled = true;
     void* userdata = nullptr;
     // For DIALOG frames: tree index of the owner frame. 0 = no owner.
     uint32_t owner_index = 0;

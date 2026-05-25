@@ -479,7 +479,11 @@ namespace xpl_host
         auto& wd = widgets[idx];
         if (!wd.native_handle && !wd.is_menubar() && wd.visible) {
           if (wd.hit_test(x, y)) {
-            if (wd.emit_events)
+            // Disabled widgets are click-transparent: they don't claim
+            // the hit, but children remain hit-testable. This matches
+            // Win32 EnableWindow semantics, where a disabled control
+            // passes clicks through to its parent / siblings.
+            if (wd.emit_events && wd.enabled)
               result = idx;
             uint32_t deeper = widget_at_recursive(widgets, idx, x, y);
             if (deeper != 0) result = deeper;
@@ -1472,7 +1476,13 @@ namespace xpl_host
             pre.data.preupdate.widget.id = idx;
             wd.session->dispatch_event(&pre);
           }
+          // Dim disabled widgets uniformly via the backend's alpha stack.
+          // Per-widget dim (not subtree); a parent's disabled flag does
+          // not propagate to children in v1.
+          bool dim = !wd.enabled && backend->push_alpha && backend->pop_alpha;
+          if (dim) backend->push_alpha(ctx, 0.5f);
           wd.paint(backend, ctx, idx == focused_widget);
+          if (dim) backend->pop_alpha(ctx);
         }
         // Translate so the child's descendants - which store coords
         // relative to the child - draw at the correct absolute position.
@@ -1568,7 +1578,7 @@ namespace xpl_host
     while (idx != 0) {
       if (widgets.exists(idx)) {
         auto& wd = widgets[idx];
-        if (!wd.native_handle && !wd.is_menubar() && wd.visible && wd.tab_stop)
+        if (!wd.native_handle && !wd.is_menubar() && wd.visible && wd.tab_stop && wd.enabled)
           out.push_back(idx);
         collect_tab_stops(widgets, idx, out);
       }
@@ -1613,6 +1623,7 @@ namespace xpl_host
     if (widget_idx == 0 || !_widgets.exists(widget_idx)) return;
     auto& w = _widgets[widget_idx];
     if (!w.emit_events) return;
+    if (!w.enabled) return;  // disabled widgets don't receive mouse events
     if (!dispatch_event(ev))
       w.on_mouse_event(ev);
   }
@@ -1666,12 +1677,26 @@ namespace xpl_host
     return wd.attrs && wd.attrs->get_int(NEUI_ATTR_TRISTATE, 0) != 0;
   }
 
+  // Fire NEUI_EVENT_CHECKBOX_CHANGED for user-driven state changes.
+  // Matches the native-host contract (win32 / macOS already emit this)
+  // so example code can drive other widgets from a checkbox toggle.
+  static void checkbox_dispatch_changed(CheckboxWidget& wd)
+  {
+    if (!wd.session || !wd.emit_events) return;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_CHECKBOX_CHANGED;
+    ev.data.checkbox.widget.id = wd.widget_id;
+    ev.data.checkbox.state     = static_cast<neui_check_state_t>(wd.check_state);
+    wd.session->dispatch_event(&ev);
+  }
+
   bool CheckboxWidget::on_keydown(uint32_t keycode, uint32_t modifiers)
   {
     if (keycode == NEUI_KEY_SPACE) {
       int mod = checkbox_is_tristate(*this) ? 3 : 2;
       check_state = (check_state + 1) % mod;
       repaint();
+      checkbox_dispatch_changed(*this);
       return true;
     }
     return false;
@@ -1690,6 +1715,7 @@ namespace xpl_host
       int mod = checkbox_is_tristate(*this) ? 3 : 2;
       check_state = (check_state + 1) % mod;
       repaint();
+      checkbox_dispatch_changed(*this);
       return true;
     }
     return false;

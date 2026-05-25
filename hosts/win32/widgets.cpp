@@ -1344,6 +1344,10 @@ namespace win32_host
         // Apply NEUI_ATTR_FONT_* if the client set them before show().
         // No-op when no font attrs are present.
         if (child.hwnd) ensure_custom_font_w32(child);
+        // Apply deferred enabled state. Children default to enabled=true;
+        // only push to Win32 when the client toggled it before show().
+        if (child.hwnd && !child.enabled)
+          EnableWindow(child.hwnd, FALSE);
         // Re-pick the IMAGE asset variant if the parent's DPI scale
         // crossed a boundary since the slot was allocated (no-op for
         // client-owned assets).
@@ -2868,6 +2872,30 @@ namespace win32_host
     if (s) s->widget_set_asset(widget, asset);
   }
 
+  static void NEUI_ABI set_enabled(neui_session_t session, neui_widget_t widget, bool enabled)
+  {
+    auto s = get_session_for_widget(session, widget);
+    if (!s) return;
+    auto* wd = s->get_widget(WidgetToIndex(widget));
+    if (!wd) return;
+    if (wd->enabled == enabled) return;
+    wd->enabled = enabled;
+    // Push the flag into the live HWND. If the HWND has not been created
+    // yet (deferred), create_child_windows will apply wd->enabled at HWND
+    // creation time.
+    if (wd->hwnd)
+      EnableWindow(wd->hwnd, enabled ? TRUE : FALSE);
+  }
+
+  static bool NEUI_ABI get_enabled(neui_session_t session, neui_widget_t widget)
+  {
+    auto s = get_session_for_widget(session, widget);
+    if (!s) return false;
+    auto* wd = s->get_widget(WidgetToIndex(widget));
+    if (!wd) return false;
+    return wd->enabled;
+  }
+
   // Native Win32 controls carry WS_TABSTOP at creation and native
   // WM_GETDLGCODE / IsDialogMessage handles traversal, so this is a no-op.
   // The entry exists to keep the vtable layout in sync with neui_widget_api_t.
@@ -3009,6 +3037,8 @@ namespace win32_host
     popup_menu,
     invalidate,
     set_asset,
+    set_enabled,
+    get_enabled,
   };
 
   // -------------------------------------------------------------------------

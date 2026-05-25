@@ -95,6 +95,21 @@ typedef struct neui_widget_api {
   // widget with set_asset(widget, asset_none) (or destroy the widget)
   // before assets->destroy.
   void               (NEUI_ABI *set_asset)(neui_session_t session, neui_widget_t widget, neui_asset_t asset);
+  // Toggle the widget's enabled state. Disabled widgets paint dimmed and
+  // do not receive input (mouse / focus). Default for every widget is
+  // enabled=true. No-op if the widget does not exist. Frames + non-
+  // interactive container widgets (SECTION, MENUBAR) accept the call
+  // but the visual / focus effect is host-defined.
+  // - win32 native host: calls EnableWindow on the underlying HWND; if
+  //   the HWND has not been created yet (deferred), the flag is stored
+  //   and applied at show().
+  // - xpl host: stored as a flag on WidgetData; paint dims the widget
+  //   (push_alpha(0.5) around its paint pass) and the hit-test / tab
+  //   traversal skip disabled widgets.
+  // - macOS native host: state is stored but the visual / input effect
+  //   is not yet wired (TODO: NSControl setEnabled:).
+  void               (NEUI_ABI *set_enabled)(neui_session_t session, neui_widget_t widget, bool enabled);
+  bool               (NEUI_ABI *get_enabled)(neui_session_t session, neui_widget_t widget);
 } neui_widget_api_t;
 
 #define NEUI_W_APPWINDOW  "neui.std.appwindow"

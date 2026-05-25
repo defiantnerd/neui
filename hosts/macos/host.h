@@ -36,6 +36,9 @@ namespace macos_host
     bool isroot      = false;
     bool visible     = true;
     bool emit_events = false;
+    // Stored only - no visual / input effect on macOS yet (TODO: wire
+    // NSControl setEnabled: / per-painted-view dim).
+    bool enabled     = true;
     void*    userdata    = nullptr;
     uint32_t owner_index = 0;
 
