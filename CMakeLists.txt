@@ -118,3 +118,25 @@ endif()
 if(APPLE)
   target_link_libraries(neui_example PRIVATE neui-macoshost)
 endif()
+
+# Minimal README example - input + button + label echo. Pure C; mirrors the
+# code block in README.md verbatim. Useful as a smoke test that the public
+# C API stays usable from a one-file client.
+if(WIN32)
+  add_executable(readme_example WIN32 examples/readme_example.c)
+else()
+  add_executable(readme_example examples/readme_example.c)
+endif()
+# Mixing a C-only main with neui's C++ static libs leaves MSVC's C++
+# runtime + static initialisers unmounted, which manifests as an
+# access violation inside the first create_session. Force the TU to
+# compile as C++. The source is kept C99-clean so the snippet in the
+# README still reads as C code.
+set_source_files_properties(examples/readme_example.c PROPERTIES LANGUAGE CXX)
+target_link_libraries(readme_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(readme_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(readme_example PRIVATE neui-macoshost)
+endif()
