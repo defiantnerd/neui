@@ -127,6 +127,37 @@ namespace macos_host
 
 } // namespace macos_host
 
+// -------------------------------------------------------------------------
+// Compound invalidation walk. Mirror of
+// hosts/win32/host.cpp::Session::invalidate_widgets_with_compound -
+// walks every CUSTOMDRAW widget owned by this session and marks any
+// whose compound_asset.id matches as needing display. The actual
+// [view setNeedsDisplay:YES] call has to cross into AppKit, but we
+// stay in pure C++ here by writing through native_control directly.
+
+@class NSView;
+
+namespace macos_host
+{
+  // Forward decl - defined in widgets.mm / window.mm where AppKit is
+  // imported. Pure C++ TU here forwards through it.
+  extern void mark_widget_dirty_for_paint(WidgetData& wd);
+
+  void Session::invalidate_widgets_with_compound(uint32_t asset_id)
+  {
+    auto order = _widgets.release_order();
+    for (uint32_t i : order) {
+      if (i == 0 || !_widgets.exists(i)) continue;
+      WidgetData& wd = _widgets[i];
+      if (!wd.type) continue;
+      if (strcmp(wd.type, NEUI_W_CUSTOMDRAW) != 0) continue;
+      if (wd.compound_asset.id != asset_id) continue;
+      mark_widget_dirty_for_paint(wd);
+    }
+  }
+
+} // namespace macos_host
+
 // Forced-symbol-reference for the example's link line. Mirror of
 // neui_register_xplhost() in hosts/crossplatform/host.cpp.
 extern "C" void neui_register_macoshost()

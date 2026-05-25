@@ -83,12 +83,23 @@ elseif(APPLE)
   # HiDPI variant - the asset manager picks it automatically on Retina.
   set(NEUI_EXAMPLE_RESOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage.png"
-    "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage@2x.png")
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage@2x.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/lemur@2x.jpg"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/lion@2x.jpg"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/panda@2x.jpg")
   add_executable(neui_example MACOSX_BUNDLE
     examples/main.cpp
     ${NEUI_EXAMPLE_RESOURCES})
   set_source_files_properties(${NEUI_EXAMPLE_RESOURCES} PROPERTIES
     MACOSX_PACKAGE_LOCATION "Resources")
+  # Disable Xcode's tiffutil step that auto-combines name.png + name@2x.png
+  # pairs into a single multi-rep .tiff. The runtime path-resolver in
+  # hosts/shared/macos/image_loader_macos.h looks up the .png by name, so
+  # we want the individual files in Resources/ verbatim. Without this the
+  # bundle ends up with myimage.tiff and no myimage.png, breaking both
+  # the IMAGE widget and the compound demo's background asset.
+  set_target_properties(neui_example PROPERTIES
+    XCODE_ATTRIBUTE_COMBINE_HIDPI_IMAGES NO)
 else()
   add_executable(neui_example examples/main.cpp)
 endif()

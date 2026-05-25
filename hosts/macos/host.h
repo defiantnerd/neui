@@ -5,6 +5,7 @@
 #include "../shared/attrs.h"
 #include "../shared/clipboard_item.h"
 #include "../shared/theme_palette.h"
+#include "asset_manager_macos.h"
 
 #include <memory>
 #include <string>
@@ -53,6 +54,13 @@ namespace macos_host
 
     std::unique_ptr<neui_detail::AttrBag> attrs;
 
+    // CUSTOMDRAW (NEUI_W_CUSTOMDRAW): optional compound asset. When set
+    // (non-asset_none and resolves to a NEUI_ASSET_KIND_COMPOUND in this
+    // session's _asset_manager), the painted-view drawRect: renders the
+    // compound's layer stack and suppresses the client's WIDGET_PAINT
+    // event. asset_none = no compound; client paints via WIDGET_PAINT.
+    neui_asset_t compound_asset = asset_none;
+
     // LISTBOX / COMBOBOX items. Used by widgets.mm's items api + by the
     // NSTableViewDataSource / NSPopUpButton population in window.mm.
     struct ItemEntry { std::string text; void* userdata = nullptr; };
@@ -98,11 +106,23 @@ namespace macos_host
     void          widget_destroy(neui_widget_t widget);
     void          widget_show(neui_widget_t widget);
 
+    // Invalidate every CUSTOMDRAW widget in this session whose
+    // compound_asset.id matches `asset_id`. Called from the compound API
+    // mutators so visible widgets repaint when their backing compound
+    // changes. asset_id is the full 32-bit handle id (session<<16 | slot).
+    void invalidate_widgets_with_compound(uint32_t asset_id);
+
     Tree<WidgetData>      _widgets;
     neui_widget_client_t* _client_widget_api = nullptr;
     neui_client_t*        _client            = nullptr;
     void*                 _token             = nullptr;
     uint32_t              _session_id        = 0;
+
+    // Session-scoped asset table backing the public neui_asset_api_t
+    // (NEUI_API_ASSETS). Loaded outside the paint loop; per-paint GPU
+    // upload happens lazily inside the painter draw_asset thunk.
+    // Released on session destroy via clear().
+    MacOSAssetManager     _asset_manager;
   };
 
   // Process-wide session registry (defined in host.mm). Slot index + 1 is

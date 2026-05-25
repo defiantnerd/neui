@@ -14,6 +14,8 @@
 #include "checkbox_image.h"
 #include "../shared/macos/clipboard_macos.h"
 #include "../shared/macos/menubar_macos.h"
+#include "../shared/compound.h"
+#include "../../backends/cg/cg_backend.h"
 
 #include <algorithm>
 #include <cstring>
@@ -90,7 +92,8 @@ namespace macos_host
       !strcmp(type, NEUI_W_MULTILINE)||
       !strcmp(type, NEUI_W_TREEVIEW) ||
       !strcmp(type, NEUI_W_SLIDER)   ||
-      !strcmp(type, NEUI_W_KNOB));
+      !strcmp(type, NEUI_W_KNOB)     ||
+      !strcmp(type, NEUI_W_CUSTOMDRAW));
 
     // Implicit type variants: CHECKBOX3 = CHECKBOX + tristate=1; MULTILINE
     // = INPUTBOX + multiline=1. Same shape as win32 / xpl.
@@ -125,6 +128,10 @@ namespace macos_host
   // NSControl held in wd.native_window / wd.native_control via __bridge_transfer.
   void release_native_window_macos (WidgetData& wd);
   void release_native_control_macos(WidgetData& wd);
+  // Defined in window.mm. Sends setNeedsDisplay:YES to the widget's
+  // NSView when it has one (used by the compound-attached invalidation
+  // hooks and widget_invalidate).
+  void mark_widget_dirty_for_paint (WidgetData& wd);
 
   void Session::widget_destroy(neui_widget_t widget)
   {
@@ -228,6 +235,11 @@ namespace macos_host
     }
   }
 
+  // Defined in window.mm. For NEUINativePaintedView instances, drop the
+  // cached image bitmap so the next drawRect: reloads from the (new) text
+  // path. No-op for non-painted views.
+  void reset_image_bitmap_cache_macos(WidgetData& wd);
+
   static void NEUI_ABI w_set_text(neui_session_t session, neui_widget_t widget, const char* text)
   {
     auto* s = get_session_for_widget(session, widget);
@@ -241,6 +253,14 @@ namespace macos_host
       [(__bridge NSWindow*)wd.native_window setTitle:ns];
     } else if (wd.native_control) {
       widget_set_native_string(wd, ns);
+      // IMAGE: source path drives the painted view's cached CGImage.
+      // Drop the cache so the next paint reloads. SECTION also re-paints
+      // (title chip is text-driven).
+      if (wd.type && (!strcmp(wd.type, NEUI_W_IMAGE) ||
+                       !strcmp(wd.type, NEUI_W_SECTION))) {
+        if (!strcmp(wd.type, NEUI_W_IMAGE)) reset_image_bitmap_cache_macos(wd);
+        mark_widget_dirty_for_paint(wd);
+      }
     }
   }
   static int  NEUI_ABI w_get_text(neui_session_t session, neui_widget_t widget, char* buf, int buflen)
@@ -359,22 +379,51 @@ namespace macos_host
     return 0;
   }
 
-  // Stub on the native macOS host - the NEUI_W_CUSTOMDRAW widget is not
-  // implemented here (would need a per-widget NEUIView subclass that
-  // brackets a CG begin_frame / end_frame around a WIDGET_PAINT dispatch).
-  // Clients targeting CUSTOMDRAW on macOS should switch to the xpl host
-  // by selecting "neui.host.crossplatform". Existing widgets get repainted
-  // when AppKit decides they're dirty; this is a no-op for them today.
-  static void  NEUI_ABI w_invalidate(neui_session_t, neui_widget_t)
+  // Request a repaint of the widget. For painted views (IMAGE, KNOB,
+  // CUSTOMDRAW) this is setNeedsDisplay:YES which coalesces with any
+  // other pending paints until the next runloop drain. For native
+  // NSControl-backed widgets (NSButton / NSTextField / ...) AppKit
+  // owns their invalidation, so the helper is a no-op for them.
+  static void  NEUI_ABI w_invalidate(neui_session_t session, neui_widget_t widget)
   {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t i = WidgetToIndex(widget);
+    if (!s->_widgets.exists(i)) return;
+    mark_widget_dirty_for_paint(s->_widgets[i]);
   }
 
-  // NEUI_W_IMAGE is not implemented on the native macOS host - see
-  // plans/macos-port.md. Asset-handle support lands together with the
-  // IMAGE widget itself as part of that port; for now this is a no-op
-  // so the vtable layout stays in sync with neui_widget_api_t.
-  static void NEUI_ABI w_set_asset(neui_session_t, neui_widget_t, neui_asset_t)
+  // Bind an asset handle to a widget. v1 only supports CUSTOMDRAW +
+  // compound: attaching a NEUI_ASSET_KIND_COMPOUND to a CUSTOMDRAW
+  // widget switches its paint path from imperative WIDGET_PAINT dispatch
+  // to declarative compound-layer walk. asset_none clears the binding.
+  //
+  // NEUI_W_IMAGE on the native macOS host still loads via
+  // [ensureImageBitmap:] from set_text (path-source only) - migrating
+  // IMAGE to use asset handles too is a follow-on, see
+  // plans/macos-customdraw-and-compound.md.
+  static void NEUI_ABI w_set_asset(neui_session_t session,
+                                     neui_widget_t widget, neui_asset_t asset)
   {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t i = WidgetToIndex(widget);
+    if (!s->_widgets.exists(i)) return;
+    auto& wd = s->_widgets[i];
+    if (!wd.type) return;
+
+    // Cross-session handles silently dropped (asset_none is the documented
+    // clear sentinel and always passes).
+    if (asset.id != asset_none.id &&
+        ((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) {
+      return;
+    }
+
+    if (!strcmp(wd.type, NEUI_W_CUSTOMDRAW)) {
+      wd.compound_asset = asset;
+      mark_widget_dirty_for_paint(wd);
+    }
+    // Other widget types: no-op until the native IMAGE path picks this up.
   }
 
   neui_widget_api_t widgets_api = {
@@ -914,7 +963,20 @@ namespace macos_host
     if (!s || !key) return 0;
     uint32_t i = WidgetToIndex(widget);
     if (!s->_widgets.exists(i)) return 0;
-    neui_detail::ensure_attrs(s->_widgets[i].attrs).set_int(key, value);
+    auto& wd = s->_widgets[i];
+    neui_detail::ensure_attrs(wd.attrs).set_int(key, value);
+    // CUSTOMDRAW + compound: any attr touch can drive a layer binding or
+    // template substitution, so request a repaint. Idempotent + cheap
+    // (AppKit coalesces setNeedsDisplay).
+    if (wd.type && !strcmp(wd.type, NEUI_W_CUSTOMDRAW) &&
+        wd.compound_asset.id != asset_none.id) {
+      mark_widget_dirty_for_paint(wd);
+    }
+    // SECTION: NEUI_ATTR_BACKGROUND drives the body fill colour.
+    if (wd.type && !strcmp(wd.type, NEUI_W_SECTION) &&
+        !strcmp(key, NEUI_ATTR_BACKGROUND)) {
+      mark_widget_dirty_for_paint(wd);
+    }
     return 1;
   }
   static int32_t NEUI_ABI a_get_int   (neui_session_t session, neui_widget_t widget,
@@ -933,7 +995,21 @@ namespace macos_host
     if (!s || !key) return 0;
     uint32_t i = WidgetToIndex(widget);
     if (!s->_widgets.exists(i)) return 0;
-    neui_detail::ensure_attrs(s->_widgets[i].attrs).set_string(key, value);
+    auto& wd = s->_widgets[i];
+    neui_detail::ensure_attrs(wd.attrs).set_string(key, value);
+    // CUSTOMDRAW + compound: text-template resolution can change on any
+    // string attr touch.
+    if (wd.type && !strcmp(wd.type, NEUI_W_CUSTOMDRAW) &&
+        wd.compound_asset.id != asset_none.id) {
+      mark_widget_dirty_for_paint(wd);
+    }
+    // SECTION: NEUI_ATTR_ALIGN_TEXT drives the title chip position - the
+    // shared paint_section helper reads it each draw, so a repaint is
+    // enough to live-update. NEUI_ATTR_BACKGROUND is handled in a_set_int.
+    if (wd.type && !strcmp(wd.type, NEUI_W_SECTION) &&
+        !strcmp(key, NEUI_ATTR_ALIGN_TEXT)) {
+      mark_widget_dirty_for_paint(wd);
+    }
     return 1;
   }
   static const char* NEUI_ABI a_get_string(neui_session_t session, neui_widget_t widget,
@@ -985,6 +1061,12 @@ namespace macos_host
     if (key && !strcmp(key, NEUI_ATTR_ROTATION) && wd.native_control) {
       NSView* v = (__bridge NSView*)wd.native_control;
       [v setNeedsDisplay:YES];
+    }
+    // CUSTOMDRAW + compound: any float attr change can drive a binding,
+    // so repaint.
+    if (wd.type && !strcmp(wd.type, NEUI_W_CUSTOMDRAW) &&
+        wd.compound_asset.id != asset_none.id) {
+      mark_widget_dirty_for_paint(wd);
     }
     return 1;
   }
@@ -1053,24 +1135,95 @@ namespace macos_host
     cmd_invoke_focused, cmd_invoke,
   };
 
-  // Asset API stubs. The native macOS host does not yet implement
-  // NEUI_W_CUSTOMDRAW (would need a per-widget NEUIView that brackets
-  // begin_frame / end_frame around a WIDGET_PAINT dispatch), and the
-  // existing native widgets here (NSButton / NSTextField / ...) don't
-  // consume client-supplied asset handles. The vtable is wired in so
-  // get_interface(NEUI_API_ASSETS) returns a valid pointer for ABI
-  // consistency; every method returns "invalid". Clients targeting
-  // CUSTOMDRAW + assets on macOS should select the xpl host
-  // ("neui.host.crossplatform"), which has a full implementation.
-  static neui_asset_t NEUI_ABI a_create_bitmap  (neui_session_t, uint32_t, uint32_t,
-                                                  const uint8_t*, float)         { return asset_none; }
-  static neui_asset_t NEUI_ABI a_create_from_file(neui_session_t, const char*)   { return asset_none; }
-  static void         NEUI_ABI a_destroy        (neui_session_t, neui_asset_t)   {}
-  static bool         NEUI_ABI a_get_size       (neui_session_t, neui_asset_t,
-                                                  float*, float*)                { return false; }
-  static neui_asset_kind_t NEUI_ABI a_get_kind  (neui_session_t, neui_asset_t)
-  { return NEUI_ASSET_KIND_NONE; }
-  static neui_asset_t NEUI_ABI a_create_compound(neui_session_t)                 { return asset_none; }
+  // Asset API. Session-scoped slot table backing the public
+  // neui_asset_api_t. Loaded outside the paint loop; per-paint GPU
+  // upload happens lazily inside macos_painter_draw_asset_thunk.
+  // Mirrors hosts/win32/widgets.cpp::as_* almost verbatim - the only
+  // host-specific bit is using neui_cg_backend::get_backend() in
+  // as_destroy so the manager can release any per-ctx CGImage caches
+  // the bitmap accumulated across paint contexts.
+
+  static neui_asset_t pack_asset_macos(uint32_t session_id, uint32_t slot)
+  {
+    return { ((session_id & 0xffff) << 16) | (slot & 0xffff) };
+  }
+
+  static neui_asset_t NEUI_ABI a_create_bitmap(neui_session_t session,
+                                                 uint32_t width_px,
+                                                 uint32_t height_px,
+                                                 const uint8_t* bgra,
+                                                 float scale)
+  {
+    auto* s = get_session(session);
+    if (!s) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_bitmap(width_px, height_px,
+                                                        bgra, scale);
+    if (slot == 0) return asset_none;
+    return pack_asset_macos(s->session_id(), slot);
+  }
+
+  static neui_asset_t NEUI_ABI a_create_from_file(neui_session_t session,
+                                                    const char* path_utf8)
+  {
+    auto* s = get_session(session);
+    if (!s || !path_utf8) return asset_none;
+    // Pick the highest backing-scale across the session's frames as the
+    // preference for @Nx variant resolution. Falls back to the main
+    // screen's backing scale when no frame has been created yet.
+    float scale = 1.0f;
+    if (NSScreen.mainScreen) {
+      float main_scale = (float)NSScreen.mainScreen.backingScaleFactor;
+      if (main_scale > scale) scale = main_scale;
+    }
+    uint32_t slot = s->_asset_manager.allocate_from_file(path_utf8, scale);
+    if (slot == 0) return asset_none;
+    return pack_asset_macos(s->session_id(), slot);
+  }
+
+  static void NEUI_ABI a_destroy(neui_session_t session, neui_asset_t asset)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    if (asset.id == asset_none.id) return;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return;
+    s->_asset_manager.release_slot(asset.id & 0xffff,
+                                    neui_cg_backend::get_backend());
+  }
+
+  static bool NEUI_ABI a_get_size(neui_session_t session, neui_asset_t asset,
+                                    float* out_w, float* out_h)
+  {
+    auto* s = get_session(session);
+    if (!s) return false;
+    if (asset.id == asset_none.id) return false;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return false;
+    auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
+    if (!e || e->scale <= 0.0f) return false;
+    if (out_w) *out_w = static_cast<float>(e->width_px)  / e->scale;
+    if (out_h) *out_h = static_cast<float>(e->height_px) / e->scale;
+    return true;
+  }
+
+  static neui_asset_kind_t NEUI_ABI a_get_kind(neui_session_t session,
+                                                 neui_asset_t asset)
+  {
+    auto* s = get_session(session);
+    if (!s) return NEUI_ASSET_KIND_NONE;
+    if (asset.id == asset_none.id) return NEUI_ASSET_KIND_NONE;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff))
+      return NEUI_ASSET_KIND_NONE;
+    auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
+    return e ? e->kind : NEUI_ASSET_KIND_NONE;
+  }
+
+  static neui_asset_t NEUI_ABI a_create_compound(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    if (!s) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_compound();
+    if (slot == 0) return asset_none;
+    return pack_asset_macos(s->session_id(), slot);
+  }
 
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
@@ -1082,41 +1235,178 @@ namespace macos_host
     a_create_compound,
   };
 
-  // Compound API stub - matches the public vtable so get_interface returns
-  // a valid pointer, but every mutator no-ops. Native macOS host has no
-  // CUSTOMDRAW yet, so no widget can host a compound; clients use the xpl
-  // host on macOS for compound drawables.
-  static neui_compound_layer_t NEUI_ABI co_add_layer(neui_session_t, neui_asset_t,
-                                                       neui_compound_layer_kind_t, int)
-  { return compound_layer_none; }
-  static void NEUI_ABI co_remove_layer(neui_session_t, neui_asset_t,
-                                         neui_compound_layer_t) {}
-  static void NEUI_ABI co_clear      (neui_session_t, neui_asset_t) {}
-  static void NEUI_ABI co_set_z      (neui_session_t, neui_asset_t,
-                                        neui_compound_layer_t, int) {}
-  static void NEUI_ABI co_set_anchor (neui_session_t, neui_asset_t,
-                                        neui_compound_layer_t,
-                                        neui_anchor_t, neui_anchor_t) {}
-  static void NEUI_ABI co_set_int    (neui_session_t, neui_asset_t,
-                                        neui_compound_layer_t,
-                                        const char*, int) {}
-  static void NEUI_ABI co_set_float  (neui_session_t, neui_asset_t,
-                                        neui_compound_layer_t,
-                                        const char*, float) {}
-  static void NEUI_ABI co_set_string (neui_session_t, neui_asset_t,
-                                        neui_compound_layer_t,
-                                        const char*, const char*) {}
-  static void NEUI_ABI co_set_asset  (neui_session_t, neui_asset_t,
-                                        neui_compound_layer_t,
-                                        const char*, neui_asset_t) {}
-  static void NEUI_ABI co_bind       (neui_session_t, neui_asset_t,
-                                        neui_compound_layer_t,
-                                        const char*, const char*, float, float) {}
-  static void NEUI_ABI co_bind_asset (neui_session_t, neui_asset_t,
-                                        neui_compound_layer_t,
-                                        const char*, const char*) {}
-  static void NEUI_ABI co_unbind     (neui_session_t, neui_asset_t,
-                                        neui_compound_layer_t, const char*) {}
+  // Compound API. Mutators dispatch to the shared mutator helpers in
+  // hosts/shared/compound.h; the host-side concern here is handle
+  // validation, looking up the MacOSAssetEntry's compound storage, and
+  // invalidating attached CUSTOMDRAW widgets after each mutation.
+  // Mirror of hosts/win32/widgets.cpp's co_* family.
+
+  static neui_detail::CompoundLayer*
+  resolve_layer_macos(neui_session_t session, neui_asset_t asset,
+                       neui_compound_layer_t layer, Session*& out_session)
+  {
+    out_session = nullptr;
+    auto* s = get_session(session);
+    if (!s) return nullptr;
+    if (asset.id == asset_none.id) return nullptr;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return nullptr;
+    uint32_t asset_slot = asset.id & 0xffff;
+    if (neui_detail::compound_layer_asset_slot(layer) != asset_slot) return nullptr;
+    auto* e = s->_asset_manager.get_slot(asset_slot);
+    if (!e || e->kind != NEUI_ASSET_KIND_COMPOUND || !e->compound) return nullptr;
+    out_session = s;
+    return neui_detail::compound_get_layer(*e->compound,
+                                            neui_detail::compound_layer_slot(layer));
+  }
+
+  static neui_detail::CompoundAsset*
+  resolve_compound_macos(neui_session_t session, neui_asset_t asset,
+                          Session*& out_session)
+  {
+    out_session = nullptr;
+    auto* s = get_session(session);
+    if (!s) return nullptr;
+    if (asset.id == asset_none.id) return nullptr;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return nullptr;
+    auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_COMPOUND || !e->compound) return nullptr;
+    out_session = s;
+    return e->compound.get();
+  }
+
+  static neui_compound_layer_t NEUI_ABI co_add_layer(neui_session_t session,
+                                                       neui_asset_t asset,
+                                                       neui_compound_layer_kind_t kind,
+                                                       int z)
+  {
+    Session* s = nullptr;
+    auto* ca = resolve_compound_macos(session, asset, s);
+    if (!ca) return compound_layer_none;
+    uint32_t asset_slot = asset.id & 0xffff;
+    uint32_t slot = neui_detail::compound_add_layer(*ca, kind, z);
+    s->invalidate_widgets_with_compound(asset.id);
+    return neui_detail::pack_compound_layer(asset_slot, slot);
+  }
+
+  static void NEUI_ABI co_remove_layer(neui_session_t session, neui_asset_t asset,
+                                         neui_compound_layer_t layer)
+  {
+    Session* s = nullptr;
+    auto* ca = resolve_compound_macos(session, asset, s);
+    if (!ca) return;
+    if (neui_detail::compound_layer_asset_slot(layer) != (asset.id & 0xffff)) return;
+    neui_detail::compound_remove_layer(*ca, neui_detail::compound_layer_slot(layer));
+    s->invalidate_widgets_with_compound(asset.id);
+  }
+
+  static void NEUI_ABI co_clear(neui_session_t session, neui_asset_t asset)
+  {
+    Session* s = nullptr;
+    auto* ca = resolve_compound_macos(session, asset, s);
+    if (!ca) return;
+    neui_detail::compound_clear(*ca);
+    s->invalidate_widgets_with_compound(asset.id);
+  }
+
+  static void NEUI_ABI co_set_z(neui_session_t session, neui_asset_t asset,
+                                  neui_compound_layer_t layer, int z)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer_macos(session, asset, layer, s);
+    if (!L) return;
+    L->z = z;
+    s->invalidate_widgets_with_compound(asset.id);
+  }
+
+  static void NEUI_ABI co_set_anchor(neui_session_t session, neui_asset_t asset,
+                                       neui_compound_layer_t layer,
+                                       neui_anchor_t parent_anchor,
+                                       neui_anchor_t self_anchor)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer_macos(session, asset, layer, s);
+    if (!L) return;
+    L->parent_anchor = parent_anchor;
+    L->self_anchor   = self_anchor;
+    s->invalidate_widgets_with_compound(asset.id);
+  }
+
+  static void NEUI_ABI co_set_int(neui_session_t session, neui_asset_t asset,
+                                    neui_compound_layer_t layer,
+                                    const char* prop, int value)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer_macos(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_set_int(*L, prop, value);
+    s->invalidate_widgets_with_compound(asset.id);
+  }
+
+  static void NEUI_ABI co_set_float(neui_session_t session, neui_asset_t asset,
+                                      neui_compound_layer_t layer,
+                                      const char* prop, float value)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer_macos(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_set_float(*L, prop, value);
+    s->invalidate_widgets_with_compound(asset.id);
+  }
+
+  static void NEUI_ABI co_set_string(neui_session_t session, neui_asset_t asset,
+                                       neui_compound_layer_t layer,
+                                       const char* prop, const char* value)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer_macos(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_set_string(*L, prop, value);
+    s->invalidate_widgets_with_compound(asset.id);
+  }
+
+  static void NEUI_ABI co_set_asset(neui_session_t session, neui_asset_t asset,
+                                      neui_compound_layer_t layer,
+                                      const char* prop, neui_asset_t value)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer_macos(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_set_asset(*L, prop, value);
+    s->invalidate_widgets_with_compound(asset.id);
+  }
+
+  static void NEUI_ABI co_bind(neui_session_t session, neui_asset_t asset,
+                                 neui_compound_layer_t layer,
+                                 const char* prop, const char* attr_key,
+                                 float scale, float offset)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer_macos(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_bind(*L, prop, attr_key, scale, offset);
+    s->invalidate_widgets_with_compound(asset.id);
+  }
+
+  static void NEUI_ABI co_bind_asset(neui_session_t session, neui_asset_t asset,
+                                       neui_compound_layer_t layer,
+                                       const char* prop, const char* attr_key)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer_macos(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_bind_asset(*L, prop, attr_key);
+    s->invalidate_widgets_with_compound(asset.id);
+  }
+
+  static void NEUI_ABI co_unbind(neui_session_t session, neui_asset_t asset,
+                                   neui_compound_layer_t layer, const char* prop)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer_macos(session, asset, layer, s);
+    if (!L || !prop) return;
+    neui_detail::apply_unbind(*L, prop);
+    s->invalidate_widgets_with_compound(asset.id);
+  }
 
   neui_compound_api_t compound_api = {
     NEUI_VERSION,

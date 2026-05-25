@@ -13,6 +13,9 @@
 #include "../shared/macos/image_loader_macos.h"
 #include "../shared/macos/theme_provider_macos.h"
 #include "../shared/widget_paint_knob.h"
+#include "../shared/widget_paint_compound.h"
+#include "../shared/widget_paint_section.h"
+#include "../shared/painter.h"
 #include "../../backends/cg/cg_backend.h"
 
 #include <cstring>
@@ -31,6 +34,17 @@
 // references it before the definition appears.
 namespace macos_host {
   WidgetData* widget_for_id(uint32_t widget_id, Session** out_session = nullptr);
+
+  // Painter draw_asset thunk - mirror of
+  // hosts/win32/widgets.cpp::w32_painter_draw_asset_thunk. Resolves the
+  // neui_asset_t through the session's MacOSAssetManager, lazy-uploads a
+  // per-(asset, ctx) CGImage on first use, then calls backend->draw_bitmap.
+  void NEUI_ABI macos_painter_draw_asset_thunk(void* host_token,
+                                                 neui_render_backend_t* backend,
+                                                 neui_render_ctx_t ctx,
+                                                 neui_asset_t asset,
+                                                 float x, float y,
+                                                 float w, float h);
 }
 
 // ---------------------------------------------------------------------------
@@ -204,18 +218,53 @@ static float neui_snap_to_steps(float v, int steps)
 
 // Load (or reload) the IMAGE bitmap from the widget's text path. Lazy on
 // first paint; rebuilds on text change via set_text → setNeedsDisplay.
+// Resolves @2x / @3x variants on Retina, matching the MacOSAssetManager
+// path-resolver so example images that ship only as @2x.jpg still load.
 - (void)ensureImageBitmap:(const std::string&)path
 {
   if (bitmap_handle) return;  // simple v1: load once, cache forever
   auto* backend = neui_cg_backend::get_backend();
   if (!backend || !render_ctx || path.empty()) return;
-  uint32_t w = 0, h = 0;
-  uint8_t* px = neui_detail::load_image_bgra8_macos(path.c_str(), &w, &h);
+
+  float scale = 1.0f;
+  if (NSScreen.mainScreen) {
+    float s_main = (float)NSScreen.mainScreen.backingScaleFactor;
+    if (s_main > scale) scale = s_main;
+  }
+
+  auto split_ext = [](const std::string& name, std::string& base, std::string& ext) {
+    auto dot = name.rfind('.');
+    if (dot == std::string::npos) { base = name; ext.clear(); }
+    else { base = name.substr(0, dot); ext = name.substr(dot); }
+  };
+  auto try_load = [&](const std::string& p, float s_out) -> uint8_t* {
+    uint32_t w = 0, h = 0;
+    uint8_t* raw = neui_detail::load_image_bgra8_macos(p.c_str(), &w, &h);
+    if (!raw) return nullptr;
+    bitmap_w_px = w;
+    bitmap_h_px = h;
+    bitmap_scale = s_out;
+    return raw;
+  };
+
+  std::string base, ext;
+  split_ext(path, base, ext);
+
+  uint8_t* px = nullptr;
+  if (scale > 2.0f) {
+    px = try_load(base + "@3x" + ext, 3.0f);
+    if (!px) px = try_load(base + "@2x" + ext, 2.0f);
+  } else if (scale > 1.0f) {
+    px = try_load(base + "@2x" + ext, 2.0f);
+  }
+  if (!px) px = try_load(path, 1.0f);
+  if (!px && scale <= 1.0f) px = try_load(base + "@2x" + ext, 2.0f);
+  if (!px && scale <= 2.0f) px = try_load(base + "@3x" + ext, 3.0f);
   if (!px) return;
-  bitmap_handle = backend->create_bitmap(render_ctx, w, h, px, /*scale*/1.0f);
-  bitmap_w_px = w;
-  bitmap_h_px = h;
-  bitmap_scale = 1.0f;
+
+  bitmap_handle = backend->create_bitmap(render_ctx,
+                                          bitmap_w_px, bitmap_h_px,
+                                          px, bitmap_scale);
   neui_detail::free_image_bgra8(px);
 }
 
@@ -235,9 +284,13 @@ static float neui_snap_to_steps(float v, int steps)
   neui_cg_backend::set_current_frame(render_ctx, (void*)cg,
                                       (float)sz.width, (float)sz.height);
   // Clear with the panel-bg colour matching the rest of the window. Same
-  // approach as the xpl host's paint_frame.
-  uint32_t clear = neui_detail::color(neui_detail::ColorRole::panel_bg);
-  if (wd->attrs && wd->attrs->has(NEUI_ATTR_BACKGROUND))
+  // approach as the xpl host's paint_frame. SECTION uses a transparent
+  // clear so the un-painted header band shows the parent's pixels.
+  bool is_section = wd->type && !strcmp(wd->type, NEUI_W_SECTION);
+  uint32_t clear = is_section
+    ? 0x00000000
+    : neui_detail::color(neui_detail::ColorRole::panel_bg);
+  if (!is_section && wd->attrs && wd->attrs->has(NEUI_ATTR_BACKGROUND))
     clear = (uint32_t)wd->attrs->get_int(NEUI_ATTR_BACKGROUND, 0);
   backend->begin_frame(render_ctx, clear);
 
@@ -286,6 +339,80 @@ static float neui_snap_to_steps(float v, int steps)
     neui_detail::paint_knob(backend, render_ctx,
                              0, 0, (float)sz.width, (float)sz.height,
                              value, /*focused*/false, polarity, steps, value_text);
+  } else if (wd->type && !strcmp(wd->type, NEUI_W_CUSTOMDRAW)) {
+    // CUSTOMDRAW dispatch - either paint the attached compound or
+    // forward a WIDGET_PAINT event. Mirror of paint_customdraw_w32.
+    // Outer push_transform + push_clip(0..w,0..h) so client state
+    // changes can't bleed past the widget rect.
+    if (backend->push_transform) backend->push_transform(render_ctx);
+    if (backend->push_clip)      backend->push_clip(render_ctx, 0.0f, 0.0f,
+                                                     (float)sz.width, (float)sz.height);
+
+    neui_painter painter{};
+    painter.backend          = backend;
+    painter.ctx              = render_ctx;
+    painter.host_token       = sess;
+    painter.draw_asset_thunk = &macos_host::macos_painter_draw_asset_thunk;
+
+    // Resolve compound (if any). asset_none -> no compound -> dispatch
+    // WIDGET_PAINT.
+    neui_detail::CompoundAsset* ca = nullptr;
+    if (wd->compound_asset.id != asset_none.id &&
+        ((wd->compound_asset.id >> 16) & 0xffff) == (sess->session_id() & 0xffff))
+    {
+      auto* e = sess->_asset_manager.get_slot(wd->compound_asset.id & 0xffff);
+      if (e && e->kind == NEUI_ASSET_KIND_COMPOUND && e->compound) ca = e->compound.get();
+    }
+
+    if (ca) {
+      const neui_detail::AttrBag* bag = neui_detail::attrs_readonly(wd->attrs);
+      neui_detail::paint_compound_below(&painter, *ca,
+                                          (float)sz.width, (float)sz.height, bag);
+      neui_detail::paint_compound_above(&painter, *ca,
+                                          (float)sz.width, (float)sz.height, bag);
+    } else if (wd->emit_events) {
+      bool focused = (self.window.isKeyWindow
+                       && self.window.firstResponder == self);
+      neui_event_t ev{};
+      ev.type = NEUI_EVENT_WIDGET_PAINT;
+      ev.data.paint.widget.id   = wd->widget_id;
+      ev.data.paint.painter_api = &neui_detail::k_painter_api;
+      ev.data.paint.p           = &painter;
+      ev.data.paint.width       = (float)sz.width;
+      ev.data.paint.height      = (float)sz.height;
+      ev.data.paint.focused     = focused;
+      sess->dispatch_event(&ev);
+    }
+
+    if (backend->pop_clip)      backend->pop_clip(render_ctx);
+    if (backend->pop_transform) backend->pop_transform(render_ctx);
+  } else if (is_section) {
+    // SECTION body + title chip. The shared helper leaves the band's
+    // non-chip area UNPAINTED (transparent clear above) so the parent's
+    // pixels show through - matches the xpl host's visual.
+    //
+    // Direction-aware lift: SECTION_BG_LIFT (+24) lifts the frame_bg
+    // towards white, but on macOS in light mode frame_bg already lives
+    // near white (windowBackgroundColor ≈ 0xECECEC, often 0xFFFFFF under
+    // newer appearances). When the lift saturates, the section becomes
+    // invisible against the NSWindow background. Detect that and shade
+    // down instead so the section reads as a depressed panel.
+    uint32_t bg;
+    if (wd->attrs && wd->attrs->has(NEUI_ATTR_BACKGROUND)) {
+      bg = (uint32_t)wd->attrs->get_int(NEUI_ATTR_BACKGROUND, 0);
+    } else {
+      uint32_t fbg    = neui_detail::color(neui_detail::ColorRole::frame_bg);
+      uint32_t lifted = neui_detail::shade(fbg,  neui_detail::SECTION_BG_LIFT);
+      if (lifted == fbg)
+        lifted = neui_detail::shade(fbg, -neui_detail::SECTION_BG_LIFT);
+      bg = lifted;
+    }
+    const char* align = wd->attrs ? wd->attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
+    uint32_t text_argb = neui_detail::color(neui_detail::ColorRole::text_primary);
+    neui_detail::paint_section(backend, render_ctx,
+                                 0.0f, 0.0f, (float)sz.width, (float)sz.height,
+                                 wd->text.c_str(),
+                                 bg, align, text_argb);
   }
 
   backend->end_frame(render_ctx);
@@ -633,6 +760,50 @@ namespace macos_host {
     if (out_session) *out_session = sess;
     return &sess->_widgets[idx];
   }
+
+  // Painter draw_asset thunk - resolves a neui_asset_t through the
+  // owning session's MacOSAssetManager, lazy-uploads a CGImage on first
+  // use per (asset, ctx) pair, then calls backend->draw_bitmap. Mirror of
+  // hosts/win32/widgets.cpp::w32_painter_draw_asset_thunk - CG's
+  // get_context_generation is a constant so the generation comparison
+  // is a no-op here, but the shape is kept for symmetry.
+  void NEUI_ABI macos_painter_draw_asset_thunk(void* host_token,
+                                                 neui_render_backend_t* backend,
+                                                 neui_render_ctx_t ctx,
+                                                 neui_asset_t asset,
+                                                 float x, float y,
+                                                 float w, float h)
+  {
+    auto* s = static_cast<Session*>(host_token);
+    if (!s || !backend || !ctx) return;
+    if (asset.id == asset_none.id) return;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return;
+    uint32_t slot = asset.id & 0xffff;
+    auto* entry = s->_asset_manager.get_slot(slot);
+    if (!entry) return;
+    const uint32_t gen = backend->get_context_generation
+      ? backend->get_context_generation(ctx) : 0u;
+    auto it = entry->bitmaps.find(ctx);
+    if (it != entry->bitmaps.end() && it->second.generation != gen) {
+      if (backend->destroy_bitmap && it->second.bmp)
+        backend->destroy_bitmap(ctx, it->second.bmp);
+      entry->bitmaps.erase(it);
+      it = entry->bitmaps.end();
+    }
+    if (it == entry->bitmaps.end()) {
+      if (!backend->create_bitmap) return;
+      void* bmp = backend->create_bitmap(ctx,
+                                          entry->width_px, entry->height_px,
+                                          entry->pixels.data(),
+                                          entry->scale);
+      if (!bmp) return;
+      it = entry->bitmaps.emplace(ctx, MacOSCtxBitmap{ bmp, gen }).first;
+    }
+    if (backend->draw_bitmap)
+      backend->draw_bitmap(ctx, it->second.bmp,
+                            0.0f, 0.0f, 0.0f, 0.0f, // full bitmap
+                            x, y, w, h);
+  }
 }
 
 @implementation NEUINativeListSource
@@ -958,17 +1129,32 @@ namespace macos_host {
 
 namespace macos_host
 {
-  // Walk up the widget tree from `idx` until we find an ancestor whose
-  // native_window is set. Returns its NSWindow.contentView (the flipped
-  // NEUINativeContentView), or nil if there's no native frame above.
+  // Forward decl - defined below alongside the descendant walker.
+  static bool widget_is_native_container(const WidgetData& w);
+
+  // Walk up the widget tree from `idx` until we find an ancestor that
+  // can host a child view. Two cases (return the closest one):
+  //   - A container widget (SECTION) with an NSView native_control -
+  //     return that view, so SECTION children layout in section-local
+  //     coords.
+  //   - A frame (APPWINDOW / DIALOG / PLUGWINDOW) with native_window -
+  //     return its NSWindow.contentView.
+  // get_all_parents returns parents in nearest-first order, so the first
+  // match wins. Returns nil if no usable ancestor exists yet.
   static NSView* find_parent_content_view(Session* s, uint32_t idx)
   {
     if (!s) return nil;
     auto parents = s->_widgets.get_all_parents(idx);
     for (uint32_t p : parents) {
       if (p == 0) continue;
-      if (s->_widgets.exists(p) && s->_widgets[p].native_window) {
-        NSWindow* w = native_window_from(s->_widgets[p].native_window);
+      if (!s->_widgets.exists(p)) continue;
+      auto& pw = s->_widgets[p];
+      if (widget_is_native_container(pw) && pw.native_control) {
+        id obj = (__bridge id)pw.native_control;
+        if ([obj isKindOfClass:[NSView class]]) return (NSView*)obj;
+      }
+      if (pw.native_window) {
+        NSWindow* w = native_window_from(pw.native_window);
         return w.contentView;
       }
     }
@@ -1001,6 +1187,38 @@ namespace macos_host
     } else if ([obj isKindOfClass:[NSMenu class]]) {
       if (NSApp.mainMenu == (NSMenu*)obj) NSApp.mainMenu = nil;
     }
+  }
+
+  // Request a repaint of a widget's painted view. Mirror of the win32
+  // host's InvalidateRect(hwnd, nullptr, FALSE). Called from
+  // Session::invalidate_widgets_with_compound + widget_invalidate +
+  // the compound-attached attribute-setter invalidation hooks. No-op
+  // for widgets without an NSView backing (native NSControl widgets get
+  // their repaint through AppKit's normal invalidation path).
+  void mark_widget_dirty_for_paint(WidgetData& wd)
+  {
+    if (!wd.native_control) return;
+    id obj = (__bridge id)wd.native_control;
+    if (![obj isKindOfClass:[NSView class]]) return;
+    [(NSView*)obj setNeedsDisplay:YES];
+  }
+
+  // Drop the cached CGImage on a NEUINativePaintedView so the next paint
+  // reloads from the widget's text path (used by NEUI_W_IMAGE when the
+  // client changes the source via set_text). No-op when no bitmap has
+  // been uploaded yet.
+  void reset_image_bitmap_cache_macos(WidgetData& wd)
+  {
+    if (!wd.native_control) return;
+    id obj = (__bridge id)wd.native_control;
+    if (![obj isKindOfClass:[NEUINativePaintedView class]]) return;
+    NEUINativePaintedView* v = (NEUINativePaintedView*)obj;
+    auto* backend = neui_cg_backend::get_backend();
+    if (v->bitmap_handle && v->render_ctx && backend) {
+      backend->destroy_bitmap(v->render_ctx, v->bitmap_handle);
+    }
+    v->bitmap_handle = nullptr;
+    v->bitmap_w_px = 0; v->bitmap_h_px = 0; v->bitmap_scale = 1.0f;
   }
 
   // -------------------------------------------------------------------------
@@ -1415,11 +1633,30 @@ namespace macos_host
       [parent_content addSubview:sl];
       w.native_control = (__bridge_retained void*)sl;
     } else if (!strcmp(w.type, NEUI_W_IMAGE)
-            || !strcmp(w.type, NEUI_W_KNOB)) {
+            || !strcmp(w.type, NEUI_W_KNOB)
+            || !strcmp(w.type, NEUI_W_CUSTOMDRAW)
+            || !strcmp(w.type, NEUI_W_SECTION)) {
+      // SECTION uses a painted view for the body fill + title chip; child
+      // widgets nest into it via the recursive descendant walker (see
+      // create_descendants_native). Pointer-events pass through to
+      // siblings via NSView default hit-test - the widget is non-
+      // interactive in v1.
       NEUINativePaintedView* v = create_painted_view(w);
       [parent_content addSubview:v];
       w.native_control = (__bridge_retained void*)v;
     }
+  }
+
+  // True for widget types whose NSView should act as the parent container
+  // for nested children. Today only SECTION needs this - the rest are
+  // leaves (LABEL / BUTTON / INPUTBOX / ...) or are addressed through
+  // dedicated paths (MENUBAR is an NSMenu, not an NSView). CUSTOMDRAW is
+  // intentionally NOT a container - matching the win32 native host's
+  // behaviour where child HWNDs of a CUSTOMDRAW HWND paint above the
+  // parent's compound layer stack but don't get z-interleaved with it.
+  static bool widget_is_native_container(const WidgetData& w)
+  {
+    return w.type && !strcmp(w.type, NEUI_W_SECTION);
   }
 
   // After a frame is created, walk every descendant and instantiate its
@@ -1427,6 +1664,13 @@ namespace macos_host
   // MENUBAR children are special: the NSMenu was already allocated at
   // widget_create time, and instead of adding a subview we hand it to
   // [NSApp setMainMenu:] so the system menu bar shows the items.
+  //
+  // For container widgets (SECTION today) the recursion descends with the
+  // container's NSView as the new parent, so children with their
+  // section-local (x, y) lay out correctly inside it. For non-containers
+  // descendants keep parenting to the same enclosing view - mirrors the
+  // pre-section behaviour and avoids leaves like NSButton accidentally
+  // becoming hosts for unrelated child widgets.
   static void create_descendants_native(Session* s, uint32_t parent_idx,
                                          NSView* parent_content)
   {
@@ -1443,7 +1687,13 @@ namespace macos_host
         } else {
           create_native_for_widget(s, cw, parent_content);
         }
-        create_descendants_native(s, i, parent_content);
+        NSView* child_parent = parent_content;
+        if (widget_is_native_container(cw) && cw.native_control) {
+          id obj = (__bridge id)cw.native_control;
+          if ([obj isKindOfClass:[NSView class]])
+            child_parent = (NSView*)obj;
+        }
+        create_descendants_native(s, i, child_parent);
       }
       i = s->_widgets.next(i);
     }
