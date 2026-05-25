@@ -1,9 +1,14 @@
 #pragma once
 
+#include <cassert>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <unordered_map>
+
+#include <neui/d/attrs.h>
 
 // Shared attribute bag used by both hosts. Stored lazily on a widget so the
 // per-widget overhead is one pointer when unused.
@@ -19,10 +24,97 @@ namespace neui_detail
     std::string s;
   };
 
+  // ---- Well-known attribute kind registry ----------------------------------
+  //
+  // The attribute API is type-strict (set_int / set_float / set_string each
+  // store with a distinct Kind and the strict getters return the default on
+  // a mismatch). That works well for the host but is a footgun for clients:
+  // calling `attrs->set_int(NEUI_ATTR_FONT_SIZE, 18)` against a documented-
+  // FLOAT key silently no-ops at read time because get_float returns the
+  // default. To catch that at the call site, the AttrBag setters consult
+  // the table below and assert in debug builds when a well-known key is
+  // paired with the wrong Kind. Release builds skip the check entirely
+  // (NDEBUG) so the runtime cost is zero.
+  //
+  // Adding a new NEUI_ATTR_* macro to include/neui/d/attrs.h REQUIRES a
+  // matching row here so the assert covers it. Unknown keys are not in the
+  // table and remain inert per the documented contract (CLAUDE.md).
+
+  enum class AttrKind : uint8_t { INT, FLOAT, STRING };
+
+  struct WellKnownAttr { const char* key; AttrKind kind; };
+
+  // Order matches the documentation table in CLAUDE.md / include/neui/d/attrs.h
+  // so diffs stay readable when new attrs are added.
+  inline constexpr WellKnownAttr k_well_known_attrs[] = {
+    { NEUI_ATTR_TRISTATE,             AttrKind::INT    },
+    { NEUI_ATTR_MULTILINE,            AttrKind::INT    },
+    { NEUI_ATTR_READONLY,             AttrKind::INT    },
+    { NEUI_ATTR_PASSWORD,             AttrKind::INT    },
+    { NEUI_ATTR_TAB_STOP,             AttrKind::INT    },
+    { NEUI_ATTR_ALIGN_TEXT,           AttrKind::STRING },
+    { NEUI_ATTR_MIN_WIDTH,            AttrKind::INT    },
+    { NEUI_ATTR_MIN_HEIGHT,           AttrKind::INT    },
+    { NEUI_ATTR_MAX_WIDTH,            AttrKind::INT    },
+    { NEUI_ATTR_MAX_HEIGHT,           AttrKind::INT    },
+    { NEUI_ATTR_ICON_PATH,            AttrKind::STRING },
+    { NEUI_ATTR_ROTATION,             AttrKind::FLOAT  },
+    { NEUI_ATTR_BACKGROUND,           AttrKind::INT    },
+    { NEUI_ATTR_THEME_MODE,           AttrKind::INT    },
+    { NEUI_ATTR_FOLLOW_SYSTEM_THEME,  AttrKind::INT    },
+    { NEUI_ATTR_ORIENTATION,          AttrKind::STRING },
+    { NEUI_ATTR_POLARITY,             AttrKind::STRING },
+    { NEUI_ATTR_STEPS,                AttrKind::INT    },
+    { NEUI_ATTR_MODAL,                AttrKind::INT    },
+    { NEUI_ATTR_VALUE_TEXT,           AttrKind::STRING },
+    { NEUI_ATTR_KNOB_MODE,            AttrKind::INT    },
+    { NEUI_ATTR_FONT_FAMILY,          AttrKind::STRING },
+    { NEUI_ATTR_FONT_SIZE,            AttrKind::FLOAT  },
+    { NEUI_ATTR_FONT_WEIGHT,          AttrKind::INT    },
+    { NEUI_PARAM_VALUE,               AttrKind::FLOAT  },
+    { NEUI_PARAM_DEFAULT,             AttrKind::FLOAT  },
+  };
+
+  // Lookup the documented kind for a well-known key. Returns nullptr when
+  // the key is not in the table (unknown / client-namespaced keys).
+  inline const AttrKind* well_known_attr_kind(const char* key)
+  {
+    if (!key) return nullptr;
+    for (const auto& a : k_well_known_attrs)
+      if (std::strcmp(a.key, key) == 0) return &a.kind;
+    return nullptr;
+  }
+
+  // Debug-only assert: fires when a well-known key is set with the wrong
+  // Kind. No-op in release. Prints a useful message to stderr before the
+  // assert trips so the breakpoint / abort dialog points at the bad call.
+  inline void assert_attr_kind(const char* key, AttrKind actual)
+  {
+  #ifndef NDEBUG
+    const AttrKind* expected = well_known_attr_kind(key);
+    if (!expected || *expected == actual) return;
+    auto name = [](AttrKind k) -> const char* {
+      switch (k) {
+        case AttrKind::INT:    return "INT (set_int)";
+        case AttrKind::FLOAT:  return "FLOAT (set_float)";
+        case AttrKind::STRING: return "STRING (set_string)";
+      }
+      return "?";
+    };
+    std::fprintf(stderr,
+      "neui attribute kind mismatch: key='%s' expected=%s actual=%s\n",
+      key, name(*expected), name(actual));
+    assert(false && "neui well-known attribute kind mismatch (see stderr)");
+  #else
+    (void)key; (void)actual;
+  #endif
+  }
+
   class AttrBag
   {
   public:
     void set_int(const std::string& key, int32_t v) {
+      assert_attr_kind(key.c_str(), AttrKind::INT);
       auto& slot = _map[key];
       slot.kind = AttrValue::INT32;
       slot.i    = v;
@@ -36,6 +128,7 @@ namespace neui_detail
     }
 
     void set_float(const std::string& key, float v) {
+      assert_attr_kind(key.c_str(), AttrKind::FLOAT);
       auto& slot = _map[key];
       slot.kind = AttrValue::FLOAT;
       slot.f    = v;
@@ -49,6 +142,7 @@ namespace neui_detail
     }
 
     void set_string(const std::string& key, const char* v) {
+      assert_attr_kind(key.c_str(), AttrKind::STRING);
       auto& slot = _map[key];
       slot.kind = AttrValue::STRING;
       slot.s    = v ? v : "";

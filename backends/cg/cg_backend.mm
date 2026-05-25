@@ -579,6 +579,15 @@ namespace neui_cg_backend
   }
 
   // ---------------------------------------------------------------------------
+  // Font stack - no-op on macOS in v1 (custom font selection is wired only
+  // in the d2d backend so far). The vtable slots exist so widget paint code
+  // can call push_font/pop_font uniformly; text continues to render in the
+  // system default until the macOS path is wired up.
+
+  static void cg_push_font(neui_render_ctx_t, const char*, int) {}
+  static void cg_pop_font (neui_render_ctx_t) {}
+
+  // ---------------------------------------------------------------------------
 
   static neui_render_backend_t backend = {
     NEUI_VERSION,
@@ -613,6 +622,8 @@ namespace neui_cg_backend
     cg_get_context_generation,
     cg_push_alpha,
     cg_pop_alpha,
+    cg_push_font,
+    cg_pop_font,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

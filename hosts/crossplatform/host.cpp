@@ -10,6 +10,7 @@
 #include "../shared/widget_paint_compound.h"
 #include "../shared/theme_palette.h"
 #include "../shared/painter.h"
+#include "../shared/widget_font.h"
 #include "asset_manager.h"
 #ifdef _WIN32
 #include "../shared/win32/theme_provider_win32.h"
@@ -63,12 +64,12 @@ namespace xpl_host
                                            float                  x_origin,
                                            float                  y_top,
                                            const std::string&     comp_text,
-                                           const std::vector<uint8_t>& attrs)
+                                           const std::vector<uint8_t>& attrs,
+                                           float                  font_size)
   {
     if (!backend->measure_text || !backend->fill_rect || comp_text.empty())
       return;
     int n = static_cast<int>(comp_text.size());
-    float font_size = 12.0f;
 
     auto colour_for_attr = [](uint8_t a) -> uint32_t {
       using neui_detail::ColorRole;
@@ -600,9 +601,13 @@ namespace xpl_host
     float fy = static_cast<float>(y);
     float fw = static_cast<float>(width);
     float fh = static_cast<float>(height);
-    if (!text.empty() && backend->draw_text)
-      backend->draw_text(ctx, fx + 4.0f, fy, fw - 8.0f, fh, text.c_str(), 12.0f,
+    if (!text.empty() && backend->draw_text) {
+      auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
+      neui_detail::push_widget_font(backend, ctx, ef);
+      backend->draw_text(ctx, fx + 4.0f, fy, fw - 8.0f, fh, text.c_str(), ef.size,
                          neui_detail::color(ColorRole::text_primary));
+      neui_detail::pop_widget_font(backend, ctx, ef);
+    }
     if (is_focused)
       backend->draw_rect(ctx, fx, fy, fw, fh, 1.5f,
                          neui_detail::color(ColorRole::focus_ring));
@@ -632,7 +637,8 @@ namespace xpl_host
                                 static_cast<float>(width),
                                 static_cast<float>(height),
                                 text.c_str(), bg, align,
-                                neui_detail::color(ColorRole::text_primary));
+                                neui_detail::color(ColorRole::text_primary),
+                                attrs.get());
   }
 
   void ButtonWidget::paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
@@ -649,15 +655,18 @@ namespace xpl_host
       backend->draw_rect(ctx, fx, fy, fw, fh, 1.0f,
                          neui_detail::color(ColorRole::border));
     if (!text.empty() && backend->draw_text) {
+      auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
+      neui_detail::push_widget_font(backend, ctx, ef);
       float text_x = fx;
       if (backend->measure_text) {
-        float tw = backend->measure_text(ctx, text.c_str(), -1, 12.0f);
+        float tw = backend->measure_text(ctx, text.c_str(), -1, ef.size);
         text_x = fx + (fw - tw) * 0.5f;
         if (text_x < fx) text_x = fx;
       }
       backend->draw_text(ctx, text_x, fy, fw - (text_x - fx), fh,
-                         text.c_str(), 12.0f,
+                         text.c_str(), ef.size,
                          neui_detail::color(ColorRole::text_primary));
+      neui_detail::pop_widget_font(backend, ctx, ef);
     }
     if (is_focused)
       backend->draw_rect(ctx, fx, fy, fw, fh, 1.5f,
@@ -689,9 +698,13 @@ namespace xpl_host
     // Text-field surface (matches MULTILINE / LISTBOX / TREEVIEW).
     backend->fill_rect(ctx, fx, fy, fw, fh,
                         neui_detail::color(ColorRole::control_bg));
+
+    auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
+    neui_detail::push_widget_font(backend, ctx, ef);
+
     if (!text.empty() && backend->draw_text)
       backend->draw_text(ctx, fx + pad, fy, fw - 2 * pad, fh,
-                         text.c_str(), 12.0f,
+                         text.c_str(), ef.size,
                          neui_detail::color(ColorRole::text_primary));
     if (backend->draw_rect) {
       uint32_t border_color = neui_detail::color(
@@ -699,19 +712,22 @@ namespace xpl_host
       backend->draw_rect(ctx, fx, fy, fw, fh, 1.0f, border_color);
     }
 
-    if (!is_focused || !backend->measure_text) return;
+    if (!is_focused || !backend->measure_text) {
+      neui_detail::pop_widget_font(backend, ctx, ef);
+      return;
+    }
 
     // Selection highlight
     if (sel_anchor != cursor_pos) {
       int lo = std::min(cursor_pos, sel_anchor);
       int hi = std::max(cursor_pos, sel_anchor);
-      float sel_x0 = fx + pad + backend->measure_text(ctx, text.c_str(), lo, 12.0f);
-      float sel_x1 = fx + pad + backend->measure_text(ctx, text.c_str(), hi, 12.0f);
+      float sel_x0 = fx + pad + backend->measure_text(ctx, text.c_str(), lo, ef.size);
+      float sel_x1 = fx + pad + backend->measure_text(ctx, text.c_str(), hi, ef.size);
       backend->fill_rect(ctx, sel_x0, cline, sel_x1 - sel_x0, cheight,
                           neui_detail::color(neui_detail::ColorRole::accent_translucent));
     }
 
-    float cursor_x = fx + pad + backend->measure_text(ctx, text.c_str(), cursor_pos, 12.0f);
+    float cursor_x = fx + pad + backend->measure_text(ctx, text.c_str(), cursor_pos, ef.size);
 
     // Composition overlay: render the in-progress IME string at the caret with
     // an underline. Suppress the regular caret - the IME caret position is
@@ -719,14 +735,15 @@ namespace xpl_host
     if (composing && !composition_text.empty() && backend->draw_text) {
       float comp_w = backend->measure_text(ctx, composition_text.c_str(),
                                            static_cast<int>(composition_text.size()),
-                                           12.0f);
+                                           ef.size);
       backend->draw_text(ctx, cursor_x, cline, comp_w, cheight,
-                         composition_text.c_str(), 12.0f,
+                         composition_text.c_str(), ef.size,
                          neui_detail::color(neui_detail::ColorRole::text_primary));
       // Per-clause underlines based on composition_attrs (one byte per
       // UTF-8 byte). Falls back to a single 1px underline if attrs absent.
       paint_composition_underline(backend, ctx, cursor_x, cline + cheight - 2.0f,
-                                   composition_text, composition_attrs);
+                                   composition_text, composition_attrs, ef.size);
+      neui_detail::pop_widget_font(backend, ctx, ef);
       return;
     }
 
@@ -738,7 +755,7 @@ namespace xpl_host
       float char_w = 8.0f;
       if (cursor_pos < static_cast<int>(text.size())) {
         int char_end = cursor_pos + utf8_char_len(text, cursor_pos);
-        float w_to_next = backend->measure_text(ctx, text.c_str(), char_end, 12.0f);
+        float w_to_next = backend->measure_text(ctx, text.c_str(), char_end, ef.size);
         char_w = w_to_next - (cursor_x - fx - pad);
       }
       // Overwrite caret: 50%-alpha block over the next character.
@@ -746,6 +763,8 @@ namespace xpl_host
                           neui_detail::with_alpha(
                             neui_detail::color(neui_detail::ColorRole::text_primary), 0x80));
     }
+
+    neui_detail::pop_widget_font(backend, ctx, ef);
   }
 
   // Caret rect in widget-local logical pixels. Used by the platform layer to
@@ -756,11 +775,14 @@ namespace xpl_host
   {
     if (!backend || !backend->measure_text || !ctx) return false;
     const float pad = 4.0f;
-    float caret_x = pad + backend->measure_text(ctx, text.c_str(), cursor_pos, 12.0f);
+    auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
+    neui_detail::push_widget_font(backend, ctx, ef);
+    float caret_x = pad + backend->measure_text(ctx, text.c_str(), cursor_pos, ef.size);
     if (composing && !composition_text.empty()) {
       caret_x += backend->measure_text(ctx, composition_text.c_str(),
-                                       composition_caret, 12.0f);
+                                       composition_caret, ef.size);
     }
+    neui_detail::pop_widget_font(backend, ctx, ef);
     if (out_x) *out_x = caret_x;
     if (out_y) *out_y = 2.0f;
     if (out_h) *out_h = static_cast<float>(height) - 4.0f;
@@ -1220,12 +1242,14 @@ namespace xpl_host
     // to the position after that character.
     int new_pos = static_cast<int>(text.size());   // default: end of string
     if (backend && backend->measure_text && ctx) {
+      auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
+      neui_detail::push_widget_font(backend, ctx, ef);
       int pos      = 0;
       float prev_w = 0.0f;  // measure_text for 0 bytes is always 0
       int len = static_cast<int>(text.size());
       while (pos < len) {
         int char_end = pos + utf8_char_len(text, pos);
-        float end_w  = backend->measure_text(ctx, text.c_str(), char_end, 12.0f);
+        float end_w  = backend->measure_text(ctx, text.c_str(), char_end, ef.size);
         if (click_x < (prev_w + end_w) * 0.5f) {
           new_pos = pos;
           break;
@@ -1233,6 +1257,7 @@ namespace xpl_host
         prev_w = end_w;
         pos    = char_end;
       }
+      neui_detail::pop_widget_font(backend, ctx, ef);
     }
 
     // Double-click selects the word at the click position.
@@ -1373,9 +1398,12 @@ namespace xpl_host
     } else {
       backend->fill_rect(ctx, fx, fy, fw, fh,
                           neui_detail::color(ColorRole::control_bg_inactive));
+      auto ef = neui_detail::read_widget_font(attrs.get(), 10.0f);
+      neui_detail::push_widget_font(backend, ctx, ef);
       backend->draw_text(ctx, fx + 2.0f, fy, fw - 4.0f, fh,
-                          text.c_str(), 10.0f,
+                          text.c_str(), ef.size,
                           neui_detail::color(ColorRole::text_disabled));
+      neui_detail::pop_widget_font(backend, ctx, ef);
     }
 
     if (rotated) backend->pop_transform(ctx);
@@ -1618,9 +1646,13 @@ namespace xpl_host
     if (check_state == 2 && backend->draw_text)
       backend->fill_rect(ctx, fx + 6.0f, fy + 6.0f, 10.0f, 10.0f, indet_col);
 
-    if (!text.empty() && backend->draw_text)
-      backend->draw_text(ctx, fx + 4.0f + 20.0f, fy, fw - 8.0f, fh, text.c_str(), 12.0f,
+    if (!text.empty() && backend->draw_text) {
+      auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
+      neui_detail::push_widget_font(backend, ctx, ef);
+      backend->draw_text(ctx, fx + 4.0f + 20.0f, fy, fw - 8.0f, fh, text.c_str(), ef.size,
                          neui_detail::color(ColorRole::text_primary));
+      neui_detail::pop_widget_font(backend, ctx, ef);
+    }
     if (is_focused)
       backend->draw_rect(ctx, fx, fy, fw, fh, 1.5f,
                          neui_detail::color(ColorRole::focus_ring));
@@ -2098,7 +2130,7 @@ namespace xpl_host
     // bounding rect (outside the inscribed circle) keep whatever the parent drew.
     neui_detail::paint_knob(backend, ctx, fx, fy, fw, fh,
                              widget_get_value(*this), is_focused,
-                             polarity, steps, value_text);
+                             polarity, steps, value_text, attrs.get());
   }
 
   bool KnobWidget::on_keydown(uint32_t keycode, uint32_t /*modifiers*/)
@@ -2314,7 +2346,8 @@ namespace xpl_host
       const std::vector<ListItemsWidget::Item>& items,
       uint32_t selected_item, uint32_t scroll_offset,
       int full_vis, int int_h,
-      uint32_t bg_color, uint32_t border_color)
+      uint32_t bg_color, uint32_t border_color,
+      float    text_size = 12.0f)
   {
     uint32_t n       = static_cast<uint32_t>(items.size());
     bool     show_sb = n > static_cast<uint32_t>(full_vis);
@@ -2343,7 +2376,7 @@ namespace xpl_host
       if (backend->draw_text)
         backend->draw_text(ctx, fx + 4.0f, row_y, content_w - 8.0f,
                            static_cast<float>(LIST_ITEM_H),
-                           items[item_idx].text.c_str(), 12.0f,
+                           items[item_idx].text.c_str(), text_size,
                            sel ? selected_text : normal_text);
     }
     if (backend->push_clip) backend->pop_clip(ctx);
@@ -2378,12 +2411,16 @@ namespace xpl_host
     using neui_detail::ColorRole;
     uint32_t border_color = neui_detail::color(
         is_focused ? ColorRole::border_focused : ColorRole::border);
+    auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
+    neui_detail::push_widget_font(backend, ctx, ef);
     paint_scrollable_list(backend, ctx,
         static_cast<float>(x), static_cast<float>(y),
         static_cast<float>(width), static_cast<float>(height),
         items, selected_item, scroll_offset,
         height / LIST_ITEM_H, height,
-        neui_detail::color(ColorRole::control_bg), border_color);
+        neui_detail::color(ColorRole::control_bg), border_color,
+        ef.size);
+    neui_detail::pop_widget_font(backend, ctx, ef);
   }
 
   bool ListItemsWidget::on_keydown(uint32_t keycode, uint32_t /*modifiers*/)
@@ -2575,12 +2612,15 @@ namespace xpl_host
     backend->fill_rect(ctx, fx, fy, fw, fh,
                         neui_detail::color(ColorRole::control_bg));
 
+    auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
+    neui_detail::push_widget_font(backend, ctx, ef);
+
     // Selected item text
     if (backend->draw_text) {
       const char* sel_text = (selected_item != UINT32_MAX && selected_item < items.size())
                              ? items[selected_item].text.c_str() : "";
       backend->draw_text(ctx, fx + 4.0f, fy, fw - arrow_w - 4.0f, fh,
-                         sel_text, 12.0f,
+                         sel_text, ef.size,
                          neui_detail::color(ColorRole::text_primary));
     }
 
@@ -2589,6 +2629,9 @@ namespace xpl_host
                         neui_detail::color(ColorRole::border));
 
     // Down-arrow symbol, centered horizontally inside the button column.
+    // Keep the arrow at the fixed 12px since it's a glyph indicator, not
+    // text content - resizing it would look out of place inside the
+    // fixed-width arrow column.
     if (backend->draw_text) {
       const char* arrow = "\xe2\x96\xbe";  // U+25BE
       float btn_x = fx + fw - arrow_w;
@@ -2602,6 +2645,8 @@ namespace xpl_host
                          arrow, 12.0f,
                          neui_detail::color(ColorRole::text_secondary));
     }
+
+    neui_detail::pop_widget_font(backend, ctx, ef);
 
     uint32_t border_color = neui_detail::color(
         is_focused ? ColorRole::border_focused : ColorRole::border);
@@ -2631,11 +2676,15 @@ namespace xpl_host
     // overlay is never blank when first opened.
     uint32_t highlight = (hover_item != UINT32_MAX) ? hover_item : selected_item;
 
+    auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
+    neui_detail::push_widget_font(backend, ctx, ef);
     paint_scrollable_list(backend, ctx, ox, oy, ow, oh,
         items, highlight, scroll_offset,
         mdv, mdv * LIST_ITEM_H,
         neui_detail::color(neui_detail::ColorRole::control_bg_alt),
-        neui_detail::color(neui_detail::ColorRole::border));
+        neui_detail::color(neui_detail::ColorRole::border),
+        ef.size);
+    neui_detail::pop_widget_font(backend, ctx, ef);
   }
 
   bool ComboBoxWidget::on_keydown(uint32_t keycode, uint32_t modifiers)
@@ -3268,6 +3317,9 @@ namespace xpl_host
     backend->fill_rect(ctx, fx, fy, content_w, fh,
                         neui_detail::color(ColorRole::control_bg));
 
+    auto ef = neui_detail::read_widget_font(attrs.get(), ML_FONT_SIZE);
+    neui_detail::push_widget_font(backend, ctx, ef);
+
     // Selection range (always normalized lo..hi).
     int sel_lo = std::min(cursor_pos, sel_anchor);
     int sel_hi = std::max(cursor_pos, sel_anchor);
@@ -3294,9 +3346,9 @@ namespace xpl_host
         int lo = std::max(sel_lo, ls);
         int hi = std::min(sel_hi, le);
         float x0 = base_x + backend->measure_text(ctx, text.c_str() + ls,
-                                                   lo - ls, ML_FONT_SIZE);
+                                                   lo - ls, ef.size);
         float x1 = base_x + backend->measure_text(ctx, text.c_str() + ls,
-                                                   hi - ls, ML_FONT_SIZE);
+                                                   hi - ls, ef.size);
         // If the selection extends past the end-of-line newline, draw a small
         // trailing strip so the user sees the newline itself as selected.
         if (sel_hi > le) x1 += 6.0f;
@@ -3311,7 +3363,7 @@ namespace xpl_host
         // pointer + len-via-\0. We copy to a temp to avoid modifying text.
         std::string seg = text.substr(ls, le - ls);
         backend->draw_text(ctx, base_x, row_y, avail_w, row_h,
-                           seg.c_str(), ML_FONT_SIZE,
+                           seg.c_str(), ef.size,
                            neui_detail::color(ColorRole::text_primary));
       }
     }
@@ -3323,7 +3375,7 @@ namespace xpl_host
           line <  static_cast<int>(scroll_offset) + vis) {
         int   ls   = starts[line];
         float col  = backend->measure_text(ctx, text.c_str() + ls,
-                                            cursor_pos - ls, ML_FONT_SIZE);
+                                            cursor_pos - ls, ef.size);
         float cx   = fx + static_cast<float>(ML_PAD_X) + col;
         float cy   = fy + static_cast<float>(ML_PAD_Y
                      + (line - static_cast<int>(scroll_offset)) * ML_LINE_H);
@@ -3333,15 +3385,15 @@ namespace xpl_host
           // IME's candidate window provides the visible caret position.
           float comp_w = backend->measure_text(ctx, composition_text.c_str(),
                                                static_cast<int>(composition_text.size()),
-                                               ML_FONT_SIZE);
+                                               ef.size);
           backend->draw_text(ctx, cx, cy, comp_w,
                              static_cast<float>(ML_LINE_H),
                              composition_text.c_str(),
-                             ML_FONT_SIZE,
+                             ef.size,
                              neui_detail::color(ColorRole::text_primary));
           paint_composition_underline(backend, ctx, cx,
                                        cy + static_cast<float>(ML_LINE_H) - 2.0f,
-                                       composition_text, composition_attrs);
+                                       composition_text, composition_attrs, ef.size);
         } else {
           backend->fill_rect(ctx, cx, cy, 1.5f, static_cast<float>(ML_LINE_H),
                              neui_detail::color(ColorRole::text_primary));
@@ -3350,6 +3402,7 @@ namespace xpl_host
     }
 
     if (backend->push_clip) backend->pop_clip(ctx);
+    neui_detail::pop_widget_font(backend, ctx, ef);
 
     // Vertical scrollbar.
     if (show_sb) {
@@ -3394,8 +3447,12 @@ namespace xpl_host
       }
     }
     if (!ctx) return 0.0f;
-    return ml.session->_backend->measure_text(ctx, ml.text.c_str() + ls,
-                                               pos - ls, ML_FONT_SIZE);
+    auto ef = neui_detail::read_widget_font(ml.attrs.get(), ML_FONT_SIZE);
+    neui_detail::push_widget_font(ml.session->_backend, ctx, ef);
+    float w = ml.session->_backend->measure_text(ctx, ml.text.c_str() + ls,
+                                                  pos - ls, ef.size);
+    neui_detail::pop_widget_font(ml.session->_backend, ctx, ef);
+    return w;
   }
 
   // Snap col_px (pixels from line start) to the closest character boundary
@@ -3417,19 +3474,23 @@ namespace xpl_host
     }
     if (!ctx) return starts[line];
 
+    auto ef = neui_detail::read_widget_font(ml.attrs.get(), ML_FONT_SIZE);
+    neui_detail::push_widget_font(ml.session->_backend, ctx, ef);
     int ls  = starts[line];
     int le  = ml_line_end(ml.text, starts, line);
     int pos = ls;
     float prev_w = 0.0f;
+    int result = le;
     while (pos < le) {
       int char_end = pos + utf8_char_len(ml.text, pos);
       float end_w  = ml.session->_backend->measure_text(
-        ctx, ml.text.c_str() + ls, char_end - ls, ML_FONT_SIZE);
-      if (col_px < (prev_w + end_w) * 0.5f) return pos;
+        ctx, ml.text.c_str() + ls, char_end - ls, ef.size);
+      if (col_px < (prev_w + end_w) * 0.5f) { result = pos; break; }
       prev_w = end_w;
       pos    = char_end;
     }
-    return le;
+    neui_detail::pop_widget_font(ml.session->_backend, ctx, ef);
+    return result;
   }
 
   bool MultilineWidget::on_keydown(uint32_t keycode, uint32_t modifiers)
@@ -3756,12 +3817,15 @@ namespace xpl_host
         line >= static_cast<int>(scroll_offset) + vis)
       return false;
     int   ls  = starts[line];
+    auto ef = neui_detail::read_widget_font(attrs.get(), ML_FONT_SIZE);
+    neui_detail::push_widget_font(backend, ctx, ef);
     float col = backend->measure_text(ctx, text.c_str() + ls,
-                                       cursor_pos - ls, ML_FONT_SIZE);
+                                       cursor_pos - ls, ef.size);
     if (composing && !composition_text.empty()) {
       col += backend->measure_text(ctx, composition_text.c_str(),
-                                    composition_caret, ML_FONT_SIZE);
+                                    composition_caret, ef.size);
     }
+    neui_detail::pop_widget_font(backend, ctx, ef);
     if (out_x) *out_x = static_cast<float>(ML_PAD_X) + col;
     if (out_y) *out_y = static_cast<float>(ML_PAD_Y
                           + (line - static_cast<int>(scroll_offset)) * ML_LINE_H);
@@ -4042,6 +4106,8 @@ namespace xpl_host
     int max_visible = (height + TREE_ROW_H - 1) / TREE_ROW_H;
     if (max_visible < 1) max_visible = 1;
 
+    auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
+
     if (backend->push_clip) backend->push_clip(ctx, fx, fy, content_w, fh);
     for (int i = 0; i < max_visible; ++i) {
       uint32_t row_idx = scroll_offset + static_cast<uint32_t>(i);
@@ -4063,7 +4129,10 @@ namespace xpl_host
                               ? ColorRole::accent
                               : ColorRole::control_bg_inactive));
 
-      // Disclosure chevron (only when this item has children).
+      // Disclosure chevron (only when this item has children). Keep the
+      // chevron at the fixed 11px (default font) - it's a glyph indicator,
+      // not the row's label text, so it sits in the host default regardless
+      // of the widget's font selection.
       if (vr.has_children && backend->draw_text) {
         const char* glyph = ti.expanded
                               ? "\xe2\x96\xbe"   // ▾ (down triangle)
@@ -4082,12 +4151,14 @@ namespace xpl_host
               : (sel && is_focused
                   ? neui_detail::color(ColorRole::accent_text)
                   : neui_detail::color(ColorRole::text_primary));
+        neui_detail::push_widget_font(backend, ctx, ef);
         backend->draw_text(ctx,
           fx + indent_px + static_cast<float>(TREE_CHEVRON_W),
           row_y,
           content_w - indent_px - static_cast<float>(TREE_CHEVRON_W) - 4.0f,
           rowh,
-          ti.text.c_str(), 12.0f, text_color);
+          ti.text.c_str(), ef.size, text_color);
+        neui_detail::pop_widget_font(backend, ctx, ef);
       }
     }
     if (backend->push_clip) backend->pop_clip(ctx);

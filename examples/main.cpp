@@ -16,8 +16,8 @@
 // hosts and the xpl host fully implement NEUI_W_CUSTOMDRAW + compound
 // drawables, so the same example renders identically on either path.
 #ifdef _WIN32
-#define ACTIVE_HOSTx "neui.host.crossplatform"
-#define ACTIVE_HOST "neui.host.win32"
+#define ACTIVE_HOST "neui.host.crossplatform"
+#define ACTIVE_HOSTx "neui.host.win32"
 #elif defined(__APPLE__)
 #define ACTIVE_HOSTx "neui.host.crossplatform"
 #define ACTIVE_HOST "neui.host.macos"
@@ -528,6 +528,10 @@ int main(int argc, char** argv) {
 
   app.widgets->set_text(sess, label,  "Type something below:");
   app.widgets->set_text(sess, button, "Read input");
+
+  app.attrs->set_string(sess, label, NEUI_ATTR_FONT_FAMILY, "Consolas");
+  app.attrs->set_int(sess, label, NEUI_ATTR_FONT_WEIGHT, 700);
+  app.attrs->set_float(sess, label, NEUI_ATTR_FONT_SIZE, 20.f);
 
   auto list_label = app.widgets->create(sess, win, NEUI_W_LABEL,   5, 100, 195,  20, nullptr);
   auto list       = app.widgets->create(sess, win, NEUI_W_LISTBOX, 5, 125, 195, 160, nullptr);

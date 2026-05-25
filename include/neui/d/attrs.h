@@ -155,6 +155,30 @@ extern "C" {
 // reflects the latest value just before the disc is drawn.
 #define NEUI_ATTR_VALUE_TEXT "neui.attr.value_text"
 
+// string: font family for text rendered by the widget (e.g. "Consolas",
+// "Segoe UI"). Empty / unset leaves the host's system default in place
+// (Segoe UI on the Win32 / D2D backend). Honoured by the Direct2D
+// backend and the two hosts that use it (native win32 + crossplatform
+// on Windows); cg / null backends ignore it (text continues to render
+// in the system default). Live - applies on the next paint for painted
+// widgets, and via WM_SETFONT on the native win32 host.
+#define NEUI_ATTR_FONT_FAMILY "neui.attr.font_family"
+
+// float (logical pixels at 96 DPI): font size for text rendered by the
+// widget. Unset / <= 0 keeps the widget's existing hardcoded default
+// (typically 12 px). Honoured everywhere draw_text / measure_text
+// flows through the widget's paint code, including the MULTILINE /
+// INPUTBOX caret + IME composition geometry so positioning stays
+// consistent with the rendered glyphs.
+#define NEUI_ATTR_FONT_SIZE "neui.attr.font_size"
+
+// int: font weight in CSS-style 100..900. 400 = Normal, 700 = Bold;
+// 0 / unset = Normal. Honoured by the Direct2D backend (mapped to the
+// nearest DWRITE_FONT_WEIGHT_*) and the native win32 host (mapped to
+// LOGFONTW::lfWeight). Italic is not exposed in v1; the style stays
+// Normal regardless of weight.
+#define NEUI_ATTR_FONT_WEIGHT "neui.attr.font_weight"
+
 // int: drag interaction style of the KNOB widget.
 //   NEUI_KNOB_MODE_ROTATIONAL = 0 (default) - cursor angle around the
 //                                              knob centre drives the value

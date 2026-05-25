@@ -5,6 +5,7 @@
 #include <dwrite.h>
 #include <cstdint>
 #include <cmath>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -15,6 +16,16 @@
 
 namespace neui_d2d_backend
 {
+  // Active font state. Pushed/popped via push_font/pop_font; the top of
+  // the stack is combined with each draw_text/measure_text call's
+  // font_size to look up an IDWriteTextFormat in the cache. Empty
+  // family => "Segoe UI" (host default); weight 0 => DWRITE_FONT_WEIGHT_NORMAL.
+  struct FontState
+  {
+    std::wstring family;   // empty = host default (Segoe UI)
+    int          weight = 0;  // 0 = DWRITE_FONT_WEIGHT_NORMAL (400)
+  };
+
   // Per-window render context.
   struct D2DContext
   {
@@ -56,15 +67,48 @@ namespace neui_d2d_backend
     // effective alpha multiplier applied to every draw call. Empty stack
     // means effective 1.0. Reset on every begin_frame.
     std::vector<float>          alpha_stack;
+
+    // Font stack. back() is the active (family, weight) pair feeding
+    // draw_text / measure_text; empty stack means "host default at the
+    // call's font_size". Reset on every begin_frame so a missing pop in
+    // one frame can't bleed across.
+    std::vector<FontState>      font_stack;
   };
 
   // Process-wide D2D factory - created once, never destroyed (lives for process lifetime).
   static ID2D1Factory*   g_factory        = nullptr;
   static IDWriteFactory* g_dwrite_factory = nullptr;
 
-  // Text format cache - keyed by font_size * 10 (rounded to 0.1pt), value is IDWriteTextFormat*.
-  // Entries are never evicted; the number of distinct sizes used in a typical app is tiny.
-  static std::unordered_map<uint32_t, IDWriteTextFormat*> g_text_format_cache;
+  // Text format cache, keyed by (family, weight, size). Size is quantised
+  // to 0.1 logical pixels so floating-point chatter (12.0 vs 12.00001)
+  // doesn't churn cache entries. Entries are never evicted; a typical
+  // app uses a handful of (family, weight, size) tuples.
+  struct TextFormatKey
+  {
+    std::wstring family;
+    int          weight = 0;     // DWRITE_FONT_WEIGHT_* (100..950)
+    uint32_t     size_q10 = 0;   // round(font_size * 10)
+
+    bool operator==(const TextFormatKey& other) const {
+      return weight == other.weight
+          && size_q10 == other.size_q10
+          && family == other.family;
+    }
+  };
+
+  struct TextFormatKeyHash
+  {
+    size_t operator()(const TextFormatKey& k) const noexcept {
+      // Cheap composition; family hash dominates if families differ.
+      size_t h = std::hash<std::wstring>{}(k.family);
+      h ^= std::hash<int>{}(k.weight)        + 0x9e3779b9 + (h << 6) + (h >> 2);
+      h ^= std::hash<uint32_t>{}(k.size_q10) + 0x9e3779b9 + (h << 6) + (h >> 2);
+      return h;
+    }
+  };
+
+  static std::unordered_map<TextFormatKey, IDWriteTextFormat*, TextFormatKeyHash>
+    g_text_format_cache;
 
   static bool ensure_factory()
   {
@@ -77,20 +121,47 @@ namespace neui_d2d_backend
     return SUCCEEDED(hr);
   }
 
-  // Returns a cached IDWriteTextFormat for the given logical font size, creating it if needed.
-  // Returns nullptr on failure.
-  static IDWriteTextFormat* get_text_format(float font_size)
+  // Snap a CSS-style weight (100..900) to the nearest DWRITE_FONT_WEIGHT
+  // bucket. 0 / out-of-range => Normal (400).
+  static DWRITE_FONT_WEIGHT normalise_weight(int weight)
+  {
+    if (weight <= 0)   return DWRITE_FONT_WEIGHT_NORMAL;
+    if (weight < 150)  return DWRITE_FONT_WEIGHT_THIN;        // 100
+    if (weight < 250)  return DWRITE_FONT_WEIGHT_EXTRA_LIGHT; // 200
+    if (weight < 350)  return DWRITE_FONT_WEIGHT_LIGHT;       // 300
+    if (weight < 450)  return DWRITE_FONT_WEIGHT_NORMAL;      // 400
+    if (weight < 550)  return DWRITE_FONT_WEIGHT_MEDIUM;      // 500
+    if (weight < 650)  return DWRITE_FONT_WEIGHT_SEMI_BOLD;   // 600
+    if (weight < 750)  return DWRITE_FONT_WEIGHT_BOLD;        // 700
+    if (weight < 850)  return DWRITE_FONT_WEIGHT_EXTRA_BOLD;  // 800
+    return DWRITE_FONT_WEIGHT_BLACK;                          // 900+
+  }
+
+  // Resolve the active font for this context (top of font_stack, or
+  // host default when empty) into a cached IDWriteTextFormat at the
+  // call's logical font size. Returns nullptr on failure.
+  static IDWriteTextFormat* get_text_format(D2DContext* ctx, float font_size)
   {
     if (!g_dwrite_factory) return nullptr;
-    uint32_t key = static_cast<uint32_t>(font_size * 10.0f + 0.5f);
+
+    const FontState* fs = (ctx && !ctx->font_stack.empty())
+      ? &ctx->font_stack.back()
+      : nullptr;
+
+    TextFormatKey key;
+    if (fs && !fs->family.empty()) key.family = fs->family;
+    else                            key.family = L"Segoe UI";
+    key.weight   = static_cast<int>(normalise_weight(fs ? fs->weight : 0));
+    key.size_q10 = static_cast<uint32_t>(font_size * 10.0f + 0.5f);
+
     auto it = g_text_format_cache.find(key);
     if (it != g_text_format_cache.end()) return it->second;
 
     IDWriteTextFormat* fmt = nullptr;
     HRESULT hr = g_dwrite_factory->CreateTextFormat(
-      L"Segoe UI",
+      key.family.c_str(),
       nullptr,
-      DWRITE_FONT_WEIGHT_NORMAL,
+      static_cast<DWRITE_FONT_WEIGHT>(key.weight),
       DWRITE_FONT_STYLE_NORMAL,
       DWRITE_FONT_STRETCH_NORMAL,
       font_size,
@@ -219,6 +290,7 @@ namespace neui_d2d_backend
     ctx->current = D2D1::Matrix3x2F::Identity();
     ctx->transform_stack.clear();
     ctx->alpha_stack.clear();
+    ctx->font_stack.clear();
     ctx->target->SetTransform(ctx->current);
     ctx->target->Clear(argb_to_color(clear_argb));
   }
@@ -297,7 +369,7 @@ namespace neui_d2d_backend
     auto* ctx = static_cast<D2DContext*>(raw);
     if (!ctx || !ctx->target || !ctx->brush || !text || !*text) return;
 
-    IDWriteTextFormat* fmt = get_text_format(font_size);
+    IDWriteTextFormat* fmt = get_text_format(ctx, font_size);
     if (!fmt) return;
 
     // Convert UTF-8 to UTF-16.
@@ -321,12 +393,13 @@ namespace neui_d2d_backend
     if (wbuf != stack_buf) delete[] wbuf;
   }
 
-  static float d2d_measure_text(neui_render_ctx_t /*raw*/,
+  static float d2d_measure_text(neui_render_ctx_t raw,
                                  const char* text, int text_len,
                                  float font_size)
   {
+    auto* ctx = static_cast<D2DContext*>(raw);
     if (!g_dwrite_factory || !text || !*text) return 0.0f;
-    IDWriteTextFormat* fmt = get_text_format(font_size);
+    IDWriteTextFormat* fmt = get_text_format(ctx, font_size);
     if (!fmt) return 0.0f;
 
     // Convert UTF-8 → UTF-16, honouring text_len byte limit.
@@ -673,6 +746,34 @@ namespace neui_d2d_backend
   }
 
   // ---------------------------------------------------------------------------
+  // Font stack
+
+  static void d2d_push_font(neui_render_ctx_t raw,
+                             const char* family_utf8,
+                             int          weight)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx) return;
+    FontState fs;
+    if (family_utf8 && *family_utf8) {
+      int needed = MultiByteToWideChar(CP_UTF8, 0, family_utf8, -1, nullptr, 0);
+      if (needed > 1) {
+        fs.family.resize(needed - 1);
+        MultiByteToWideChar(CP_UTF8, 0, family_utf8, -1, fs.family.data(), needed);
+      }
+    }
+    fs.weight = weight;
+    ctx->font_stack.push_back(std::move(fs));
+  }
+
+  static void d2d_pop_font(neui_render_ctx_t raw)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx || ctx->font_stack.empty()) return;
+    ctx->font_stack.pop_back();
+  }
+
+  // ---------------------------------------------------------------------------
 
   static neui_render_backend_t backend = {
     NEUI_VERSION,
@@ -707,6 +808,8 @@ namespace neui_d2d_backend
     d2d_get_context_generation,
     d2d_push_alpha,
     d2d_pop_alpha,
+    d2d_push_font,
+    d2d_pop_font,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

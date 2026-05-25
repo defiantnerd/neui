@@ -338,7 +338,8 @@ static float neui_snap_to_steps(float v, int steps)
 
     neui_detail::paint_knob(backend, render_ctx,
                              0, 0, (float)sz.width, (float)sz.height,
-                             value, /*focused*/false, polarity, steps, value_text);
+                             value, /*focused*/false, polarity, steps, value_text,
+                             wd->attrs.get());
   } else if (wd->type && !strcmp(wd->type, NEUI_W_CUSTOMDRAW)) {
     // CUSTOMDRAW dispatch - either paint the attached compound or
     // forward a WIDGET_PAINT event. Mirror of paint_customdraw_w32.
@@ -412,7 +413,8 @@ static float neui_snap_to_steps(float v, int steps)
     neui_detail::paint_section(backend, render_ctx,
                                  0.0f, 0.0f, (float)sz.width, (float)sz.height,
                                  wd->text.c_str(),
-                                 bg, align, text_argb);
+                                 bg, align, text_argb,
+                                 wd->attrs.get());
   }
 
   backend->end_frame(render_ctx);

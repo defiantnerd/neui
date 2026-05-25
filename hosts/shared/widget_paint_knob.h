@@ -3,6 +3,8 @@
 #include <neui/d/renderer.h>
 #include <cmath>
 
+#include "widget_font.h"
+
 // Shared knob paint helper. Used by both the crossplatform host and the win32
 // host's painted-widget seam, so the visual is identical regardless of which
 // host instantiated the widget.
@@ -54,7 +56,8 @@ namespace neui_detail
                           bool  focused,
                           KnobPolarity polarity = KNOB_POLARITY_MIN,
                           int   steps           = 0,    // 0/1 → continuous, no extra ticks
-                          const char* value_text = nullptr) // optional overlay
+                          const char* value_text = nullptr, // optional overlay
+                          const AttrBag* bag    = nullptr)  // for NEUI_ATTR_FONT_*
   {
     if (!backend || !ctx) return;
 
@@ -171,18 +174,24 @@ namespace neui_detail
       backend->line_to(ctx, ex, ey);
       backend->stroke_path(ctx, 2.0f, 0xFFFFFFFF);
 
-      // Value-text overlay below the disc when set.
+      // Value-text overlay below the disc when set. Honour NEUI_ATTR_FONT_*
+      // for the overlay - size override changes the rendered glyph height
+      // (we don't reshape TEXT_H, so a much larger size will clip into
+      // TEXT_H's band; the default 12 fits comfortably).
       if (has_text && backend->draw_text) {
+        EffectiveFont ef = read_widget_font(bag, TEXT_FONT);
+        push_widget_font(backend, ctx, ef);
         float text_w = w;
         if (backend->measure_text) {
-          float mw = backend->measure_text(ctx, value_text, -1, TEXT_FONT);
+          float mw = backend->measure_text(ctx, value_text, -1, ef.size);
           if (mw > 0.0f && mw < w) text_w = mw;
         }
         float text_x = x + (w - text_w) * 0.5f;
         float text_y = y + h - TEXT_H;
         uint32_t text_color = focused ? 0xFFFFFFFF : 0xFFE0E0E0;
         backend->draw_text(ctx, text_x, text_y, text_w, TEXT_H,
-                            value_text, TEXT_FONT, text_color);
+                            value_text, ef.size, text_color);
+        pop_widget_font(backend, ctx, ef);
       }
     } else if (backend->fill_rect) {
       backend->fill_rect(ctx, x, y, w, h, 0xFF404040);

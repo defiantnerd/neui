@@ -68,6 +68,13 @@ namespace win32_host {
     // Win32-specific
     HWND hwnd = nullptr;
     HFONT hfont = nullptr;   // DPI-scaled font; owned by frame windows (APPWINDOW/PLUGWINDOW)
+    // Optional per-widget custom font, built from NEUI_ATTR_FONT_FAMILY /
+    // NEUI_ATTR_FONT_SIZE / NEUI_ATTR_FONT_WEIGHT. When non-null the native
+    // control is sent WM_SETFONT(custom_hfont) instead of the parent
+    // frame's hfont. font_signature caches a hash of (family, size, weight,
+    // dpi) so ensure_custom_font can no-op when nothing relevant changed.
+    HFONT    custom_hfont    = nullptr;
+    uint64_t font_signature  = 0;
     HICON native_icon = nullptr;  // owned icon for frame windows; freed in widget_destroy
     Session* session = nullptr;
     uint32_t session_id = 0;   // stored as uint32_t for packing math; wrap as neui_session_t when returning to public API
@@ -254,6 +261,7 @@ namespace win32_host {
     void cascade_dpi(uint32_t parent_index, UINT new_dpi);
     uint32_t get_dpi_for_widget(uint32_t index);
     HWND find_parent_hwnd(uint32_t widget_index);     // walk up tree to find nearest HWND
+    HFONT find_parent_hfont(uint32_t widget_index);   // walk up tree to find nearest ancestor HFONT (frame font)
     bool dispatch_menu_event(UINT cmd_id);             // route WM_COMMAND (lParam==0) to menu items
 
     // Try to consume a message via this session's menubar accelerator

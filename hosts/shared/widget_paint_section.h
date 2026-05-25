@@ -3,6 +3,8 @@
 #include <neui/d/renderer.h>
 #include <cstring>
 
+#include "widget_font.h"
+
 // Shared SECTION paint helper. Used by both the crossplatform host and the
 // win32 host's painted-widget seam so the visual is identical regardless of
 // which host instantiated the widget.
@@ -80,7 +82,8 @@ namespace neui_detail
                             const char* text,
                             uint32_t    bg_argb,
                             const char* align,
-                            uint32_t    text_argb)
+                            uint32_t    text_argb,
+                            const AttrBag* bag = nullptr)
   {
     if (!backend || !ctx) return;
 
@@ -91,7 +94,10 @@ namespace neui_detail
       return;
     }
 
-    float tw = backend->measure_text(ctx, text, -1, SECTION_LABEL_FONT);
+    EffectiveFont ef = read_widget_font(bag, SECTION_LABEL_FONT);
+    push_widget_font(backend, ctx, ef);
+
+    float tw = backend->measure_text(ctx, text, -1, ef.size);
     SectionChip c = section_chip_rect(fx, fw, fh, tw, align);
 
     // Body fills the rect below the band with the section colour.
@@ -105,6 +111,8 @@ namespace neui_detail
     // Title text - vertically centred in the band by the backend's
     // paragraph alignment, horizontally inside the chip's padded interior.
     backend->draw_text(ctx, c.text_x, fy, c.text_w, c.band_h,
-                       text, SECTION_LABEL_FONT, text_argb);
+                       text, ef.size, text_argb);
+
+    pop_widget_font(backend, ctx, ef);
   }
 } // namespace neui_detail

@@ -122,6 +122,18 @@ extern "C" {
     // the framework adds no outer alpha bracket of its own.
     void (NEUI_ABI *push_alpha)(neui_painter_t* p, float factor);
     void (NEUI_ABI *pop_alpha) (neui_painter_t* p);
+
+    // ---- Font stack --------------------------------------------------------
+    // Push a (family, weight) pair onto the font stack. Every subsequent
+    // draw_text / measure_text resolves the active family + weight from
+    // the top of the stack and combines it with the call's font_size to
+    // pick the backend text format. NULL or "" family = host system
+    // default; weight 0 = Normal (CSS 400). Pairs must be balanced inside
+    // the paint call; the framework adds no outer font bracket of its own.
+    void (NEUI_ABI *push_font)(neui_painter_t* p,
+                                const char* family_utf8,
+                                int          weight);
+    void (NEUI_ABI *pop_font) (neui_painter_t* p);
   } neui_painter_api_t;
 
 #ifdef __cplusplus

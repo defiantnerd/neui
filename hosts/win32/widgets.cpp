@@ -170,6 +170,127 @@ namespace win32_host
     return CreateFontIndirectW(&ncm.lfMessageFont);
   }
 
+  // Snap CSS-style weight (100..900) to a Win32 LOGFONT::lfWeight value.
+  // 0 / unset / out-of-range = FW_NORMAL. Matches the bucketing the d2d
+  // backend uses for DWRITE_FONT_WEIGHT_*.
+  static int normalise_lfweight_w32(int weight)
+  {
+    if (weight <= 0)   return FW_NORMAL;
+    if (weight < 150)  return FW_THIN;          // 100
+    if (weight < 250)  return FW_EXTRALIGHT;    // 200
+    if (weight < 350)  return FW_LIGHT;         // 300
+    if (weight < 450)  return FW_NORMAL;        // 400
+    if (weight < 550)  return FW_MEDIUM;        // 500
+    if (weight < 650)  return FW_SEMIBOLD;      // 600
+    if (weight < 750)  return FW_BOLD;          // 700
+    if (weight < 850)  return FW_EXTRABOLD;     // 800
+    return FW_HEAVY;                            // 900+
+  }
+
+  // Compose a 64-bit signature for (family, size_q1, weight, dpi) that
+  // round-trips through (size_q1, dpi) in the low 32 bits + a 32-bit
+  // family hash in the high half. Same signature => no HFONT rebuild.
+  static uint64_t font_signature_w32(const char* family, uint32_t size_q1,
+                                      int weight, UINT dpi)
+  {
+    uint32_t fh = 0;
+    if (family) {
+      for (const char* p = family; *p; ++p)
+        fh = fh * 31u + static_cast<uint8_t>(*p);
+    }
+    fh ^= static_cast<uint32_t>(weight) * 2654435761u;
+    uint64_t lo = (static_cast<uint64_t>(dpi) << 16) ^ size_q1;
+    return (static_cast<uint64_t>(fh) << 32) | lo;
+  }
+
+  // Apply NEUI_ATTR_FONT_FAMILY / NEUI_ATTR_FONT_SIZE / NEUI_ATTR_FONT_WEIGHT
+  // to a native control's HFONT. Rebuilds the per-widget HFONT when the
+  // (family, size, weight, dpi) tuple differs from the cached signature;
+  // when none of the font attrs are set, drops any custom HFONT and falls
+  // back to the parent frame's lfMessageFont via WM_SETFONT. Cheap when
+  // the signature already matches (one attr lookup + a hash compare).
+  static void ensure_custom_font_w32(WidgetData& wd)
+  {
+    if (!wd.hwnd) return;
+
+    // Read attrs. Unset family + weight + size means "no override" -
+    // tear down any prior custom_hfont and reapply the parent's font.
+    // Strict typing - the kind assert in AttrBag catches set_int/_float
+    // calls against the wrong kind at the call site.
+    const char* family = (wd.attrs ? wd.attrs->get_string(NEUI_ATTR_FONT_FAMILY) : nullptr);
+    float       size   = (wd.attrs ? wd.attrs->get_float (NEUI_ATTR_FONT_SIZE,   0.0f) : 0.0f);
+    int         weight = (wd.attrs ? wd.attrs->get_int   (NEUI_ATTR_FONT_WEIGHT, 0   ) : 0);
+    bool fam_set = (family && *family);
+    bool sz_set  = (size > 0.0f);
+    bool wt_set  = (weight > 0);
+
+    if (!fam_set && !sz_set && !wt_set) {
+      if (wd.custom_hfont) {
+        // Reapply parent's font so the control doesn't keep our custom one.
+        HFONT parent_hfont = wd.session ? wd.session->find_parent_hfont(wd.index) : nullptr;
+        SendMessageW(wd.hwnd, WM_SETFONT,
+                     reinterpret_cast<WPARAM>(parent_hfont), TRUE);
+        DeleteObject(wd.custom_hfont);
+        wd.custom_hfont   = nullptr;
+        wd.font_signature = 0;
+      }
+      return;
+    }
+
+    UINT dpi = wd.dpi ? wd.dpi : (wd.session ? wd.session->get_dpi_for_widget(wd.index) : 96);
+    if (dpi == 0) dpi = 96;
+
+    // Effective size for HFONT: client value (logical px at 96 DPI) when
+    // set, else extract the parent frame font's size so we only override
+    // family / weight without resizing.
+    float eff_size = size;
+    if (!sz_set) {
+      // Default to the lfMessageFont's logical height at 96 DPI.
+      NONCLIENTMETRICSW ncm = {};
+      ncm.cbSize = sizeof(ncm);
+      SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, 96);
+      int h = ncm.lfMessageFont.lfHeight;
+      eff_size = static_cast<float>(h < 0 ? -h : (h * 3 / 4));  // pt-ish fallback
+      if (eff_size <= 0.0f) eff_size = 12.0f;
+    }
+
+    uint32_t size_q1 = static_cast<uint32_t>(eff_size * 10.0f + 0.5f);
+    uint64_t sig = font_signature_w32(fam_set ? family : "", size_q1, weight, dpi);
+    if (sig == wd.font_signature && wd.custom_hfont) return;
+
+    LOGFONTW lf = {};
+    // lfHeight in physical pixels: convert logical-px size -> pt via /72
+    // then scale by DPI. Negative = "character height" (matches CreateDpiFont
+    // which uses lfMessageFont's negative lfHeight).
+    lf.lfHeight    = -MulDiv(static_cast<int>(eff_size + 0.5f), static_cast<int>(dpi), 72);
+    lf.lfWeight    = normalise_lfweight_w32(weight);
+    lf.lfCharSet   = DEFAULT_CHARSET;
+    lf.lfOutPrecision   = OUT_DEFAULT_PRECIS;
+    lf.lfClipPrecision  = CLIP_DEFAULT_PRECIS;
+    lf.lfQuality        = CLEARTYPE_QUALITY;
+    lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
+    if (fam_set) {
+      auto w = ToWide(family);
+      wcsncpy_s(lf.lfFaceName, LF_FACESIZE, w.c_str(), _TRUNCATE);
+    } else {
+      // No family override - clone the system message-font face so the
+      // overridden weight/size still uses Segoe UI etc.
+      NONCLIENTMETRICSW ncm = {};
+      ncm.cbSize = sizeof(ncm);
+      SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi);
+      wcsncpy_s(lf.lfFaceName, LF_FACESIZE, ncm.lfMessageFont.lfFaceName, _TRUNCATE);
+    }
+
+    HFONT new_hfont = CreateFontIndirectW(&lf);
+    if (!new_hfont) return;
+
+    if (wd.custom_hfont) DeleteObject(wd.custom_hfont);
+    wd.custom_hfont   = new_hfont;
+    wd.font_signature = sig;
+    SendMessageW(wd.hwnd, WM_SETFONT,
+                 reinterpret_cast<WPARAM>(new_hfont), TRUE);
+  }
+
   // Re-allocate an IMAGE widget's internally-owned asset slot at a new
   // DPI scale so the @2x / @3x variant re-picks. No-op for client-owned
   // assets (the client chose the scale at create_from_file time) and
@@ -300,7 +421,7 @@ namespace win32_host
     int steps = widget_get_steps_w32(wd);
     neui_detail::paint_knob(backend, ctx, 0.0f, 0.0f, w, h,
                              widget_get_value_w32(wd), focused,
-                             polarity, steps, value_text);
+                             polarity, steps, value_text, wd.attrs.get());
   }
 
   // Mouse / wheel hook for KNOB. Implements angular-drag-to-value: the
@@ -731,7 +852,8 @@ namespace win32_host
     const char* align = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
     neui_detail::paint_section(backend, ctx, 0.0f, 0.0f, w, h,
                                 wd.text.c_str(), bg, align,
-                                neui_detail::color(ColorRole::text_primary));
+                                neui_detail::color(ColorRole::text_primary),
+                                wd.attrs.get());
   }
 
   // Build and apply the section's window region so anything outside
@@ -1079,6 +1201,15 @@ namespace win32_host
             DeleteObject(wd.hfont);
             wd.hfont = nullptr;
           }
+          // Force a custom-font rebuild on the next ensure_custom_font_w32
+          // call (signature is dpi-dependent). DeleteObject + null is the
+          // cheapest way; the rebuild happens when create_child_windows
+          // re-broadcasts the new parent font and we re-apply.
+          if (wd.custom_hfont) {
+            DeleteObject(wd.custom_hfont);
+            wd.custom_hfont   = nullptr;
+            wd.font_signature = 0;
+          }
           // Reposition + resize this child to its logical geometry at the
           // new DPI. wd.x / wd.y are parent-relative logical pixels; the
           // new physical px land at the right spot in the parent HWND's
@@ -1210,6 +1341,9 @@ namespace win32_host
         if (child.hwnd && parent_wd.hfont) {
           SendMessageW(child.hwnd, WM_SETFONT, (WPARAM)parent_wd.hfont, TRUE);
         }
+        // Apply NEUI_ATTR_FONT_* if the client set them before show().
+        // No-op when no font attrs are present.
+        if (child.hwnd) ensure_custom_font_w32(child);
         // Re-pick the IMAGE asset variant if the parent's DPI scale
         // crossed a boundary since the slot was allocated (no-op for
         // client-owned assets).
@@ -1331,6 +1465,11 @@ namespace win32_host
     if (w.hfont) {
       DeleteObject(w.hfont);
       w.hfont = nullptr;
+    }
+    if (w.custom_hfont) {
+      DeleteObject(w.custom_hfont);
+      w.custom_hfont   = nullptr;
+      w.font_signature = 0;
     }
     if (w.native_icon) {
       DestroyIcon(w.native_icon);
@@ -1738,6 +1877,17 @@ namespace win32_host
       if (p == 0) continue;
       if (_widgets.exists(p) && _widgets[p].hwnd)
         return _widgets[p].hwnd;
+    }
+    return nullptr;
+  }
+
+  HFONT Session::find_parent_hfont(uint32_t widget_index)
+  {
+    auto parents = _widgets.get_all_parents(widget_index);
+    for (auto p : parents) {
+      if (p == 0) continue;
+      if (_widgets.exists(p) && _widgets[p].hfont)
+        return _widgets[p].hfont;
     }
     return nullptr;
   }
@@ -2891,6 +3041,14 @@ namespace win32_host
          !strcmp(w->type, NEUI_W_CUSTOMDRAW))) {
       InvalidateRect(w->hwnd, nullptr, FALSE);
     }
+    // Font weight: rebuild the per-widget HFONT and re-broadcast via
+    // WM_SETFONT. Native controls (Edit, Button, Static, Checkbox) pick
+    // up the new font immediately; painted widgets re-read attrs on the
+    // next paint, so an extra InvalidateRect is required.
+    if (w->hwnd && !strcmp(key, NEUI_ATTR_FONT_WEIGHT)) {
+      ensure_custom_font_w32(*w);
+      InvalidateRect(w->hwnd, nullptr, FALSE);
+    }
     // CUSTOMDRAW + compound: any attr change can drive a layer binding
     // or a template substitution, so a compound-attached widget repaints
     // on every attr touch. Cheap: InvalidateRect is idempotent.
@@ -2919,6 +3077,12 @@ namespace win32_host
     // Live re-application for behavior-bearing keys.
     if (w->isroot && w->hwnd && !strcmp(key, NEUI_ATTR_ICON_PATH)) {
       neui_detail::apply_window_icon(w->hwnd, value, &w->native_icon);
+    }
+    // Font family: rebuild custom HFONT (native controls update via
+    // WM_SETFONT; painted widgets pick it up on the next paint).
+    if (w->hwnd && !strcmp(key, NEUI_ATTR_FONT_FAMILY)) {
+      ensure_custom_font_w32(*w);
+      InvalidateRect(w->hwnd, nullptr, FALSE);
     }
     // Section: align change moves the title chip, so the window region
     // has to be rebuilt before the next paint. Also covers background
@@ -2959,7 +3123,15 @@ namespace win32_host
   {
     auto* w = get_widget_ptr(session, widget);
     if (!w || !key || !w->attrs) return 0;
-    return w->attrs->remove(key) ? 1 : 0;
+    bool removed = w->attrs->remove(key);
+    if (removed && w->hwnd &&
+        (!strcmp(key, NEUI_ATTR_FONT_FAMILY) ||
+         !strcmp(key, NEUI_ATTR_FONT_SIZE)   ||
+         !strcmp(key, NEUI_ATTR_FONT_WEIGHT))) {
+      ensure_custom_font_w32(*w);
+      InvalidateRect(w->hwnd, nullptr, FALSE);
+    }
+    return removed ? 1 : 0;
   }
 
   static int NEUI_ABI a_set_float(neui_session_t session, neui_widget_t widget,
@@ -2997,6 +3169,12 @@ namespace win32_host
     // need this; only painted widgets read the attr in their draw path.
     if (w->hwnd && w->type && !strcmp(key, NEUI_ATTR_ROTATION) &&
         !strcmp(w->type, NEUI_W_IMAGE)) {
+      InvalidateRect(w->hwnd, nullptr, FALSE);
+    }
+    // Font size: rebuild HFONT for native controls; painted widgets pick
+    // it up on the next paint.
+    if (w->hwnd && !strcmp(key, NEUI_ATTR_FONT_SIZE)) {
+      ensure_custom_font_w32(*w);
       InvalidateRect(w->hwnd, nullptr, FALSE);
     }
     // CUSTOMDRAW + compound: any float attr change can drive a binding,

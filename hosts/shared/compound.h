@@ -73,6 +73,14 @@ namespace neui_detail
     std::string              text_template;       // raw source (the {key} string)
     std::vector<TextSegment> text_segments;       // preparsed
     float                    text_size    = 12.0f;
+    // Text-layer font selection. Empty family / weight 0 leaves the
+    // host's system default in place (Segoe UI Normal on D2D). Honoured
+    // by the d2d backend; the cg backend ignores them (no-op push_font).
+    // `family` is a template string (same {key} substitution as `text`),
+    // pre-parsed at set_string time so paint can resolve it cheaply.
+    std::string              text_family_template;
+    std::vector<TextSegment> text_family_segments;
+    int                      text_weight  = 0;    // CSS 100..900; 0 = Normal
     // text_color is optional - when neither set explicitly via set_int
     // ("color", ...) nor bound via bind("color", ...), the paint helper
     // falls back to the active theme's text_primary role. text_color_set
@@ -373,6 +381,7 @@ namespace neui_detail
       }
       if (prop == "align_x")  { L.text_align_x = v; return true; }
       if (prop == "align_y")  { L.text_align_y = v; return true; }
+      if (prop == "weight")   { L.text_weight  = v; return true; }
     }
     return false;
   }
@@ -400,6 +409,11 @@ namespace neui_detail
     if (L.kind == NEUI_COMPOUND_LAYER_TEXT && prop == "text") {
       L.text_template = v ? v : "";
       L.text_segments = parse_template(v);
+      return true;
+    }
+    if (L.kind == NEUI_COMPOUND_LAYER_TEXT && prop == "family") {
+      L.text_family_template = v ? v : "";
+      L.text_family_segments = parse_template(v);
       return true;
     }
     return false;

@@ -89,6 +89,18 @@ namespace neui_detail
           } else {
             color = neui_detail::color(neui_detail::ColorRole::text_primary);
           }
+          // Font selection: family template (with the same {key} substitution
+          // as `text`) + weight. Both default to "system default" / Normal
+          // when unset, in which case we skip push_font entirely so backends
+          // keep their current behaviour. Family bindings would be unusual
+          // (the source is a string), so weight is the bindable one.
+          std::string family = render_template(L.text_family_segments, bag);
+          int weight = effective_int(L, "weight", L.text_weight, bag);
+          bool need_font_scope = (!family.empty() || weight != 0);
+          if (need_font_scope)
+            k_painter_api.push_font(p,
+              family.empty() ? nullptr : family.c_str(), weight);
+
           // Backends draw_text vertical-centres in the rect and (effectively)
           // left-aligns horizontally by default. For center / right we
           // compute the x offset via measure_text. align_y default = center;
@@ -105,6 +117,8 @@ namespace neui_detail
           }
           k_painter_api.draw_text(p, draw_x, r.y, draw_w, r.h,
                                     text.c_str(), size, color);
+
+          if (need_font_scope) k_painter_api.pop_font(p);
         }
         break;
       }

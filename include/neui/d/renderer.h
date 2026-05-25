@@ -199,6 +199,28 @@ typedef struct neui_render_backend {
   void (NEUI_ABI *push_alpha)(neui_render_ctx_t ctx, float factor);
   void (NEUI_ABI *pop_alpha) (neui_render_ctx_t ctx);
 
+  // --- Font stack (stateful per context) ---------------------------------
+  //
+  // Push a (family, weight) pair onto the font stack. Every subsequent
+  // draw_text / measure_text call resolves the active family + weight
+  // from the top of the stack and combines it with the call's font_size
+  // to select a backend text format. Empty family (NULL or "") means
+  // "use the host system default" (Segoe UI on the D2D backend); a
+  // weight of 0 means Normal (CSS 400). Mapping uses the nearest
+  // standard weight bucket per platform.
+  //
+  // Push / pop pairs must be balanced inside a frame; the stack is
+  // reset to empty (effective default) at every begin_frame so a
+  // missing pop in one frame can't bleed across.
+  //
+  // Backends that don't implement font selection (cg, null) provide
+  // no-op stubs to keep the vtable shape; text continues to render
+  // in their system default until they wire it up.
+  void (NEUI_ABI *push_font)(neui_render_ctx_t ctx,
+                              const char* family_utf8,
+                              int          weight);
+  void (NEUI_ABI *pop_font) (neui_render_ctx_t ctx);
+
 } neui_render_backend_t;
 
 #ifdef __cplusplus

@@ -38,6 +38,8 @@ namespace neui_null_backend
   static uint32_t null_get_context_generation(neui_render_ctx_t) { return 0u; }
   static void  null_push_alpha     (neui_render_ctx_t, float) {}
   static void  null_pop_alpha      (neui_render_ctx_t) {}
+  static void  null_push_font      (neui_render_ctx_t, const char*, int) {}
+  static void  null_pop_font       (neui_render_ctx_t) {}
 
   static neui_render_backend_t backend = {
     NEUI_VERSION,
@@ -72,6 +74,8 @@ namespace neui_null_backend
     null_get_context_generation,
     null_push_alpha,
     null_pop_alpha,
+    null_push_font,
+    null_pop_font,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }
