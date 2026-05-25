@@ -25,9 +25,13 @@ extern "C" {
 #define NEUI_API_VIDEO    "com.defiantnerd.neui.extension.video/0"
 #endif
 
-// Session structure so we have a proper type for the API
+// Session handle. Treated read-only by host + client convention - do not
+// mutate `session` after the host populates it via create_session().
+// (Same shape as neui_widget_t / neui_item_t. The struct wrapper exists
+// purely for type safety so a session id can't be confused with any
+// other uint32_t handle at call sites.)
 typedef struct neui_session {
-  const uint32_t session;       // a session number of 0 means "invalid"
+  uint32_t session;             // 0 means "invalid"
 } neui_session_t;
 
 // Opaque handle for a tree/menu item.

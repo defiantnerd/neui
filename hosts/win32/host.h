@@ -70,12 +70,12 @@ namespace win32_host {
     HFONT hfont = nullptr;   // DPI-scaled font; owned by frame windows (APPWINDOW/PLUGWINDOW)
     HICON native_icon = nullptr;  // owned icon for frame windows; freed in widget_destroy
     Session* session = nullptr;
-    uint32_t session_id = 0;   // stored as uint32_t; construct neui_session_t{session_id} when needed
+    uint32_t session_id = 0;   // stored as uint32_t for packing math; wrap as neui_session_t when returning to public API
     uint32_t dpi = 96;
     bool mouse_tracked = false;
     bool has_subclass = false;
     wchar_t pending_surrogate = 0;  // high surrogate waiting for its low pair in WM_CHAR
-    uint32_t widget_id = 0;    // stored as uint32_t; construct neui_widget_t{widget_id} when needed
+    uint32_t widget_id = 0;    // stored as uint32_t for packing math; wrap as neui_widget_t when returning to public API
     std::string text;          // copy of the last set_text value; applied on HWND creation if set before show
     struct PendingItem { std::string text; void* userdata; };
     std::vector<PendingItem> pending_items;     // items queued before HWND exists
@@ -355,7 +355,7 @@ namespace win32_host {
     neui_widget_client_t* _client_widget_api = nullptr;
     neui_client_t* _client = nullptr;
     void* _token = nullptr;
-    uint32_t _session_id = 0;   // stored as uint32_t; construct neui_session_t{_session_id} when needed
+    uint32_t _session_id = 0;   // stored as uint32_t for packing math; wrap as neui_session_t when returning to public API
     std::vector<uint32_t> _menubars;  // widget indices of MENUBAR widgets, for WM_COMMAND routing
   };
 

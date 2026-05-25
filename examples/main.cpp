@@ -16,8 +16,8 @@
 // hosts and the xpl host fully implement NEUI_W_CUSTOMDRAW + compound
 // drawables, so the same example renders identically on either path.
 #ifdef _WIN32
-#define ACTIVE_HOST "neui.host.crossplatform"
-#define ACTIVE_HOSTx "neui.host.win32"
+#define ACTIVE_HOSTx "neui.host.crossplatform"
+#define ACTIVE_HOST "neui.host.win32"
 #elif defined(__APPLE__)
 #define ACTIVE_HOSTx "neui.host.crossplatform"
 #define ACTIVE_HOST "neui.host.macos"
@@ -41,8 +41,7 @@ static void dbglog(const char* fmt, ...) {
 }
 
 // App context passed as token through the session so callbacks can identify widgets.
-// neui_session_t / neui_widget_t have const members and cannot be copy-assigned,
-// so we store the raw IDs and reconstruct the handles when calling the API.
+// Session + widget handles are plain id structs; stored by value, treated read-only.
 struct AppState {
   neui_api_t*           neui      = nullptr;
   neui_widget_api_t*    widgets   = nullptr;
@@ -51,7 +50,7 @@ struct AppState {
   neui_attr_api_t*      attrs     = nullptr;
   neui_asset_api_t*     assets    = nullptr;
   neui_compound_api_t*  compound  = nullptr;
-  uint32_t           session   = 0;
+  neui_session_t     session   = {0};
   uint32_t           win_id    = 0;
   uint32_t           input_id  = 0;
   uint32_t           button_id = 0;
@@ -115,7 +114,7 @@ struct AppState {
 static void open_about_dialog(AppState* app)
 {
   if (!app || app->about_dlg_id != 0) return;  // already open
-  neui_session_t sess  = { app->session };
+  neui_session_t sess  = app->session;
   neui_widget_t  owner = { app->win_id };
 
   auto dlg = app->widgets->create(sess, widget_none, NEUI_W_DIALOG,
@@ -167,7 +166,7 @@ static neui_widget_client_t widget_client = {
         return true;
       }
       if (app && event->data.mouse.widget.id == app->button_id) {
-        neui_session_t sess  = { app->session };
+        neui_session_t sess  = app->session;
         neui_widget_t  input = { app->input_id };
         // Read current input box content (syncs from Win32 control)
         int needed = app->widgets->get_text(sess, input, nullptr, 0);
@@ -182,7 +181,7 @@ static neui_widget_client_t widget_client = {
       // OK button inside the modal "About" dialog: dismiss the dialog.
       if (app && app->about_dlg_id != 0 &&
           event->data.mouse.widget.id == app->about_ok_id) {
-        neui_session_t sess = { app->session };
+        neui_session_t sess = app->session;
         neui_widget_t  dlg  = { app->about_dlg_id };
         app->widgets->destroy(sess, dlg);
         app->about_dlg_id = 0;
@@ -196,7 +195,7 @@ static neui_widget_client_t widget_client = {
         dbglog("selection cleared\n");
         return true;
       }
-      neui_session_t sess   = { app->session };
+      neui_session_t sess   = app->session;
       neui_widget_t  widget = event->data.item.widget;
       // Image combo: userdata is the literal source filename. Push it
       // onto the rotating IMAGE widget; xpl repaints on next paint and
@@ -325,7 +324,7 @@ static neui_widget_client_t widget_client = {
       if (!app || !app->attrs) return false;
       uint32_t wid = event->data.preupdate.widget.id;
       if (wid == app->knob_id || wid == app->knob2_id) {
-        neui_session_t sess = { app->session };
+        neui_session_t sess = app->session;
         neui_widget_t  w    = { wid };
         float v = app->attrs->get_float(sess, w, NEUI_PARAM_VALUE, 0.0f);
         char buf[32];
@@ -353,7 +352,7 @@ static neui_widget_client_t widget_client = {
       if (app->value_label_id != 0 && app->widgets) {
         char buf[64];
         snprintf(buf, sizeof(buf), "%s: %.2f", which, v);
-        neui_session_t sess  = { app->session };
+        neui_session_t sess  = app->session;
         neui_widget_t  label = { app->value_label_id };
         app->widgets->set_text(sess, label, buf);
       }
@@ -362,7 +361,7 @@ static neui_widget_client_t widget_client = {
       // drives custom widget" loop: state change -> invalidate -> paint.
       if (wid == app->knob_id && app->customdraw_id != 0 && app->widgets) {
         app->customdraw_v = v;
-        neui_session_t sess = { app->session };
+        neui_session_t sess = app->session;
         neui_widget_t  cd   = { app->customdraw_id };
         app->widgets->invalidate(sess, cd);
       }
@@ -373,19 +372,19 @@ static neui_widget_client_t widget_client = {
       // (xpl too) invalidates the widget on attr touch when a compound
       // is attached. So no explicit invalidate() is needed here.
       if (wid == app->knob_id && app->compound_widget_a != 0 && app->attrs) {
-        neui_session_t sess = { app->session };
+        neui_session_t sess = app->session;
         neui_widget_t  cw   = { app->compound_widget_a };
         app->attrs->set_float(sess, cw, NEUI_PARAM_VALUE, v);
       }
       if (wid == app->knob_b_id && app->compound_widget_b != 0 && app->attrs) {
-        neui_session_t sess = { app->session };
+        neui_session_t sess = app->session;
         neui_widget_t  cw   = { app->compound_widget_b };
         app->attrs->set_float(sess, cw, NEUI_PARAM_VALUE, v);
       }
       // Rotation slider drives the image's NEUI_ATTR_ROTATION attribute.
       // The framework's transform stack picks it up on the next paint.
       if (wid == app->rot_slider_id && app->rot_image_id != 0 && app->attrs) {
-        neui_session_t sess  = { app->session };
+        neui_session_t sess  = app->session;
         neui_widget_t  image = { app->rot_image_id };
         const float two_pi = 6.28318530717958647692f;
         app->attrs->set_float(sess, image, NEUI_ATTR_ROTATION, v * two_pi);
@@ -395,7 +394,7 @@ static neui_widget_client_t widget_client = {
 
     case NEUI_EVENT_TREE_ITEM_SELECTED: {
       if (!app) return true;
-      neui_session_t sess   = { app->session };
+      neui_session_t sess   = app->session;
       neui_widget_t  widget = event->data.tree.widget;
       neui_item_t    item   = event->data.tree.item;
       char buf[256] = {};
@@ -407,7 +406,7 @@ static neui_widget_client_t widget_client = {
 
     case NEUI_EVENT_TREE_ITEM_ACTIVATED: {
       if (!app) return true;
-      neui_session_t sess   = { app->session };
+      neui_session_t sess   = app->session;
       neui_widget_t  widget = event->data.tree.widget;
       neui_item_t    item   = event->data.tree.item;
       char buf[256] = {};
@@ -459,7 +458,7 @@ int main(int argc, char** argv) {
   // Pass &app as token so callbacks can access widget handles and the widget API
   auto sess = neui->create_session(&host_client, &app);
   app.neui    = neui;
-  app.session = sess.session;
+  app.session = sess;
   app.widgets = (neui_widget_api_t*)neui->get_interface(sess, NEUI_API_WIDGETS);
   app.items   = (neui_items_api_t*) neui->get_interface(sess, NEUI_API_ITEMS);
   app.tree    = (neui_tree_api_t*)  neui->get_interface(sess, NEUI_API_TREE);
