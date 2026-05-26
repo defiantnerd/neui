@@ -831,7 +831,7 @@ int main(int argc, char** argv) {
       auto txt_layer = app.compound->add_layer(sess, cs,
                                                  NEUI_COMPOUND_LAYER_TEXT, 1);
       app.compound->set_anchor(sess, cs, txt_layer,
-                                 NEUI_ANCHOR_BOTTOM, NEUI_ANCHOR_CENTER);
+                                 NEUI_ANCHOR_BOTTOM, NEUI_ANCHOR_BOTTOM);
       app.compound->set_int(sess, cs, txt_layer, "width",  NEUI_COMPOUND_FILL);
       app.compound->set_int(sess, cs, txt_layer, "height", 22);
       app.compound->set_string(sess, cs, txt_layer, "text", "{name}: {value}");
