@@ -30,11 +30,6 @@ is a real initiative, not trivial; together they form one programme.
 
 ## Widgets
 
-- **`widgets->set_enabled` on macOS native.** Win32 + xpl shipped;
-  macOS host stores the flag but does not yet drive
-  `[NSControl setEnabled:]` or dim the painted-view subset. One-pager
-  follow-up: per-type branch in `w_set_enabled` mirroring the existing
-  `w_set_text` / `w_set_check` shape.
 - **`NEUI_W_IMAGE` on the native macOS host** still loads via
   `[view ensureImageBitmap:]`. The `MacOSAssetManager` and
   `macos_painter_draw_asset_thunk` already exist (used by CUSTOMDRAW

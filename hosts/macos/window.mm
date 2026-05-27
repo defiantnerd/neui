@@ -294,6 +294,13 @@ static float neui_snap_to_steps(float v, int steps)
     clear = (uint32_t)wd->attrs->get_int(NEUI_ATTR_BACKGROUND, 0);
   backend->begin_frame(render_ctx, clear);
 
+  // Disabled painted widgets (IMAGE / KNOB / CUSTOMDRAW / SECTION) draw their
+  // content at half opacity over the (full-opacity) background clear, matching
+  // the xpl host's per-widget push_alpha(0.5) dim. begin_frame resets the
+  // alpha stack, so this must be pushed after it; popped before end_frame.
+  bool dim_disabled = !wd->enabled;
+  if (dim_disabled) backend->push_alpha(render_ctx, 0.5f);
+
   if (wd->type && !strcmp(wd->type, NEUI_W_IMAGE)) {
     [self ensureImageBitmap:wd->text];
     if (bitmap_handle) {
@@ -417,6 +424,8 @@ static float neui_snap_to_steps(float v, int steps)
                                  wd->attrs.get());
   }
 
+  if (dim_disabled) backend->pop_alpha(render_ctx);
+
   backend->end_frame(render_ctx);
 }
 
@@ -482,6 +491,13 @@ static float neui_snap_to_steps(float v, int steps)
 {
   if (![self isKnob]) { [super mouseDown:event]; return; }
 
+  // Disabled knob ignores all pointer input (no drag, no double-click reset).
+  // dragging stays false, so mouseDragged / mouseUp are inert too.
+  {
+    auto* wd = macos_host::widget_for_id(widget_id);
+    if (wd && !wd->enabled) return;
+  }
+
   // Double-click → reset to NEUI_PARAM_DEFAULT.
   if (event.clickCount >= 2) {
     auto* wd = macos_host::widget_for_id(widget_id);
@@ -533,6 +549,10 @@ static float neui_snap_to_steps(float v, int steps)
 - (void)scrollWheel:(NSEvent*)event
 {
   if (![self isKnob]) { [super scrollWheel:event]; return; }
+  {
+    auto* wd = macos_host::widget_for_id(widget_id);
+    if (wd && !wd->enabled) return;  // disabled knob ignores the wheel
+  }
   CGFloat raw = event.scrollingDeltaY;
   if (raw == 0) return;
   // Match the xpl host's wheel-up = decrease convention (audio-plugin feel).
@@ -1378,6 +1398,56 @@ namespace macos_host
     return w.attrs && w.attrs->get_int(NEUI_ATTR_READONLY, 0) != 0;
   }
 
+  // Push WidgetData::enabled into the live native control. Mirror of the
+  // win32 host's EnableWindow path (hosts/win32/widgets.cpp::set_enabled +
+  // the deferred apply in create_child_windows). Called from w_set_enabled
+  // (live change) and from create_native_for_widget (deferred apply right
+  // after the NSView/NSControl is instantiated). No-op until the control
+  // exists - the flag lives on WidgetData and is re-applied at creation.
+  //
+  // Three shapes:
+  //  - NEUINativePaintedView (IMAGE / KNOB / CUSTOMDRAW / SECTION): no
+  //    NSControl setEnabled:; the dim is applied in drawRect: (push_alpha)
+  //    and input is gated in the mouse handlers. Just request a repaint.
+  //  - NSControl leaves (LABEL / BUTTON / INPUTBOX / CHECKBOX / COMBOBOX /
+  //    SLIDER): drive [NSControl setEnabled:] directly - AppKit greys the
+  //    control and stops routing input to it.
+  //  - NSScrollView-hosted controls (LISTBOX / TREEVIEW = NSTableView /
+  //    NSOutlineView, both NSControls; MULTILINE = NSTextView, which is not
+  //    an NSControl): reach the document view and disable it there.
+  void apply_enabled_native_macos(WidgetData& wd)
+  {
+    if (!wd.native_control) return;
+    id obj = (__bridge id)wd.native_control;
+    BOOL en = wd.enabled ? YES : NO;
+
+    if ([obj isKindOfClass:[NEUINativePaintedView class]]) {
+      [(NSView*)obj setNeedsDisplay:YES];
+      return;
+    }
+    if ([obj isKindOfClass:[NSControl class]]) {
+      [(NSControl*)obj setEnabled:en];
+      return;
+    }
+    if ([obj isKindOfClass:[NSScrollView class]]) {
+      NSView* doc = ((NSScrollView*)obj).documentView;
+      if ([doc isKindOfClass:[NSControl class]]) {
+        [(NSControl*)doc setEnabled:en];
+      } else if ([doc isKindOfClass:[NSTextView class]]) {
+        // NSTextView is not an NSControl. Re-derive editability from the
+        // readonly attr when re-enabling so set_enabled doesn't clobber a
+        // client's readonly intent; gate selection + dim the glyphs while
+        // disabled. textColor uses the dynamic system colours so it tracks
+        // light / dark appearance.
+        NSTextView* tv = (NSTextView*)doc;
+        tv.editable   = en ? !is_readonly(wd) : NO;
+        tv.selectable = en ? YES : NO;
+        tv.textColor  = en ? NSColor.textColor : NSColor.disabledControlTextColor;
+      }
+      return;
+    }
+  }
+
   static NEUINativePaintedView* create_painted_view(WidgetData& w)
   {
     NEUINativePaintedView* v = [[NEUINativePaintedView alloc]
@@ -1647,6 +1717,13 @@ namespace macos_host
       [parent_content addSubview:v];
       w.native_control = (__bridge_retained void*)v;
     }
+
+    // Apply any pre-show enabled state now that the native control exists.
+    // Children default to enabled=true, so this only matters when the client
+    // disabled the widget before widget_show. Mirror of the win32 host's
+    // deferred EnableWindow in create_child_windows.
+    if (w.native_control && !w.enabled)
+      apply_enabled_native_macos(w);
   }
 
   // True for widget types whose NSView should act as the parent container

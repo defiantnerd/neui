@@ -132,6 +132,10 @@ namespace macos_host
   // NSView when it has one (used by the compound-attached invalidation
   // hooks and widget_invalidate).
   void mark_widget_dirty_for_paint (WidgetData& wd);
+  // Defined in window.mm. Pushes WidgetData::enabled into the live native
+  // control ([NSControl setEnabled:] / NSTextView gating / painted-view
+  // repaint). No-op until the control is created.
+  void apply_enabled_native_macos (WidgetData& wd);
 
   void Session::widget_destroy(neui_widget_t widget)
   {
@@ -426,14 +430,19 @@ namespace macos_host
     // Other widget types: no-op until the native IMAGE path picks this up.
   }
 
-  // Stubs - state is stored on WidgetData but not yet pushed into the
-  // native control. Wiring NSControl setEnabled: is a follow-up.
   static void NEUI_ABI w_set_enabled(neui_session_t session, neui_widget_t widget, bool enabled)
   {
     auto* s = get_session_for_widget(session, widget);
     if (!s) return;
     uint32_t i = WidgetToIndex(widget);
-    if (s->_widgets.exists(i)) s->_widgets[i].enabled = enabled;
+    if (!s->_widgets.exists(i)) return;
+    auto& wd = s->_widgets[i];
+    if (wd.enabled == enabled) return;
+    wd.enabled = enabled;
+    // Push the flag into the live native control. If the control has not been
+    // created yet (deferred until widget_show), create_native_for_widget
+    // re-applies wd.enabled right after instantiation.
+    apply_enabled_native_macos(wd);
   }
   static bool NEUI_ABI w_get_enabled(neui_session_t session, neui_widget_t widget)
   {
