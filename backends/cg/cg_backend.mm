@@ -17,6 +17,7 @@
 #import <CoreText/CoreText.h>
 
 #include <cmath>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -24,6 +25,15 @@
 
 namespace neui_cg_backend
 {
+  // Active font state - mirror of the d2d backend's FontState. Pushed/popped
+  // via push_font/pop_font; the top of the stack feeds draw_text/measure_text.
+  // Empty family => system UI font (SF Pro); weight 0 => Regular (400).
+  struct FontState
+  {
+    std::string family;     // empty = system UI font
+    int         weight = 0; // CSS 100..900; 0 = Regular
+  };
+
   // Per-window render context. The CGContextRef itself only lives for one
   // drawRect: call - the platform layer rebinds it via set_current_frame at
   // the top of every frame.
@@ -41,6 +51,11 @@ namespace neui_cg_backend
     // Multiplied into the alpha component of every draw colour. Reset on
     // every begin_frame.
     std::vector<float> alpha_stack;
+
+    // Font stack. back() = active (family, weight) for draw_text/measure_text;
+    // size stays a per-call parameter. Empty = system UI font / Regular.
+    // Reset on every begin_frame (mirror of the d2d backend).
+    std::vector<FontState> font_stack;
   };
 
   // ---------------------------------------------------------------------------
@@ -77,37 +92,88 @@ namespace neui_cg_backend
     return st->alpha_stack.empty() ? 1.0f : st->alpha_stack.back();
   }
 
-  // CTFont cache - keyed by font_size * 10 (rounded to 0.1pt). Process-wide
-  // and never evicted; the number of distinct sizes used in typical apps is
-  // tiny (parallels d2d_backend's IDWriteTextFormat cache).
-  static std::unordered_map<uint32_t, CTFontRef>& font_cache()
+  // CTFont cache - keyed by "family|weight|size_q10". Process-wide and never
+  // evicted; the number of distinct (family, weight, size) tuples used in
+  // typical apps is tiny (parallels d2d_backend's IDWriteTextFormat cache).
+  static std::unordered_map<std::string, CTFontRef>& font_cache()
   {
-    static std::unordered_map<uint32_t, CTFontRef> cache;
+    static std::unordered_map<std::string, CTFontRef> cache;
     return cache;
   }
 
-  static CTFontRef get_text_font(float font_size)
+  // CSS-style weight (100..900, 0 = unset) → AppKit NSFontWeight scale.
+  // Mirror of the d2d backend's normalise_weight mapping.
+  static CGFloat css_weight_to_nsfontweight(int weight)
+  {
+    if (weight <= 0)  return NSFontWeightRegular;
+    if (weight < 150) return NSFontWeightUltraLight; // 100
+    if (weight < 250) return NSFontWeightThin;       // 200
+    if (weight < 350) return NSFontWeightLight;      // 300
+    if (weight < 450) return NSFontWeightRegular;    // 400
+    if (weight < 550) return NSFontWeightMedium;     // 500
+    if (weight < 650) return NSFontWeightSemibold;   // 600
+    if (weight < 750) return NSFontWeightBold;       // 700
+    if (weight < 850) return NSFontWeightHeavy;      // 800
+    return NSFontWeightBlack;                         // 900
+  }
+
+  // Resolve the active font (top of the ctx's font stack, or system default
+  // when empty) at the given size into a cached CTFontRef. Empty family =>
+  // system UI font at the requested weight; a named family resolves via a
+  // weight-traited font descriptor, falling back to the system font when the
+  // family is unavailable (e.g. a Windows family name like "Consolas").
+  static CTFontRef get_active_font(const CGContextState* st, float font_size)
   {
     if (font_size <= 0.0f) return nullptr;
-    uint32_t key = static_cast<uint32_t>(font_size * 10.0f + 0.5f);
+
+    const FontState* fs = (st && !st->font_stack.empty())
+      ? &st->font_stack.back() : nullptr;
+    const std::string family = fs ? fs->family : std::string();
+    const int         weight = fs ? fs->weight : 0;
+
+    std::string key = family;
+    key += '|';
+    key += std::to_string(weight);
+    key += '|';
+    key += std::to_string(static_cast<uint32_t>(font_size * 10.0f + 0.5f));
+
     auto& cache = font_cache();
     auto it = cache.find(key);
     if (it != cache.end()) return it->second;
-    // kCTFontUIFontSystem resolves to SF Pro on modern macOS, Helvetica
-    // Neue on older - matches the system UI font users expect.
-    CTFontRef font = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem,
-                                                    static_cast<CGFloat>(font_size),
-                                                    nullptr);
-    if (font) cache[key] = font;
-    return font;
+
+    CGFloat ns_weight = css_weight_to_nsfontweight(weight);
+    NSFont* font = nil;
+    if (family.empty()) {
+      // SF Pro on modern macOS, at the requested weight.
+      font = [NSFont systemFontOfSize:static_cast<CGFloat>(font_size)
+                                weight:ns_weight];
+    } else {
+      NSString* fam = [NSString stringWithUTF8String:family.c_str()];
+      if (fam) {
+        NSFontDescriptor* desc = [NSFontDescriptor fontDescriptorWithFontAttributes:@{
+          NSFontFamilyAttribute : fam,
+          NSFontTraitsAttribute : @{ NSFontWeightTrait : @(ns_weight) },
+        }];
+        font = [NSFont fontWithDescriptor:desc size:static_cast<CGFloat>(font_size)];
+      }
+      if (!font)  // unknown family → graceful fallback to the system font
+        font = [NSFont systemFontOfSize:static_cast<CGFloat>(font_size)
+                                  weight:ns_weight];
+    }
+    // NSFont is toll-free bridged with CTFont; retain a +1 ref for the cache.
+    CTFontRef ctf = font ? (CTFontRef)CFBridgingRetain(font) : nullptr;
+    if (ctf) cache[key] = ctf;
+    return ctf;
   }
 
   // Build a one-line CTLine for `text_len` bytes of UTF-8 (-1 = full string)
-  // at the given font size. Caller releases via CFRelease.
-  static CTLineRef make_ctline(const char* text, int text_len, float font_size)
+  // at the given font size, using the ctx's active font (family + weight from
+  // the font stack). Caller releases via CFRelease.
+  static CTLineRef make_ctline(const CGContextState* st,
+                                const char* text, int text_len, float font_size)
   {
     if (!text || font_size <= 0.0f) return nullptr;
-    CTFontRef font = get_text_font(font_size);
+    CTFontRef font = get_active_font(st, font_size);
     if (!font) return nullptr;
 
     CFStringRef cf_str;
@@ -194,6 +260,7 @@ namespace neui_cg_backend
     // leaking past one frame even if a widget forgot a pop.
     CGContextSaveGState(st->cg_ctx);
     st->alpha_stack.clear();
+    st->font_stack.clear();
     CGFloat rgba[4];
     argb_to_rgba(clear_argb, rgba);
     CGContextSetRGBFillColor(st->cg_ctx, rgba[0], rgba[1], rgba[2], rgba[3]);
@@ -265,7 +332,7 @@ namespace neui_cg_backend
     auto* st = static_cast<CGContextState*>(raw);
     if (!st || !st->cg_ctx || !text || !*text || font_size <= 0.0f) return;
 
-    CTLineRef line = make_ctline(text, -1, font_size);
+    CTLineRef line = make_ctline(st, text, -1, font_size);
     if (!line) return;
 
     CGFloat ascent = 0, descent = 0, leading = 0;
@@ -295,12 +362,13 @@ namespace neui_cg_backend
     CFRelease(line);
   }
 
-  static float cg_measure_text(neui_render_ctx_t /*raw*/,
+  static float cg_measure_text(neui_render_ctx_t raw,
                                 const char* text, int text_len,
                                 float font_size)
   {
     if (!text || !*text || font_size <= 0.0f) return 0.0f;
-    CTLineRef line = make_ctline(text, text_len, font_size);
+    auto* st = static_cast<CGContextState*>(raw);
+    CTLineRef line = make_ctline(st, text, text_len, font_size);
     if (!line) return 0.0f;
     CGFloat ascent = 0, descent = 0, leading = 0;
     double width = CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
@@ -579,13 +647,27 @@ namespace neui_cg_backend
   }
 
   // ---------------------------------------------------------------------------
-  // Font stack - no-op on macOS in v1 (custom font selection is wired only
-  // in the d2d backend so far). The vtable slots exist so widget paint code
-  // can call push_font/pop_font uniformly; text continues to render in the
-  // system default until the macOS path is wired up.
+  // Font stack - selects the (family, weight) pair feeding draw_text /
+  // measure_text. Mirror of d2d_push_font / d2d_pop_font; font_size stays a
+  // per-call parameter and the stack resets on every begin_frame. Empty
+  // family => system UI font; weight is CSS-style 100..900 (0 = Regular).
 
-  static void cg_push_font(neui_render_ctx_t, const char*, int) {}
-  static void cg_pop_font (neui_render_ctx_t) {}
+  static void cg_push_font(neui_render_ctx_t raw, const char* family_utf8, int weight)
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    if (!st) return;
+    FontState fs;
+    if (family_utf8 && *family_utf8) fs.family = family_utf8;
+    fs.weight = weight;
+    st->font_stack.push_back(std::move(fs));
+  }
+
+  static void cg_pop_font(neui_render_ctx_t raw)
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    if (!st || st->font_stack.empty()) return;
+    st->font_stack.pop_back();
+  }
 
   // ---------------------------------------------------------------------------
 

@@ -143,6 +143,18 @@ namespace macos_host
   // Defined in window.mm. Blocking popup menu anchored to an NSView; returns
   // the 1-based pick (separators consume an index) or 0 on dismiss.
   int  run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items);
+  // Defined in window.mm. Applies NEUI_ATTR_FONT_* to a native control's
+  // NSFont (no-op for painted widgets + when no font attr is set).
+  void apply_font_native_macos(WidgetData& wd);
+
+  // True for the three font attribute keys. Used by the attr setters to
+  // re-apply the native font + repaint painted text on a live change.
+  static inline bool is_font_attr(const char* key)
+  {
+    return key && (!strcmp(key, NEUI_ATTR_FONT_FAMILY) ||
+                   !strcmp(key, NEUI_ATTR_FONT_SIZE)   ||
+                   !strcmp(key, NEUI_ATTR_FONT_WEIGHT));
+  }
 
   // Pack a (session_id, slot) pair into a neui_asset_t handle. Defined
   // lower in this TU alongside the asset API; forward-declared here so the
@@ -1163,6 +1175,8 @@ namespace macos_host
         !strcmp(key, NEUI_ATTR_BACKGROUND)) {
       mark_widget_dirty_for_paint(wd);
     }
+    // NEUI_ATTR_FONT_WEIGHT: re-apply native control font + repaint painted text.
+    if (is_font_attr(key)) { apply_font_native_macos(wd); mark_widget_dirty_for_paint(wd); }
     return 1;
   }
   static int32_t NEUI_ABI a_get_int   (neui_session_t session, neui_widget_t widget,
@@ -1196,6 +1210,8 @@ namespace macos_host
         !strcmp(key, NEUI_ATTR_ALIGN_TEXT)) {
       mark_widget_dirty_for_paint(wd);
     }
+    // NEUI_ATTR_FONT_FAMILY: re-apply native control font + repaint painted text.
+    if (is_font_attr(key)) { apply_font_native_macos(wd); mark_widget_dirty_for_paint(wd); }
     return 1;
   }
   static const char* NEUI_ABI a_get_string(neui_session_t session, neui_widget_t widget,
@@ -1254,6 +1270,8 @@ namespace macos_host
         wd.compound_asset.id != asset_none.id) {
       mark_widget_dirty_for_paint(wd);
     }
+    // NEUI_ATTR_FONT_SIZE: re-apply native control font + repaint painted text.
+    if (is_font_attr(key)) { apply_font_native_macos(wd); mark_widget_dirty_for_paint(wd); }
     return 1;
   }
   static float   NEUI_ABI a_get_float(neui_session_t session, neui_widget_t widget,

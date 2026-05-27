@@ -1709,6 +1709,75 @@ namespace macos_host
     return w.attrs && w.attrs->get_int(NEUI_ATTR_READONLY, 0) != 0;
   }
 
+  // CSS weight (100..900, 0 = unset) → AppKit NSFontWeight scale. Mirror of
+  // the cg backend's css_weight_to_nsfontweight (kept local so window.mm
+  // doesn't depend on the backend's internals).
+  static CGFloat css_weight_to_nsfontweight_macos(int weight)
+  {
+    if (weight <= 0)  return NSFontWeightRegular;
+    if (weight < 150) return NSFontWeightUltraLight;
+    if (weight < 250) return NSFontWeightThin;
+    if (weight < 350) return NSFontWeightLight;
+    if (weight < 450) return NSFontWeightRegular;
+    if (weight < 550) return NSFontWeightMedium;
+    if (weight < 650) return NSFontWeightSemibold;
+    if (weight < 750) return NSFontWeightBold;
+    if (weight < 850) return NSFontWeightHeavy;
+    return NSFontWeightBlack;
+  }
+
+  // Apply NEUI_ATTR_FONT_FAMILY / _SIZE / _WEIGHT to a native control's
+  // NSFont. Mirror of the win32 host's ensure_custom_font_w32 (WM_SETFONT):
+  // when none of the font attrs are set the control keeps its system font;
+  // a partial set keeps the unspecified dimensions (size falls back to the
+  // control's current point size). An unknown family (e.g. a Windows family
+  // like "Consolas") gracefully falls back to the system font at the
+  // requested size/weight. NSScrollView-hosted MULTILINE targets its
+  // document NSTextView; painted widgets get their font via the cg font
+  // stack instead, so this is a no-op for them.
+  void apply_font_native_macos(WidgetData& wd)
+  {
+    if (!wd.native_control || !wd.attrs) return;
+    id obj = (__bridge id)wd.native_control;
+    NSControl*  ctrl = nil;
+    NSTextView* tv   = nil;
+    if ([obj isKindOfClass:[NSControl class]]) {
+      ctrl = (NSControl*)obj;
+    } else if ([obj isKindOfClass:[NSScrollView class]]) {
+      NSView* doc = ((NSScrollView*)obj).documentView;
+      if ([doc isKindOfClass:[NSTextView class]]) tv = (NSTextView*)doc;
+    }
+    if (!ctrl && !tv) return;  // tables / painted views: not handled here
+
+    const char* family = wd.attrs->get_string(NEUI_ATTR_FONT_FAMILY);
+    float       size   = wd.attrs->get_float (NEUI_ATTR_FONT_SIZE,   0.0f);
+    int         weight = wd.attrs->get_int   (NEUI_ATTR_FONT_WEIGHT, 0);
+    bool fam_set = family && *family;
+    bool sz_set  = size > 0.0f;
+    bool wt_set  = weight > 0;
+    if (!fam_set && !sz_set && !wt_set) return;  // no override
+
+    NSFont* cur = ctrl ? ctrl.font : tv.font;
+    CGFloat eff_size = sz_set ? (CGFloat)size
+                              : (cur ? cur.pointSize : [NSFont systemFontSize]);
+    CGFloat ns_weight = css_weight_to_nsfontweight_macos(weight);
+
+    NSFont* font = nil;
+    if (fam_set) {
+      NSString* fam = [NSString stringWithUTF8String:family];
+      if (fam) {
+        NSFontDescriptor* desc = [NSFontDescriptor fontDescriptorWithFontAttributes:@{
+          NSFontFamilyAttribute : fam,
+          NSFontTraitsAttribute : @{ NSFontWeightTrait : @(ns_weight) },
+        }];
+        font = [NSFont fontWithDescriptor:desc size:eff_size];
+      }
+    }
+    if (!font) font = [NSFont systemFontOfSize:eff_size weight:ns_weight];
+    if (ctrl) ctrl.font = font;
+    else      tv.font   = font;
+  }
+
   // Push WidgetData geometry (x/y/width/height, logical px) into the live
   // native object. Mirror of the win32 host's SetWindowPos path. Child
   // controls get a parent-relative frame (the content view is isFlipped, so
@@ -2072,6 +2141,10 @@ namespace macos_host
     // deferred EnableWindow in create_child_windows.
     if (w.native_control && !w.enabled)
       apply_enabled_native_macos(w);
+
+    // Apply any pre-show custom font (NEUI_ATTR_FONT_*) - no-op when unset.
+    if (w.native_control)
+      apply_font_native_macos(w);
   }
 
   // True for widget types whose NSView should act as the parent container
