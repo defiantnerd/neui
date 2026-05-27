@@ -30,12 +30,6 @@ is a real initiative, not trivial; together they form one programme.
 
 ## Widgets
 
-- **`NEUI_W_IMAGE` on the native macOS host** still loads via
-  `[view ensureImageBitmap:]`. The `MacOSAssetManager` and
-  `macos_painter_draw_asset_thunk` already exist (used by CUSTOMDRAW
-  + compound); migrating IMAGE to `set_asset` is a one-pager
-  follow-on - re-point the existing view code at the shared asset
-  manager.
 - **Native blocking modal** (Cocoa `runModalForWindow`, Win32
   `DialogBoxIndirect`). Current non-blocking modal matches the
   event-loop shape; revisit only if a real use case demands it.

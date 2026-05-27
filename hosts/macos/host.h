@@ -57,6 +57,16 @@ namespace macos_host
 
     std::unique_ptr<neui_detail::AttrBag> attrs;
 
+    // NEUI_W_IMAGE source: a bitmap asset resolved against the session's
+    // _asset_manager (same handle space as NEUI_API_ASSETS). Set either by
+    // a file path via set_text (allocates an internally-owned slot) or by a
+    // client-supplied handle via set_asset. image_asset_owned == true means
+    // this slot was allocated internally and must be released on re-set /
+    // set_asset / destroy; false means the client owns it (we just drop the
+    // reference). asset_none = no source. Mirror of the win32 host.
+    neui_asset_t image_asset       = asset_none;
+    bool         image_asset_owned = false;
+
     // CUSTOMDRAW (NEUI_W_CUSTOMDRAW): optional compound asset. When set
     // (non-asset_none and resolves to a NEUI_ASSET_KIND_COMPOUND in this
     // session's _asset_manager), the painted-view drawRect: renders the

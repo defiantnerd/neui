@@ -152,10 +152,6 @@ NSWindowStyleMask styles_for_appwindow()
 @public
   uint32_t          widget_id;
   neui_render_ctx_t render_ctx;
-  void*             bitmap_handle;       // CGBitmapHandle* from cg_backend
-  uint32_t          bitmap_w_px;
-  uint32_t          bitmap_h_px;
-  float             bitmap_scale;
   // KNOB drag state. Mirror of the xpl host's KnobWidget drag fields:
   // dragging gates the move handler; drag_prev_angle is the last
   // pointer-relative-to-center angle; drag_continuous is an unsnapped
@@ -205,67 +201,14 @@ static float neui_snap_to_steps(float v, int steps)
 
 - (void)dealloc
 {
+  // The IMAGE bitmap now lives in the session's MacOSAssetManager, not on
+  // the view; its per-ctx GPU cache for this render_ctx is dropped by
+  // release_native_control_macos before teardown. Here we only destroy the
+  // view's own render context.
   auto* backend = neui_cg_backend::get_backend();
-  if (backend) {
-    if (bitmap_handle && render_ctx)
-      backend->destroy_bitmap(render_ctx, bitmap_handle);
-    if (render_ctx)
-      backend->destroy_context(render_ctx);
-  }
-  bitmap_handle = nullptr;
-  render_ctx    = nullptr;
-}
-
-// Load (or reload) the IMAGE bitmap from the widget's text path. Lazy on
-// first paint; rebuilds on text change via set_text → setNeedsDisplay.
-// Resolves @2x / @3x variants on Retina, matching the MacOSAssetManager
-// path-resolver so example images that ship only as @2x.jpg still load.
-- (void)ensureImageBitmap:(const std::string&)path
-{
-  if (bitmap_handle) return;  // simple v1: load once, cache forever
-  auto* backend = neui_cg_backend::get_backend();
-  if (!backend || !render_ctx || path.empty()) return;
-
-  float scale = 1.0f;
-  if (NSScreen.mainScreen) {
-    float s_main = (float)NSScreen.mainScreen.backingScaleFactor;
-    if (s_main > scale) scale = s_main;
-  }
-
-  auto split_ext = [](const std::string& name, std::string& base, std::string& ext) {
-    auto dot = name.rfind('.');
-    if (dot == std::string::npos) { base = name; ext.clear(); }
-    else { base = name.substr(0, dot); ext = name.substr(dot); }
-  };
-  auto try_load = [&](const std::string& p, float s_out) -> uint8_t* {
-    uint32_t w = 0, h = 0;
-    uint8_t* raw = neui_detail::load_image_bgra8_macos(p.c_str(), &w, &h);
-    if (!raw) return nullptr;
-    bitmap_w_px = w;
-    bitmap_h_px = h;
-    bitmap_scale = s_out;
-    return raw;
-  };
-
-  std::string base, ext;
-  split_ext(path, base, ext);
-
-  uint8_t* px = nullptr;
-  if (scale > 2.0f) {
-    px = try_load(base + "@3x" + ext, 3.0f);
-    if (!px) px = try_load(base + "@2x" + ext, 2.0f);
-  } else if (scale > 1.0f) {
-    px = try_load(base + "@2x" + ext, 2.0f);
-  }
-  if (!px) px = try_load(path, 1.0f);
-  if (!px && scale <= 1.0f) px = try_load(base + "@2x" + ext, 2.0f);
-  if (!px && scale <= 2.0f) px = try_load(base + "@3x" + ext, 3.0f);
-  if (!px) return;
-
-  bitmap_handle = backend->create_bitmap(render_ctx,
-                                          bitmap_w_px, bitmap_h_px,
-                                          px, bitmap_scale);
-  neui_detail::free_image_bgra8(px);
+  if (backend && render_ctx)
+    backend->destroy_context(render_ctx);
+  render_ctx = nullptr;
 }
 
 - (void)drawRect:(NSRect)dirtyRect
@@ -302,30 +245,40 @@ static float neui_snap_to_steps(float v, int steps)
   if (dim_disabled) backend->push_alpha(render_ctx, 0.5f);
 
   if (wd->type && !strcmp(wd->type, NEUI_W_IMAGE)) {
-    [self ensureImageBitmap:wd->text];
-    if (bitmap_handle) {
-      // Aspect-preserving fit (letterbox / pillarbox, centred). Same shape
-      // as the existing hosts.
-      float vw = (float)sz.width, vh = (float)sz.height;
-      float bw = (float)bitmap_w_px / bitmap_scale;
-      float bh = (float)bitmap_h_px / bitmap_scale;
-      float scale = (bw / bh > vw / vh) ? (vw / bw) : (vh / bh);
-      float dw = bw * scale, dh = bh * scale;
-      float dx = (vw - dw) * 0.5f, dy = (vh - dh) * 0.5f;
-      // Honour NEUI_ATTR_ROTATION via the renderer transform stack - same
-      // shape as the xpl host's IMAGE paint path.
-      float rot = wd->attrs ? wd->attrs->get_float(NEUI_ATTR_ROTATION, 0.0f) : 0.0f;
-      if (rot != 0.0f) {
-        backend->push_transform(render_ctx);
-        backend->translate(render_ctx, dx + dw * 0.5f, dy + dh * 0.5f);
-        backend->rotate(render_ctx, rot);
-        backend->translate(render_ctx, -dw * 0.5f, -dh * 0.5f);
-        backend->draw_bitmap(render_ctx, bitmap_handle,
-                              0, 0, 0, 0, 0, 0, dw, dh);
-        backend->pop_transform(render_ctx);
-      } else {
-        backend->draw_bitmap(render_ctx, bitmap_handle,
-                              0, 0, 0, 0, dx, dy, dw, dh);
+    // Resolve the widget's bitmap asset (set via a set_text path or a
+    // set_asset handle) against the session asset manager. The lazy per-ctx
+    // GPU upload + draw is delegated to macos_painter_draw_asset_thunk - the
+    // same path CUSTOMDRAW + compound use - so there is no per-view cache.
+    // We only compute the aspect-fit destination rect and rotation here.
+    if (wd->image_asset.id != asset_none.id &&
+        ((wd->image_asset.id >> 16) & 0xffff) == (sess->session_id() & 0xffff)) {
+      auto* entry = sess->_asset_manager.get_slot(wd->image_asset.id & 0xffff);
+      if (entry && entry->kind == NEUI_ASSET_KIND_BITMAP && entry->scale > 0.0f) {
+        // Aspect-preserving fit (letterbox / pillarbox, centred). Same shape
+        // as the other hosts.
+        float vw = (float)sz.width, vh = (float)sz.height;
+        float bw = (float)entry->width_px  / entry->scale;
+        float bh = (float)entry->height_px / entry->scale;
+        if (bw > 0.0f && bh > 0.0f && vw > 0.0f && vh > 0.0f) {
+          float scale = (bw / bh > vw / vh) ? (vw / bw) : (vh / bh);
+          float dw = bw * scale, dh = bh * scale;
+          float dx = (vw - dw) * 0.5f, dy = (vh - dh) * 0.5f;
+          // Honour NEUI_ATTR_ROTATION via the renderer transform stack -
+          // same shape as the xpl host's IMAGE paint path.
+          float rot = wd->attrs ? wd->attrs->get_float(NEUI_ATTR_ROTATION, 0.0f) : 0.0f;
+          if (rot != 0.0f) {
+            backend->push_transform(render_ctx);
+            backend->translate(render_ctx, dx + dw * 0.5f, dy + dh * 0.5f);
+            backend->rotate(render_ctx, rot);
+            backend->translate(render_ctx, -dw * 0.5f, -dh * 0.5f);
+            macos_host::macos_painter_draw_asset_thunk(
+              sess, backend, render_ctx, wd->image_asset, 0, 0, dw, dh);
+            backend->pop_transform(render_ctx);
+          } else {
+            macos_host::macos_painter_draw_asset_thunk(
+              sess, backend, render_ctx, wd->image_asset, dx, dy, dw, dh);
+          }
+        }
       }
     }
   } else if (wd->type && !strcmp(wd->type, NEUI_W_KNOB)) {
@@ -1204,7 +1157,18 @@ namespace macos_host
     // NSMenu is not an NSView - sending removeFromSuperview to it crashes.
     id obj = (__bridge_transfer id)wd.native_control;
     wd.native_control = nullptr;
-    if ([obj isKindOfClass:[NSView class]]) {
+    if ([obj isKindOfClass:[NEUINativePaintedView class]]) {
+      // Painted views own a render context whose per-ctx GPU bitmaps are
+      // cached on the session's asset manager (IMAGE source + CUSTOMDRAW
+      // compound assets). Drop that cache while the context is still valid -
+      // the view's dealloc destroys the context right after. Mirror of the
+      // win32 PaintedWndProc WM_DESTROY -> _asset_manager.release_context.
+      NEUINativePaintedView* pv = (NEUINativePaintedView*)obj;
+      if (wd.session && pv->render_ctx)
+        wd.session->_asset_manager.release_context(pv->render_ctx,
+                                                   neui_cg_backend::get_backend());
+      [pv removeFromSuperview];
+    } else if ([obj isKindOfClass:[NSView class]]) {
       [(NSView*)obj removeFromSuperview];
     } else if ([obj isKindOfClass:[NSMenu class]]) {
       if (NSApp.mainMenu == (NSMenu*)obj) NSApp.mainMenu = nil;
@@ -1225,23 +1189,6 @@ namespace macos_host
     [(NSView*)obj setNeedsDisplay:YES];
   }
 
-  // Drop the cached CGImage on a NEUINativePaintedView so the next paint
-  // reloads from the widget's text path (used by NEUI_W_IMAGE when the
-  // client changes the source via set_text). No-op when no bitmap has
-  // been uploaded yet.
-  void reset_image_bitmap_cache_macos(WidgetData& wd)
-  {
-    if (!wd.native_control) return;
-    id obj = (__bridge id)wd.native_control;
-    if (![obj isKindOfClass:[NEUINativePaintedView class]]) return;
-    NEUINativePaintedView* v = (NEUINativePaintedView*)obj;
-    auto* backend = neui_cg_backend::get_backend();
-    if (v->bitmap_handle && v->render_ctx && backend) {
-      backend->destroy_bitmap(v->render_ctx, v->bitmap_handle);
-    }
-    v->bitmap_handle = nullptr;
-    v->bitmap_w_px = 0; v->bitmap_h_px = 0; v->bitmap_scale = 1.0f;
-  }
 
   // -------------------------------------------------------------------------
   // Per-type widget_show helpers.
@@ -1459,8 +1406,6 @@ namespace macos_host
                                                 (uint32_t)w.width,
                                                 (uint32_t)w.height);
     }
-    v->bitmap_handle = nullptr;
-    v->bitmap_w_px = 0; v->bitmap_h_px = 0; v->bitmap_scale = 1.0f;
     return v;
   }
 
@@ -1603,7 +1548,14 @@ namespace macos_host
     b.buttonType    = NSButtonTypeMomentaryChange;  // disables AppKit's auto-toggle of .state
     b.imagePosition = NSImageLeft;
     b.alignment     = NSTextAlignmentLeft;
-    b.image         = checkbox_image_for_state(NEUI_CHECK_UNCHECKED);
+    // Initialise from any check state set before widget_show. w_set_check
+    // caches the logical state on the attrs but can't touch the NSButton
+    // until it exists (deferred creation), so the initial image must be
+    // derived from the cached value rather than hardcoded to UNCHECKED.
+    int init_state = w.attrs
+      ? w.attrs->get_int("neui.macoshost.checkstate", NEUI_CHECK_UNCHECKED)
+      : NEUI_CHECK_UNCHECKED;
+    b.image         = checkbox_image_for_state(init_state);
     b.target        = [NEUINativeControlTarget shared];
     b.action        = @selector(neuiControlAction:);
     b.tag           = (NSInteger)w.widget_id;

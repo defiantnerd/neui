@@ -137,6 +137,25 @@ namespace macos_host
   // repaint). No-op until the control is created.
   void apply_enabled_native_macos (WidgetData& wd);
 
+  // Pack a (session_id, slot) pair into a neui_asset_t handle. Defined
+  // lower in this TU alongside the asset API; forward-declared here so the
+  // IMAGE source helpers in widget_set_text / widget_set_asset can build a
+  // handle for an internally-allocated slot.
+  static neui_asset_t pack_asset_macos(uint32_t session_id, uint32_t slot);
+
+  // Highest backing scale across the session's screens, used as the @Nx
+  // variant preference when allocating an IMAGE asset from a path before a
+  // view exists. Mirrors a_create_from_file's choice.
+  static float preferred_asset_scale_macos()
+  {
+    float scale = 1.0f;
+    if (NSScreen.mainScreen) {
+      float ms = (float)NSScreen.mainScreen.backingScaleFactor;
+      if (ms > scale) scale = ms;
+    }
+    return scale;
+  }
+
   void Session::widget_destroy(neui_widget_t widget)
   {
     uint32_t index = WidgetToIndex(widget);
@@ -158,8 +177,20 @@ namespace macos_host
     if (_client_widget_api && _client_widget_api->ondestroy)
       _client_widget_api->ondestroy(_token, widget, w.userdata);
 
+    // Tear down the native control first - for painted views this also drops
+    // the asset manager's per-ctx GPU cache for the view's render context
+    // (release_native_control_macos -> release_context). Then free any
+    // internally-owned IMAGE asset slot (client-supplied handles are left
+    // for the client to destroy).
     if (w.native_control) release_native_control_macos(w);
     if (w.native_window)  release_native_window_macos (w);
+
+    if (w.image_asset_owned && w.image_asset.id != asset_none.id) {
+      _asset_manager.release_slot(w.image_asset.id & 0xffff,
+                                   neui_cg_backend::get_backend());
+      w.image_asset       = asset_none;
+      w.image_asset_owned = false;
+    }
 
     _widgets.remove(index);
   }
@@ -239,11 +270,6 @@ namespace macos_host
     }
   }
 
-  // Defined in window.mm. For NEUINativePaintedView instances, drop the
-  // cached image bitmap so the next drawRect: reloads from the (new) text
-  // path. No-op for non-painted views.
-  void reset_image_bitmap_cache_macos(WidgetData& wd);
-
   static void NEUI_ABI w_set_text(neui_session_t session, neui_widget_t widget, const char* text)
   {
     auto* s = get_session_for_widget(session, widget);
@@ -252,19 +278,39 @@ namespace macos_host
     if (!s->_widgets.exists(i)) return;
     auto& wd = s->_widgets[i];
     wd.text = text ? text : "";
+
+    // IMAGE: the text is a file path. Allocate an internally-owned bitmap
+    // asset from it (releasing any prior owned slot first), exactly like the
+    // win32 host's widget_set_text. The drawRect: IMAGE branch resolves
+    // wd.image_asset against the session asset manager, so there is no
+    // per-view bitmap cache any more. Deferred-safe: allocation doesn't need
+    // the NSView to exist - @Nx variant resolution uses the screen scale.
+    if (wd.type && !strcmp(wd.type, NEUI_W_IMAGE)) {
+      auto* backend = neui_cg_backend::get_backend();
+      if (wd.image_asset_owned && wd.image_asset.id != asset_none.id)
+        s->_asset_manager.release_slot(wd.image_asset.id & 0xffff, backend);
+      wd.image_asset       = asset_none;
+      wd.image_asset_owned = false;
+      if (!wd.text.empty()) {
+        uint32_t slot = s->_asset_manager.allocate_from_file(
+                          wd.text, preferred_asset_scale_macos());
+        if (slot != 0) {
+          wd.image_asset       = pack_asset_macos(s->session_id(), slot);
+          wd.image_asset_owned = true;
+        }
+      }
+      mark_widget_dirty_for_paint(wd);
+      return;
+    }
+
     NSString* ns = [NSString stringWithUTF8String:wd.text.c_str()];
     if (wd.native_window) {
       [(__bridge NSWindow*)wd.native_window setTitle:ns];
     } else if (wd.native_control) {
       widget_set_native_string(wd, ns);
-      // IMAGE: source path drives the painted view's cached CGImage.
-      // Drop the cache so the next paint reloads. SECTION also re-paints
-      // (title chip is text-driven).
-      if (wd.type && (!strcmp(wd.type, NEUI_W_IMAGE) ||
-                       !strcmp(wd.type, NEUI_W_SECTION))) {
-        if (!strcmp(wd.type, NEUI_W_IMAGE)) reset_image_bitmap_cache_macos(wd);
+      // SECTION: text is the title chip - repaint so it picks up the change.
+      if (wd.type && !strcmp(wd.type, NEUI_W_SECTION))
         mark_widget_dirty_for_paint(wd);
-      }
     }
   }
   static int  NEUI_ABI w_get_text(neui_session_t session, neui_widget_t widget, char* buf, int buflen)
@@ -397,15 +443,13 @@ namespace macos_host
     mark_widget_dirty_for_paint(s->_widgets[i]);
   }
 
-  // Bind an asset handle to a widget. v1 only supports CUSTOMDRAW +
-  // compound: attaching a NEUI_ASSET_KIND_COMPOUND to a CUSTOMDRAW
-  // widget switches its paint path from imperative WIDGET_PAINT dispatch
-  // to declarative compound-layer walk. asset_none clears the binding.
-  //
-  // NEUI_W_IMAGE on the native macOS host still loads via
-  // [ensureImageBitmap:] from set_text (path-source only) - migrating
-  // IMAGE to use asset handles too is a follow-on, see
-  // plans/macos-customdraw-and-compound.md.
+  // Bind an asset handle to a widget. Two widget types consume it:
+  //  - NEUI_W_IMAGE: the bitmap asset becomes the image source (last-set
+  //    wins against set_text). Mutual-clear: binding an asset drops any
+  //    set_text path; asset_none clears the source.
+  //  - NEUI_W_CUSTOMDRAW: a NEUI_ASSET_KIND_COMPOUND switches the paint
+  //    path from imperative WIDGET_PAINT dispatch to declarative
+  //    compound-layer walk; asset_none clears the binding.
   static void NEUI_ABI w_set_asset(neui_session_t session,
                                      neui_widget_t widget, neui_asset_t asset)
   {
@@ -423,11 +467,24 @@ namespace macos_host
       return;
     }
 
-    if (!strcmp(wd.type, NEUI_W_CUSTOMDRAW)) {
+    if (!strcmp(wd.type, NEUI_W_IMAGE)) {
+      // Release the previous internally-owned slot (only ours to free;
+      // client-supplied handles stay owned by the client). Store the new
+      // handle as not-owned and clear the path so the two sources don't
+      // both resolve. Mirror of the win32 host.
+      if (wd.image_asset_owned && wd.image_asset.id != asset_none.id)
+        s->_asset_manager.release_slot(wd.image_asset.id & 0xffff,
+                                        neui_cg_backend::get_backend());
+      wd.image_asset       = asset;
+      wd.image_asset_owned = false;
+      wd.text.clear();
+      mark_widget_dirty_for_paint(wd);
+    }
+    else if (!strcmp(wd.type, NEUI_W_CUSTOMDRAW)) {
       wd.compound_asset = asset;
       mark_widget_dirty_for_paint(wd);
     }
-    // Other widget types: no-op until the native IMAGE path picks this up.
+    // Other widget types: no-op.
   }
 
   static void NEUI_ABI w_set_enabled(neui_session_t session, neui_widget_t widget, bool enabled)
