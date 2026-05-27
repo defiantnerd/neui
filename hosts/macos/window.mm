@@ -11,6 +11,7 @@
 #include "host.h"
 #include "checkbox_image.h"
 #include "../shared/macos/image_loader_macos.h"
+#include "../shared/macos/keys_macos.h"
 #include "../shared/macos/theme_provider_macos.h"
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_compound.h"
@@ -45,6 +46,18 @@ namespace macos_host {
                                                  neui_asset_t asset,
                                                  float x, float y,
                                                  float w, float h);
+
+  // Blocking popup menu. Builds an NSMenu from the NULL-terminated UTF-8
+  // `items` ("-" = separator), presents it at `(x, y)` in `anchor`'s
+  // (flipped) coordinate space, and returns the 1-based index of the picked
+  // item (separators consume an index, matching the win32 host) or 0 on
+  // dismiss. Defined after the view; the KNOB right-click handler calls it.
+  int run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items);
+
+  // Defined in widgets.mm. Routes a built-in command (NEUI_CMD_*) to the key
+  // window's first responder; returns true if consumed. The menu-pick router
+  // calls it before falling back to TREE_ITEM_ACTIVATED.
+  bool invoke_focused_command_macos(uint32_t cmd);
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +152,34 @@ NSWindowStyleMask styles_for_appwindow()
 
 @implementation NEUINativeContentView
 - (BOOL)isFlipped { return YES; }
+
+// Make native text editing self-sufficient. Unlike the win32 native Edit
+// control (which handles Ctrl+C/X/V/A itself), a Cocoa text field only
+// receives ⌘C/⌘X/⌘V/⌘A/⌘Z when a main-menu item claims those key
+// equivalents - AppKit does not synthesize a standard Edit menu. Rather than
+// force every client to add Cut/Copy/Paste items, route the standard editing
+// shortcuts here through the same command path as menu / NEUI_API_COMMANDS.
+//
+// Order: NSApp matches main-menu key equivalents first, so a client-defined
+// Edit ▸ Undo (⌘Z) still wins; this override only fires for shortcuts the
+// menu didn't claim. invoke_focused_command_macos returns false when no text
+// responder consumes the action, so we fall through to super in that case.
+- (BOOL)performKeyEquivalent:(NSEvent*)event
+{
+  if (event.modifierFlags & NSEventModifierFlagCommand) {
+    NSString* chars = event.charactersIgnoringModifiers.lowercaseString;
+    bool shift = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+    uint32_t cmd = 0;
+    if      ([chars isEqualToString:@"c"]) cmd = NEUI_CMD_COPY;
+    else if ([chars isEqualToString:@"v"]) cmd = NEUI_CMD_PASTE;
+    else if ([chars isEqualToString:@"x"]) cmd = NEUI_CMD_CUT;
+    else if ([chars isEqualToString:@"a"]) cmd = NEUI_CMD_SELECT_ALL;
+    else if ([chars isEqualToString:@"z"]) cmd = shift ? NEUI_CMD_REDO : NEUI_CMD_UNDO;
+    if (cmd && macos_host::invoke_focused_command_macos(cmd))
+      return YES;
+  }
+  return [super performKeyEquivalent:event];
+}
 @end
 
 // ---------------------------------------------------------------------------
@@ -198,6 +239,72 @@ static float neui_snap_to_steps(float v, int steps)
 - (BOOL)isFlipped { return YES; }
 - (BOOL)isOpaque  { return NO; }
 - (BOOL)acceptsFirstMouse:(NSEvent*)event { (void)event; return YES; }
+
+// Only CUSTOMDRAW takes keyboard focus - it forwards keys to the client.
+// KNOB / IMAGE / SECTION don't need key input.
+- (BOOL)acceptsFirstResponder
+{
+  auto* wd = macos_host::widget_for_id(widget_id);
+  return wd && wd->type && !strcmp(wd->type, NEUI_W_CUSTOMDRAW);
+}
+
+- (void)keyDown:(NSEvent*)event
+{
+  macos_host::Session* sess = nullptr;
+  auto* wd = macos_host::widget_for_id(widget_id, &sess);
+  bool cd = wd && sess && wd->emit_events && wd->type
+            && !strcmp(wd->type, NEUI_W_CUSTOMDRAW);
+  if (!cd) { [super keyDown:event]; return; }
+
+  uint32_t mods = neui_detail::mac_modifiers_to_neui(event.modifierFlags);
+  neui_event_t kd = {};
+  kd.type                = NEUI_EVENT_KEYDOWN;
+  kd.data.key.widget     = { wd->widget_id };
+  kd.data.key.keycode    = neui_detail::mac_keycode_to_neui(event.keyCode);
+  kd.data.key.modifiers  = mods;
+  sess->dispatch_event(&kd);
+
+  // KEYCHAR for the produced text. Skip when Command is held (those are
+  // shortcuts, not text - matches win32's WM_CHAR behaviour) and skip the
+  // NSFunctionKey private-use range (arrows / F-keys come via KEYDOWN only).
+  NSString* chars = event.characters;
+  if (chars.length > 0 && !(event.modifierFlags & NSEventModifierFlagCommand)) {
+    NSUInteger i = 0;
+    while (i < chars.length) {
+      unichar c = [chars characterAtIndex:i];
+      uint32_t cp;
+      if (c >= 0xD800 && c <= 0xDBFF && i + 1 < chars.length) {
+        unichar lo = [chars characterAtIndex:i + 1];
+        cp = 0x10000u + ((uint32_t)(c - 0xD800) << 10) + (uint32_t)(lo - 0xDC00);
+        i += 2;
+      } else {
+        cp = c; i += 1;
+      }
+      if (cp >= 0xF700 && cp <= 0xF8FF) continue;  // function-key range
+      neui_event_t kc = {};
+      kc.type               = NEUI_EVENT_KEYCHAR;
+      kc.data.key.widget    = { wd->widget_id };
+      kc.data.key.keycode   = cp;
+      kc.data.key.modifiers = mods;
+      sess->dispatch_event(&kc);
+    }
+  }
+}
+
+- (void)keyUp:(NSEvent*)event
+{
+  macos_host::Session* sess = nullptr;
+  auto* wd = macos_host::widget_for_id(widget_id, &sess);
+  bool cd = wd && sess && wd->emit_events && wd->type
+            && !strcmp(wd->type, NEUI_W_CUSTOMDRAW);
+  if (!cd) { [super keyUp:event]; return; }
+  neui_event_t ku = {};
+  ku.type               = NEUI_EVENT_KEYUP;
+  ku.data.key.widget    = { wd->widget_id };
+  ku.data.key.keycode   = neui_detail::mac_keycode_to_neui(event.keyCode);
+  ku.data.key.modifiers = neui_detail::mac_modifiers_to_neui(event.modifierFlags);
+  sess->dispatch_event(&ku);
+}
 
 - (void)dealloc
 {
@@ -440,82 +547,217 @@ static float neui_snap_to_steps(float v, int steps)
   return [self convertPoint:event.locationInWindow fromView:nil];
 }
 
+// --- CUSTOMDRAW raw-input plumbing -----------------------------------------
+// CUSTOMDRAW widgets forward pointer input to the client as NEUI_EVENT_MOUSE_*
+// (parity with the win32 host's subclass proc). KNOB drives its own value and
+// IMAGE / SECTION are non-interactive, so only CUSTOMDRAW opts in here.
+
+- (bool)customDrawWantsInput
+{
+  auto* wd = macos_host::widget_for_id(widget_id);
+  return wd && wd->enabled && wd->emit_events && wd->type
+         && !strcmp(wd->type, NEUI_W_CUSTOMDRAW);
+}
+
+- (NSPoint)localPoint:(NSEvent*)event
+{
+  // Widget-local, flipped (top-left origin) - matches the WIDGET_PAINT origin.
+  return [self convertPoint:event.locationInWindow fromView:nil];
+}
+
+- (void)dispatchMouse:(neui_event_type_t)type at:(NSPoint)p buttonmap:(uint32_t)bmap
+{
+  macos_host::Session* sess = nullptr;
+  auto* wd = macos_host::widget_for_id(widget_id, &sess);
+  if (!wd || !sess) return;
+  neui_event_t ev = {};
+  ev.type                 = type;
+  ev.data.mouse.widget    = { wd->widget_id };
+  ev.data.mouse.x         = (int)p.x;
+  ev.data.mouse.y         = (int)p.y;
+  ev.data.mouse.buttonmap = bmap;
+  sess->dispatch_event(&ev);
+}
+
+// Tracking area drives MOUSE_MOVE / ENTER / LEAVE. Rebuilt whenever the view
+// geometry changes (AppKit calls this after every setFrame:).
+- (void)updateTrackingAreas
+{
+  [super updateTrackingAreas];
+  for (NSTrackingArea* ta in [self.trackingAreas copy])
+    [self removeTrackingArea:ta];
+  NSTrackingArea* ta = [[NSTrackingArea alloc]
+    initWithRect:self.bounds
+    options:(NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved
+             | NSTrackingActiveInKeyWindow)
+    owner:self userInfo:nil];
+  [self addTrackingArea:ta];
+}
+
+- (void)mouseEntered:(NSEvent*)event
+{
+  if (![self customDrawWantsInput]) { [super mouseEntered:event]; return; }
+  [self dispatchMouse:NEUI_EVENT_MOUSE_ENTER at:[self localPoint:event] buttonmap:0];
+}
+- (void)mouseExited:(NSEvent*)event
+{
+  if (![self customDrawWantsInput]) { [super mouseExited:event]; return; }
+  [self dispatchMouse:NEUI_EVENT_MOUSE_LEAVE at:[self localPoint:event] buttonmap:0];
+}
+- (void)mouseMoved:(NSEvent*)event
+{
+  if (![self customDrawWantsInput]) { [super mouseMoved:event]; return; }
+  [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event] buttonmap:0];
+}
+
 - (void)mouseDown:(NSEvent*)event
 {
-  if (![self isKnob]) { [super mouseDown:event]; return; }
-
-  // Disabled knob ignores all pointer input (no drag, no double-click reset).
-  // dragging stays false, so mouseDragged / mouseUp are inert too.
-  {
-    auto* wd = macos_host::widget_for_id(widget_id);
-    if (wd && !wd->enabled) return;
-  }
-
-  // Double-click → reset to NEUI_PARAM_DEFAULT.
-  if (event.clickCount >= 2) {
-    auto* wd = macos_host::widget_for_id(widget_id);
-    float def = 0.0f;
-    if (wd && wd->attrs) def = neui_clamp01(wd->attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f));
-    [self setKnobValueFromUser:def];
+  if ([self isKnob]) {
+    // Disabled knob ignores all pointer input (no drag, no double-click
+    // reset). dragging stays false, so mouseDragged / mouseUp are inert too.
+    {
+      auto* wd = macos_host::widget_for_id(widget_id);
+      if (wd && !wd->enabled) return;
+    }
+    // Double-click → reset to NEUI_PARAM_DEFAULT.
+    if (event.clickCount >= 2) {
+      auto* wd = macos_host::widget_for_id(widget_id);
+      float def = 0.0f;
+      if (wd && wd->attrs) def = neui_clamp01(wd->attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f));
+      [self setKnobValueFromUser:def];
+      return;
+    }
+    NSPoint p = [self localPointForKnobEvent:event];
+    NSPoint c = [self knobCenter];
+    float dx = (float)(p.x - c.x);
+    float dy = (float)(p.y - c.y);
+    float r2 = dx * dx + dy * dy;
+    if (r2 < NEUI_KNOB_DEAD_ZONE_R * NEUI_KNOB_DEAD_ZONE_R) return;
+    dragging        = true;
+    drag_prev_angle = std::atan2(dy, dx);
+    // Seed the continuous accumulator with the snapped current value so the
+    // first delta nudges off it (rather than starting from 0).
+    drag_continuous = [self knobValue];
     return;
   }
-
-  NSPoint p = [self localPointForKnobEvent:event];
-  NSPoint c = [self knobCenter];
-  float dx = (float)(p.x - c.x);
-  float dy = (float)(p.y - c.y);
-  float r2 = dx * dx + dy * dy;
-  if (r2 < NEUI_KNOB_DEAD_ZONE_R * NEUI_KNOB_DEAD_ZONE_R) return;
-
-  dragging        = true;
-  drag_prev_angle = std::atan2(dy, dx);
-  // Seed the continuous accumulator with the snapped current value so the
-  // first delta nudges off it (rather than starting from 0).
-  drag_continuous = [self knobValue];
+  if ([self customDrawWantsInput]) {
+    // Grab keyboard focus so subsequent keyDown / keyUp route here (and the
+    // paint pass reports focused = YES). NSView doesn't auto-focus on click.
+    [self.window makeFirstResponder:self];
+    neui_event_type_t t = (event.clickCount >= 2)
+      ? NEUI_EVENT_MOUSE_BUTTON_DBLCLICK : NEUI_EVENT_MOUSE_BUTTON_DOWN;
+    [self dispatchMouse:t at:[self localPoint:event] buttonmap:1];
+    return;
+  }
+  [super mouseDown:event];
 }
 
 - (void)mouseDragged:(NSEvent*)event
 {
-  if (![self isKnob] || !dragging) { [super mouseDragged:event]; return; }
-  NSPoint p = [self localPointForKnobEvent:event];
-  NSPoint c = [self knobCenter];
-  float dx = (float)(p.x - c.x);
-  float dy = (float)(p.y - c.y);
-  float r2 = dx * dx + dy * dy;
-  if (r2 < NEUI_KNOB_DEAD_ZONE_R * NEUI_KNOB_DEAD_ZONE_R) return;  // unstable
-
-  float cur_angle = std::atan2(dy, dx);
-  float delta     = neui_knob_wrap_pi(cur_angle - drag_prev_angle);
-  bool fine = (event.modifierFlags & NSEventModifierFlagShift) != 0;
-  float scale = (fine ? NEUI_KNOB_FINE_SCALE : 1.0f) / NEUI_KNOB_SWEEP_RAD;
-  drag_continuous = neui_clamp01(drag_continuous + delta * scale);
-  [self setKnobValueFromUser:drag_continuous];
-  drag_prev_angle = cur_angle;
+  if ([self isKnob]) {
+    if (!dragging) { [super mouseDragged:event]; return; }
+    NSPoint p = [self localPointForKnobEvent:event];
+    NSPoint c = [self knobCenter];
+    float dx = (float)(p.x - c.x);
+    float dy = (float)(p.y - c.y);
+    float r2 = dx * dx + dy * dy;
+    if (r2 < NEUI_KNOB_DEAD_ZONE_R * NEUI_KNOB_DEAD_ZONE_R) return;  // unstable
+    float cur_angle = std::atan2(dy, dx);
+    float delta     = neui_knob_wrap_pi(cur_angle - drag_prev_angle);
+    bool fine = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+    float scale = (fine ? NEUI_KNOB_FINE_SCALE : 1.0f) / NEUI_KNOB_SWEEP_RAD;
+    drag_continuous = neui_clamp01(drag_continuous + delta * scale);
+    [self setKnobValueFromUser:drag_continuous];
+    drag_prev_angle = cur_angle;
+    return;
+  }
+  if ([self customDrawWantsInput]) {
+    // A held-button drag surfaces as MOUSE_MOVE (buttonmap 0, matching the
+    // win32 WM_MOUSEMOVE convention); the client tracks button state from
+    // the preceding DOWN / UP.
+    [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event] buttonmap:0];
+    return;
+  }
+  [super mouseDragged:event];
 }
 
 - (void)mouseUp:(NSEvent*)event
 {
-  if (![self isKnob]) { [super mouseUp:event]; return; }
-  dragging = false;
+  if ([self isKnob]) { dragging = false; return; }
+  if ([self customDrawWantsInput]) {
+    [self dispatchMouse:NEUI_EVENT_MOUSE_BUTTON_UP at:[self localPoint:event] buttonmap:0];
+    return;
+  }
+  [super mouseUp:event];
+}
+
+- (void)rightMouseDown:(NSEvent*)event
+{
+  if ([self isKnob]) {
+    auto* wd = macos_host::widget_for_id(widget_id);
+    if (wd && !wd->enabled) return;  // disabled knob: no context menu
+    NSPoint p = [self localPointForKnobEvent:event];
+    static const char* k_items[] = { "Reset to default", nullptr };
+    int pick = macos_host::run_popup_menu_macos(self, (int)p.x, (int)p.y, k_items);
+    if (pick == 1) {
+      float def = 0.0f;
+      if (wd && wd->attrs) def = neui_clamp01(wd->attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f));
+      [self setKnobValueFromUser:def];
+    }
+    return;
+  }
+  if ([self customDrawWantsInput]) {
+    [self dispatchMouse:NEUI_EVENT_MOUSE_RBUTTON_DOWN at:[self localPoint:event] buttonmap:0];
+    return;
+  }
+  [super rightMouseDown:event];
+}
+- (void)rightMouseUp:(NSEvent*)event
+{
+  if ([self customDrawWantsInput]) {
+    [self dispatchMouse:NEUI_EVENT_MOUSE_RBUTTON_UP at:[self localPoint:event] buttonmap:0];
+    return;
+  }
+  [super rightMouseUp:event];
 }
 
 - (void)scrollWheel:(NSEvent*)event
 {
-  if (![self isKnob]) { [super scrollWheel:event]; return; }
-  {
-    auto* wd = macos_host::widget_for_id(widget_id);
-    if (wd && !wd->enabled) return;  // disabled knob ignores the wheel
+  if ([self isKnob]) {
+    {
+      auto* wd = macos_host::widget_for_id(widget_id);
+      if (wd && !wd->enabled) return;  // disabled knob ignores the wheel
+    }
+    CGFloat raw = event.scrollingDeltaY;
+    if (raw == 0) return;
+    // Match the xpl host's wheel-up = decrease convention (audio-plugin feel).
+    bool fine = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+    int steps = [self knobSteps];
+    float magnitude = (steps >= 2)
+      ? (1.0f / (float)(steps - 1))
+      : (fine ? 0.01f : 0.05f);
+    float sign = (raw > 0) ? -1.0f : 1.0f;
+    [self setKnobValueFromUser:[self knobValue] + sign * magnitude];
+    return;
   }
-  CGFloat raw = event.scrollingDeltaY;
-  if (raw == 0) return;
-  // Match the xpl host's wheel-up = decrease convention (audio-plugin feel).
-  bool fine = (event.modifierFlags & NSEventModifierFlagShift) != 0;
-  int steps = [self knobSteps];
-  float magnitude = (steps >= 2)
-    ? (1.0f / (float)(steps - 1))
-    : (fine ? 0.01f : 0.05f);
-  float sign = (raw > 0) ? -1.0f : 1.0f;
-  [self setKnobValueFromUser:[self knobValue] + sign * magnitude];
+  if ([self customDrawWantsInput]) {
+    CGFloat raw = event.scrollingDeltaY;
+    int delta = (raw > 0) ? 1 : (raw < 0 ? -1 : 0);
+    if (delta == 0) return;
+    macos_host::Session* sess = nullptr;
+    auto* wd = macos_host::widget_for_id(widget_id, &sess);
+    if (!wd || !sess) return;
+    NSPoint p = [self localPoint:event];
+    neui_event_t ev = {};
+    ev.type              = NEUI_EVENT_MOUSE_WHEEL;
+    ev.data.wheel.widget = { wd->widget_id };
+    ev.data.wheel.x      = (int)p.x;
+    ev.data.wheel.y      = (int)p.y;
+    ev.data.wheel.delta  = delta;
+    sess->dispatch_event(&ev);
+    return;
+  }
+  [super scrollWheel:event];
 }
 
 @end
@@ -572,6 +814,45 @@ static float neui_snap_to_steps(float v, int steps)
       wake_app_event_pump();
     }
   }
+}
+
+// Frame focus → NEUI_EVENT_WIDGET_FOCUS for the frame widget. Mirror of the
+// win32 host's WM_SETFOCUS / WM_KILLFOCUS path. Clients see logical focus at
+// the frame granularity (Tier B per-widget focus proxies are deferred).
+- (void)dispatchFrameFocus:(bool)gained
+{
+  if (!session || !session->_widgets.exists(widget_index)) return;
+  neui_event_t ev = {};
+  ev.type              = NEUI_EVENT_WIDGET_FOCUS;
+  ev.data.focus.widget = { session->_widgets[widget_index].widget_id };
+  ev.data.focus.focused = gained;
+  session->dispatch_event(&ev);
+}
+
+- (void)windowDidBecomeKey:(NSNotification*)note { (void)note; [self dispatchFrameFocus:true];  }
+- (void)windowDidResignKey:(NSNotification*)note { (void)note; [self dispatchFrameFocus:false]; }
+
+// Frame resize → NEUI_EVENT_RESIZE with the new content size in logical
+// pixels. Mirror of the win32 host's WM_SIZE path. The content view is
+// isFlipped with a backing-scale CTM, so contentView.bounds is already in
+// logical points (= logical px at 96 DPI).
+- (void)windowDidResize:(NSNotification*)note
+{
+  if (!session || !session->_widgets.exists(widget_index)) return;
+  NSWindow* win = (NSWindow*)note.object;
+  if (![win isKindOfClass:[NSWindow class]]) return;
+  NSSize sz = win.contentView ? win.contentView.bounds.size : win.frame.size;
+
+  auto& wd = session->_widgets[widget_index];
+  wd.width  = (int)sz.width;
+  wd.height = (int)sz.height;
+
+  neui_event_t ev = {};
+  ev.type               = NEUI_EVENT_RESIZE;
+  ev.data.resize.widget = { wd.widget_id };
+  ev.data.resize.width  = (int)sz.width;
+  ev.data.resize.height = (int)sz.height;
+  session->dispatch_event(&ev);
 }
 
 @end
@@ -838,6 +1119,70 @@ namespace macos_host {
 @end
 
 // ---------------------------------------------------------------------------
+// NEUIPopupCollector - records the picked NSMenuItem's tag for the blocking
+// popup_menu helper. Each item's action targets this object; after the
+// nested popup tracking loop returns, pickedTag holds the 1-based choice
+// (or 0 if the menu was dismissed without a pick).
+
+@interface NEUIPopupCollector : NSObject
+{
+@public
+  int pickedTag;
+}
+- (void)neuiPopupPick:(id)sender;
+@end
+
+@implementation NEUIPopupCollector
+- (instancetype)init { if ((self = [super init])) pickedTag = 0; return self; }
+- (void)neuiPopupPick:(id)sender
+{
+  NSMenuItem* mi = (NSMenuItem*)sender;
+  if ([mi isKindOfClass:[NSMenuItem class]]) pickedTag = (int)mi.tag;
+}
+@end
+
+namespace macos_host {
+  int run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items)
+  {
+    if (!items) return 0;
+    NSMenu* menu = [[NSMenu alloc] initWithTitle:@""];
+    menu.autoenablesItems = NO;
+    NEUIPopupCollector* collector = [[NEUIPopupCollector alloc] init];
+
+    int idx = 0;
+    for (const char* const* p = items; *p; ++p) {
+      ++idx;  // separators consume an index slot (matches the win32 host)
+      const char* t = *p;
+      if (t[0] == '-' && t[1] == '\0') {
+        [menu addItem:[NSMenuItem separatorItem]];
+        continue;
+      }
+      NSMenuItem* mi = [[NSMenuItem alloc]
+        initWithTitle:[NSString stringWithUTF8String:t]
+               action:@selector(neuiPopupPick:)
+        keyEquivalent:@""];
+      mi.target  = collector;
+      mi.tag     = idx;
+      mi.enabled = YES;
+      [menu addItem:mi];
+    }
+
+    if (anchor) {
+      [menu popUpMenuPositioningItem:nil
+                          atLocation:NSMakePoint(x, y)
+                              inView:anchor];
+    } else {
+      NSWindow* kw = [NSApp keyWindow];
+      if (kw.contentView)
+        [menu popUpMenuPositioningItem:nil
+                            atLocation:NSMakePoint(x, y)
+                                inView:kw.contentView];
+    }
+    return collector->pickedTag;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // NEUINativeMenuTarget - singleton sink for menu-item picks. Decodes
 // (widget_id, item_id) from the NSMenuItem's representedObject + tag, looks
 // up the macos_host::Session, fires NEUI_EVENT_TREE_ITEM_ACTIVATED.
@@ -876,6 +1221,18 @@ namespace macos_host {
   auto* sess = sp.get();
   if (!sess->_widgets.exists(idx)) return;
   auto& wd = sess->_widgets[idx];
+
+  // Routed-command binding (tree->set_menu_cmd): a built-in command goes to
+  // the focused widget first. If it's consumed there, the client does NOT see
+  // TREE_ITEM_ACTIVATED. Mirror of the win32 host's dispatch_menu_event.
+  auto cmd_it = wd.tree_items.find(item_id);
+  if (cmd_it != wd.tree_items.end()) {
+    uint32_t cmd = cmd_it->second.menu_cmd;
+    if (cmd != 0 && cmd < NEUI_CMD_USER_BASE &&
+        macos_host::invoke_focused_command_macos(cmd)) {
+      return;  // consumed by the focused widget
+    }
+  }
 
   neui_event_t ev = {};
   ev.type             = NEUI_EVENT_TREE_ITEM_ACTIVATED;
@@ -1251,6 +1608,13 @@ namespace macos_host
       [[NEUINativeContentView alloc] initWithFrame:NSMakeRect(0, 0, w.width, w.height)];
     [window setContentView:cv];
 
+    // Tab / Shift-Tab focus traversal: the key-view loop is built manually in
+    // widget-creation order (see rebuild_key_view_loop_macos, called after the
+    // descendants are created) so the order matches the win32 + xpl hosts.
+    // AppKit's autorecalculatesKeyViewLoop is left OFF because it orders by
+    // geometry (top-to-bottom / left-to-right), which would diverge.
+    window.autorecalculatesKeyViewLoop = NO;
+
     NEUINativeWindowDelegate* d = [[NEUINativeWindowDelegate alloc] init];
     d->session      = s;
     d->widget_index = idx;
@@ -1343,6 +1707,38 @@ namespace macos_host
   static bool is_readonly(WidgetData& w)
   {
     return w.attrs && w.attrs->get_int(NEUI_ATTR_READONLY, 0) != 0;
+  }
+
+  // Push WidgetData geometry (x/y/width/height, logical px) into the live
+  // native object. Mirror of the win32 host's SetWindowPos path. Child
+  // controls get a parent-relative frame (the content view is isFlipped, so
+  // (x, y) is top-left); frames get a content-size + screen re-origin
+  // (top-left semantics, converted to AppKit's bottom-left screen space);
+  // painted views also resize their CG render context. No-op until the
+  // native object exists.
+  void apply_geometry_native_macos(WidgetData& wd)
+  {
+    if (wd.native_window) {
+      NSWindow* win = (__bridge NSWindow*)wd.native_window;
+      [win setContentSize:NSMakeSize(wd.width, wd.height)];
+      if (NSScreen.mainScreen) {
+        CGFloat sh = NSScreen.mainScreen.frame.size.height;
+        [win setFrameTopLeftPoint:NSMakePoint(wd.x, sh - wd.y)];
+      }
+      return;
+    }
+    if (!wd.native_control) return;
+    id obj = (__bridge id)wd.native_control;
+    if (![obj isKindOfClass:[NSView class]]) return;
+    NSView* v = (NSView*)obj;
+    [v setFrame:NSMakeRect(wd.x, wd.y, wd.width, wd.height)];
+    if ([obj isKindOfClass:[NEUINativePaintedView class]]) {
+      NEUINativePaintedView* pv = (NEUINativePaintedView*)obj;
+      auto* backend = neui_cg_backend::get_backend();
+      if (backend && backend->resize && pv->render_ctx)
+        backend->resize(pv->render_ctx, (uint32_t)wd.width, (uint32_t)wd.height);
+      [pv setNeedsDisplay:YES];
+    }
   }
 
   // Push WidgetData::enabled into the live native control. Mirror of the
@@ -1702,6 +2098,72 @@ namespace macos_host
   // descendants keep parenting to the same enclosing view - mirrors the
   // pre-section behaviour and avoids leaves like NSButton accidentally
   // becoming hosts for unrelated child widgets.
+  // The NSView that represents this widget in the key-view loop, or nil if
+  // it isn't a tab stop. The tab-stop SET mirrors the win32 host's WS_TABSTOP
+  // controls (BUTTON / INPUTBOX / MULTILINE / CHECKBOX[3] / LISTBOX / COMBOBOX
+  // / TREEVIEW / SLIDER / CUSTOMDRAW); LABEL / SECTION / IMAGE / KNOB are not.
+  // NEUI_ATTR_TAB_STOP = 0 removes a widget explicitly (default on). For
+  // NSScrollView-hosted controls the document view (table / outline / text)
+  // is the responder, so it - not the scroll container - goes in the loop.
+  static NSView* tab_stop_view_macos(WidgetData& w)
+  {
+    if (!w.native_control || !w.type || !w.visible) return nil;
+    if (w.attrs && w.attrs->has(NEUI_ATTR_TAB_STOP) &&
+        w.attrs->get_int(NEUI_ATTR_TAB_STOP, 1) == 0)
+      return nil;
+    const char* t = w.type;
+    bool is_stop =
+      !strcmp(t, NEUI_W_BUTTON)   || !strcmp(t, NEUI_W_INPUTBOX)  ||
+      !strcmp(t, NEUI_W_MULTILINE)|| !strcmp(t, NEUI_W_CHECKBOX)  ||
+      !strcmp(t, NEUI_W_CHECKBOX3)|| !strcmp(t, NEUI_W_LISTBOX)   ||
+      !strcmp(t, NEUI_W_COMBOBOX) || !strcmp(t, NEUI_W_TREEVIEW)  ||
+      !strcmp(t, NEUI_W_SLIDER)   || !strcmp(t, NEUI_W_CUSTOMDRAW);
+    if (!is_stop) return nil;
+    id obj = (__bridge id)w.native_control;
+    if (![obj isKindOfClass:[NSView class]]) return nil;
+    NSView* v = (NSView*)obj;
+    if ([v isKindOfClass:[NSScrollView class]]) {
+      NSView* doc = ((NSScrollView*)v).documentView;
+      if (doc) return doc;
+    }
+    return v;
+  }
+
+  // Collect tab-stop views under `parent_idx` in widget-creation order
+  // (pre-order DFS: node before its descendants, siblings in insertion order)
+  // - identical to the win32 z-order walk + xpl collect_tab_stops.
+  static void collect_tab_stops_macos(Session* s, uint32_t parent_idx,
+                                        std::vector<NSView*>& out)
+  {
+    uint32_t i = s->_widgets.child(parent_idx);
+    while (i != 0) {
+      if (s->_widgets.exists(i)) {
+        NSView* v = tab_stop_view_macos(s->_widgets[i]);
+        if (v) out.push_back(v);
+        collect_tab_stops_macos(s, i, out);
+      }
+      i = s->_widgets.next(i);
+    }
+  }
+
+  // Wire the frame's key-view loop in creation order so Tab / Shift-Tab match
+  // win32 + xpl. Disabled controls left in the chain are skipped automatically
+  // by AppKit (they return NO from acceptsFirstResponder), so the loop only
+  // needs rebuilding when widgets are added / removed - done on each show.
+  void rebuild_key_view_loop_macos(Session* s, uint32_t frame_idx, NSWindow* window)
+  {
+    if (!window) return;
+    std::vector<NSView*> stops;
+    collect_tab_stops_macos(s, frame_idx, stops);
+    window.autorecalculatesKeyViewLoop = NO;
+    if (stops.empty()) return;
+    const size_t n = stops.size();
+    for (size_t k = 0; k < n; ++k)
+      [stops[k] setNextKeyView:stops[(k + 1) % n]];
+    if (!window.initialFirstResponder)
+      window.initialFirstResponder = stops.front();
+  }
+
   static void create_descendants_native(Session* s, uint32_t parent_idx,
                                          NSView* parent_content)
   {
@@ -1762,6 +2224,9 @@ namespace macos_host
       // WM_CREATE → create_child_windows path.
       NSView* cv = native_window_from(w.native_window).contentView;
       create_descendants_native(this, index, cv);
+      // Build the Tab / Shift-Tab key-view loop in creation order now that all
+      // descendant controls exist.
+      rebuild_key_view_loop_macos(this, index, native_window_from(w.native_window));
       return;
     }
 

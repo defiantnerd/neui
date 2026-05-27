@@ -136,6 +136,13 @@ namespace macos_host
   // control ([NSControl setEnabled:] / NSTextView gating / painted-view
   // repaint). No-op until the control is created.
   void apply_enabled_native_macos (WidgetData& wd);
+  // Defined in window.mm. Pushes WidgetData geometry into the live native
+  // object (NSView frame / NSWindow content size + origin / painted-view
+  // render-ctx resize). No-op until the native object exists.
+  void apply_geometry_native_macos(WidgetData& wd);
+  // Defined in window.mm. Blocking popup menu anchored to an NSView; returns
+  // the 1-based pick (separators consume an index) or 0 on dismiss.
+  int  run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items);
 
   // Pack a (session_id, slot) pair into a neui_asset_t handle. Defined
   // lower in this TU alongside the asset API; forward-declared here so the
@@ -219,10 +226,43 @@ namespace macos_host
     if (s) s->widget_show(widget);
   }
 
-  static void NEUI_ABI w_hide(neui_session_t, neui_widget_t)                    {}
-  static void NEUI_ABI w_set_pos(neui_session_t, neui_widget_t,
-                                  int, int, int, int)                          {}
-  static void NEUI_ABI w_set_size(neui_session_t, neui_widget_t, int, int)      {}
+  static void NEUI_ABI w_hide(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t i = WidgetToIndex(widget);
+    if (!s->_widgets.exists(i)) return;
+    auto& wd = s->_widgets[i];
+    wd.visible = false;
+    if (wd.native_window) {
+      [(__bridge NSWindow*)wd.native_window orderOut:nil];
+    } else if (wd.native_control) {
+      id obj = (__bridge id)wd.native_control;
+      if ([obj isKindOfClass:[NSView class]]) [(NSView*)obj setHidden:YES];
+    }
+  }
+  static void NEUI_ABI w_set_pos(neui_session_t session, neui_widget_t widget,
+                                  int x, int y, int width, int height)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t i = WidgetToIndex(widget);
+    if (!s->_widgets.exists(i)) return;
+    auto& wd = s->_widgets[i];
+    wd.x = x; wd.y = y; wd.width = width; wd.height = height;
+    apply_geometry_native_macos(wd);
+  }
+  static void NEUI_ABI w_set_size(neui_session_t session, neui_widget_t widget,
+                                   int width, int height)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t i = WidgetToIndex(widget);
+    if (!s->_widgets.exists(i)) return;
+    auto& wd = s->_widgets[i];
+    wd.width = width; wd.height = height;
+    apply_geometry_native_macos(wd);
+  }
   static void NEUI_ABI w_set_emit_events(neui_session_t session, neui_widget_t widget, bool enabled)
   {
     auto* s = get_session_for_widget(session, widget);
@@ -342,9 +382,50 @@ namespace macos_host
     }
     return needed;
   }
-  static neui_widget_t NEUI_ABI w_get_first_child (neui_session_t, neui_widget_t) { return widget_none; }
-  static neui_widget_t NEUI_ABI w_get_next_sibling(neui_session_t, neui_widget_t) { return widget_none; }
-  static void NEUI_ABI w_set_focus(neui_session_t, neui_widget_t)               {}
+  static neui_widget_t NEUI_ABI w_get_first_child (neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return widget_none;
+    uint32_t i = WidgetToIndex(widget);
+    if (!s->_widgets.exists(i)) return widget_none;
+    uint32_t child = s->_widgets.child(i);
+    if (child == 0 || !s->_widgets.exists(child)) return widget_none;
+    return { s->_widgets[child].widget_id };
+  }
+  static neui_widget_t NEUI_ABI w_get_next_sibling(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return widget_none;
+    uint32_t i = WidgetToIndex(widget);
+    if (!s->_widgets.exists(i)) return widget_none;
+    uint32_t next = s->_widgets.next(i);
+    if (next == 0 || !s->_widgets.exists(next)) return widget_none;
+    return { s->_widgets[next].widget_id };
+  }
+  static void NEUI_ABI w_set_focus(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t i = WidgetToIndex(widget);
+    if (!s->_widgets.exists(i)) return;
+    auto& wd = s->_widgets[i];
+    if (wd.native_window) {
+      [(__bridge NSWindow*)wd.native_window makeKeyAndOrderFront:nil];
+      return;
+    }
+    if (!wd.native_control) return;
+    id obj = (__bridge id)wd.native_control;
+    if (![obj isKindOfClass:[NSView class]]) return;
+    NSView* v = (NSView*)obj;
+    // NSScrollView-hosted controls (MULTILINE / LISTBOX / TREEVIEW): focus the
+    // document view (the editable text / table), not the scroll container.
+    NSView* target = v;
+    if ([v isKindOfClass:[NSScrollView class]]) {
+      NSView* doc = ((NSScrollView*)v).documentView;
+      if (doc) target = doc;
+    }
+    [v.window makeFirstResponder:target];
+  }
   static void NEUI_ABI w_set_check(neui_session_t session, neui_widget_t widget,
                                     neui_check_state_t state)
   {
@@ -423,10 +504,20 @@ namespace macos_host
     }
     if (w) *w = gw; if (h) *h = gh;
   }
-  static int   NEUI_ABI w_popup_menu(neui_session_t, neui_widget_t, int, int,
-                                      const char* const*)
+  static int   NEUI_ABI w_popup_menu(neui_session_t session, neui_widget_t anchor,
+                                      int x, int y, const char* const* items)
   {
-    return 0;
+    auto* s = get_session_for_widget(session, anchor);
+    if (!s || !items) return 0;
+    uint32_t i = WidgetToIndex(anchor);
+    if (!s->_widgets.exists(i)) return 0;
+    auto& wd = s->_widgets[i];
+    NSView* view = nil;
+    if (wd.native_control) {
+      id obj = (__bridge id)wd.native_control;
+      if ([obj isKindOfClass:[NSView class]]) view = (NSView*)obj;
+    }
+    return run_popup_menu_macos(view, x, y, items);
   }
 
   // Request a repaint of the widget. For painted views (IMAGE, KNOB,
@@ -1025,8 +1116,17 @@ namespace macos_host
     [ov scrollRowToVisible:row];
   }
 
-  static void NEUI_ABI t_set_menu_cmd(neui_session_t, neui_widget_t,
-                                       neui_item_t, uint32_t)                   {}
+  static void NEUI_ABI t_set_menu_cmd(neui_session_t session, neui_widget_t widget,
+                                       neui_item_t item, uint32_t cmd)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t i = WidgetToIndex(widget);
+    if (!s->_widgets.exists(i)) return;
+    auto& wd = s->_widgets[i];
+    auto it = wd.tree_items.find(item.id);
+    if (it != wd.tree_items.end()) it->second.menu_cmd = cmd;
+  }
 
   neui_tree_api_t tree_api = {
     t_add, t_remove, t_clear,
@@ -1194,16 +1294,78 @@ namespace macos_host
   {
     return neui_detail::clipboard_has_text_macos();
   }
-  static neui_clipboard_item_t NEUI_ABI c_read       (neui_session_t)           { return neui_clipboard_item_none; }
-  static neui_clipboard_item_t NEUI_ABI c_create_item(neui_session_t)           { return neui_clipboard_item_none; }
-  static void NEUI_ABI c_release(neui_session_t, neui_clipboard_item_t)         {}
-  static int  NEUI_ABI c_write  (neui_session_t, neui_clipboard_item_t)         { return 0; }
-  static int  NEUI_ABI c_item_set_format(neui_session_t, neui_clipboard_item_t,
-                                          const char*, const void*, uint32_t)   { return 0; }
-  static int  NEUI_ABI c_item_get_format(neui_session_t, neui_clipboard_item_t,
-                                          const char*, void*, int)              { return 0; }
-  static bool NEUI_ABI c_item_has_format(neui_session_t, neui_clipboard_item_t,
-                                          const char*)                          { return false; }
+  // Item-based clipboard API. v1 round-trips text/plain only, backed by the
+  // session's ClipboardItemStore. Mirror of the win32 host's cb_* family,
+  // using the NSPasteboard helpers in clipboard_macos.h for system I/O.
+  static neui_clipboard_item_t NEUI_ABI c_read(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    if (!s) return neui_clipboard_item_none;
+    if (!neui_detail::clipboard_has_text_macos()) return neui_clipboard_item_none;
+    int n = neui_detail::clipboard_get_text_macos(nullptr, 0);
+    if (n <= 0) return neui_clipboard_item_none;
+    std::vector<char> buf(static_cast<size_t>(n));
+    if (neui_detail::clipboard_get_text_macos(buf.data(), n) <= 0)
+      return neui_clipboard_item_none;
+    uint32_t id = s->_clipboard_items.allocate();
+    auto* item = s->_clipboard_items.get(id);
+    if (!item) return neui_clipboard_item_none;
+    item->set_format(NEUI_CLIPBOARD_MIME_TEXT, buf.data(), static_cast<uint32_t>(n));
+    return { id };
+  }
+  static neui_clipboard_item_t NEUI_ABI c_create_item(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    if (!s) return neui_clipboard_item_none;
+    return { s->_clipboard_items.allocate() };
+  }
+  static void NEUI_ABI c_release(neui_session_t session, neui_clipboard_item_t item)
+  {
+    auto* s = get_session(session);
+    if (s) s->_clipboard_items.release(item.id);
+  }
+  static int NEUI_ABI c_write(neui_session_t session, neui_clipboard_item_t item)
+  {
+    auto* s = get_session(session);
+    if (!s) return 0;
+    auto* it = s->_clipboard_items.get(item.id);
+    if (!it || !it->has_format(NEUI_CLIPBOARD_MIME_TEXT)) return 0;
+    int n = it->get_format(NEUI_CLIPBOARD_MIME_TEXT, nullptr, 0);
+    if (n <= 0) return 0;
+    std::vector<char> buf(static_cast<size_t>(n));
+    it->get_format(NEUI_CLIPBOARD_MIME_TEXT, buf.data(), n);
+    uint32_t length = static_cast<uint32_t>(n);
+    if (length > 0 && buf[length - 1] == '\0') length -= 1;  // drop terminator
+    return neui_detail::clipboard_set_text_macos(buf.data(), length) ? 1 : 0;
+  }
+  static int NEUI_ABI c_item_set_format(neui_session_t session, neui_clipboard_item_t item,
+                                         const char* mime, const void* data, uint32_t length)
+  {
+    auto* s = get_session(session);
+    if (!s || !mime) return 0;
+    if (strcmp(mime, NEUI_CLIPBOARD_MIME_TEXT) != 0) return 0;  // v1: text only
+    auto* it = s->_clipboard_items.get(item.id);
+    if (!it) return 0;
+    it->set_format(mime, data, length);
+    return 1;
+  }
+  static int NEUI_ABI c_item_get_format(neui_session_t session, neui_clipboard_item_t item,
+                                         const char* mime, void* buf, int buflen)
+  {
+    auto* s = get_session(session);
+    if (!s || !mime) return -1;
+    auto* it = s->_clipboard_items.get(item.id);
+    if (!it) return -1;
+    return it->get_format(mime, buf, buflen);
+  }
+  static bool NEUI_ABI c_item_has_format(neui_session_t session, neui_clipboard_item_t item,
+                                          const char* mime)
+  {
+    auto* s = get_session(session);
+    if (!s || !mime) return false;
+    auto* it = s->_clipboard_items.get(item.id);
+    return it && it->has_format(mime);
+  }
 
   neui_clipboard_api_t clipboard_api = {
     NEUI_VERSION,
@@ -1213,8 +1375,50 @@ namespace macos_host
     c_item_set_format, c_item_get_format, c_item_has_format,
   };
 
-  static int NEUI_ABI cmd_invoke_focused(neui_session_t, uint32_t)              { return 0; }
-  static int NEUI_ABI cmd_invoke        (neui_session_t, neui_widget_t, uint32_t) { return 0; }
+  // Route a built-in command (NEUI_CMD_*) to the key window's first
+  // responder via AppKit's standard editing actions. cut/copy/paste/
+  // select-all/delete map to NSResponder/NSText selectors; undo/redo go
+  // through the responder's NSUndoManager. Returns true if something handled
+  // it. Non-static so the menu-pick router in window.mm can call it.
+  // Mirror of the win32 host's Session::invoke_focused_command.
+  bool invoke_focused_command_macos(uint32_t cmd)
+  {
+    NSWindow* win = [NSApp keyWindow];
+    if (!win) return false;
+
+    if (cmd == NEUI_CMD_UNDO || cmd == NEUI_CMD_REDO) {
+      NSResponder* r = win.firstResponder;
+      NSUndoManager* um = nil;
+      if (r && [r respondsToSelector:@selector(undoManager)])
+        um = [(id)r undoManager];
+      if (!um) return false;
+      if (cmd == NEUI_CMD_UNDO) { if (!um.canUndo) return false; [um undo]; return true; }
+      else                      { if (!um.canRedo) return false; [um redo]; return true; }
+    }
+
+    SEL sel = nil;
+    switch (cmd) {
+      case NEUI_CMD_CUT:        sel = @selector(cut:);       break;
+      case NEUI_CMD_COPY:       sel = @selector(copy:);      break;
+      case NEUI_CMD_PASTE:      sel = @selector(paste:);     break;
+      case NEUI_CMD_SELECT_ALL: sel = @selector(selectAll:); break;
+      case NEUI_CMD_DELETE:     sel = @selector(delete:);    break;
+      default: return false;  // NONE / unknown / >= USER_BASE: client's job
+    }
+    return [NSApp sendAction:sel to:nil from:nil] ? true : false;
+  }
+
+  static int NEUI_ABI cmd_invoke_focused(neui_session_t /*session*/, uint32_t cmd)
+  {
+    return invoke_focused_command_macos(cmd) ? 1 : 0;
+  }
+  static int NEUI_ABI cmd_invoke(neui_session_t session, neui_widget_t widget, uint32_t cmd)
+  {
+    // Focus the target widget, then run the command against the now-current
+    // first responder (mirrors the win32 host's invoke_command).
+    w_set_focus(session, widget);
+    return invoke_focused_command_macos(cmd) ? 1 : 0;
+  }
 
   neui_commands_api_t commands_api = {
     NEUI_VERSION,

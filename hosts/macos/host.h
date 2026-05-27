@@ -88,6 +88,10 @@ namespace macos_host
       std::string text;
       void*       userdata  = nullptr;
       bool        enabled   = true;
+      // Menubar items only: a built-in command (NEUI_CMD_*) bound via
+      // tree->set_menu_cmd. On activation, the menu pick routes this to the
+      // focused widget first; 0 = no binding (client gets TREE_ITEM_ACTIVATED).
+      uint32_t    menu_cmd  = 0;
     };
     std::unordered_map<uint32_t, TreeNode> tree_items;
     std::vector<uint32_t>                  tree_items_ordered;
@@ -136,6 +140,11 @@ namespace macos_host
     // upload happens lazily inside the painter draw_asset thunk.
     // Released on session destroy via clear().
     MacOSAssetManager     _asset_manager;
+
+    // Session-scoped clipboard item store backing the item-based half of
+    // NEUI_API_CLIPBOARD (read / create_item / write / item_*_format).
+    // v1 round-trips text/plain only. Mirror of the win32 host.
+    neui_detail::ClipboardItemStore _clipboard_items;
   };
 
   // Process-wide session registry (defined in host.mm). Slot index + 1 is
