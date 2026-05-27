@@ -276,9 +276,14 @@ macOS:
 
 ## Deferred Issues
 
+**win32 ↔ macOS native hosts are at functional parity** (events, CUSTOMDRAW input, focus + creation-order Tab, layout, popup menus, routed commands, clipboard text + item API, IMAGE via the asset manager, enabled/disabled, fonts). Two small macOS-only divergences remain:
+
+- **KNOB is not a keyboard tab-stop on macOS** - win32 gives it `WS_TABSTOP`; the macOS `NSView` refuses first responder so Tab skips it (CUSTOMDRAW is a tab-stop on both). Needs the KNOB made focusable + arrow-key value handling.
+- **macOS Tab participation follows the system Full-Keyboard-Access setting** - the traversal *order* matches win32 (widget-creation order via `rebuild_key_view_loop_macos`), but *which* control types Tab visits beyond text fields / lists is OS policy (buttons / checkboxes / sliders only when FKA is on), whereas win32 always visits every `WS_TABSTOP`. Hand-roll Tab (cf. xpl `focus_next`) for fully deterministic cross-platform traversal.
+
 - Tier B focus parity (xpl proxy HWND per widget for UIAutomation / accessibility on Windows; NSAccessibility seam on macOS).
 - Custom clipboard formats (HTML / image); v1 only routes `text/plain` (API shape forward-compatible).
-- Multi-level redo on win32 host - `NEUI_CMD_REDO` maps to `EM_UNDO` (toggle, single-level). Use xpl text widgets for multi-level via `EditHistory`.
+- Multi-level redo on win32 host - `NEUI_CMD_REDO` maps to `EM_UNDO` (toggle, single-level). macOS native routes REDO through `NSUndoManager` (multi-level) and xpl text widgets use `EditHistory` (multi-level); only the win32 native path is single-level.
 - Multi-session palette correctness - `active_palette_override_ptr` is process-wide (last-set-wins). Fine for single-session.
 - Compound layer kinds beyond `text` / `asset`: `rect` / `path` / `group` (the last unlocks nested transform scopes). Template format specs (`{key:.2f}`). Declarative interactivity (per-layer hit targets, drag-to-attr bindings) - v1 routes input through CUSTOMDRAW's normal MOUSE_* path. Asset-layer `tint` (ARGB multiplier) reserved but not wired.
 - Native blocking modal (Cocoa `runModalForWindow`, Win32 `DialogBoxIndirect`). Current non-blocking modal matches the event-loop shape.

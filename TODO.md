@@ -4,6 +4,33 @@ Running list of open work. Items are terse; design rationale lives in
 `CLAUDE.md` or in `plans/` files. Shipped work is tracked in git, not
 here.
 
+## Host parity (win32 ↔ macOS)
+
+The win32 and macOS native hosts are at **functional parity**. Shipped
+on both: event dispatch (full mouse / key / focus / resize), CUSTOMDRAW
+mouse + keyboard, `set_focus` + Tab traversal (creation order), layout
+(`set_pos` / `set_size` / `hide` / tree traversal), blocking
+`popup_menu` + KNOB right-click reset, routed commands +
+`tree->set_menu_cmd`, clipboard text + item API, `NEUI_W_IMAGE` via the
+shared asset manager, enabled/disabled, and fonts (cg backend font
+stack + native `NSFont`). Two small macOS-only divergences remain:
+
+- **KNOB is not a keyboard tab-stop on macOS.** On win32 a KNOB carries
+  `WS_TABSTOP`; on macOS its `NSView` refuses first responder, so Tab
+  skips it (CUSTOMDRAW is a tab-stop on both). Closing it needs the KNOB
+  made focusable + arrow-key value handling.
+- **macOS Tab participation follows the system "Full Keyboard Access"
+  setting.** The traversal *order* matches win32 (widget-creation
+  order), but *which* control types Tab visits beyond text fields /
+  lists is OS policy - buttons / checkboxes / sliders join only when
+  Full Keyboard Access is on, whereas win32 always visits every
+  `WS_TABSTOP`. Hand-roll Tab (like the xpl host's `focus_next`) if
+  fully deterministic cross-platform traversal is required.
+
+(Remaining cross-platform gaps below - native blocking modal, custom
+clipboard formats, Tier B accessibility - are deferred symmetrically on
+*both* hosts, not macOS-only.)
+
 ## Audio-plugin / drawable framework
 
 Path toward asset-driven, fully skinnable plugin controls. Each entry
