@@ -45,27 +45,45 @@ extern "C" {
 #define NEUI_COMPOUND_FILL (-1)
 
 // Layer state filter bits. A layer with NEUI_PROP_SHOW_WHEN = 0 (default)
-// is painted in every state. A non-zero mask gates the layer behind the
-// widget's current state: paint only if (current_state & show_when) != 0.
+// is painted in every state. Otherwise the mask is an AND filter across
+// three axes (enabled, hovered, pressed): each axis can require the
+// positive bit, the negated bit, or neither (don't care).
 //
-// The current_state composed each paint always contains exactly one of
-// ENABLED / DISABLED (mirrors widgets->get_enabled), and optionally
-// HOVERED (mouse cursor inside the widget rect) and / or PRESSED (mouse
-// button was pressed on the widget and not yet released - capture-style,
-// stays set when the cursor leaves while held).
+// The visibility rule is:
+//   layer visible iff (show_when & ~current_state) == 0
+// i.e. every bit set in show_when must be present in current_state.
 //
-// Reacts to internal hover / press / enabled detection only; independent
-// of any client event emission.
-#define NEUI_LAYER_STATE_ENABLED  (1u << 0)
-#define NEUI_LAYER_STATE_DISABLED (1u << 1)
-#define NEUI_LAYER_STATE_HOVERED  (1u << 2)
-#define NEUI_LAYER_STATE_PRESSED  (1u << 3)
+// current_state is composed each paint and always carries exactly one
+// bit per axis - the positive bit if the widget is in that state, the
+// NOT_* bit if it isn't. Reacts to internal hover / press / enabled
+// detection only; independent of any client event emission.
+//
+//   ENABLED  / NOT_ENABLED  - mirrors widgets->get_enabled
+//   HOVERED  / NOT_HOVERED  - mouse cursor inside the widget rect
+//   PRESSED  / NOT_PRESSED  - mouse button held since press on this
+//                             widget (capture-style: survives the cursor
+//                             leaving the rect, clears on release)
+//
+// Examples:
+//   show_when = HOVERED                       -> only when hovered
+//   show_when = NOT_ENABLED                   -> only when disabled
+//   show_when = HOVERED | NOT_PRESSED         -> only when hovered AND not pressed
+//   show_when = ENABLED | HOVERED | PRESSED   -> only when all three hold
+//
+// Setting both bits on the same axis (e.g. ENABLED | NOT_ENABLED) is a
+// contradiction and the layer is never visible.
+#define NEUI_LAYER_STATE_ENABLED      (1u << 0)
+#define NEUI_LAYER_STATE_HOVERED      (1u << 1)
+#define NEUI_LAYER_STATE_PRESSED      (1u << 2)
+#define NEUI_LAYER_STATE_NOT_ENABLED  (1u << 3)
+#define NEUI_LAYER_STATE_NOT_HOVERED  (1u << 4)
+#define NEUI_LAYER_STATE_NOT_PRESSED  (1u << 5)
 
 // Prop name for the state filter. Set via set_int. Default value 0
 // means "visible in every state".
 //
 //   compound->set_int(sess, asset, layer, NEUI_PROP_SHOW_WHEN,
-//                     NEUI_LAYER_STATE_HOVERED | NEUI_LAYER_STATE_PRESSED);
+//                     NEUI_LAYER_STATE_HOVERED | NEUI_LAYER_STATE_NOT_PRESSED);
 #define NEUI_PROP_SHOW_WHEN "show_when"
 
   // Layer handle. Internally (asset_id << 16) | slot - same layout as

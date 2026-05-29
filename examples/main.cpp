@@ -872,9 +872,13 @@ int main(int argc, char** argv) {
 
       // State-filtered layers: each "show_when" bitmask gates the layer
       // behind the widget's internal hover / press state with no client
-      // onevent plumbing. Hover-only, press-only, disabled-only - each
-      // appears precisely when its state holds. Independent of event
-      // emission; driven by the framework's hover / press detection.
+      // onevent plumbing. Driven by the framework's hover / press / enabled
+      // detection; independent of event emission. The two layers are
+      // mutually exclusive at the same screen position: HOVER appears
+      // while the cursor is in but the button isn't held; PRESS takes
+      // over while the button is held (capture-style - stays even if
+      // the cursor drags out). HOVERED | NOT_PRESSED is the AND-match
+      // expressing "hovered but not currently pressed".
       auto hover_layer = app.compound->add_layer(sess, cs,
                                                    NEUI_COMPOUND_LAYER_TEXT, 2);
       app.compound->set_anchor(sess, cs, hover_layer,
@@ -884,7 +888,8 @@ int main(int argc, char** argv) {
       app.compound->set_string(sess, cs, hover_layer, "text", "HOVER");
       app.compound->set_float (sess, cs, hover_layer, "size", 11.0f);
       app.compound->set_int   (sess, cs, hover_layer, NEUI_PROP_SHOW_WHEN,
-                                 NEUI_LAYER_STATE_HOVERED);
+                                 NEUI_LAYER_STATE_HOVERED
+                                 | NEUI_LAYER_STATE_NOT_PRESSED);
 
       auto press_layer = app.compound->add_layer(sess, cs,
                                                    NEUI_COMPOUND_LAYER_TEXT, 3);
@@ -892,7 +897,6 @@ int main(int argc, char** argv) {
                                  NEUI_ANCHOR_TOP, NEUI_ANCHOR_TOP);
       app.compound->set_int(sess, cs, press_layer, "width",  NEUI_COMPOUND_FILL);
       app.compound->set_int(sess, cs, press_layer, "height", 18);
-      app.compound->set_int(sess, cs, press_layer, "offset_y", 16);
       app.compound->set_string(sess, cs, press_layer, "text", "PRESS");
       app.compound->set_float (sess, cs, press_layer, "size", 11.0f);
       app.compound->set_int   (sess, cs, press_layer, NEUI_PROP_SHOW_WHEN,
@@ -932,6 +936,13 @@ int main(int argc, char** argv) {
       app.attrs->set_float (sess, cw_c, NEUI_PARAM_VALUE,   0.5f);
       app.attrs->set_float (sess, cw_c, NEUI_PARAM_DEFAULT, 0.5f);
 
+      // Four handlers on one behavior asset bundle the full rotary-knob
+      // input feel: rotational drag (primary gesture), wheel (fine
+      // adjust), arrow keys (keyboard tweak when focused), and right-
+      // click "Reset to default" (the CONTEXT_RESET handler reads
+      // target_default and writes it back). The handlers run in
+      // dispatch order; mouse / wheel / key events each match the first
+      // applicable handler.
       neui_asset_t ba = app.assets->create_behavior(sess);
       app.behavior_asset_h = ba;
       neui_behavior_handler_t hdrag =
@@ -943,6 +954,11 @@ int main(int argc, char** argv) {
       neui_behavior_handler_t hreset =
         app.behavior->add_handler(sess, ba, NEUI_BEHAVIOR_KIND_CONTEXT_RESET);
 
+      // Shared per-handler config: all four manipulate the same float
+      // attr (NEUI_PARAM_VALUE) clamped to [0, 1]. target_default is
+      // only consulted by CONTEXT_RESET but is harmless on the others.
+      // No client onevent plumbing: the framework writes the attr and
+      // the compound's rotation binding re-renders.
       neui_behavior_handler_t hs[] = { hdrag, hwheel, hkeys, hreset };
       for (auto h : hs) {
         app.behavior->set_string(sess, ba, h, "target",         NEUI_PARAM_VALUE);
@@ -950,6 +966,11 @@ int main(int argc, char** argv) {
         app.behavior->set_float (sess, ba, h, "min", 0.0f);
         app.behavior->set_float (sess, ba, h, "max", 1.0f);
       }
+      // Per-handler tuning. Wheel `step` is per-notch (Win32 maps
+      // WHEEL_DELTA via SPI_GETWHEELSCROLLLINES, so one physical notch
+      // advances by step * lines_per_notch). Key `step` is per arrow
+      // tap; `coarse` is the Shift+arrow step. Values picked to feel
+      // similar to the native KNOB widget's drag sensitivity.
       app.behavior->set_float(sess, ba, hwheel, "step",   0.02f);
       app.behavior->set_float(sess, ba, hkeys,  "step",   0.01f);
       app.behavior->set_float(sess, ba, hkeys,  "coarse", 0.10f);

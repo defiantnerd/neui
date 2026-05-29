@@ -474,12 +474,15 @@ namespace neui_detail
   }
 
   // Compose a NEUI_LAYER_STATE_* bitmask from the three input booleans.
-  // current_state always carries exactly one of ENABLED / DISABLED.
+  // Always carries exactly one bit per axis (positive or NOT_* form) so
+  // the visibility check `(show_when & ~state_mask) == 0` lets a layer
+  // require either side of any axis via its show_when bits.
   inline uint32_t compose_widget_state(bool enabled, bool hovered, bool pressed)
   {
-    uint32_t mask = enabled ? NEUI_LAYER_STATE_ENABLED : NEUI_LAYER_STATE_DISABLED;
-    if (hovered) mask |= NEUI_LAYER_STATE_HOVERED;
-    if (pressed) mask |= NEUI_LAYER_STATE_PRESSED;
+    uint32_t mask = 0;
+    mask |= enabled ? NEUI_LAYER_STATE_ENABLED : NEUI_LAYER_STATE_NOT_ENABLED;
+    mask |= hovered ? NEUI_LAYER_STATE_HOVERED : NEUI_LAYER_STATE_NOT_HOVERED;
+    mask |= pressed ? NEUI_LAYER_STATE_PRESSED : NEUI_LAYER_STATE_NOT_PRESSED;
     return mask;
   }
 

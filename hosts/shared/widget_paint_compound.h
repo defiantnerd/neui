@@ -59,7 +59,9 @@ namespace neui_detail
                                      const AttrBag* bag,
                                      uint32_t state_mask)
   {
-    if (L.show_when != 0u && (L.show_when & state_mask) == 0u) return;
+    // AND-filter: every bit set in show_when must be present in state_mask.
+    // show_when == 0 (default) always passes.
+    if ((L.show_when & ~state_mask) != 0u) return;
     float a = effective_float(L, "alpha", L.alpha, bag);
     if (a <= 0.0f) return;
     if (a > 1.0f)  a = 1.0f;
