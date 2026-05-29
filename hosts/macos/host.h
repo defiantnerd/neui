@@ -40,6 +40,13 @@ namespace macos_host
     // Stored only - no visual / input effect on macOS yet (TODO: wire
     // NSControl setEnabled: / per-painted-view dim).
     bool enabled     = true;
+    // Hover / press flags consumed by CUSTOMDRAW compound layer state
+    // filters (NEUI_LAYER_STATE_HOVERED / _PRESSED). Set by
+    // NEUINativePaintedView's mouseEntered: / mouseExited: / mouseDown: /
+    // mouseUp:. Native-control views leave these untouched (compound only
+    // attaches to CUSTOMDRAW).
+    bool hovered     = false;
+    bool pressed     = false;
     void*    userdata    = nullptr;
     uint32_t owner_index = 0;
 

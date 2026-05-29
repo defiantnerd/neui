@@ -85,6 +85,13 @@ namespace win32_host {
     uint32_t session_id = 0;   // stored as uint32_t for packing math; wrap as neui_session_t when returning to public API
     uint32_t dpi = 96;
     bool mouse_tracked = false;
+    // Hover / press flags consumed by CUSTOMDRAW compound layer state
+    // filters (NEUI_LAYER_STATE_HOVERED / _PRESSED). Set by PaintedWndProc
+    // on WM_MOUSEMOVE / WM_MOUSELEAVE / WM_LBUTTONDOWN / WM_LBUTTONUP.
+    // Native-control HWNDs leave these untouched (compound only attaches
+    // to CUSTOMDRAW).
+    bool hovered = false;
+    bool pressed = false;
     bool has_subclass = false;
     wchar_t pending_surrogate = 0;  // high surrogate waiting for its low pair in WM_CHAR
     uint32_t widget_id = 0;    // stored as uint32_t for packing math; wrap as neui_widget_t when returning to public API

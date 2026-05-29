@@ -648,6 +648,13 @@ namespace win32_host
                             x, y, w, h);
   }
 
+  // Invalidate the widget's HWND if it hosts a CUSTOMDRAW compound whose
+  // layers depend on state (NEUI_LAYER_STATE_*). Called from PaintedWndProc
+  // on hover / press transitions so the compound repaints to swap state-
+  // filtered layers in / out. Defined non-static so window.cpp can reach
+  // it; forward-declared there.
+  void w32_invalidate_if_state_filtered_compound(WidgetData& wd);
+
   // Resolve a CUSTOMDRAW widget's compound asset to its CompoundAsset
   // storage. Returns nullptr if no compound is attached or the slot has
   // been released. Caller falls back to WIDGET_PAINT in that case.
@@ -660,6 +667,14 @@ namespace win32_host
     auto* e = wd.session->_asset_manager.get_slot(a.id & 0xffff);
     if (!e || e->kind != NEUI_ASSET_KIND_COMPOUND || !e->compound) return nullptr;
     return e->compound.get();
+  }
+
+  void w32_invalidate_if_state_filtered_compound(WidgetData& wd)
+  {
+    auto* ca = resolve_widget_compound_w32(wd);
+    if (!ca) return;
+    if (!neui_detail::compound_has_state_filters(*ca)) return;
+    if (wd.hwnd) InvalidateRect(wd.hwnd, nullptr, FALSE);
   }
 
   static void paint_customdraw_w32(neui_render_backend_t* backend,
@@ -685,8 +700,10 @@ namespace win32_host
       // z=0 child slot is irreducibly fixed at "after the parent paint" -
       // both the below and above layers land before child HWNDs render.
       const neui_detail::AttrBag* bag = neui_detail::attrs_readonly(wd.attrs);
-      neui_detail::paint_compound_below(&painter, *ca, w, h, bag);
-      neui_detail::paint_compound_above(&painter, *ca, w, h, bag);
+      uint32_t state_mask = neui_detail::compose_widget_state(
+                              wd.enabled, wd.hovered, wd.pressed);
+      neui_detail::paint_compound_below(&painter, *ca, w, h, bag, state_mask);
+      neui_detail::paint_compound_above(&painter, *ca, w, h, bag, state_mask);
     } else {
       neui_event_t ev{};
       ev.type = NEUI_EVENT_WIDGET_PAINT;

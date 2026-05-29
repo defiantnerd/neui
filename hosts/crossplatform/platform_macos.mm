@@ -172,7 +172,7 @@ void wake_app_event_pump()
    || type == NEUI_EVENT_MOUSE_RBUTTON_DOWN) {
     if (type == NEUI_EVENT_MOUSE_BUTTON_DOWN) {
       session->set_focus(hit);
-      session->_pressed_widget = hit;
+      session->set_pressed(hit);
     }
     target = hit;
   } else if (type == NEUI_EVENT_MOUSE_MOVE) {
@@ -225,7 +225,7 @@ void wake_app_event_pump()
   float ly = (float)p.y;
   uint32_t hit     = session->widget_at(lx, ly, widget_index);
   uint32_t pressed = session->_pressed_widget;
-  session->_pressed_widget = 0;
+  session->set_pressed(0);
 
   if (hit == 0) return;
   auto* hw = session->get_widget(hit);

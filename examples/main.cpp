@@ -869,6 +869,34 @@ int main(int argc, char** argv) {
       // Leave "color" unset - the text layer falls back to the active
       // theme's text_primary colour, so the label stays legible if the
       // user flips the system theme at runtime.
+
+      // State-filtered layers: each "show_when" bitmask gates the layer
+      // behind the widget's internal hover / press state with no client
+      // onevent plumbing. Hover-only, press-only, disabled-only - each
+      // appears precisely when its state holds. Independent of event
+      // emission; driven by the framework's hover / press detection.
+      auto hover_layer = app.compound->add_layer(sess, cs,
+                                                   NEUI_COMPOUND_LAYER_TEXT, 2);
+      app.compound->set_anchor(sess, cs, hover_layer,
+                                 NEUI_ANCHOR_TOP, NEUI_ANCHOR_TOP);
+      app.compound->set_int(sess, cs, hover_layer, "width",  NEUI_COMPOUND_FILL);
+      app.compound->set_int(sess, cs, hover_layer, "height", 18);
+      app.compound->set_string(sess, cs, hover_layer, "text", "HOVER");
+      app.compound->set_float (sess, cs, hover_layer, "size", 11.0f);
+      app.compound->set_int   (sess, cs, hover_layer, NEUI_PROP_SHOW_WHEN,
+                                 NEUI_LAYER_STATE_HOVERED);
+
+      auto press_layer = app.compound->add_layer(sess, cs,
+                                                   NEUI_COMPOUND_LAYER_TEXT, 3);
+      app.compound->set_anchor(sess, cs, press_layer,
+                                 NEUI_ANCHOR_TOP, NEUI_ANCHOR_TOP);
+      app.compound->set_int(sess, cs, press_layer, "width",  NEUI_COMPOUND_FILL);
+      app.compound->set_int(sess, cs, press_layer, "height", 18);
+      app.compound->set_int(sess, cs, press_layer, "offset_y", 16);
+      app.compound->set_string(sess, cs, press_layer, "text", "PRESS");
+      app.compound->set_float (sess, cs, press_layer, "size", 11.0f);
+      app.compound->set_int   (sess, cs, press_layer, NEUI_PROP_SHOW_WHEN,
+                                 NEUI_LAYER_STATE_PRESSED);
     }
 
     // Two CUSTOMDRAW widgets pointing at the same compound asset. Each

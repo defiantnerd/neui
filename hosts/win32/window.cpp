@@ -52,6 +52,11 @@ namespace win32_host
   // a slider's value on double-click.
   void widget_reset_to_default_w32(WidgetData& wd);
 
+  // Defined in widgets.cpp. Declared here so PaintedWndProc can repaint
+  // a CUSTOMDRAW widget when hover / press transitions affect its compound
+  // layer state filters (NEUI_LAYER_STATE_*).
+  void w32_invalidate_if_state_filtered_compound(WidgetData& wd);
+
   // Re-apply system-theme state to a frame. Called from
   // Session::on_theme_changed for every frame in the session;
   // gated internally on NEUI_ATTR_FOLLOW_SYSTEM_THEME so frames that
@@ -300,14 +305,40 @@ namespace win32_host
     }
     case WM_LBUTTONDOWN:
       SetCapture(hwnd);
+      if (wd && !wd->pressed) {
+        wd->pressed = true;
+        w32_invalidate_if_state_filtered_compound(*wd);
+      }
       if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
       return 0;
     case WM_LBUTTONUP:
       if (GetCapture() == hwnd) ReleaseCapture();
+      if (wd && wd->pressed) {
+        wd->pressed = false;
+        w32_invalidate_if_state_filtered_compound(*wd);
+      }
+      if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
+      return 0;
+    case WM_MOUSEMOVE:
+      if (wd && !wd->hovered) {
+        TRACKMOUSEEVENT tme = {};
+        tme.cbSize    = sizeof(tme);
+        tme.dwFlags   = TME_LEAVE;
+        tme.hwndTrack = hwnd;
+        TrackMouseEvent(&tme);
+        wd->hovered = true;
+        w32_invalidate_if_state_filtered_compound(*wd);
+      }
+      if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
+      return 0;
+    case WM_MOUSELEAVE:
+      if (wd && wd->hovered) {
+        wd->hovered = false;
+        w32_invalidate_if_state_filtered_compound(*wd);
+      }
       if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
       return 0;
     case WM_LBUTTONDBLCLK:
-    case WM_MOUSEMOVE:
     case WM_MOUSEWHEEL:
     case WM_RBUTTONDOWN:
     case WM_RBUTTONUP:

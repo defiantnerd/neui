@@ -49,11 +49,31 @@ is a real initiative, not trivial; together they form one programme.
   them without it. Build the abstraction alongside the first one.
 - **Compound layer kinds beyond v1.** `rect` / `path` / `group` (the
   last unlocks nested transform scopes for a tree of layers).
-  Format specs in templates (`{key:.2f}`). Declarative interactivity
-  (per-layer hit targets, drag-to-attr bindings) - v1 routes input
-  through CUSTOMDRAW's normal MOUSE_* path. Asset-layer `tint`
+  Format specs in templates (`{key:.2f}`). Asset-layer `tint`
   (ARGB multiplier) reserved in docs but not yet wired through the
   backends.
+- **Behavior follow-ups.** Declarative interactivity v1 shipped as
+  `NEUI_ASSET_KIND_BEHAVIOR` (drag V/H/rotational/biaxial, wheel,
+  key step, click toggle/cycle, context reset) - one asset bundles
+  multiple handlers + reuses compound's 9-pt anchor system for
+  per-region hit zones. Open extensions:
+  - **Detent / plateau modifier** on drag handlers. `set_string(h,
+    "detents", "0.5:0.02:0.04")` (`value:pull_radius:release`); sticky
+    values that resist near specific points without quantizing
+    everywhere. Distinct from `steps`. Slot it into
+    `behavior_runtime.h` between range-clamp and step-snap.
+  - **Pen pressure / tilt** through the dispatch (needs the platform
+    layer to surface `WM_POINTER*` / `NSEventTypePressure` first; the
+    dispatch is additive when the data lands).
+  - **Cursor hint** on handlers - `cursor` string prop is parsed but
+    no-op in v1. Needs a public `set_cursor` seam first.
+  - **`bind`-style attr indirection on handler props** (min/max as
+    bound attrs). v1 takes static numbers.
+  - **WHEEL modifier-fine.** `neui_event_wheel_t` carries no
+    `buttonmap` today, so `fine_modifier` is a no-op on WHEEL even
+    though it works on drag + key. Add modifier bits to the wheel
+    event payload (or factor wheel through the mouse struct) before
+    wiring the fine path in `behavior_runtime.h`.
 
 ## Widgets
 

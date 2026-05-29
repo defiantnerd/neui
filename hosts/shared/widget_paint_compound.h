@@ -56,8 +56,10 @@ namespace neui_detail
   inline void paint_compound_layer(neui_painter_t* p,
                                      const CompoundLayer& L,
                                      float parent_w, float parent_h,
-                                     const AttrBag* bag)
+                                     const AttrBag* bag,
+                                     uint32_t state_mask)
   {
+    if (L.show_when != 0u && (L.show_when & state_mask) == 0u) return;
     float a = effective_float(L, "alpha", L.alpha, bag);
     if (a <= 0.0f) return;
     if (a > 1.0f)  a = 1.0f;
@@ -158,7 +160,8 @@ namespace neui_detail
                                     const CompoundAsset& ca,
                                     float widget_w, float widget_h,
                                     const AttrBag* bag,
-                                    bool paint_above_children)
+                                    bool paint_above_children,
+                                    uint32_t state_mask)
   {
     auto slots = compound_sorted_slots(ca);
     for (uint32_t slot : slots) {
@@ -166,24 +169,31 @@ namespace neui_detail
       if (!L) continue;
       bool is_above = (L->z >= 0);
       if (is_above != paint_above_children) continue;
-      paint_compound_layer(p, *L, widget_w, widget_h, bag);
+      paint_compound_layer(p, *L, widget_w, widget_h, bag, state_mask);
     }
   }
 
+  // state_mask is a NEUI_LAYER_STATE_* bitmask describing the widget's
+  // current state (compose with compose_widget_state). Pass
+  // NEUI_LAYER_STATE_ENABLED for callers that don't care about state
+  // filtering - layers with show_when == 0 (the default) are visible in
+  // every state.
   inline void paint_compound_below(neui_painter_t* p,
                                      const CompoundAsset& ca,
                                      float widget_w, float widget_h,
-                                     const AttrBag* bag)
+                                     const AttrBag* bag,
+                                     uint32_t state_mask)
   {
-    paint_compound_pass(p, ca, widget_w, widget_h, bag, /*above*/false);
+    paint_compound_pass(p, ca, widget_w, widget_h, bag, /*above*/false, state_mask);
   }
 
   inline void paint_compound_above(neui_painter_t* p,
                                      const CompoundAsset& ca,
                                      float widget_w, float widget_h,
-                                     const AttrBag* bag)
+                                     const AttrBag* bag,
+                                     uint32_t state_mask)
   {
-    paint_compound_pass(p, ca, widget_w, widget_h, bag, /*above*/true);
+    paint_compound_pass(p, ca, widget_w, widget_h, bag, /*above*/true, state_mask);
   }
 
 } // namespace neui_detail

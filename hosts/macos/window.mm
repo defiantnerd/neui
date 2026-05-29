@@ -98,6 +98,23 @@ namespace macos_host {
     [v setNeedsDisplay:YES];
   }
 
+  // Invalidate the painted view if its compound has state-filtered layers.
+  // Called from NEUINativePaintedView's hover / press transitions so the
+  // compound repaints when NEUI_LAYER_STATE_* changes.
+  static void macos_invalidate_if_state_filtered_compound(WidgetData* wd)
+  {
+    if (!wd || !wd->session) return;
+    if (wd->compound_asset.id == asset_none.id) return;
+    if (((wd->compound_asset.id >> 16) & 0xffff)
+          != (wd->session->session_id() & 0xffff)) return;
+    auto* e = wd->session->_asset_manager.get_slot(wd->compound_asset.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_COMPOUND || !e->compound) return;
+    if (!neui_detail::compound_has_state_filters(*e->compound)) return;
+    if (!wd->native_control) return;
+    NSView* v = (__bridge NSView*)wd->native_control;
+    [v setNeedsDisplay:YES];
+  }
+
   static void macos_behavior_emit_attr_changed(void* host_data,
                                                  const char* attr_key, float value)
   {
@@ -543,10 +560,14 @@ static float neui_snap_to_steps(float v, int steps)
 
     if (ca) {
       const neui_detail::AttrBag* bag = neui_detail::attrs_readonly(wd->attrs);
+      uint32_t state_mask = neui_detail::compose_widget_state(
+                              wd->enabled, wd->hovered, wd->pressed);
       neui_detail::paint_compound_below(&painter, *ca,
-                                          (float)sz.width, (float)sz.height, bag);
+                                          (float)sz.width, (float)sz.height, bag,
+                                          state_mask);
       neui_detail::paint_compound_above(&painter, *ca,
-                                          (float)sz.width, (float)sz.height, bag);
+                                          (float)sz.width, (float)sz.height, bag,
+                                          state_mask);
     } else if (wd->emit_events) {
       bool focused = (self.window.isKeyWindow
                        && self.window.firstResponder == self);
@@ -709,11 +730,19 @@ static float neui_snap_to_steps(float v, int steps)
 - (void)mouseEntered:(NSEvent*)event
 {
   if (![self customDrawWantsInput]) { [super mouseEntered:event]; return; }
+  if (auto* wd = macos_host::widget_for_id(widget_id); wd && !wd->hovered) {
+    wd->hovered = true;
+    macos_host::macos_invalidate_if_state_filtered_compound(wd);
+  }
   [self dispatchMouse:NEUI_EVENT_MOUSE_ENTER at:[self localPoint:event] buttonmap:0];
 }
 - (void)mouseExited:(NSEvent*)event
 {
   if (![self customDrawWantsInput]) { [super mouseExited:event]; return; }
+  if (auto* wd = macos_host::widget_for_id(widget_id); wd && wd->hovered) {
+    wd->hovered = false;
+    macos_host::macos_invalidate_if_state_filtered_compound(wd);
+  }
   [self dispatchMouse:NEUI_EVENT_MOUSE_LEAVE at:[self localPoint:event] buttonmap:0];
 }
 - (void)mouseMoved:(NSEvent*)event
@@ -756,6 +785,10 @@ static float neui_snap_to_steps(float v, int steps)
     // Grab keyboard focus so subsequent keyDown / keyUp route here (and the
     // paint pass reports focused = YES). NSView doesn't auto-focus on click.
     [self.window makeFirstResponder:self];
+    if (auto* wd = macos_host::widget_for_id(widget_id); wd && !wd->pressed) {
+      wd->pressed = true;
+      macos_host::macos_invalidate_if_state_filtered_compound(wd);
+    }
     neui_event_type_t t = (event.clickCount >= 2)
       ? NEUI_EVENT_MOUSE_BUTTON_DBLCLICK : NEUI_EVENT_MOUSE_BUTTON_DOWN;
     [self dispatchMouse:t at:[self localPoint:event] buttonmap:1];
@@ -799,6 +832,10 @@ static float neui_snap_to_steps(float v, int steps)
 {
   if ([self isKnob]) { dragging = false; return; }
   if ([self customDrawWantsInput]) {
+    if (auto* wd = macos_host::widget_for_id(widget_id); wd && wd->pressed) {
+      wd->pressed = false;
+      macos_host::macos_invalidate_if_state_filtered_compound(wd);
+    }
     [self dispatchMouse:NEUI_EVENT_MOUSE_BUTTON_UP at:[self localPoint:event] buttonmap:0];
     return;
   }

@@ -629,7 +629,7 @@ namespace xpl_host
 
       // Focus always follows the primary click, even without emit_events.
       wud->session->set_focus(hit);
-      wud->session->_pressed_widget = hit;
+      wud->session->set_pressed(hit);
 
       SetCapture(hwnd);  // keep getting mouse messages if cursor leaves the window
 
@@ -693,7 +693,7 @@ namespace xpl_host
 
       uint32_t hit     = wud->session->widget_at(lx, ly, wud->widget_index);
       uint32_t pressed = wud->session->_pressed_widget;
-      wud->session->_pressed_widget = 0;
+      wud->session->set_pressed(0);
 
       if (hit != 0) {
         auto* hw = wud->session->get_widget(hit);

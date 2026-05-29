@@ -68,6 +68,9 @@ namespace neui_detail
     int   width    = NEUI_COMPOUND_FILL;
     int   height   = NEUI_COMPOUND_FILL;
     float alpha    = 1.0f;
+    // Layer state filter (NEUI_LAYER_STATE_* bitmask). 0 = always visible.
+    // Non-zero = paint only when (widget_state & show_when) != 0.
+    uint32_t show_when = 0;
 
     // Text-layer fields.
     std::string              text_template;       // raw source (the {key} string)
@@ -373,6 +376,7 @@ namespace neui_detail
     if (prop == "offset_y") { L.offset_y = v; return true; }
     if (prop == "width")    { L.width    = v; return true; }
     if (prop == "height")   { L.height   = v; return true; }
+    if (prop == "show_when"){ L.show_when = static_cast<uint32_t>(v); return true; }
     if (L.kind == NEUI_COMPOUND_LAYER_TEXT) {
       if (prop == "color")    {
         L.text_color     = static_cast<uint32_t>(v);
@@ -454,6 +458,29 @@ namespace neui_detail
   inline void apply_unbind(CompoundLayer& L, const std::string& prop)
   {
     L.bindings.erase(prop);
+  }
+
+  // ---- State filter introspection -----------------------------------------
+
+  // Returns true if any layer has a non-zero show_when filter. Used by the
+  // host event paths to decide whether hover / press transitions need to
+  // invalidate the widget. Cheap (linear scan of a small layer table).
+  inline bool compound_has_state_filters(const CompoundAsset& ca)
+  {
+    for (const auto& layer : ca.layers) {
+      if (layer && layer->show_when != 0u) return true;
+    }
+    return false;
+  }
+
+  // Compose a NEUI_LAYER_STATE_* bitmask from the three input booleans.
+  // current_state always carries exactly one of ENABLED / DISABLED.
+  inline uint32_t compose_widget_state(bool enabled, bool hovered, bool pressed)
+  {
+    uint32_t mask = enabled ? NEUI_LAYER_STATE_ENABLED : NEUI_LAYER_STATE_DISABLED;
+    if (hovered) mask |= NEUI_LAYER_STATE_HOVERED;
+    if (pressed) mask |= NEUI_LAYER_STATE_PRESSED;
+    return mask;
   }
 
   // ---- Paint-order iteration -----------------------------------------------

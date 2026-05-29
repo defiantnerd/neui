@@ -44,6 +44,30 @@ extern "C" {
 // Sentinel for "match the widget's dimension on this axis."
 #define NEUI_COMPOUND_FILL (-1)
 
+// Layer state filter bits. A layer with NEUI_PROP_SHOW_WHEN = 0 (default)
+// is painted in every state. A non-zero mask gates the layer behind the
+// widget's current state: paint only if (current_state & show_when) != 0.
+//
+// The current_state composed each paint always contains exactly one of
+// ENABLED / DISABLED (mirrors widgets->get_enabled), and optionally
+// HOVERED (mouse cursor inside the widget rect) and / or PRESSED (mouse
+// button was pressed on the widget and not yet released - capture-style,
+// stays set when the cursor leaves while held).
+//
+// Reacts to internal hover / press / enabled detection only; independent
+// of any client event emission.
+#define NEUI_LAYER_STATE_ENABLED  (1u << 0)
+#define NEUI_LAYER_STATE_DISABLED (1u << 1)
+#define NEUI_LAYER_STATE_HOVERED  (1u << 2)
+#define NEUI_LAYER_STATE_PRESSED  (1u << 3)
+
+// Prop name for the state filter. Set via set_int. Default value 0
+// means "visible in every state".
+//
+//   compound->set_int(sess, asset, layer, NEUI_PROP_SHOW_WHEN,
+//                     NEUI_LAYER_STATE_HOVERED | NEUI_LAYER_STATE_PRESSED);
+#define NEUI_PROP_SHOW_WHEN "show_when"
+
   // Layer handle. Internally (asset_id << 16) | slot - same layout as
   // neui_asset_t / neui_widget_t. Slot-reused on remove_layer.
   typedef struct neui_compound_layer {
@@ -134,6 +158,9 @@ extern "C" {
     //     "width"     int     px (NEUI_COMPOUND_FILL = match widget width)
     //     "height"    int     px (NEUI_COMPOUND_FILL = match widget height)
     //     "alpha"     float   0..1 opacity; 0 short-circuits the layer
+    //     "show_when" int     bitmask of NEUI_LAYER_STATE_* flags; 0 (default)
+    //                         = visible always; non-zero = visible only when
+    //                         (current_state & show_when) != 0.
 
     void (NEUI_ABI *set_int)   (neui_session_t session, neui_asset_t asset,
                                   neui_compound_layer_t layer,

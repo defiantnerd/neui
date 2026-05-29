@@ -22,6 +22,27 @@
 
 namespace xpl_host
 {
+  // Forward decl - definition lives next to the compound paint code.
+  static neui_detail::CompoundAsset* resolve_widget_compound(Session* s,
+                                                              neui_asset_t a);
+
+  // Invalidate the widget's owning frame if the widget hosts a CUSTOMDRAW
+  // compound whose layers depend on state (NEUI_LAYER_STATE_* via show_when).
+  // Called from set_hovered / set_pressed on each side of a transition so
+  // the compound repaints to swap state-filtered layers in / out.
+  static void invalidate_if_state_filtered_compound(Session* s, uint32_t widget_idx)
+  {
+    if (!s || widget_idx == 0 || !s->_widgets.exists(widget_idx)) return;
+    auto& wd = s->_widgets[widget_idx];
+    auto* cd = dynamic_cast<CustomDrawWidget*>(&wd);
+    if (!cd) return;
+    auto* ca = resolve_widget_compound(s, cd->compound_asset);
+    if (!ca) return;
+    if (!neui_detail::compound_has_state_filters(*ca)) return;
+    void* frame = s->find_parent_native_handle(widget_idx);
+    if (frame) platform_invalidate(frame);
+  }
+
   // ---------------------------------------------------------------------------
   // UTF-8 helpers (byte-string cursor navigation)
 
@@ -560,8 +581,10 @@ namespace xpl_host
   {
     if (new_idx == _hovered_widget) return;
 
-    if (_hovered_widget != 0 && _widgets.exists(_hovered_widget)) {
-      auto& wd = _widgets[_hovered_widget];
+    uint32_t old_idx = _hovered_widget;
+    if (old_idx != 0 && _widgets.exists(old_idx)) {
+      auto& wd = _widgets[old_idx];
+      wd.hovered = false;
       if (wd.emit_events) {
         neui_event_t ev = {};
         ev.type = NEUI_EVENT_MOUSE_LEAVE;
@@ -574,6 +597,7 @@ namespace xpl_host
 
     if (new_idx != 0 && _widgets.exists(new_idx)) {
       auto& wd = _widgets[new_idx];
+      wd.hovered = true;
       if (wd.emit_events) {
         neui_event_t ev = {};
         ev.type = NEUI_EVENT_MOUSE_ENTER;
@@ -581,6 +605,26 @@ namespace xpl_host
         dispatch_event(&ev);
       }
     }
+
+    invalidate_if_state_filtered_compound(this, old_idx);
+    invalidate_if_state_filtered_compound(this, new_idx);
+  }
+
+  void Session::set_pressed(uint32_t new_idx)
+  {
+    if (new_idx == _pressed_widget) return;
+
+    uint32_t old_idx = _pressed_widget;
+    if (old_idx != 0 && _widgets.exists(old_idx))
+      _widgets[old_idx].pressed = false;
+
+    _pressed_widget = new_idx;
+
+    if (new_idx != 0 && _widgets.exists(new_idx))
+      _widgets[new_idx].pressed = true;
+
+    invalidate_if_state_filtered_compound(this, old_idx);
+    invalidate_if_state_filtered_compound(this, new_idx);
   }
 
   void Session::on_dpi_changed(uint32_t widget_index, uint32_t new_dpi)
@@ -2091,8 +2135,10 @@ namespace xpl_host
     if (auto* ca = resolve_widget_compound(session, compound_asset)) {
       // Compound mode: paint z<0 layers here; z>=0 layers come from
       // paint_after_children below. WIDGET_PAINT is suppressed.
+      uint32_t state_mask = neui_detail::compose_widget_state(enabled, hovered, pressed);
       neui_detail::paint_compound_below(&painter, *ca, fw, fh,
-                                          neui_detail::attrs_readonly(attrs));
+                                          neui_detail::attrs_readonly(attrs),
+                                          state_mask);
     } else {
       neui_event_t ev{};
       ev.type = NEUI_EVENT_WIDGET_PAINT;
@@ -2132,8 +2178,10 @@ namespace xpl_host
     painter.host_token       = session;
     painter.draw_asset_thunk = &xpl_painter_draw_asset_thunk;
 
+    uint32_t state_mask = neui_detail::compose_widget_state(enabled, hovered, pressed);
     neui_detail::paint_compound_above(&painter, *ca, fw, fh,
-                                        neui_detail::attrs_readonly(attrs));
+                                        neui_detail::attrs_readonly(attrs),
+                                        state_mask);
 
     if (backend->pop_clip) backend->pop_clip(ctx);
   }

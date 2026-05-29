@@ -48,6 +48,13 @@ namespace xpl_host
     // (push_alpha(0.5) bracket around paint) and is skipped by widget_at
     // hit-test + focus_next tab traversal. Default true.
     bool enabled     = true;
+    // Mouse-state flags consumed by compound layer state filters
+    // (NEUI_LAYER_STATE_HOVERED / _PRESSED). hovered = cursor is currently
+    // inside this widget's bounds (last set_hovered target). pressed =
+    // a mouse button went down on this widget and hasn't yet released
+    // (capture-style: stays true while cursor moves out, clears on UP).
+    bool hovered     = false;
+    bool pressed     = false;
     void*    userdata  = nullptr;
     uint32_t widget_id = 0;
     std::string text;
@@ -590,6 +597,12 @@ namespace xpl_host
 
     // Update the hovered widget, firing mouse enter/leave events.
     void set_hovered(uint32_t new_idx);
+
+    // Update the captured (pressed) widget. Mirrors set_hovered's role
+    // for the press flag: clears the previous widget's `pressed`, sets
+    // the new widget's `pressed`, and invalidates either side when it
+    // has a compound asset with state-filtered layers.
+    void set_pressed(uint32_t new_idx);
 
     // Popup menu overlay (used by widgets->popup_menu). Blocking - runs a
     // nested message loop until the user picks an item or dismisses.
