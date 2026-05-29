@@ -584,7 +584,19 @@ namespace macos_host
       mark_widget_dirty_for_paint(wd);
     }
     else if (!strcmp(wd.type, NEUI_W_CUSTOMDRAW)) {
-      wd.compound_asset = asset;
+      // Kind-route: BEHAVIOR -> input slot, otherwise -> compound visual slot.
+      // asset_none clears the compound slot (matches the v1 contract for
+      // IMAGE / CUSTOMDRAW).
+      if (asset.id == asset_none.id) {
+        wd.compound_asset = asset_none;
+      } else {
+        auto* entry = s->_asset_manager.get_slot(asset.id & 0xffff);
+        if (entry && entry->kind == NEUI_ASSET_KIND_BEHAVIOR) {
+          wd.behavior_asset = asset;
+        } else {
+          wd.compound_asset = asset;
+        }
+      }
       mark_widget_dirty_for_paint(wd);
     }
     // Other widget types: no-op.
@@ -1533,6 +1545,15 @@ namespace macos_host
     return pack_asset_macos(s->session_id(), slot);
   }
 
+  static neui_asset_t NEUI_ABI a_create_behavior(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    if (!s) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_behavior();
+    if (slot == 0) return asset_none;
+    return pack_asset_macos(s->session_id(), slot);
+  }
+
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
     a_create_bitmap,
@@ -1541,6 +1562,7 @@ namespace macos_host
     a_get_size,
     a_get_kind,
     a_create_compound,
+    a_create_behavior,
   };
 
   // Compound API. Mutators dispatch to the shared mutator helpers in
@@ -1730,6 +1752,112 @@ namespace macos_host
     co_bind,
     co_bind_asset,
     co_unbind,
+  };
+
+  // Behavior API (NEUI_API_BEHAVIOR) - same shape as compound_api.
+  // Mutations don't change paint output, so there's no invalidate walk;
+  // per-write invalidate happens in the dispatch callbacks at run time.
+
+  static neui_detail::BehaviorAsset*
+  resolve_behavior_macos(neui_session_t session, neui_asset_t asset, Session*& out_session)
+  {
+    out_session = nullptr;
+    auto* s = get_session(session);
+    if (!s) return nullptr;
+    if (asset.id == asset_none.id) return nullptr;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return nullptr;
+    auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_BEHAVIOR || !e->behavior) return nullptr;
+    out_session = s;
+    return e->behavior.get();
+  }
+
+  static neui_detail::BehaviorHandler*
+  resolve_behavior_handler_macos(neui_session_t session, neui_asset_t asset,
+                                   neui_behavior_handler_t handler, Session*& out_session)
+  {
+    out_session = nullptr;
+    auto* s = get_session(session);
+    if (!s) return nullptr;
+    if (asset.id == asset_none.id) return nullptr;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return nullptr;
+    uint32_t asset_slot = asset.id & 0xffff;
+    if (neui_detail::behavior_handler_asset_slot(handler) != asset_slot) return nullptr;
+    auto* e = s->_asset_manager.get_slot(asset_slot);
+    if (!e || e->kind != NEUI_ASSET_KIND_BEHAVIOR || !e->behavior) return nullptr;
+    out_session = s;
+    return neui_detail::behavior_get_handler(*e->behavior,
+                                              neui_detail::behavior_handler_slot(handler));
+  }
+
+  static neui_behavior_handler_t NEUI_ABI be_add_handler(neui_session_t session,
+                                                          neui_asset_t asset,
+                                                          neui_behavior_kind_t kind)
+  {
+    Session* s = nullptr;
+    auto* ba = resolve_behavior_macos(session, asset, s);
+    if (!ba) return behavior_handler_none;
+    uint32_t asset_slot = asset.id & 0xffff;
+    uint32_t slot = neui_detail::behavior_add_handler(*ba, kind);
+    return neui_detail::pack_behavior_handler(asset_slot, slot);
+  }
+
+  static void NEUI_ABI be_remove_handler(neui_session_t session, neui_asset_t asset,
+                                          neui_behavior_handler_t handler)
+  {
+    Session* s = nullptr;
+    auto* ba = resolve_behavior_macos(session, asset, s);
+    if (!ba) return;
+    if (neui_detail::behavior_handler_asset_slot(handler) != (asset.id & 0xffff)) return;
+    neui_detail::behavior_remove_handler(*ba, neui_detail::behavior_handler_slot(handler));
+  }
+
+  static void NEUI_ABI be_clear(neui_session_t session, neui_asset_t asset)
+  {
+    Session* s = nullptr;
+    auto* ba = resolve_behavior_macos(session, asset, s);
+    if (!ba) return;
+    neui_detail::behavior_clear(*ba);
+  }
+
+  static void NEUI_ABI be_set_int(neui_session_t session, neui_asset_t asset,
+                                    neui_behavior_handler_t handler,
+                                    const char* prop, int value)
+  {
+    Session* s = nullptr;
+    auto* H = resolve_behavior_handler_macos(session, asset, handler, s);
+    if (!H || !prop) return;
+    neui_detail::apply_behavior_set_int(*H, prop, value);
+  }
+
+  static void NEUI_ABI be_set_float(neui_session_t session, neui_asset_t asset,
+                                      neui_behavior_handler_t handler,
+                                      const char* prop, float value)
+  {
+    Session* s = nullptr;
+    auto* H = resolve_behavior_handler_macos(session, asset, handler, s);
+    if (!H || !prop) return;
+    neui_detail::apply_behavior_set_float(*H, prop, value);
+  }
+
+  static void NEUI_ABI be_set_string(neui_session_t session, neui_asset_t asset,
+                                       neui_behavior_handler_t handler,
+                                       const char* prop, const char* value)
+  {
+    Session* s = nullptr;
+    auto* H = resolve_behavior_handler_macos(session, asset, handler, s);
+    if (!H || !prop) return;
+    neui_detail::apply_behavior_set_string(*H, prop, value);
+  }
+
+  neui_behavior_api_t behavior_api = {
+    NEUI_VERSION,
+    be_add_handler,
+    be_remove_handler,
+    be_clear,
+    be_set_int,
+    be_set_float,
+    be_set_string,
   };
 
 } // namespace macos_host

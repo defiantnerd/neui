@@ -703,17 +703,147 @@ namespace win32_host
     if (backend->pop_transform) backend->pop_transform(ctx);
   }
 
-  // Minimal mouse hook for CUSTOMDRAW: the ChildSubclassProc already
-  // dispatches MOUSE_* events to the client (emit_events is auto-set), so
-  // the only thing we need PaintedWndProc to do is route focus on click so
-  // arrow keys / typed input reach the client through the same subclass's
-  // WM_KEYDOWN / WM_CHAR path. Everything else is no-op.
+  // Resolve a CUSTOMDRAW widget's behavior asset to its BehaviorAsset.
+  // Returns nullptr if no behavior is attached or the slot was released.
+  static neui_detail::BehaviorAsset* resolve_widget_behavior_w32(WidgetData& wd)
+  {
+    if (!wd.session) return nullptr;
+    neui_asset_t a = wd.behavior_asset;
+    if (a.id == asset_none.id) return nullptr;
+    if (((a.id >> 16) & 0xffff) != (wd.session->session_id() & 0xffff)) return nullptr;
+    auto* e = wd.session->_asset_manager.get_slot(a.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_BEHAVIOR || !e->behavior) return nullptr;
+    return e->behavior.get();
+  }
+
+  // Host callbacks for behavior dispatch on win32 native.
+  static void w32_behavior_invalidate(void* host_data)
+  {
+    auto* wd = static_cast<WidgetData*>(host_data);
+    if (wd && wd->hwnd) InvalidateRect(wd->hwnd, nullptr, FALSE);
+  }
+
+  static void w32_behavior_emit_attr_changed(void* host_data,
+                                               const char* attr_key, float value)
+  {
+    auto* wd = static_cast<WidgetData*>(host_data);
+    if (!wd || !wd->session || !wd->emit_events) return;
+    neui_event_t ev{};
+    ev.type                 = NEUI_EVENT_ATTR_CHANGED;
+    ev.data.attr.widget.id  = wd->widget_id;
+    ev.data.attr.attr_key   = attr_key;
+    ev.data.attr.value      = value;
+    wd->session->dispatch_event(&ev);
+  }
+
+  static int w32_behavior_popup_menu(void* host_data, int local_x, int local_y,
+                                       const char* const* items)
+  {
+    auto* wd = static_cast<WidgetData*>(host_data);
+    if (!wd || !items) return 0;
+    neui_widget_t anchor = { wd->widget_id };
+    return popup_menu({ wd->session_id }, anchor, local_x, local_y, items);
+  }
+
+  static neui_detail::BehaviorDispatchCtx make_behavior_ctx_w32(WidgetData& wd)
+  {
+    neui_detail::BehaviorDispatchCtx ctx{};
+    ctx.bag      = &neui_detail::ensure_attrs(wd.attrs);
+    ctx.widget_w = static_cast<float>(wd.width);
+    ctx.widget_h = static_cast<float>(wd.height);
+    ctx.host_data         = &wd;
+    ctx.invalidate        = &w32_behavior_invalidate;
+    ctx.emit_attr_changed = &w32_behavior_emit_attr_changed;
+    ctx.popup_menu        = &w32_behavior_popup_menu;
+    return ctx;
+  }
+
+  // Translate WM_* params into a neui_event_t suitable for the shared
+  // behavior dispatch. Returns false if msg is not a supported mouse event.
+  static bool w32_build_mouse_event(WidgetData& wd, UINT msg,
+                                      WPARAM wParam, LPARAM lParam,
+                                      neui_event_t& out_ev,
+                                      float& out_lx, float& out_ly)
+  {
+    UINT dpi = (wd.session ? wd.session->get_dpi_for_widget(wd.index) : 96);
+    if (dpi == 0) dpi = 96;
+    int lx = MulDiv(GET_X_LPARAM(lParam), 96, static_cast<int>(dpi));
+    int ly = MulDiv(GET_Y_LPARAM(lParam), 96, static_cast<int>(dpi));
+    out_lx = static_cast<float>(lx);
+    out_ly = static_cast<float>(ly);
+    neui_widget_t wid = { wd.widget_id };
+    switch (msg) {
+      case WM_LBUTTONDOWN:
+        out_ev = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        return true;
+      case WM_LBUTTONUP:
+        out_ev = { NEUI_EVENT_MOUSE_BUTTON_UP };
+        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        return true;
+      case WM_MOUSEMOVE:
+        out_ev = { NEUI_EVENT_MOUSE_MOVE };
+        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        return true;
+      case WM_RBUTTONDOWN:
+        out_ev = { NEUI_EVENT_MOUSE_RBUTTON_DOWN };
+        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        return true;
+      case WM_RBUTTONUP:
+        out_ev = { NEUI_EVENT_MOUSE_RBUTTON_UP };
+        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        return true;
+      case WM_MOUSEWHEEL: {
+        short delta = static_cast<short>(HIWORD(wParam));
+        out_ev = { NEUI_EVENT_MOUSE_WHEEL };
+        out_ev.data.wheel.widget = wid;
+        out_ev.data.wheel.x      = lx;
+        out_ev.data.wheel.y      = ly;
+        out_ev.data.wheel.delta  = delta / WHEEL_DELTA;
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  // Mouse / key hook for CUSTOMDRAW. Sequence:
+  //   1. ChildSubclassProc already fired NEUI_EVENT_MOUSE_* / KEY* to the
+  //      client (emit_events is auto-set; ignores client return).
+  //   2. This runs next. If a behavior asset is attached, dispatch through
+  //      hosts/shared/behavior_runtime.h, which writes attrs and emits
+  //      NEUI_EVENT_ATTR_CHANGED for user-driven mutations.
+  //   3. The default WM_* handling (focus on click) runs after.
   static void painted_msg_customdraw_w32(WidgetData& wd, UINT msg,
-                                          WPARAM /*wParam*/, LPARAM /*lParam*/)
+                                          WPARAM wParam, LPARAM lParam)
   {
     if (msg == WM_LBUTTONDOWN && wd.hwnd) {
       SetFocus(wd.hwnd);
     }
+
+    auto* ba = resolve_widget_behavior_w32(wd);
+    if (!ba) return;
+    if (!wd.behavior_rt)
+      wd.behavior_rt = std::make_unique<neui_detail::BehaviorRuntime>();
+    auto ctx = make_behavior_ctx_w32(wd);
+
+    if (msg == WM_KEYDOWN) {
+      // Modifiers: read live (the WM_KEYDOWN message doesn't carry them).
+      uint32_t mods = 0;
+      if (GetKeyState(VK_SHIFT)   & 0x8000) mods |= NEUI_KMOD_SHIFT;
+      if (GetKeyState(VK_CONTROL) & 0x8000) mods |= NEUI_KMOD_CTRL;
+      if (GetKeyState(VK_MENU)    & 0x8000) mods |= NEUI_KMOD_ALT;
+      neui_detail::behavior_dispatch_key(*ba, *wd.behavior_rt, ctx,
+                                          static_cast<uint32_t>(wParam), mods);
+      return;
+    }
+
+    neui_event_t ev;
+    float local_x = 0.0f, local_y = 0.0f;
+    if (!w32_build_mouse_event(wd, msg, wParam, lParam, ev, local_x, local_y))
+      return;
+    neui_detail::behavior_dispatch_mouse(*ba, *wd.behavior_rt, ctx,
+                                          &ev, local_x, local_y);
   }
 
   // -------------------------------------------------------------------------
@@ -2857,7 +2987,19 @@ namespace win32_host
     }
     else if (strcmp(w.type, NEUI_W_CUSTOMDRAW) == 0) {
       // CUSTOMDRAW + compound: compound replaces WIDGET_PAINT dispatch.
-      w.compound_asset = asset;
+      // CUSTOMDRAW + behavior: behavior routes input events to attr writes.
+      // Kind-route by inspecting the asset entry; asset_none clears the
+      // compound slot (matches the v1 contract for IMAGE / CUSTOMDRAW).
+      if (asset.id == asset_none.id) {
+        w.compound_asset = asset_none;
+      } else {
+        auto* entry = _asset_manager.get_slot(asset.id & 0xffff);
+        if (entry && entry->kind == NEUI_ASSET_KIND_BEHAVIOR) {
+          w.behavior_asset = asset;
+        } else {
+          w.compound_asset = asset;
+        }
+      }
     }
     else {
       return;  // unsupported widget type
@@ -3473,6 +3615,15 @@ namespace win32_host
     return pack_asset_w32(s->session_id(), slot);
   }
 
+  static neui_asset_t NEUI_ABI as_create_behavior(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    if (!s) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_behavior();
+    if (slot == 0) return asset_none;
+    return pack_asset_w32(s->session_id(), slot);
+  }
+
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
     as_create_bitmap,
@@ -3481,6 +3632,7 @@ namespace win32_host
     as_get_size,
     as_get_kind,
     as_create_compound,
+    as_create_behavior,
   };
 
   // ---------------------------------------------------------------------------
@@ -3670,5 +3822,112 @@ namespace win32_host
     co_bind,
     co_bind_asset,
     co_unbind,
+  };
+
+  // ---------------------------------------------------------------------------
+  // Behavior API (NEUI_API_BEHAVIOR) - same shape as compound_api. Mutations
+  // don't change paint output, so no invalidate walk is needed; the per-write
+  // invalidate happens in the dispatch callbacks at run time.
+
+  static neui_detail::BehaviorAsset*
+  resolve_behavior_w32(neui_session_t session, neui_asset_t asset, Session*& out_session)
+  {
+    out_session = nullptr;
+    auto* s = get_session(session);
+    if (!s) return nullptr;
+    if (asset.id == asset_none.id) return nullptr;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return nullptr;
+    auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_BEHAVIOR || !e->behavior) return nullptr;
+    out_session = s;
+    return e->behavior.get();
+  }
+
+  static neui_detail::BehaviorHandler*
+  resolve_behavior_handler_w32(neui_session_t session, neui_asset_t asset,
+                                 neui_behavior_handler_t handler, Session*& out_session)
+  {
+    out_session = nullptr;
+    auto* s = get_session(session);
+    if (!s) return nullptr;
+    if (asset.id == asset_none.id) return nullptr;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return nullptr;
+    uint32_t asset_slot = asset.id & 0xffff;
+    if (neui_detail::behavior_handler_asset_slot(handler) != asset_slot) return nullptr;
+    auto* e = s->_asset_manager.get_slot(asset_slot);
+    if (!e || e->kind != NEUI_ASSET_KIND_BEHAVIOR || !e->behavior) return nullptr;
+    out_session = s;
+    return neui_detail::behavior_get_handler(*e->behavior,
+                                              neui_detail::behavior_handler_slot(handler));
+  }
+
+  static neui_behavior_handler_t NEUI_ABI be_add_handler(neui_session_t session,
+                                                          neui_asset_t asset,
+                                                          neui_behavior_kind_t kind)
+  {
+    Session* s = nullptr;
+    auto* ba = resolve_behavior_w32(session, asset, s);
+    if (!ba) return behavior_handler_none;
+    uint32_t asset_slot = asset.id & 0xffff;
+    uint32_t slot = neui_detail::behavior_add_handler(*ba, kind);
+    return neui_detail::pack_behavior_handler(asset_slot, slot);
+  }
+
+  static void NEUI_ABI be_remove_handler(neui_session_t session, neui_asset_t asset,
+                                          neui_behavior_handler_t handler)
+  {
+    Session* s = nullptr;
+    auto* ba = resolve_behavior_w32(session, asset, s);
+    if (!ba) return;
+    if (neui_detail::behavior_handler_asset_slot(handler) != (asset.id & 0xffff)) return;
+    neui_detail::behavior_remove_handler(*ba, neui_detail::behavior_handler_slot(handler));
+  }
+
+  static void NEUI_ABI be_clear(neui_session_t session, neui_asset_t asset)
+  {
+    Session* s = nullptr;
+    auto* ba = resolve_behavior_w32(session, asset, s);
+    if (!ba) return;
+    neui_detail::behavior_clear(*ba);
+  }
+
+  static void NEUI_ABI be_set_int(neui_session_t session, neui_asset_t asset,
+                                    neui_behavior_handler_t handler,
+                                    const char* prop, int value)
+  {
+    Session* s = nullptr;
+    auto* H = resolve_behavior_handler_w32(session, asset, handler, s);
+    if (!H || !prop) return;
+    neui_detail::apply_behavior_set_int(*H, prop, value);
+  }
+
+  static void NEUI_ABI be_set_float(neui_session_t session, neui_asset_t asset,
+                                      neui_behavior_handler_t handler,
+                                      const char* prop, float value)
+  {
+    Session* s = nullptr;
+    auto* H = resolve_behavior_handler_w32(session, asset, handler, s);
+    if (!H || !prop) return;
+    neui_detail::apply_behavior_set_float(*H, prop, value);
+  }
+
+  static void NEUI_ABI be_set_string(neui_session_t session, neui_asset_t asset,
+                                       neui_behavior_handler_t handler,
+                                       const char* prop, const char* value)
+  {
+    Session* s = nullptr;
+    auto* H = resolve_behavior_handler_w32(session, asset, handler, s);
+    if (!H || !prop) return;
+    neui_detail::apply_behavior_set_string(*H, prop, value);
+  }
+
+  neui_behavior_api_t behavior_api = {
+    NEUI_VERSION,
+    be_add_handler,
+    be_remove_handler,
+    be_clear,
+    be_set_int,
+    be_set_float,
+    be_set_string,
   };
 }

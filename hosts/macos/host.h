@@ -5,6 +5,7 @@
 #include "../shared/attrs.h"
 #include "../shared/clipboard_item.h"
 #include "../shared/theme_palette.h"
+#include "../shared/behavior_runtime.h"
 #include "asset_manager_macos.h"
 
 #include <memory>
@@ -73,6 +74,14 @@ namespace macos_host
     // compound's layer stack and suppresses the client's WIDGET_PAINT
     // event. asset_none = no compound; client paints via WIDGET_PAINT.
     neui_asset_t compound_asset = asset_none;
+
+    // CUSTOMDRAW: optional behavior asset (NEUI_ASSET_KIND_BEHAVIOR). When
+    // attached, the framework dispatches mouse / key / wheel events through
+    // hosts/shared/behavior_runtime.h, which mutates target attrs in this
+    // widget's AttrBag. See <neui/d/behavior.h>. Per-widget drag state is
+    // lazy.
+    neui_asset_t                                  behavior_asset = asset_none;
+    std::unique_ptr<neui_detail::BehaviorRuntime> behavior_rt;
 
     // LISTBOX / COMBOBOX items. Used by widgets.mm's items api + by the
     // NSTableViewDataSource / NSPopUpButton population in window.mm.

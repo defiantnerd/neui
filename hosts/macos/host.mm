@@ -23,6 +23,7 @@ namespace macos_host
   extern neui_commands_api_t  commands_api;
   extern neui_asset_api_t     asset_api;
   extern neui_compound_api_t  compound_api;
+  extern neui_behavior_api_t  behavior_api;
 
   // -------------------------------------------------------------------------
 
@@ -88,6 +89,7 @@ namespace macos_host
     if (!strcmp(iface, NEUI_API_COMMANDS))  return &commands_api;
     if (!strcmp(iface, NEUI_API_ASSETS))    return &asset_api;
     if (!strcmp(iface, NEUI_API_COMPOUND))  return &compound_api;
+    if (!strcmp(iface, NEUI_API_BEHAVIOR))  return &behavior_api;
     return nullptr;
   }
 

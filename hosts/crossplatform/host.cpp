@@ -126,6 +126,7 @@ namespace xpl_host
   extern neui_commands_api_t  commands_api;
   extern neui_asset_api_t     asset_api;
   extern neui_compound_api_t  compound_api;
+  extern neui_behavior_api_t  behavior_api;
 
   // -------------------------------------------------------------------------
   // Session management
@@ -167,6 +168,7 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_COMMANDS))  return &commands_api;
     if (!strcmp(iface, NEUI_API_ASSETS))    return &asset_api;
     if (!strcmp(iface, NEUI_API_COMPOUND))  return &compound_api;
+    if (!strcmp(iface, NEUI_API_BEHAVIOR))  return &behavior_api;
     return nullptr;
   }
 
@@ -2134,6 +2136,93 @@ namespace xpl_host
                                         neui_detail::attrs_readonly(attrs));
 
     if (backend->pop_clip) backend->pop_clip(ctx);
+  }
+
+  // ---- Behavior plumbing for CUSTOMDRAW -----------------------------------
+
+  // Resolve a behavior asset attached to a CUSTOMDRAW widget. Returns
+  // nullptr if no asset, the asset was released, or the kind doesn't match.
+  static neui_detail::BehaviorAsset*
+  resolve_widget_behavior(Session* s, neui_asset_t a)
+  {
+    if (!s) return nullptr;
+    if (a.id == asset_none.id) return nullptr;
+    if (((a.id >> 16) & 0xffff) != (s->get_session_id() & 0xffff)) return nullptr;
+    auto* e = s->_asset_manager.get_slot(a.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_BEHAVIOR || !e->behavior) return nullptr;
+    return e->behavior.get();
+  }
+
+  static void xpl_behavior_invalidate(void* host_data)
+  {
+    auto* wd = static_cast<CustomDrawWidget*>(host_data);
+    if (!wd || !wd->session) return;
+    // Mirrors WidgetData::repaint() but that method is protected, so
+    // duplicate its body (single line) rather than friend the dispatch.
+    void* frame = wd->session->find_parent_native_handle(wd->index);
+    if (frame) platform_invalidate(frame);
+  }
+
+  static void xpl_behavior_emit_attr_changed(void* host_data,
+                                              const char* attr_key, float value)
+  {
+    auto* wd = static_cast<CustomDrawWidget*>(host_data);
+    if (!wd || !wd->session || !wd->emit_events) return;
+    neui_event_t ev{};
+    ev.type                 = NEUI_EVENT_ATTR_CHANGED;
+    ev.data.attr.widget.id  = wd->widget_id;
+    ev.data.attr.attr_key   = attr_key;
+    ev.data.attr.value      = value;
+    wd->session->dispatch_event(&ev);
+  }
+
+  static int xpl_behavior_popup_menu(void* host_data, int local_x, int local_y,
+                                       const char* const* items)
+  {
+    auto* wd = static_cast<CustomDrawWidget*>(host_data);
+    if (!wd || !wd->session || !items) return 0;
+    std::vector<std::string> v;
+    for (int i = 0; items[i] != nullptr; ++i) v.emplace_back(items[i]);
+    return wd->session->open_popup_menu(wd->index, local_x, local_y, v);
+  }
+
+  // Build a dispatch ctx for this widget, ensuring its AttrBag exists.
+  static neui_detail::BehaviorDispatchCtx make_behavior_ctx(CustomDrawWidget& wd)
+  {
+    neui_detail::BehaviorDispatchCtx ctx{};
+    ctx.bag      = &neui_detail::ensure_attrs(wd.attrs);
+    ctx.widget_w = static_cast<float>(wd.width);
+    ctx.widget_h = static_cast<float>(wd.height);
+    ctx.host_data         = &wd;
+    ctx.invalidate        = &xpl_behavior_invalidate;
+    ctx.emit_attr_changed = &xpl_behavior_emit_attr_changed;
+    ctx.popup_menu        = &xpl_behavior_popup_menu;
+    return ctx;
+  }
+
+  bool CustomDrawWidget::on_mouse_event(neui_event_t* event)
+  {
+    if (!event || !session) return false;
+    auto* ba = resolve_widget_behavior(session, behavior_asset);
+    if (!ba) return false;
+    if (!behavior_rt) behavior_rt = std::make_unique<neui_detail::BehaviorRuntime>();
+    auto ctx = make_behavior_ctx(*this);
+    // event coords are frame-local; convert to widget-local.
+    float local_x = static_cast<float>(event->data.mouse.x - abs_x);
+    float local_y = static_cast<float>(event->data.mouse.y - abs_y);
+    return neui_detail::behavior_dispatch_mouse(*ba, *behavior_rt, ctx,
+                                                 event, local_x, local_y);
+  }
+
+  bool CustomDrawWidget::on_keydown(uint32_t keycode, uint32_t modifiers)
+  {
+    if (!session) return false;
+    auto* ba = resolve_widget_behavior(session, behavior_asset);
+    if (!ba) return false;
+    if (!behavior_rt) behavior_rt = std::make_unique<neui_detail::BehaviorRuntime>();
+    auto ctx = make_behavior_ctx(*this);
+    return neui_detail::behavior_dispatch_key(*ba, *behavior_rt, ctx,
+                                                keycode, modifiers);
   }
 
   void KnobWidget::paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,

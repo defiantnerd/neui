@@ -5,6 +5,7 @@
 #include "../shared/attrs.h"
 #include "../shared/clipboard_item.h"
 #include "../shared/theme_palette.h"
+#include "../shared/behavior_runtime.h"
 #include "asset_manager_w32.h"
 #include <memory>
 #include <string>
@@ -114,6 +115,14 @@ namespace win32_host {
     // the compound's layer stack and suppresses the client's WIDGET_PAINT
     // event. asset_none = no compound; client paints via WIDGET_PAINT.
     neui_asset_t compound_asset    = asset_none;
+
+    // CUSTOMDRAW: optional behavior asset (NEUI_ASSET_KIND_BEHAVIOR). When
+    // set, the painted-widget message hook routes mouse / key / wheel
+    // events through behavior_dispatch_* (hosts/shared/behavior_runtime.h),
+    // which manipulates target attrs in this widget's AttrBag. See
+    // <neui/d/behavior.h>. Per-widget drag state is lazy.
+    neui_asset_t                                  behavior_asset = asset_none;
+    std::unique_ptr<neui_detail::BehaviorRuntime> behavior_rt;
 
     // Treeview item data
     struct TreeItemData {

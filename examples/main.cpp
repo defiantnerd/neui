@@ -50,6 +50,7 @@ struct AppState {
   neui_attr_api_t*      attrs     = nullptr;
   neui_asset_api_t*     assets    = nullptr;
   neui_compound_api_t*  compound  = nullptr;
+  neui_behavior_api_t*  behavior  = nullptr;
   neui_session_t     session   = {0};
   uint32_t           win_id    = 0;
   uint32_t           input_id  = 0;
@@ -106,6 +107,14 @@ struct AppState {
   uint32_t           compound_widget_a = 0;
   uint32_t           compound_widget_b = 0;
   neui_asset_t       compound_shape    = asset_none;
+  // Behavior demo: a third CUSTOMDRAW sharing the same compound visual
+  // but with an attached NEUI_ASSET_KIND_BEHAVIOR for input. Drag,
+  // wheel, arrow keys, and right-click "Reset to default" all route
+  // through the behavior asset and mutate the widget's "value" attr -
+  // no client onevent plumbing required. The compound's existing
+  // rotation binding picks up the new value at paint time.
+  uint32_t           behavior_widget_id = 0;
+  neui_asset_t       behavior_asset_h   = asset_none;
 };
 
 // Open a modal "About" dialog owned by the main window. The dialog has a
@@ -404,6 +413,26 @@ static neui_widget_client_t widget_client = {
       return true;
     }
 
+    case NEUI_EVENT_ATTR_CHANGED: {
+      // User-driven attr write from a behavior asset (CUSTOMDRAW C).
+      // Mirror to the value label so the info string above the knobs /
+      // sliders reflects behavior-driven changes too. Native sliders /
+      // knobs still emit NEUI_EVENT_VALUE_CHANGED via the case above; the
+      // two event channels are complementary.
+      if (!app) return false;
+      uint32_t wid = event->data.attr.widget.id;
+      if (wid == app->behavior_widget_id && app->value_label_id != 0
+          && app->widgets && event->data.attr.attr_key) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "C %s: %.2f",
+                  event->data.attr.attr_key, event->data.attr.value);
+        neui_session_t sess  = app->session;
+        neui_widget_t  label = { app->value_label_id };
+        app->widgets->set_text(sess, label, buf);
+      }
+      return true;
+    }
+
     case NEUI_EVENT_TREE_ITEM_SELECTED: {
       if (!app) return true;
       neui_session_t sess   = app->session;
@@ -477,6 +506,7 @@ int main(int argc, char** argv) {
   app.attrs   = (neui_attr_api_t*)  neui->get_interface(sess, NEUI_API_ATTRS);
   app.assets  = (neui_asset_api_t*) neui->get_interface(sess, NEUI_API_ASSETS);
   app.compound = (neui_compound_api_t*) neui->get_interface(sess, NEUI_API_COMPOUND);
+  app.behavior = (neui_behavior_api_t*) neui->get_interface(sess, NEUI_API_BEHAVIOR);
 
   // Window: four columns - left = input + listbox, middle = combobox + checkboxes,
   //   right = treeview, far-right = slider + knob (continuous + 16-step variants).
@@ -486,7 +516,7 @@ int main(int argc, char** argv) {
   //   bottommost widget bottom    : y=580  → client height ≈ 585
   // Win11 non-client chrome (resize borders + title bar + menu bar) is
   // about 16 horizontal + 58 vertical, so ≈ 890 × 645 outer.
-  auto win = app.widgets->create(sess, widget_none, NEUI_W_APPWINDOW, 100, 100, 890, 645, nullptr);
+  auto win = app.widgets->create(sess, widget_none, NEUI_W_APPWINDOW, 100, 100, 1010, 645, nullptr);
   app.win_id = win.id;
   app.widgets->set_text(sess, win, "neui example");
   // Opt this frame into system-theme tracking on both hosts: title bar +
@@ -857,6 +887,48 @@ int main(int argc, char** argv) {
       app.attrs->set_float (sess, cw_a, NEUI_PARAM_VALUE, 0.5f);
       app.attrs->set_string(sess, cw_b, "name",  "B");
       app.attrs->set_float (sess, cw_b, NEUI_PARAM_VALUE, 0.5f);
+    }
+
+    // ----------------------------------------------------------------
+    // Interactive-behavior demo: a third CUSTOMDRAW sharing the same
+    // compound visual, with an attached NEUI_ASSET_KIND_BEHAVIOR that
+    // wires rotational drag + wheel + arrow keys + right-click reset.
+    // No client onevent plumbing: the framework writes `value` on the
+    // widget's AttrBag and the compound's rotation binding picks it up.
+    if (app.behavior) {
+      auto cw_c = app.widgets->create(sess, win, NEUI_W_CUSTOMDRAW,
+                                        875, 410, 110, 110, nullptr);
+      app.behavior_widget_id = cw_c.id;
+      app.widgets->set_asset(sess, cw_c, app.compound_shape);
+      app.attrs->set_string(sess, cw_c, "name",  "C");
+      app.attrs->set_float (sess, cw_c, NEUI_PARAM_VALUE,   0.5f);
+      app.attrs->set_float (sess, cw_c, NEUI_PARAM_DEFAULT, 0.5f);
+
+      neui_asset_t ba = app.assets->create_behavior(sess);
+      app.behavior_asset_h = ba;
+      neui_behavior_handler_t hdrag =
+        app.behavior->add_handler(sess, ba, NEUI_BEHAVIOR_KIND_DRAG_ROTATIONAL);
+      neui_behavior_handler_t hwheel =
+        app.behavior->add_handler(sess, ba, NEUI_BEHAVIOR_KIND_WHEEL);
+      neui_behavior_handler_t hkeys =
+        app.behavior->add_handler(sess, ba, NEUI_BEHAVIOR_KIND_KEY_STEP);
+      neui_behavior_handler_t hreset =
+        app.behavior->add_handler(sess, ba, NEUI_BEHAVIOR_KIND_CONTEXT_RESET);
+
+      neui_behavior_handler_t hs[] = { hdrag, hwheel, hkeys, hreset };
+      for (auto h : hs) {
+        app.behavior->set_string(sess, ba, h, "target",         NEUI_PARAM_VALUE);
+        app.behavior->set_string(sess, ba, h, "target_default", NEUI_PARAM_DEFAULT);
+        app.behavior->set_float (sess, ba, h, "min", 0.0f);
+        app.behavior->set_float (sess, ba, h, "max", 1.0f);
+      }
+      app.behavior->set_float(sess, ba, hwheel, "step",   0.02f);
+      app.behavior->set_float(sess, ba, hkeys,  "step",   0.01f);
+      app.behavior->set_float(sess, ba, hkeys,  "coarse", 0.10f);
+
+      // Kind-routed: set_asset with a BEHAVIOR handle lands in the
+      // widget's behavior slot, leaving the compound visual intact.
+      app.widgets->set_asset(sess, cw_c, ba);
     }
   }
 

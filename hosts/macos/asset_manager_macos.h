@@ -9,6 +9,7 @@
 #include <neui/d/assets.h>
 #include "../shared/macos/image_loader_macos.h"
 #include "../shared/compound.h"
+#include "../shared/behavior.h"
 
 namespace macos_host
 {
@@ -38,6 +39,9 @@ namespace macos_host
 
     // Populated for NEUI_ASSET_KIND_COMPOUND entries; null otherwise.
     std::unique_ptr<neui_detail::CompoundAsset> compound;
+
+    // Populated for NEUI_ASSET_KIND_BEHAVIOR entries; null otherwise.
+    std::unique_ptr<neui_detail::BehaviorAsset> behavior;
   };
 
   // Session-scoped asset table backing the public neui_asset_api_t.
@@ -107,6 +111,16 @@ namespace macos_host
       auto entry = std::make_unique<MacOSAssetEntry>();
       entry->kind     = NEUI_ASSET_KIND_COMPOUND;
       entry->compound = std::make_unique<neui_detail::CompoundAsset>();
+      return alloc_slot(std::move(entry));
+    }
+
+    // Allocate a slot holding an empty BehaviorAsset. Mutated via
+    // NEUI_API_BEHAVIOR. Returns 0 on failure.
+    uint32_t allocate_behavior()
+    {
+      auto entry = std::make_unique<MacOSAssetEntry>();
+      entry->kind     = NEUI_ASSET_KIND_BEHAVIOR;
+      entry->behavior = std::make_unique<neui_detail::BehaviorAsset>();
       return alloc_slot(std::move(entry));
     }
 

@@ -7,6 +7,7 @@
 #include <neui/d/assets.h>
 
 #include "compound.h"
+#include "behavior.h"
 
 namespace neui_detail
 {
@@ -41,6 +42,9 @@ namespace neui_detail
 
     // Populated for NEUI_ASSET_KIND_COMPOUND entries; null otherwise.
     std::unique_ptr<CompoundAsset> compound;
+
+    // Populated for NEUI_ASSET_KIND_BEHAVIOR entries; null otherwise.
+    std::unique_ptr<BehaviorAsset> behavior;
   };
 
   // Internal asset manager - lifetime tied to a Session.
@@ -78,6 +82,10 @@ namespace neui_detail
     // Allocate a new asset slot holding an empty CompoundAsset.
     // Mutated through NEUI_API_COMPOUND. Returns 0 on failure.
     uint32_t allocate_compound();
+
+    // Allocate a new asset slot holding an empty BehaviorAsset.
+    // Mutated through NEUI_API_BEHAVIOR. Returns 0 on failure.
+    uint32_t allocate_behavior();
 
     // Release the slot. CPU pixels freed immediately; GPU caches dropped.
     void release_slot(uint32_t slot, neui_render_backend_t* backend);

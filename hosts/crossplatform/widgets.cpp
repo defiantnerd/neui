@@ -412,7 +412,22 @@ namespace xpl_host
       img->asset = asset;
       img->text.clear();
     } else if (auto* cd = dynamic_cast<CustomDrawWidget*>(&wd)) {
-      cd->compound_asset = asset;
+      // Kind-route: COMPOUND -> visual slot, BEHAVIOR -> input slot.
+      // asset_none clears whichever slot the kind would land in - but
+      // since asset_none has no kind, we use it to clear the compound
+      // slot (matching the v1 contract for IMAGE/CUSTOMDRAW).
+      if (asset.id == asset_none.id) {
+        cd->compound_asset = asset_none;
+      } else {
+        uint32_t slot = asset.id & 0xffff;
+        auto* entry  = s->_asset_manager.get_slot(slot);
+        if (entry && entry->kind == NEUI_ASSET_KIND_BEHAVIOR) {
+          cd->behavior_asset = asset;
+        } else {
+          // Default route (BITMAP / COMPOUND / null entry): compound slot.
+          cd->compound_asset = asset;
+        }
+      }
     } else {
       return;  // non-IMAGE/CUSTOMDRAW: no-op
     }
@@ -1715,6 +1730,15 @@ namespace xpl_host
     return pack_asset(s->_session_id, slot);
   }
 
+  static neui_asset_t NEUI_ABI as_create_behavior(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    if (!s) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_behavior();
+    if (slot == 0) return asset_none;
+    return pack_asset(s->_session_id, slot);
+  }
+
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
     as_create_bitmap,
@@ -1723,6 +1747,7 @@ namespace xpl_host
     as_get_size,
     as_get_kind,
     as_create_compound,
+    as_create_behavior,
   };
 
   // ===========================================================================
@@ -1961,5 +1986,114 @@ namespace xpl_host
     std::vector<void*> already;
     invalidate_walk_xpl(s, 0, asset_id, already);
   }
+
+  // ===========================================================================
+  // Behavior API (NEUI_API_BEHAVIOR)
+
+  static neui_detail::BehaviorAsset*
+  resolve_behavior(neui_session_t session, neui_asset_t asset, Session*& out_session)
+  {
+    out_session = nullptr;
+    auto* s = get_session(session);
+    if (!s) return nullptr;
+    if (asset.id == asset_none.id) return nullptr;
+    if (((asset.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return nullptr;
+    auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_BEHAVIOR || !e->behavior) return nullptr;
+    out_session = s;
+    return e->behavior.get();
+  }
+
+  static neui_detail::BehaviorHandler*
+  resolve_behavior_handler(neui_session_t session, neui_asset_t asset,
+                            neui_behavior_handler_t handler, Session*& out_session)
+  {
+    out_session = nullptr;
+    auto* s = get_session(session);
+    if (!s) return nullptr;
+    if (asset.id == asset_none.id) return nullptr;
+    if (((asset.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return nullptr;
+    uint32_t asset_slot = asset.id & 0xffff;
+    if (neui_detail::behavior_handler_asset_slot(handler) != asset_slot) return nullptr;
+    auto* e = s->_asset_manager.get_slot(asset_slot);
+    if (!e || e->kind != NEUI_ASSET_KIND_BEHAVIOR || !e->behavior) return nullptr;
+    out_session = s;
+    return neui_detail::behavior_get_handler(*e->behavior,
+                                              neui_detail::behavior_handler_slot(handler));
+  }
+
+  // Behavior mutations don't change paint output, so we skip the
+  // invalidate-widgets walk that compound mutations need. Visual updates
+  // happen only when the behavior actually writes an attr at run time,
+  // and that already triggers invalidate via the per-write callback.
+  static neui_behavior_handler_t NEUI_ABI be_add_handler(neui_session_t session,
+                                                          neui_asset_t asset,
+                                                          neui_behavior_kind_t kind)
+  {
+    Session* s = nullptr;
+    auto* ba = resolve_behavior(session, asset, s);
+    if (!ba) return behavior_handler_none;
+    uint32_t asset_slot = asset.id & 0xffff;
+    uint32_t slot = neui_detail::behavior_add_handler(*ba, kind);
+    return neui_detail::pack_behavior_handler(asset_slot, slot);
+  }
+
+  static void NEUI_ABI be_remove_handler(neui_session_t session, neui_asset_t asset,
+                                          neui_behavior_handler_t handler)
+  {
+    Session* s = nullptr;
+    auto* ba = resolve_behavior(session, asset, s);
+    if (!ba) return;
+    if (neui_detail::behavior_handler_asset_slot(handler) != (asset.id & 0xffff)) return;
+    neui_detail::behavior_remove_handler(*ba, neui_detail::behavior_handler_slot(handler));
+  }
+
+  static void NEUI_ABI be_clear(neui_session_t session, neui_asset_t asset)
+  {
+    Session* s = nullptr;
+    auto* ba = resolve_behavior(session, asset, s);
+    if (!ba) return;
+    neui_detail::behavior_clear(*ba);
+  }
+
+  static void NEUI_ABI be_set_int(neui_session_t session, neui_asset_t asset,
+                                    neui_behavior_handler_t handler,
+                                    const char* prop, int value)
+  {
+    Session* s = nullptr;
+    auto* H = resolve_behavior_handler(session, asset, handler, s);
+    if (!H || !prop) return;
+    neui_detail::apply_behavior_set_int(*H, prop, value);
+  }
+
+  static void NEUI_ABI be_set_float(neui_session_t session, neui_asset_t asset,
+                                      neui_behavior_handler_t handler,
+                                      const char* prop, float value)
+  {
+    Session* s = nullptr;
+    auto* H = resolve_behavior_handler(session, asset, handler, s);
+    if (!H || !prop) return;
+    neui_detail::apply_behavior_set_float(*H, prop, value);
+  }
+
+  static void NEUI_ABI be_set_string(neui_session_t session, neui_asset_t asset,
+                                       neui_behavior_handler_t handler,
+                                       const char* prop, const char* value)
+  {
+    Session* s = nullptr;
+    auto* H = resolve_behavior_handler(session, asset, handler, s);
+    if (!H || !prop) return;
+    neui_detail::apply_behavior_set_string(*H, prop, value);
+  }
+
+  neui_behavior_api_t behavior_api = {
+    NEUI_VERSION,
+    be_add_handler,
+    be_remove_handler,
+    be_clear,
+    be_set_int,
+    be_set_float,
+    be_set_string,
+  };
 
 } // namespace xpl_host

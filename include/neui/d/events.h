@@ -48,6 +48,7 @@ extern "C" {
     NEUI_EVENT_RESIZE                   = DEF_WIDGET_EVENT(5),  // frame client area resized
     NEUI_EVENT_VALUE_CHANGED            = DEF_WIDGET_EVENT(6),  // slider/knob value changed by user
     NEUI_EVENT_WIDGET_PAINT             = DEF_WIDGET_EVENT(7),  // NEUI_W_CUSTOMDRAW: client draws via backend/ctx
+    NEUI_EVENT_ATTR_CHANGED             = DEF_WIDGET_EVENT(8),  // behavior wrote an attr (user-driven)
 
     NEUI_EVENT_ITEM_SELECTED            = DEF_ITEM_EVENT(1),  // fired when selection changes in listbox/combobox
 
@@ -69,6 +70,22 @@ extern "C" {
     NEUI_CHECK_CHECKED       = 1,
     NEUI_CHECK_INDETERMINATE = 2,
   } neui_check_state_t;
+
+  // Bit values for neui_event_mouse_t::buttonmap. Numeric values match the
+  // Win32 MK_* constants so the win32 platform layer forwards wParam
+  // unmodified; other hosts populate the same bits explicitly.
+  // Note: NEUI_MK_ALT is not produced by the Win32 / current macOS layers
+  // today (Win32 MK_* has no ALT bit; the macOS host doesn't populate
+  // modifier bits at all). It is reserved so behavior handlers can opt
+  // into ALT-fine semantics when hosts later plumb it through.
+  enum {
+    NEUI_MK_LBUTTON = 0x0001,
+    NEUI_MK_RBUTTON = 0x0002,
+    NEUI_MK_SHIFT   = 0x0004,
+    NEUI_MK_CONTROL = 0x0008,
+    NEUI_MK_MBUTTON = 0x0010,
+    NEUI_MK_ALT     = 0x0020,
+  };
 
   // event_mouse for all events like move/click/button etc.
   typedef struct neui_event_mouse
@@ -148,6 +165,18 @@ extern "C" {
     float         value;    // current normalized value [0..1]
   } neui_event_value_t;
 
+  // User-driven attribute mutation by a behavior asset attached to the
+  // widget. Programmatic attrs->set_* calls do NOT fire this; only
+  // mouse / keyboard / wheel input routed through a behavior handler.
+  // attr_key points into the host's interned strings and stays valid
+  // for the duration of the event dispatch only.
+  typedef struct neui_event_attr
+  {
+    neui_widget_t widget;
+    const char*   attr_key;
+    float         value;    // value-as-float; INT attrs promoted via attr_as_float
+  } neui_event_attr_t;
+
   typedef struct neui_event_custom
   {
     neui_widget_t widget;
@@ -199,6 +228,7 @@ extern "C" {
       neui_event_resize_t    resize;
       neui_event_preupdate_t preupdate;
       neui_event_value_t     value;
+      neui_event_attr_t      attr;
       neui_event_paint_t     paint;
       neui_event_custom_t    custom;
     } data;

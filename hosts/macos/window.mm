@@ -61,6 +61,113 @@ namespace macos_host {
 }
 
 // ---------------------------------------------------------------------------
+// Behavior plumbing for CUSTOMDRAW.
+//
+// CUSTOMDRAW widgets carry an optional NEUI_ASSET_KIND_BEHAVIOR via
+// widgets->set_asset. When attached, the shared dispatch
+// (hosts/shared/behavior_runtime.h) interprets mouse / key / wheel events
+// and writes target attrs in the widget's AttrBag, firing
+// NEUI_EVENT_ATTR_CHANGED on user-driven mutations. These helpers wrap
+// the host callbacks (invalidate, emit, popup) so the dispatch is a
+// single call from the view's input methods.
+
+namespace macos_host {
+
+  static neui_detail::BehaviorAsset*
+  resolve_widget_behavior_macos(WidgetData& wd, Session* sess)
+  {
+    if (!sess) return nullptr;
+    neui_asset_t a = wd.behavior_asset;
+    if (a.id == asset_none.id) return nullptr;
+    if (((a.id >> 16) & 0xffff) != (sess->session_id() & 0xffff)) return nullptr;
+    auto* e = sess->_asset_manager.get_slot(a.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_BEHAVIOR || !e->behavior) return nullptr;
+    return e->behavior.get();
+  }
+
+  // Forward-decl: defined later in this TU after the painted view + popup
+  // helper are in scope.
+  static int macos_behavior_popup_menu(void* host_data, int local_x, int local_y,
+                                         const char* const* items);
+
+  static void macos_behavior_invalidate(void* host_data)
+  {
+    auto* wd = static_cast<WidgetData*>(host_data);
+    if (!wd || !wd->native_control) return;
+    NSView* v = (__bridge NSView*)wd->native_control;
+    [v setNeedsDisplay:YES];
+  }
+
+  static void macos_behavior_emit_attr_changed(void* host_data,
+                                                 const char* attr_key, float value)
+  {
+    auto* wd = static_cast<WidgetData*>(host_data);
+    if (!wd || !wd->session || !wd->emit_events) return;
+    neui_event_t ev = {};
+    ev.type                 = NEUI_EVENT_ATTR_CHANGED;
+    ev.data.attr.widget.id  = wd->widget_id;
+    ev.data.attr.attr_key   = attr_key;
+    ev.data.attr.value      = value;
+    wd->session->dispatch_event(&ev);
+  }
+
+  static neui_detail::BehaviorDispatchCtx make_behavior_ctx_macos(WidgetData& wd)
+  {
+    neui_detail::BehaviorDispatchCtx ctx{};
+    ctx.bag      = &neui_detail::ensure_attrs(wd.attrs);
+    ctx.widget_w = static_cast<float>(wd.width);
+    ctx.widget_h = static_cast<float>(wd.height);
+    ctx.host_data         = &wd;
+    ctx.invalidate        = &macos_behavior_invalidate;
+    ctx.emit_attr_changed = &macos_behavior_emit_attr_changed;
+    ctx.popup_menu        = &macos_behavior_popup_menu;
+    return ctx;
+  }
+
+  // Dispatch an already-built neui_event_t through the widget's behavior
+  // asset. Returns true if a handler consumed the event.
+  static bool dispatch_behavior_mouse(uint32_t widget_id, neui_event_t* ev,
+                                        float local_x, float local_y)
+  {
+    Session* sess = nullptr;
+    auto* wd = widget_for_id(widget_id, &sess);
+    if (!wd || !sess) return false;
+    auto* ba = resolve_widget_behavior_macos(*wd, sess);
+    if (!ba) return false;
+    if (!wd->behavior_rt)
+      wd->behavior_rt = std::make_unique<neui_detail::BehaviorRuntime>();
+    auto ctx = make_behavior_ctx_macos(*wd);
+    return neui_detail::behavior_dispatch_mouse(*ba, *wd->behavior_rt, ctx,
+                                                  ev, local_x, local_y);
+  }
+
+  static bool dispatch_behavior_key(uint32_t widget_id, uint32_t keycode,
+                                      uint32_t modifiers)
+  {
+    Session* sess = nullptr;
+    auto* wd = widget_for_id(widget_id, &sess);
+    if (!wd || !sess) return false;
+    auto* ba = resolve_widget_behavior_macos(*wd, sess);
+    if (!ba) return false;
+    if (!wd->behavior_rt)
+      wd->behavior_rt = std::make_unique<neui_detail::BehaviorRuntime>();
+    auto ctx = make_behavior_ctx_macos(*wd);
+    return neui_detail::behavior_dispatch_key(*ba, *wd->behavior_rt, ctx,
+                                                keycode, modifiers);
+  }
+
+  static int macos_behavior_popup_menu(void* host_data, int local_x, int local_y,
+                                         const char* const* items)
+  {
+    auto* wd = static_cast<WidgetData*>(host_data);
+    if (!wd || !wd->native_control || !items) return 0;
+    NSView* anchor = (__bridge NSView*)wd->native_control;
+    return run_popup_menu_macos(anchor, local_x, local_y, items);
+  }
+
+} // namespace macos_host
+
+// ---------------------------------------------------------------------------
 // Module-private state.
 
 namespace {
@@ -257,12 +364,14 @@ static float neui_snap_to_steps(float v, int steps)
   if (!cd) { [super keyDown:event]; return; }
 
   uint32_t mods = neui_detail::mac_modifiers_to_neui(event.modifierFlags);
+  uint32_t kc   = neui_detail::mac_keycode_to_neui(event.keyCode);
   neui_event_t kd = {};
   kd.type                = NEUI_EVENT_KEYDOWN;
   kd.data.key.widget     = { wd->widget_id };
-  kd.data.key.keycode    = neui_detail::mac_keycode_to_neui(event.keyCode);
+  kd.data.key.keycode    = kc;
   kd.data.key.modifiers  = mods;
   sess->dispatch_event(&kd);
+  macos_host::dispatch_behavior_key(widget_id, kc, mods);
 
   // KEYCHAR for the produced text. Skip when Command is held (those are
   // shortcuts, not text - matches win32's WM_CHAR behaviour) and skip the
@@ -577,6 +686,9 @@ static float neui_snap_to_steps(float v, int steps)
   ev.data.mouse.y         = (int)p.y;
   ev.data.mouse.buttonmap = bmap;
   sess->dispatch_event(&ev);
+  // Run the behavior pass after the client has had first chance. The
+  // dispatch is a no-op when no behavior asset is attached.
+  macos_host::dispatch_behavior_mouse(widget_id, &ev, (float)p.x, (float)p.y);
 }
 
 // Tracking area drives MOUSE_MOVE / ENTER / LEAVE. Rebuilt whenever the view
@@ -672,10 +784,12 @@ static float neui_snap_to_steps(float v, int steps)
     return;
   }
   if ([self customDrawWantsInput]) {
-    // A held-button drag surfaces as MOUSE_MOVE (buttonmap 0, matching the
-    // win32 WM_MOUSEMOVE convention); the client tracks button state from
-    // the preceding DOWN / UP.
-    [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event] buttonmap:0];
+    // A held-button drag surfaces as MOUSE_MOVE with NEUI_MK_LBUTTON set
+    // so behavior dispatch (hosts/shared/behavior_runtime.h) can tell
+    // the difference between an in-flight drag and a release-then-move.
+    // Clients that don't use behaviors still receive the MOVE event as
+    // before and can ignore the buttonmap field.
+    [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event] buttonmap:NEUI_MK_LBUTTON];
     return;
   }
   [super mouseDragged:event];
@@ -755,6 +869,7 @@ static float neui_snap_to_steps(float v, int steps)
     ev.data.wheel.y      = (int)p.y;
     ev.data.wheel.delta  = delta;
     sess->dispatch_event(&ev);
+    macos_host::dispatch_behavior_mouse(widget_id, &ev, (float)p.x, (float)p.y);
     return;
   }
   [super scrollWheel:event];

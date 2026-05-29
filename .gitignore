@@ -34,3 +34,6 @@
 # Typical Folders
 .vs
 out
+
+# MAC Shit
+.DS_Store

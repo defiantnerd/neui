@@ -20,6 +20,8 @@ typedef enum neui_key
   NEUI_KEY_ESCAPE = 0x1B,
   NEUI_KEY_SPACE  = 0x20,
 
+  NEUI_KEY_PAGEUP   = 0x21,
+  NEUI_KEY_PAGEDOWN = 0x22,
   NEUI_KEY_END    = 0x23,
   NEUI_KEY_HOME   = 0x24,
   NEUI_KEY_LEFT   = 0x25,

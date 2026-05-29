@@ -9,6 +9,7 @@
 #include <neui/d/assets.h>
 #include "../shared/win32/image_loader_win32.h"
 #include "../shared/compound.h"
+#include "../shared/behavior.h"
 
 namespace win32_host
 {
@@ -41,6 +42,9 @@ namespace win32_host
 
     // Populated for NEUI_ASSET_KIND_COMPOUND entries; null otherwise.
     std::unique_ptr<neui_detail::CompoundAsset> compound;
+
+    // Populated for NEUI_ASSET_KIND_BEHAVIOR entries; null otherwise.
+    std::unique_ptr<neui_detail::BehaviorAsset> behavior;
   };
 
   // Session-scoped asset table backing the public neui_asset_api_t.
@@ -132,6 +136,28 @@ namespace win32_host
       auto entry = std::make_unique<W32AssetEntry>();
       entry->kind     = NEUI_ASSET_KIND_COMPOUND;
       entry->compound = std::make_unique<neui_detail::CompoundAsset>();
+
+      if (_handles.empty()) _handles.emplace_back(nullptr);
+
+      uint32_t slot;
+      if (!_free_slots.empty()) {
+        slot = _free_slots.back();
+        _free_slots.pop_back();
+        _handles[slot] = std::move(entry);
+      } else {
+        slot = static_cast<uint32_t>(_handles.size());
+        _handles.emplace_back(std::move(entry));
+      }
+      return slot;
+    }
+
+    // Allocate a slot holding an empty BehaviorAsset. Mutated via
+    // NEUI_API_BEHAVIOR. Returns 0 on failure.
+    uint32_t allocate_behavior()
+    {
+      auto entry = std::make_unique<W32AssetEntry>();
+      entry->kind     = NEUI_ASSET_KIND_BEHAVIOR;
+      entry->behavior = std::make_unique<neui_detail::BehaviorAsset>();
 
       if (_handles.empty()) _handles.emplace_back(nullptr);
 

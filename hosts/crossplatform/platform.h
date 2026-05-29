@@ -6,13 +6,10 @@
 // platform_win32.cpp implements this on Windows; platform_null.cpp elsewhere.
 
 // Public NEUI_KEY_* / NEUI_KMOD_* constants come from <neui/neui.h>'s
-// d/keys.h header. Mouse-modifier bits below are different - they match
-// Win32 MK_* values so the platform layer can forward wParam directly.
-enum : uint32_t {
-  NEUI_MK_LBUTTON = 0x0001,
-  NEUI_MK_SHIFT   = 0x0004,
-  NEUI_MK_CTRL    = 0x0008,
-};
+// d/keys.h header. Mouse-modifier bits (NEUI_MK_*) come from d/events.h
+// since they describe the public neui_event_mouse_t::buttonmap field;
+// numeric values match Win32 MK_* so the platform layer forwards wParam
+// directly.
 
 namespace xpl_host
 {

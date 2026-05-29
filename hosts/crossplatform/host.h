@@ -6,6 +6,7 @@
 #include "../shared/clipboard_item.h"
 #include "../shared/edit_history.h"
 #include "../shared/theme_palette.h"
+#include "../shared/behavior_runtime.h"
 #include "asset_manager.h"
 
 #include <string>
@@ -418,6 +419,15 @@ namespace xpl_host
   class CustomDrawWidget : public WidgetData {
   public:
     neui_asset_t compound_asset = asset_none;
+    // Behavior asset attached via widgets->set_asset (kind-routed). When
+    // set, the framework consults the asset's handler list before the
+    // client's onevent for mouse / key / wheel events on this widget,
+    // turning the CUSTOMDRAW into a fully interactive painted control.
+    // See <neui/d/behavior.h>.
+    neui_asset_t behavior_asset = asset_none;
+    // Lazy per-widget drag state. Allocated on first MOUSE_BUTTON_DOWN
+    // that lands on a drag-kind handler.
+    std::unique_ptr<neui_detail::BehaviorRuntime> behavior_rt;
 
     void paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
                bool is_focused) override;
@@ -428,6 +438,14 @@ namespace xpl_host
     void paint_after_children(neui_render_backend_t* backend,
                                 neui_render_ctx_t ctx,
                                 bool is_focused) override;
+
+    // Behavior dispatch hooks. Returns true if a behavior handler
+    // consumed the event. Called by Session::dispatch_mouse_event /
+    // Session::handle_input_key before the legacy on_mouse_event /
+    // on_keydown forwards (which CustomDrawWidget itself doesn't
+    // override - the behavior path is the only one).
+    bool on_mouse_event(neui_event_t* event) override;
+    bool on_keydown(uint32_t keycode, uint32_t modifiers) override;
   };
 
   // MENUBAR - native menu bar handle + all item bookkeeping

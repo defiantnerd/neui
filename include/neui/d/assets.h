@@ -39,11 +39,16 @@ extern "C" {
     // Compound drawable: a mutable, declarative stack of typed layers
     // (text / asset) read at paint time. Built via NEUI_API_COMPOUND.
     NEUI_ASSET_KIND_COMPOUND = 2,
+    // Behavior: a mutable list of input handlers (drag / wheel / key /
+    // click / context-reset) that, when attached to a CUSTOMDRAW widget,
+    // manipulate attrs in the widget's AttrBag in response to mouse /
+    // keyboard / wheel events. Built via NEUI_API_BEHAVIOR.
+    NEUI_ASSET_KIND_BEHAVIOR = 3,
     // Reserved for future kinds. Do NOT renumber; bind new values to the
     // next unused integer so old client builds stay forward-compatible.
-    // NEUI_ASSET_KIND_SVG    = 3,
-    // NEUI_ASSET_KIND_VECTOR = 4,
-    // NEUI_ASSET_KIND_FONT   = 5,
+    // NEUI_ASSET_KIND_SVG    = 4,
+    // NEUI_ASSET_KIND_VECTOR = 5,
+    // NEUI_ASSET_KIND_FONT   = 6,
   } neui_asset_kind_t;
 
   typedef struct neui_asset_api {
@@ -97,6 +102,11 @@ extern "C" {
     // failure. Hosts that don't support compound (e.g. native macOS;
     // CUSTOMDRAW isn't implemented there) return asset_none.
     neui_asset_t (NEUI_ABI *create_compound)(neui_session_t session);
+
+    // Create a behavior asset - an empty, mutable list of input handlers.
+    // Populate via NEUI_API_BEHAVIOR. Returns asset_none on allocation
+    // failure. Attaches to CUSTOMDRAW via widgets->set_asset (kind-routed).
+    neui_asset_t (NEUI_ABI *create_behavior)(neui_session_t session);
   } neui_asset_api_t;
 
 #ifdef __cplusplus
