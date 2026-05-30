@@ -114,9 +114,9 @@ namespace neui_detail
     // Resolves the best available path for the requested scale.
     // Returns empty string if no suitable file is found.
     // Scale resolution:
-    //   scale > 2.0 → try @3x → try @2x → try base
-    //   scale > 1.0 → try @2x → try base
-    //   scale == 1.0 → try base
+    //   scale > 2.0 -> try @3x -> try @2x -> try base
+    //   scale > 1.0 -> try @2x -> try base
+    //   scale == 1.0 -> try base
     static std::string resolve_path(const std::string& name, float scale);
 
     // Splits "dir/file.ext" into {"dir/file", ".ext"}.

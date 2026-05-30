@@ -87,7 +87,7 @@ namespace win32_host
     return MulDiv(logical, (int)dpi, 96);
   }
 
-  // Widget type → Win32 class mapping
+  // Widget type -> Win32 class mapping
   struct WidgetTypeInfo {
     const char* neui_type;
     LPCWSTR win32_class;
@@ -332,7 +332,7 @@ namespace win32_host
     return v;
   }
 
-  // Snap v to one of N evenly-spaced positions on [0..1]. steps < 2 → no snap.
+  // Snap v to one of N evenly-spaced positions on [0..1]. steps < 2 -> no snap.
   static float snap_to_steps_w32(float v, int steps)
   {
     if (steps < 2) return v;
@@ -429,7 +429,7 @@ namespace win32_host
   // sensitivity is the natural 1/radius (small circles move the value
   // faster than wide ones). Shift = 1/5 sensitivity, wheel for nudges,
   // double-click = reset to NEUI_PARAM_DEFAULT.
-  static constexpr float KNOB_W32_SWEEP_RAD     = 4.71238898f; // 1.5 * PI (270°)
+  static constexpr float KNOB_W32_SWEEP_RAD     = 4.71238898f; // 1.5 * PI (270deg)
   static constexpr float KNOB_W32_DEAD_ZONE_R   = 4.0f;        // logical px
   static constexpr float KNOB_W32_FINE_SCALE    = 0.2f;        // Shift = 1/5 sensitivity
   // Slider modes (vertical / horizontal NEUI_ATTR_KNOB_MODE): logical-pixel
@@ -1004,7 +1004,7 @@ namespace win32_host
   }
 
   // Build and apply the section's window region so anything outside
-  // (body ∪ title chip) is clipped away. Called from PaintedWndProc on
+  // (body U title chip) is clipped away. Called from PaintedWndProc on
   // create + size, and from set_text / NEUI_ATTR_ALIGN_TEXT live updates.
   // Logical (96 DPI) measurements are converted to physical px for the
   // GDI region. If `text` is empty the region is the full rect (no band).
@@ -1209,7 +1209,7 @@ namespace win32_host
         const char* o = wd.attrs->get_string(NEUI_ATTR_ORIENTATION);
         if (o && !strcmp(o, "vertical"))
           style = (style & ~static_cast<DWORD>(TBS_HORZ)) | TBS_VERT;
-        // Tick marks: NEUI_ATTR_STEPS >= 2 → clear TBS_NOTICKS so user-
+        // Tick marks: NEUI_ATTR_STEPS >= 2 -> clear TBS_NOTICKS so user-
         // placed ticks render. We do NOT use TBS_AUTOTICKS because its
         // frequency (TBM_SETTICFREQ) must be integer; for non-divisible
         // step counts (e.g. 16 over a 1000 range) it rounds down and the
@@ -1369,7 +1369,7 @@ namespace win32_host
                        SWP_NOZORDER | SWP_NOACTIVATE);
           // Painted widgets (KNOB, SECTION, IMAGE, CUSTOMDRAW) own a
           // per-widget D2D context whose DPI must be reset so DrawText
-          // / fill_rect map logical → physical at the new ratio. The
+          // / fill_rect map logical -> physical at the new ratio. The
           // SetWindowPos above already fires WM_SIZE which handles the
           // swap-chain resize.
           auto* backend = neui_d2d_backend::get_backend();

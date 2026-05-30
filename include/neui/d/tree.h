@@ -46,7 +46,7 @@ typedef struct neui_tree_api {
   // modifiers is a bitwise-OR of NEUI_KMOD_* values. key is one of NEUI_KEY_*.
   // Pass NEUI_KEY_NONE to clear an existing shortcut.
   // The host appends a platform-appropriate display label after the menu
-  // item's text (e.g. "Save\tCtrl+S" on Win/Linux, "Save\t⌘S" on macOS) and
+  // item's text (e.g. "Save\tCtrl+S" on Win/Linux, "Save\tCmdS" on macOS) and
   // wires the keystroke up so pressing it fires NEUI_EVENT_TREE_ITEM_ACTIVATED
   // for this item - same event a mouse pick produces.
   // Menu bar: takes effect; the parent frame's accelerator table is rebuilt.

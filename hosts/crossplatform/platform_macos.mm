@@ -7,8 +7,8 @@
 //
 // Step 3: NSResponder mouse + key handlers on NEUIView. Mouse events route
 // through Session::widget_at + dispatch_mouse_event with a captured
-// _pressed_widget across drags. Key events translate kVK_* → NEUI_KEY_*
-// (matching Win32 VK_*) and Cmd → NEUI_KMOD_CTRL / Control → NEUI_KMOD_META
+// _pressed_widget across drags. Key events translate kVK_* -> NEUI_KEY_*
+// (matching Win32 VK_*) and Cmd -> NEUI_KMOD_CTRL / Control -> NEUI_KMOD_META
 // (Cmd is the platform-primary modifier per neui's convention). Window
 // key/resign-key notifications mirror the win32 host's WM_SETFOCUS / WM_KILLFOCUS
 // path on the frame.
@@ -49,7 +49,7 @@ using neui_detail::is_printable_codepoint;
 
 namespace {
 
-// Live APPWINDOW count. Hits 0 → [NSApp stop:nil] (mirrors the win32 host's
+// Live APPWINDOW count. Hits 0 -> [NSApp stop:nil] (mirrors the win32 host's
 // PostQuitMessage on the last APPWINDOW close). DIALOG / PLUGWINDOW do NOT
 // participate.
 int g_appwindow_count = 0;
@@ -201,7 +201,7 @@ void wake_app_event_pump()
 - (void)mouseDown:(NSEvent*)event
 {
   if (!session) return;
-  // clickCount == 2 → DBLCLICK; clickCount >= 3 not modeled.
+  // clickCount == 2 -> DBLCLICK; clickCount >= 3 not modeled.
   if (event.clickCount == 2) {
     [self dispatchMouseEventForType:NEUI_EVENT_MOUSE_BUTTON_DBLCLICK event:event];
     return;
@@ -508,7 +508,7 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
   }
 
   // Plain typing - fire one KEYCHAR per Unicode codepoint, with the same
-  // dispatch_event → on_keychar two-stage routing as keyDown:.
+  // dispatch_event -> on_keychar two-stage routing as keyDown:.
   uint32_t fw = session->_focused_widget;
   if (fw == 0 || !session->_widgets.exists(fw)) return;
   auto& wd = session->_widgets[fw];
@@ -550,7 +550,7 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
                   ? [(NSAttributedString*)string string]
                   : (NSString*)string;
 
-  // Empty marked text → composition cancellation. Same effect as unmarkText:
+  // Empty marked text -> composition cancellation. Same effect as unmarkText:
   // for our pipeline.
   if (!s || s.length == 0) {
     if (_composing) {
@@ -682,7 +682,7 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
   // dialog as a sheet on. nil for non-sheet windows. Held weakly so a closed
   // owner doesn't keep this delegate alive.
   __weak NSWindow*   sheet_owner;
-  bool               sheet_active; // beginSheet:'d → must endSheet on close
+  bool               sheet_active; // beginSheet:'d -> must endSheet on close
 }
 @end
 
@@ -692,7 +692,7 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
 {
   (void)sender;
   if (!session) return YES;
-  // Mirror the win32 host's WM_CLOSE → APP_QUIT path: the client sees the
+  // Mirror the win32 host's WM_CLOSE -> APP_QUIT path: the client sees the
   // event first and may veto the close by returning false.
   neui_event_t ev = {};
   ev.type = NEUI_EVENT_APP_QUIT;
@@ -1136,7 +1136,7 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // Native menu bar (NSMenu / NSMenuItem). The macOS menu bar is process-global
   // (NSApp.mainMenu); per-frame menubars all funnel into it. NSMenuItem
-  // activations route through NEUIMenuTarget.neuiMenuPick: → the matching
+  // activations route through NEUIMenuTarget.neuiMenuPick: -> the matching
   // Session::dispatch_menu_event.
 
   void* platform_menubar_create(uint32_t menubar_widget_id)

@@ -59,7 +59,7 @@
 
       <!--
         UTF-8 active code page (Win10 1903+). Lets ANSI Win32 APIs
-        (CreateFileA, MessageBoxA, …) take UTF-8 strings directly, which
+        (CreateFileA, MessageBoxA, ...) take UTF-8 strings directly, which
         matches our internal convention.
       -->
       <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>

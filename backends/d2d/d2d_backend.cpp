@@ -402,7 +402,7 @@ namespace neui_d2d_backend
     IDWriteTextFormat* fmt = get_text_format(ctx, font_size);
     if (!fmt) return 0.0f;
 
-    // Convert UTF-8 → UTF-16, honouring text_len byte limit.
+    // Convert UTF-8 -> UTF-16, honouring text_len byte limit.
     int byte_len = (text_len < 0) ? -1 : text_len;
     int needed = MultiByteToWideChar(CP_UTF8, 0, text, byte_len, nullptr, 0);
     if (needed <= 0) return 0.0f;
@@ -632,7 +632,7 @@ namespace neui_d2d_backend
     }
 
     // Direct2D's AddArc renders nothing when the start point and end point
-    // coincide, so a full-circle arc (|sweep| ≈ 2π) produces no output.
+    // coincide, so a full-circle arc (|sweep| ~= 2pi) produces no output.
     // Split such arcs into two halves through the antipodal point so each
     // segment has distinct endpoints.
     const float PI     = 3.14159265358979323846f;

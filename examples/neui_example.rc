@@ -8,7 +8,7 @@
 // We do this via an .rc file (rather than link.exe's /MANIFESTINPUT)
 // because MSBuild's auto-manifest generation produces a competing
 // MANIFEST resource - combining the two causes link.exe to fail with
-// "duplicate resource. type:MANIFEST, name:1, …".
+// "duplicate resource. type:MANIFEST, name:1, ...".
 
 #include <winuser.h>
 

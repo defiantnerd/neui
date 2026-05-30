@@ -45,7 +45,7 @@ namespace xpl_host
     WCHAR    pending_surrogate = 0;      // high surrogate waiting for its low pair
   };
 
-  // UTF-8 → UTF-16 helper used by menubar platform functions.
+  // UTF-8 -> UTF-16 helper used by menubar platform functions.
   static std::wstring to_wide(const char* utf8)
   {
     if (!utf8 || !*utf8) return {};
@@ -118,7 +118,7 @@ namespace xpl_host
   // Composition messages arrive on the frame HWND (the only HWND in this
   // host). We resolve the logically-focused widget from Session and forward
   // composition events to its WidgetData::on_composition virtual. Widgets
-  // that cannot accept composition (buttons, lists, …) return false from
+  // that cannot accept composition (buttons, lists, ...) return false from
   // the default and the message falls through to DefWindowProcW.
 
   static WidgetData* focused_text_widget(Session* sess)
@@ -129,7 +129,7 @@ namespace xpl_host
     return &sess->_widgets[fw];
   }
 
-  // UTF-16 → UTF-8. Returns empty on empty input.
+  // UTF-16 -> UTF-8. Returns empty on empty input.
   static std::string utf16_to_utf8(const wchar_t* w, int wlen)
   {
     if (!w || wlen <= 0) return {};
@@ -172,7 +172,7 @@ namespace xpl_host
       //   ATTR_CONVERTED           = 2
       //   ATTR_TARGET_NOTCONVERTED = 3
       //   ATTR_INPUT_ERROR         = 4
-      //   ATTR_FIXEDCONVERTED      = 5  → treat as CONVERTED
+      //   ATTR_FIXEDCONVERTED      = 5  -> treat as CONVERTED
       switch (imm_attr) {
       case ATTR_INPUT:               return 0;
       case ATTR_TARGET_CONVERTED:    return 1;
@@ -221,7 +221,7 @@ namespace xpl_host
     if (!wd->caret_rect_local(backend, frame_wd->render_ctx, &lx, &ly, &lh))
       return;
 
-    // Widget logical x/y → frame-client logical px → physical px via DPI.
+    // Widget logical x/y -> frame-client logical px -> physical px via DPI.
     // The widget's stored x/y is parent-relative; abs_x / abs_y is the
     // cached frame-local position (recomputed during the paint walk).
     float lx_in_frame = lx + static_cast<float>(wd->abs_x);
@@ -437,7 +437,7 @@ namespace xpl_host
 
     case WM_SIZE: {
       // lParam gives the new client area in physical pixels.
-      // Skip minimised state - Windows reports 0×0 client size and we don't
+      // Skip minimised state - Windows reports 0x0 client size and we don't
       // want clients to see spurious zero-sized resize events.
       if (wParam == SIZE_MINIMIZED) return 0;
 
@@ -1080,7 +1080,7 @@ namespace xpl_host
       owner_hwnd,
       nullptr,
       g_hinstance,
-      wud   // lpCreateParams → stored in GWLP_USERDATA via WM_NCCREATE
+      wud   // lpCreateParams -> stored in GWLP_USERDATA via WM_NCCREATE
     );
 
     if (!hwnd) { delete wud; return; }
@@ -1175,7 +1175,7 @@ namespace xpl_host
       if (GetWindowRect(static_cast<HWND>(owner_native), &or_rc)) {
         UINT odpi = GetDpiForWindow(static_cast<HWND>(owner_native));
         if (odpi == 0) odpi = 96;
-        // Convert owner physical rect → logical pixels at 96 DPI; reading
+        // Convert owner physical rect -> logical pixels at 96 DPI; reading
         // wd.x/y back out from CreateWindow happens at the same conversion.
         int or_w_log = MulDiv(or_rc.right  - or_rc.left, 96, static_cast<int>(odpi));
         int or_h_log = MulDiv(or_rc.bottom - or_rc.top,  96, static_cast<int>(odpi));

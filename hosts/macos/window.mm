@@ -189,7 +189,7 @@ namespace macos_host {
 
 namespace {
 
-// Live APPWINDOW count. Hits 0 → [NSApp stop:nil] + post wake-up.
+// Live APPWINDOW count. Hits 0 -> [NSApp stop:nil] + post wake-up.
 int g_appwindow_count = 0;
 
 bool g_nsapp_initialised = false;
@@ -279,13 +279,13 @@ NSWindowStyleMask styles_for_appwindow()
 
 // Make native text editing self-sufficient. Unlike the win32 native Edit
 // control (which handles Ctrl+C/X/V/A itself), a Cocoa text field only
-// receives ⌘C/⌘X/⌘V/⌘A/⌘Z when a main-menu item claims those key
+// receives CmdC/CmdX/CmdV/CmdA/CmdZ when a main-menu item claims those key
 // equivalents - AppKit does not synthesize a standard Edit menu. Rather than
 // force every client to add Cut/Copy/Paste items, route the standard editing
 // shortcuts here through the same command path as menu / NEUI_API_COMMANDS.
 //
 // Order: NSApp matches main-menu key equivalents first, so a client-defined
-// Edit ▸ Undo (⌘Z) still wins; this override only fires for shortcuts the
+// Edit > Undo (CmdZ) still wins; this override only fires for shortcuts the
 // menu didn't claim. invoke_focused_command_macos returns false when no text
 // responder consumes the action, so we fall through to super in that case.
 - (BOOL)performKeyEquivalent:(NSEvent*)event
@@ -329,7 +329,7 @@ NSWindowStyleMask styles_for_appwindow()
 
 // KNOB drag tunables - mirror of the xpl host's KnobWidget constants
 // (hosts/crossplatform/host.cpp around the KnobWidget block).
-static constexpr float NEUI_KNOB_SWEEP_RAD   = 4.71238898f;  // 1.5*PI (270°)
+static constexpr float NEUI_KNOB_SWEEP_RAD   = 4.71238898f;  // 1.5*PI (270deg)
 static constexpr float NEUI_KNOB_DEAD_ZONE_R = 4.0f;          // logical px
 static constexpr float NEUI_KNOB_FINE_SCALE  = 0.2f;          // Shift = 1/5
 
@@ -591,7 +591,7 @@ static float neui_snap_to_steps(float v, int steps)
     //
     // Direction-aware lift: SECTION_BG_LIFT (+24) lifts the frame_bg
     // towards white, but on macOS in light mode frame_bg already lives
-    // near white (windowBackgroundColor ≈ 0xECECEC, often 0xFFFFFF under
+    // near white (windowBackgroundColor ~= 0xECECEC, often 0xFFFFFF under
     // newer appearances). When the lift saturates, the section becomes
     // invisible against the NSWindow background. Detect that and shade
     // down instead so the section reads as a depressed panel.
@@ -760,7 +760,7 @@ static float neui_snap_to_steps(float v, int steps)
       auto* wd = macos_host::widget_for_id(widget_id);
       if (wd && !wd->enabled) return;
     }
-    // Double-click → reset to NEUI_PARAM_DEFAULT.
+    // Double-click -> reset to NEUI_PARAM_DEFAULT.
     if (event.clickCount >= 2) {
       auto* wd = macos_host::widget_for_id(widget_id);
       float def = 0.0f;
@@ -936,7 +936,7 @@ static float neui_snap_to_steps(float v, int steps)
   if (!session) return YES;
 
   // Give the client a chance to veto. APP_QUIT is the veto event for any
-  // frame close (mirrors the win32 / xpl host's WM_CLOSE → APP_QUIT path);
+  // frame close (mirrors the win32 / xpl host's WM_CLOSE -> APP_QUIT path);
   // dialogs and appwindows go through the same dispatch.
   neui_event_t ev = {};
   ev.type = NEUI_EVENT_APP_QUIT;
@@ -968,7 +968,7 @@ static float neui_snap_to_steps(float v, int steps)
   }
 }
 
-// Frame focus → NEUI_EVENT_WIDGET_FOCUS for the frame widget. Mirror of the
+// Frame focus -> NEUI_EVENT_WIDGET_FOCUS for the frame widget. Mirror of the
 // win32 host's WM_SETFOCUS / WM_KILLFOCUS path. Clients see logical focus at
 // the frame granularity (Tier B per-widget focus proxies are deferred).
 - (void)dispatchFrameFocus:(bool)gained
@@ -984,7 +984,7 @@ static float neui_snap_to_steps(float v, int steps)
 - (void)windowDidBecomeKey:(NSNotification*)note { (void)note; [self dispatchFrameFocus:true];  }
 - (void)windowDidResignKey:(NSNotification*)note { (void)note; [self dispatchFrameFocus:false]; }
 
-// Frame resize → NEUI_EVENT_RESIZE with the new content size in logical
+// Frame resize -> NEUI_EVENT_RESIZE with the new content size in logical
 // pixels. Mirror of the win32 host's WM_SIZE path. The content view is
 // isFlipped with a backing-scale CTM, so contentView.bounds is already in
 // logical points (= logical px at 96 DPI).
@@ -1545,7 +1545,7 @@ namespace macos_host {
   sess->dispatch_event(&ev);
 }
 
-// Double-click → TREE_ITEM_ACTIVATED. Wired via the table view's
+// Double-click -> TREE_ITEM_ACTIVATED. Wired via the table view's
 // doubleAction in create_treeview.
 - (void)neuiOutlineDoubleClick:(id)sender
 {
@@ -1861,7 +1861,7 @@ namespace macos_host
     return w.attrs && w.attrs->get_int(NEUI_ATTR_READONLY, 0) != 0;
   }
 
-  // CSS weight (100..900, 0 = unset) → AppKit NSFontWeight scale. Mirror of
+  // CSS weight (100..900, 0 = unset) -> AppKit NSFontWeight scale. Mirror of
   // the cg backend's css_weight_to_nsfontweight (kept local so window.mm
   // doesn't depend on the backend's internals).
   static CGFloat css_weight_to_nsfontweight_macos(int weight)
@@ -2446,7 +2446,7 @@ namespace macos_host
       }
       // Now that contentView exists, recursively create native controls for
       // every descendant. This is the equivalent of the win32 host's
-      // WM_CREATE → create_child_windows path.
+      // WM_CREATE -> create_child_windows path.
       NSView* cv = native_window_from(w.native_window).contentView;
       create_descendants_native(this, index, cv);
       // Build the Tab / Shift-Tab key-view loop in creation order now that all

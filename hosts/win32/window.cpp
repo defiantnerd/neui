@@ -282,8 +282,8 @@ namespace win32_host
         float lh = static_cast<float>(rc.bottom) * 96.0f / static_cast<float>(dpi);
         bool focused = (GetFocus() == hwnd);
 
-        // Background colour: client override → theme palette (when the
-        // owning frame opts in) → system COLOR_WINDOW (today's default).
+        // Background colour: client override -> theme palette (when the
+        // owning frame opts in) -> system COLOR_WINDOW (today's default).
         uint32_t clear_argb;
         if (wd->attrs && wd->attrs->has(NEUI_ATTR_BACKGROUND)) {
           clear_argb = static_cast<uint32_t>(
@@ -701,7 +701,7 @@ namespace win32_host
       }
     case WM_SIZE:
       {
-        // Skip minimised state - Windows reports 0×0 client size and we
+        // Skip minimised state - Windows reports 0x0 client size and we
         // don't want clients to see spurious zero-sized resize events.
         if (wParam == SIZE_MINIMIZED) return 0;
         if (wd && wd->session) {
@@ -964,7 +964,7 @@ namespace win32_host
           neui_event_t event = { NEUI_EVENT_MOUSE_BUTTON_DBLCLICK };
           event.data.mouse = { wid, lx, ly, 1 };
           wd->session->dispatch_event(&event);
-          // Slider double-click → reset to NEUI_PARAM_DEFAULT. Knob has its
+          // Slider double-click -> reset to NEUI_PARAM_DEFAULT. Knob has its
           // own DBLCLK handling in painted_msg_knob_w32; only the native
           // trackbar needs framework-side intervention here.
           if (wd->type && !strcmp(wd->type, NEUI_W_SLIDER))

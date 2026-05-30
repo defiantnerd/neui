@@ -10,7 +10,7 @@
 // host instantiated the widget.
 //
 // Renders a circular knob body with an indicator line that sweeps from
-// -135° (value 0) to +135° (value 1). 0° points up (12 o'clock); the sweep
+// -135deg (value 0) to +135deg (value 1). 0deg points up (12 o'clock); the sweep
 // goes clockwise on screen, so value 0.5 points straight up.
 //
 // All coordinates are logical pixels at 96 DPI. The (x, y, w, h) rect is
@@ -23,9 +23,9 @@ namespace neui_detail
 {
   // Anchor end of the active fill arc. Maps directly to NEUI_ATTR_POLARITY.
   enum KnobPolarity {
-    KNOB_POLARITY_MIN    = 0,  // sweep start (7 o'clock) → value
-    KNOB_POLARITY_CENTER = 1,  // 12 o'clock → value (bipolar params)
-    KNOB_POLARITY_MAX    = 2,  // sweep end (5 o'clock) → value
+    KNOB_POLARITY_MIN    = 0,  // sweep start (7 o'clock) -> value
+    KNOB_POLARITY_CENTER = 1,  // 12 o'clock -> value (bipolar params)
+    KNOB_POLARITY_MAX    = 2,  // sweep end (5 o'clock) -> value
   };
 
   // Map the public string value to the polarity enum. Unknown / null input
@@ -55,18 +55,18 @@ namespace neui_detail
                           float value,           // [0..1]
                           bool  focused,
                           KnobPolarity polarity = KNOB_POLARITY_MIN,
-                          int   steps           = 0,    // 0/1 → continuous, no extra ticks
+                          int   steps           = 0,    // 0/1 -> continuous, no extra ticks
                           const char* value_text = nullptr, // optional overlay
                           const AttrBag* bag    = nullptr)  // for NEUI_ATTR_FONT_*
   {
     if (!backend || !ctx) return;
 
-    // 0 rad = 3-o'clock (D2D's default). We want 0° = 12-o'clock and a
-    // 270° sweep starting at 7-o'clock (-135° from 12) and ending at
-    // 5-o'clock (+135° from 12). Subtract π/2 to rotate the whole sweep
+    // 0 rad = 3-o'clock (D2D's default). We want 0deg = 12-o'clock and a
+    // 270deg sweep starting at 7-o'clock (-135deg from 12) and ending at
+    // 5-o'clock (+135deg from 12). Subtract pi/2 to rotate the whole sweep
     // so 12-o'clock is the centre.
     const float HALF_PI    = 1.5707963267948966f;
-    const float DEG_135    = 2.356194490192345f;          // 135° in radians
+    const float DEG_135    = 2.356194490192345f;          // 135deg in radians
     const float SWEEP_START = -DEG_135 - HALF_PI;          // 7-o'clock
     const float SWEEP_END   =  DEG_135 - HALF_PI;          // 5-o'clock
 
@@ -107,11 +107,11 @@ namespace neui_detail
       // Knob body - filled disc + outline. The full circle is split into
       // two semicircle arcs because Direct2D's AddArc draws nothing when
       // the start point equals the end point (which is the case for a
-      // 0..2π single arc starting and ending at 3 o'clock).
+      // 0..2pi single arc starting and ending at 3 o'clock).
       const float PI = 3.14159265358979323846f;
       backend->begin_path(ctx);
-      backend->arc(ctx, cx, cy, r, 0.0f, PI);          // 3 o'clock → 9 o'clock (bottom half on screen)
-      backend->arc(ctx, cx, cy, r, PI,   2.0f * PI);   // 9 o'clock → 3 o'clock (top half on screen)
+      backend->arc(ctx, cx, cy, r, 0.0f, PI);          // 3 o'clock -> 9 o'clock (bottom half on screen)
+      backend->arc(ctx, cx, cy, r, PI,   2.0f * PI);   // 9 o'clock -> 3 o'clock (top half on screen)
       backend->close_path(ctx);
       backend->fill_path(ctx, 0xFF404040);
       backend->stroke_path(ctx, 1.0f,
@@ -124,9 +124,9 @@ namespace neui_detail
       backend->stroke_path(ctx, 1.0f, 0xFF606060);
 
       // Active arc - anchored by polarity:
-      //   MIN     → from sweep start (7 o'clock) to current value
-      //   CENTER  → from 12 o'clock (the sweep midpoint) to current value
-      //   MAX     → from sweep end   (5 o'clock) to current value
+      //   MIN     -> from sweep start (7 o'clock) to current value
+      //   CENTER  -> from 12 o'clock (the sweep midpoint) to current value
+      //   MAX     -> from sweep end   (5 o'clock) to current value
       // The d2d backend picks sweep direction from the sign of (theta - anchor),
       // so a CENTER polarity arc renders to the left or right of 12 o'clock
       // automatically depending on whether value is below or above 0.5.

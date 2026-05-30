@@ -12,7 +12,7 @@ extern "C" {
 //
 // Attributes are string-keyed name/value pairs stored on a widget. They unify
 // implicit widget variants (e.g. CHECKBOX3 == CHECKBOX + tristate=1) and let
-// clients configure orthogonal features (password, readonly, …) without
+// clients configure orthogonal features (password, readonly, ...) without
 // growing the core widget API.
 //
 // Attributes that change observable behavior (tristate, multiline, password)
@@ -32,7 +32,7 @@ extern "C" {
 
 // ---- Well-known platform-neutral keys -------------------------------------
 
-// int (bool): cycles unchecked → checked → indeterminate on a CHECKBOX.
+// int (bool): cycles unchecked -> checked -> indeterminate on a CHECKBOX.
 // Implicit on CHECKBOX3.
 #define NEUI_ATTR_TRISTATE  "neui.attr.tristate"
 

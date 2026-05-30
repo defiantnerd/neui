@@ -143,7 +143,7 @@ namespace neui_detail
   // Sessions point this at their own effective_palette so paint code
   // (which reads via current_palette()) automatically uses the session's
   // forced LIGHT / DARK / AUTO interpretation without every paint site
-  // needing a Session pointer. Single-threaded UI → no TLS needed.
+  // needing a Session pointer. Single-threaded UI -> no TLS needed.
   // Multi-session apps share the override (last-set wins); typical
   // single-session use is unaffected.
   inline const Palette*& active_palette_override_ptr()

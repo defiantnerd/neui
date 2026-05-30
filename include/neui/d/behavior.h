@@ -67,7 +67,7 @@ extern "C" {
     // (modulo `steps` snap count, with `wrap` int prop controlling
     // wrap-vs-clamp at the top).
     NEUI_BEHAVIOR_KIND_CLICK_CYCLE      = 8,
-    // Right-click → "Reset to default" popup_menu. Reads the value held
+    // Right-click -> "Reset to default" popup_menu. Reads the value held
     // by `target_default` attr key (or NEUI_PARAM_DEFAULT if not set)
     // and writes it to `target`. Useful as a one-handler-per-widget UX
     // standard.

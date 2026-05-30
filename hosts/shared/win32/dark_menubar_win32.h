@@ -24,10 +24,10 @@
 // undocumented but stable messages:
 //
 //   WM_UAHDRAWMENU      (0x0091) - paint the menu-bar background
-//   WM_UAHDRAWMENUITEM  (0x0092) - paint each "File", "Edit", … item
+//   WM_UAHDRAWMENUITEM  (0x0092) - paint each "File", "Edit", ... item
 //
 // These messages have shipped unchanged since Windows 10 1809. The
-// structs they use (UAHMENU, UAHDRAWMENUITEM, …) are likewise stable
+// structs they use (UAHMENU, UAHDRAWMENUITEM, ...) are likewise stable
 // even though Microsoft never published headers for them.
 
 namespace neui_detail

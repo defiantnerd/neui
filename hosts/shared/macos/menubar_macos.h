@@ -20,7 +20,7 @@
 
 namespace neui_detail
 {
-  // "Save\tCtrl+S" → "Save". macOS shows the keyEquivalent separately rather
+  // "Save\tCtrl+S" -> "Save". macOS shows the keyEquivalent separately rather
   // than appended to the title.
   inline NSString* macos_menu_title_only(const char* display_text)
   {

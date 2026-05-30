@@ -1785,7 +1785,7 @@ namespace xpl_host
     return v;
   }
 
-  // Snap v to one of N evenly-spaced positions on [0..1]. steps < 2 → no snap.
+  // Snap v to one of N evenly-spaced positions on [0..1]. steps < 2 -> no snap.
   static float snap_to_steps(float v, int steps)
   {
     if (steps < 2) return v;
@@ -2320,8 +2320,8 @@ namespace xpl_host
   }
 
   // Angular-drag constants (shared between xpl and win32 knob handlers).
-  // Total sweep matches the visual sweep in paint_knob (-135°..+135°).
-  static constexpr float KNOB_SWEEP_RAD     = 4.71238898f; // 1.5 * PI (270°)
+  // Total sweep matches the visual sweep in paint_knob (-135deg..+135deg).
+  static constexpr float KNOB_SWEEP_RAD     = 4.71238898f; // 1.5 * PI (270deg)
   static constexpr float KNOB_DEAD_ZONE_R   = 4.0f;        // logical px
   static constexpr float KNOB_FINE_SCALE    = 0.2f;        // Shift = 1/5 sensitivity
   // Slider modes (vertical / horizontal NEUI_ATTR_KNOB_MODE): pixels of
@@ -2330,7 +2330,7 @@ namespace xpl_host
   static constexpr float KNOB_SLIDER_SWEEP_PX = 200.0f;
 
   // Wrap a delta angle into [-PI, +PI] so frame-by-frame tracking is robust
-  // around the atan2 wraparound at ±π (e.g. cursor crossing 9 o'clock).
+  // around the atan2 wraparound at +/-pi (e.g. cursor crossing 9 o'clock).
   static float wrap_pi(float d)
   {
     const float TWO_PI = 6.28318530717958647692f;
@@ -2365,7 +2365,7 @@ namespace xpl_host
     if (event->type == NEUI_EVENT_MOUSE_RBUTTON_DOWN && session) {
       // Right-click context menu. Position the popup at the cursor in the
       // knob's local coordinate system (the popup overlay handles the
-      // anchor → frame-absolute conversion). event.mouse coords are
+      // anchor -> frame-absolute conversion). event.mouse coords are
       // frame-local; subtract the widget's frame-local origin to get local.
       int local_x = event->data.mouse.x - abs_x;
       int local_y = event->data.mouse.y - abs_y;
@@ -2982,7 +2982,7 @@ namespace xpl_host
     int height = popup_total_height(_popup_items);
     if (lx < _popup_x_abs || lx >= _popup_x_abs + width ||
         ly < _popup_y_abs || ly >= _popup_y_abs + height) {
-      // click outside → dismiss
+      // click outside -> dismiss
       _popup_picked = 0;
       _popup_active = false;
       _popup_running = false;
@@ -3396,9 +3396,9 @@ namespace xpl_host
 
   // Byte offsets of each line's first character. Always includes 0; the list
   // ends with one entry past the last newline (or the empty line at the end).
-  // Example: "ab\nc"  → [0, 3]
-  //          "ab\n"   → [0, 3]
-  //          ""       → [0]
+  // Example: "ab\nc"  -> [0, 3]
+  //          "ab\n"   -> [0, 3]
+  //          ""       -> [0]
   static std::vector<int> ml_line_starts(const std::string& s)
   {
     std::vector<int> starts;
@@ -4298,8 +4298,8 @@ namespace xpl_host
       // of the widget's font selection.
       if (vr.has_children && backend->draw_text) {
         const char* glyph = ti.expanded
-                              ? "\xe2\x96\xbe"   // ▾ (down triangle)
-                              : "\xe2\x96\xb8";  // ▸ (right triangle)
+                              ? "\xe2\x96\xbe"   // v (down triangle)
+                              : "\xe2\x96\xb8";  // > (right triangle)
         backend->draw_text(ctx,
           fx + indent_px, row_y,
           static_cast<float>(TREE_CHEVRON_W), rowh,
@@ -4432,7 +4432,7 @@ namespace xpl_host
       break;
     }
     case NEUI_KEY_LEFT: {
-      // If selection is expanded → collapse; otherwise jump to parent.
+      // If selection is expanded -> collapse; otherwise jump to parent.
       if (cur < 0) return false;
       auto it = tree_items.find(selected_tree_item);
       if (it == tree_items.end()) return false;
@@ -4454,7 +4454,7 @@ namespace xpl_host
         if (!it->second.expanded) {
           it->second.expanded = true;
         } else {
-          // Already expanded → move to first enabled child.
+          // Already expanded -> move to first enabled child.
           if (cur + 1 < static_cast<int>(rows.size()) &&
               rows[cur + 1].depth > rows[cur].depth) {
             int target = tv_item_enabled(*this, rows[cur + 1].id)
@@ -4581,7 +4581,7 @@ namespace xpl_host
       }
     }
 
-    // ---- double-click in content area → ACTIVATED ----------------------
+    // ---- double-click in content area -> ACTIVATED ----------------------
     if (event->type == NEUI_EVENT_MOUSE_BUTTON_DBLCLICK) {
       int rel_y = event->data.mouse.y - abs_y;
       if (rel_y < 0) return false;

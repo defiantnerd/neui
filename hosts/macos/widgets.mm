@@ -4,7 +4,7 @@
 // Step 3 of plans/native-macos-host.md: wires widget_create / widget_destroy
 // (tree slot allocation) and routes widget_show through Session. NSWindow
 // plumbing for APPWINDOW lives in window.mm; later steps extend
-// widget_show's per-type switch (LABEL / BUTTON / INPUTBOX / …).
+// widget_show's per-type switch (LABEL / BUTTON / INPUTBOX / ...).
 //
 // Shape mirror of hosts/win32/widgets.cpp.
 
@@ -869,7 +869,7 @@ namespace macos_host
 
       // Mirror the item into wd.tree_items so t_get_text / t_get_userdata
       // work uniformly across MENUBAR + TREEVIEW. Without this the
-      // example's `ud == (void*)20` check on the Help → About activation
+      // example's `ud == (void*)20` check on the Help -> About activation
       // never fires (get_userdata returns nullptr).
       WidgetData::TreeNode node;
       node.parent_id = (parent.id == tree_item_root.id) ? 0 : parent.id;
@@ -906,7 +906,7 @@ namespace macos_host
       // Nested item: leaf with action, OR submenu if user later adds a child
       // under it (we model as both - start as leaf, promote to submenu on
       // first child add). For v1 simplicity, assume two-level menubars
-      // (top → leaves) - the example fits that. Three-level can layer in
+      // (top -> leaves) - the example fits that. Three-level can layer in
       // later by detecting an existing leaf-with-tag and converting.
       NSMenuItem* p = find_menu_item_by_tag(root, parent.id);
       if (!p) return tree_item_none;

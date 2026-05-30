@@ -3,10 +3,10 @@
 // Shape mirror of backends/d2d/d2d_backend.cpp:
 //   - One CGContext per frame (drawRect: hands one to begin_frame via
 //     set_current_frame).
-//   - Path API → CGMutablePathRef built between begin_path and fill/stroke.
-//   - Transform stack + clip stack → CGContextSaveGState/RestoreGState.
-//   - Bitmap → CGImage / draw_bitmap (text + bitmaps come online in steps 4 & 9).
-//   - Text → CTLine / CTFramesetter (step 4).
+//   - Path API -> CGMutablePathRef built between begin_path and fill/stroke.
+//   - Transform stack + clip stack -> CGContextSaveGState/RestoreGState.
+//   - Bitmap -> CGImage / draw_bitmap (text + bitmaps come online in steps 4 & 9).
+//   - Text -> CTLine / CTFramesetter (step 4).
 //
 // The NEUIView is configured with isFlipped=YES so drawRect:'s CTM already
 // has Y increasing downward, matching the renderer.h convention. No explicit
@@ -101,7 +101,7 @@ namespace neui_cg_backend
     return cache;
   }
 
-  // CSS-style weight (100..900, 0 = unset) → AppKit NSFontWeight scale.
+  // CSS-style weight (100..900, 0 = unset) -> AppKit NSFontWeight scale.
   // Mirror of the d2d backend's normalise_weight mapping.
   static CGFloat css_weight_to_nsfontweight(int weight)
   {
@@ -156,7 +156,7 @@ namespace neui_cg_backend
         }];
         font = [NSFont fontWithDescriptor:desc size:static_cast<CGFloat>(font_size)];
       }
-      if (!font)  // unknown family → graceful fallback to the system font
+      if (!font)  // unknown family -> graceful fallback to the system font
         font = [NSFont systemFontOfSize:static_cast<CGFloat>(font_size)
                                   weight:ns_weight];
     }
@@ -352,7 +352,7 @@ namespace neui_cg_backend
     CGFloat rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     CGContextSetRGBFillColor(cg, rgba[0], rgba[1], rgba[2], rgba[3]);
 
-    // Origin → baseline; counter-flip Y so glyphs draw upright.
+    // Origin -> baseline; counter-flip Y so glyphs draw upright.
     CGContextTranslateCTM(cg, x, baseline_y);
     CGContextScaleCTM(cg, 1.0, -1.0);
     CGContextSetTextPosition(cg, 0, 0);
@@ -458,7 +458,7 @@ namespace neui_cg_backend
   // Draw a bitmap region into the dst rect. Coordinates are logical pixels.
   // src_w / src_h <= 0 means "entire bitmap"; otherwise the (src_x..) rect
   // is interpreted in the bitmap's logical-coordinate space and converted
-  // to physical pixels (× scale) before sub-imaging.
+  // to physical pixels (x scale) before sub-imaging.
   //
   // The view is isFlipped=YES, so the CTM has Y inverted. CGContextDrawImage
   // treats the image's natural origin as bottom-left in user space, which

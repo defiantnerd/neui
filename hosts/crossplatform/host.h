@@ -293,7 +293,7 @@ namespace xpl_host
     bool on_mouse_event(neui_event_t* event) override;
   };
 
-  // KNOB - circular value control with -135°..+135° sweep. Self-painted via
+  // KNOB - circular value control with -135deg..+135deg sweep. Self-painted via
   // the shared paint_knob helper; current value in NEUI_PARAM_VALUE.
   // Mouse interaction: angular drag - moving the cursor around the knob
   // centre rotates the value. Per-pixel sensitivity is the natural
@@ -469,7 +469,7 @@ namespace xpl_host
       bool        is_separator   = false;
       void*       userdata       = nullptr;
       std::string text;
-      // Typed shortcut binding. shortcut_key == NEUI_KEY_NONE → no shortcut.
+      // Typed shortcut binding. shortcut_key == NEUI_KEY_NONE -> no shortcut.
       uint32_t    shortcut_mods  = 0;
       uint32_t    shortcut_key   = 0;
       // Cached display label ("Ctrl+S") computed from mods/key. Stored so
@@ -479,7 +479,7 @@ namespace xpl_host
       uint32_t    menu_cmd       = 0;
     };
     std::unordered_map<uint32_t, MenuItemData> menu_items;
-    std::unordered_map<uint32_t, uint32_t>     menu_cmd_map;       // cmd_id → neui item id
+    std::unordered_map<uint32_t, uint32_t>     menu_cmd_map;       // cmd_id -> neui item id
     std::vector<uint32_t>                      menu_item_ids_ordered;
     uint32_t                                   next_menu_item_id = 1;
     uint32_t                                   next_menu_cmd_id  = 0x8000;

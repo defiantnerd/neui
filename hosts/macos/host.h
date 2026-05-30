@@ -97,7 +97,7 @@ namespace macos_host
     uint32_t               selected_item = UINT32_MAX;  // NEUI_ITEM_NONE
 
     // TREEVIEW state. Mirror of the xpl host's TreeviewWidget data:
-    // tree_items maps neui id → data; tree_items_ordered preserves insertion
+    // tree_items maps neui id -> data; tree_items_ordered preserves insertion
     // order (NSOutlineView's child:ofItem: uses it for stable indices).
     struct TreeNode {
       uint32_t    parent_id = 0;

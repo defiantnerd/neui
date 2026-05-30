@@ -117,10 +117,10 @@ struct AppState {
   neui_asset_t       behavior_asset_h   = asset_none;
   // Image-knob demo: CUSTOMDRAW driven by two bitmap layers (a static
   // background shell + a moving overlay rotated by NEUI_PARAM_VALUE) plus
-  // a behavior asset for input. Sweep is 270° total, 135° to either side
-  // of the artwork's resting pose: value 0 -> rotation 0 (rest = -135°
-  // visually), value 1 -> rotation 1.5π (rotated to +135°), value 0.5 ->
-  // rotation 0.75π (12 o'clock). Same input handler shape as cw_c.
+  // a behavior asset for input. Sweep is 270deg total, 135deg to either side
+  // of the artwork's resting pose: value 0 -> rotation 0 (rest = -135deg
+  // visually), value 1 -> rotation 1.5pi (rotated to +135deg), value 0.5 ->
+  // rotation 0.75pi (12 o'clock). Same input handler shape as cw_c.
   uint32_t           img_knob_widget_id = 0;
   neui_asset_t       img_knob_compound  = asset_none;
   neui_asset_t       img_knob_bg        = asset_none;
@@ -470,7 +470,7 @@ static neui_widget_client_t widget_client = {
       dbglog("tree item activated: \"%s\" -> %p\n", buf, ud);
       if (ud == (void*)4 && app->neui)  // Exit
         app->neui->endsession(sess);
-      if (ud == (void*)20)              // Help > About → open modal dialog
+      if (ud == (void*)20)              // Help > About -> open modal dialog
         open_about_dialog(app);
       return true;
     }
@@ -526,10 +526,10 @@ int main(int argc, char** argv) {
   //   right = treeview, far-right = slider + knob (continuous + 16-step variants).
   // Outer window dimensions sized so the client area has roughly the same
   // ~5px margin on right and bottom as it has on left and top:
-  //   rightmost widget right edge: x=865  → client width ≈ 870
-  //   bottommost widget bottom    : y=580  → client height ≈ 585
+  //   rightmost widget right edge: x=865  -> client width ~= 870
+  //   bottommost widget bottom    : y=580  -> client height ~= 585
   // Win11 non-client chrome (resize borders + title bar + menu bar) is
-  // about 16 horizontal + 58 vertical, so ≈ 890 × 645 outer.
+  // about 16 horizontal + 58 vertical, so ~= 890 x 645 outer.
   auto win = app.widgets->create(sess, widget_none, NEUI_W_APPWINDOW, 100, 100, 1010, 645, nullptr);
   app.win_id = win.id;
   app.widgets->set_text(sess, win, "neui example");
@@ -863,7 +863,7 @@ int main(int argc, char** argv) {
       neui_asset_t cs = app.compound_shape;
 
       // Layer z=-1: aspect-fitted bitmap behind the text, rotated by value.
-      // Scale 2π so value 0..1 maps to a full rotation. offset = 0.
+      // Scale 2pi so value 0..1 maps to a full rotation. offset = 0.
       auto bg_layer = app.compound->add_layer(sess, cs,
                                                 NEUI_COMPOUND_LAYER_ASSET, -1);
       app.compound->set_anchor(sess, cs, bg_layer,
@@ -1006,8 +1006,8 @@ int main(int argc, char** argv) {
     // from two bitmap layers (no shared visual with A / B / C). Layer 0
     // is the static knob shell; layer 1 is the moving overlay rotated by
     // a binding on NEUI_PARAM_VALUE. The artwork's resting pose is the
-    // value=0 position (135° CCW from neutral), so the rotation goes
-    // 0 -> 1.5π as value goes 0 -> 1 (270° total sweep, value 0.5 lands
+    // value=0 position (135deg CCW from neutral), so the rotation goes
+    // 0 -> 1.5pi as value goes 0 -> 1 (270deg total sweep, value 0.5 lands
     // straight up). Input handler shape mirrors cw_c.
     if (app.behavior
         && app.img_knob_bg.id   != asset_none.id
@@ -1040,8 +1040,8 @@ int main(int argc, char** argv) {
         app.compound->set_int  (sess, cs, mv_layer, "height", 70);
         app.compound->set_int  (sess, cs, mv_layer, "offset_y", -15);
         app.compound->set_asset(sess, cs, mv_layer, "asset",  app.img_knob_move);
-        // 270° sweep: scale = 3π/2, offset = 0. Positive rotation is CW
-        // (renderer Y-down convention), matching "1.0 = 135° to the right".
+        // 270deg sweep: scale = 3pi/2, offset = 0. Positive rotation is CW
+        // (renderer Y-down convention), matching "1.0 = 135deg to the right".
         const float three_half_pi = 4.71238898038f;
         app.compound->bind(sess, cs, mv_layer, "rotation",
                              NEUI_PARAM_VALUE, three_half_pi, 0.0f);

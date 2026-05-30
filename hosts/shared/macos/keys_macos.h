@@ -13,15 +13,15 @@
 // macOS host (`hosts/macos/`) can both include without ODR violations.
 //
 // - kVK_* virtual keycode constants (subset used by neui - letters, digits,
-//   F1–F12, navigation / control). Inlined to avoid pulling in the
+//   F1-F12, navigation / control). Inlined to avoid pulling in the
 //   deprecated Carbon framework just for the values; constants come from
 //   <Carbon/HIToolbox/Events.h>.
-// - mac_keycode_to_neui: kVK_* → neui_key_t (matches Win32 VK_* values).
-// - mac_modifiers_to_neui: NSEventModifierFlags → NEUI_KMOD_* bitmask. Per
+// - mac_keycode_to_neui: kVK_* -> neui_key_t (matches Win32 VK_* values).
+// - mac_modifiers_to_neui: NSEventModifierFlags -> NEUI_KMOD_* bitmask. Per
 //   neui's convention NEUI_KMOD_CTRL is the platform's *primary* command
-//   modifier, so on macOS Cmd → NEUI_KMOD_CTRL and the physical Control key
-//   → NEUI_KMOD_META.
-// - mac_buttonmap: NSEvent.pressedMouseButtons + modifier flags → Win32
+//   modifier, so on macOS Cmd -> NEUI_KMOD_CTRL and the physical Control key
+//   -> NEUI_KMOD_META.
+// - mac_buttonmap: NSEvent.pressedMouseButtons + modifier flags -> Win32
 //   MK_* bitmask the host's mouse events carry in buttonmap.
 // - is_printable_codepoint: gates which codepoints from
 //   [NSEvent characters] should fire NEUI_EVENT_KEYCHAR (skips control

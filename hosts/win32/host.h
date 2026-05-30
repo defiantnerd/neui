@@ -139,8 +139,8 @@ namespace win32_host {
       bool        enabled  = true;
     };
     struct PendingTreeItem { uint32_t neui_id; uint32_t parent_neui_id; };
-    std::unordered_map<uint32_t, TreeItemData>    tree_items;          // neui id → data
-    std::unordered_map<uintptr_t, uint32_t>       tree_items_reverse;  // HTREEITEM (as uintptr_t) → neui id
+    std::unordered_map<uint32_t, TreeItemData>    tree_items;          // neui id -> data
+    std::unordered_map<uintptr_t, uint32_t>       tree_items_reverse;  // HTREEITEM (as uintptr_t) -> neui id
     std::vector<PendingTreeItem>                  pending_tree_items;  // items buffered before HWND exists
     uint32_t                                      next_tree_id = 1;    // 0 reserved for root sentinel
 
@@ -154,15 +154,15 @@ namespace win32_host {
       bool        is_separator  = false;
       void*       userdata      = nullptr;
       std::string text;
-      // Typed shortcut binding. shortcut_key == NEUI_KEY_NONE → no shortcut.
+      // Typed shortcut binding. shortcut_key == NEUI_KEY_NONE -> no shortcut.
       uint32_t    shortcut_mods = 0;
       uint32_t    shortcut_key  = 0;
       std::string shortcut;     // formatted display label, derived from mods/key
       // Built-in command binding (neui_command_t). 0 = no built-in routing.
       uint32_t    menu_cmd      = 0;
     };
-    std::unordered_map<uint32_t, MenuItemData>    menu_items;            // neui id → data
-    std::unordered_map<UINT, uint32_t>            menu_cmd_map;          // cmd_id → neui item id
+    std::unordered_map<uint32_t, MenuItemData>    menu_items;            // neui id -> data
+    std::unordered_map<UINT, uint32_t>            menu_cmd_map;          // cmd_id -> neui item id
     std::vector<uint32_t>                         menu_item_ids_ordered; // insertion order for navigation
     uint32_t                                      next_menu_item_id = 1;
     // Win32 WM_COMMAND wParam carries only LOWORD; cmd_ids must stay <= 0xFFFF

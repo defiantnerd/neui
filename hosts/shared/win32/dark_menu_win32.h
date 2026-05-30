@@ -15,7 +15,7 @@
 //
 // Microsoft never exposed a documented API to flip native menus to dark.
 // All shipping apps that have themed native menus (Notepad, Settings,
-// File Explorer, Windows Terminal, …) reach for a small set of
+// File Explorer, Windows Terminal, ...) reach for a small set of
 // undocumented exports in `uxtheme.dll`, identified by ordinal:
 //
 //   ord 104 - RefreshImmersiveColorPolicyState()

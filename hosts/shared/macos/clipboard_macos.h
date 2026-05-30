@@ -12,9 +12,9 @@
 // can include without ODR violations. Mirror of clipboard_win32.h.
 //
 // Same byte-count contract as clipboard_get_text_win32:
-//   buf = NULL → query bytes needed (incl. null terminator)
-//   no clipboard text → 0
-//   error → -1
+//   buf = NULL -> query bytes needed (incl. null terminator)
+//   no clipboard text -> 0
+//   error -> -1
 
 namespace neui_detail
 {

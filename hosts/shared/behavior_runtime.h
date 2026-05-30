@@ -28,7 +28,7 @@ namespace neui_detail
 {
   // ---- Constants ----------------------------------------------------------
 
-  // Matches KnobWidget's KNOB_SWEEP_RAD (1.5 * PI = 270°). Rotational drag
+  // Matches KnobWidget's KNOB_SWEEP_RAD (1.5 * PI = 270deg). Rotational drag
   // travels this many radians for a full 0..1 sweep, so the value-delta
   // per radian is 1 / KNOB_SWEEP_RAD.
   inline constexpr float BEHAVIOR_KNOB_SWEEP_RAD = 4.71238898f;
@@ -150,7 +150,7 @@ namespace neui_detail
     return behavior_clamp(v, H.min, H.max);
   }
 
-  // Apply (snap → clamp → write) for the handler's target attr. Returns
+  // Apply (snap -> clamp -> write) for the handler's target attr. Returns
   // true if the stored value actually changed. Emits NEUI_EVENT_ATTR_CHANGED
   // and invalidates the widget on change.
   inline bool behavior_write_value(const BehaviorHandler& H,
@@ -389,7 +389,7 @@ namespace neui_detail
       // Wheel up DECREASES, wheel down INCREASES (audio-plugin convention,
       // matches the existing KNOB). Delta arrives in lines (Win32 converts
       // WHEEL_DELTA notches via SPI_GETWHEELSCROLLLINES; macOS / xpl pass
-      // ±1 per notch). Multiply by |delta| so one notch advances by
+      // +/-1 per notch). Multiply by |delta| so one notch advances by
       // `step * lines_per_notch` rather than a single `step`, otherwise
       // wheel feels imperceptible at typical step values (~0.01..0.05).
       // The wheel event payload doesn't carry modifier bits today
