@@ -115,6 +115,17 @@ struct AppState {
   // rotation binding picks up the new value at paint time.
   uint32_t           behavior_widget_id = 0;
   neui_asset_t       behavior_asset_h   = asset_none;
+  // Image-knob demo: CUSTOMDRAW driven by two bitmap layers (a static
+  // background shell + a moving overlay rotated by NEUI_PARAM_VALUE) plus
+  // a behavior asset for input. Sweep is 270° total, 135° to either side
+  // of the artwork's resting pose: value 0 -> rotation 0 (rest = -135°
+  // visually), value 1 -> rotation 1.5π (rotated to +135°), value 0.5 ->
+  // rotation 0.75π (12 o'clock). Same input handler shape as cw_c.
+  uint32_t           img_knob_widget_id = 0;
+  neui_asset_t       img_knob_compound  = asset_none;
+  neui_asset_t       img_knob_bg        = asset_none;
+  neui_asset_t       img_knob_move      = asset_none;
+  neui_asset_t       img_knob_behavior  = asset_none;
 };
 
 // Open a modal "About" dialog owned by the main window. The dialog has a
@@ -414,17 +425,20 @@ static neui_widget_client_t widget_client = {
     }
 
     case NEUI_EVENT_ATTR_CHANGED: {
-      // User-driven attr write from a behavior asset (CUSTOMDRAW C).
-      // Mirror to the value label so the info string above the knobs /
-      // sliders reflects behavior-driven changes too. Native sliders /
-      // knobs still emit NEUI_EVENT_VALUE_CHANGED via the case above; the
-      // two event channels are complementary.
+      // User-driven attr write from a behavior asset (CUSTOMDRAW C or
+      // the image-knob). Mirror to the value label so the info string
+      // above the knobs / sliders reflects behavior-driven changes too.
+      // Native sliders / knobs still emit NEUI_EVENT_VALUE_CHANGED via
+      // the case above; the two event channels are complementary.
       if (!app) return false;
       uint32_t wid = event->data.attr.widget.id;
-      if (wid == app->behavior_widget_id && app->value_label_id != 0
+      const char* tag = (wid == app->behavior_widget_id) ? "C"
+                      : (wid == app->img_knob_widget_id) ? "imgknob"
+                                                         : nullptr;
+      if (tag && app->value_label_id != 0
           && app->widgets && event->data.attr.attr_key) {
         char buf[64];
-        snprintf(buf, sizeof(buf), "C %s: %.2f",
+        snprintf(buf, sizeof(buf), "%s %s: %.2f", tag,
                   event->data.attr.attr_key, event->data.attr.value);
         neui_session_t sess  = app->session;
         neui_widget_t  label = { app->value_label_id };
@@ -828,6 +842,13 @@ int main(int argc, char** argv) {
   if (app.assets)
     app.customdraw_bg = app.assets->create_from_file(sess, "myimage.png");
 
+  // Image-knob assets: bg shell + rotating moving part. Both files exist
+  // as 1x and @2x; the asset loader auto-picks @2x on HiDPI displays.
+  if (app.assets) {
+    app.img_knob_bg   = app.assets->create_from_file(sess, "knob_bg.png");
+    app.img_knob_move = app.assets->create_from_file(sess, "knob_move.png");
+  }
+
   // -------------------------------------------------------------------------
   // Compound-drawable demo. Two CUSTOMDRAW widgets share ONE compound
   // asset (the visual shape) but carry their own attribute values; the
@@ -979,6 +1000,86 @@ int main(int argc, char** argv) {
       // widget's behavior slot, leaving the compound visual intact.
       app.widgets->set_asset(sess, cw_c, ba);
     }
+
+    // ----------------------------------------------------------------
+    // Image-knob demo: a fourth CUSTOMDRAW with its own compound built
+    // from two bitmap layers (no shared visual with A / B / C). Layer 0
+    // is the static knob shell; layer 1 is the moving overlay rotated by
+    // a binding on NEUI_PARAM_VALUE. The artwork's resting pose is the
+    // value=0 position (135° CCW from neutral), so the rotation goes
+    // 0 -> 1.5π as value goes 0 -> 1 (270° total sweep, value 0.5 lands
+    // straight up). Input handler shape mirrors cw_c.
+    if (app.behavior
+        && app.img_knob_bg.id   != asset_none.id
+        && app.img_knob_move.id != asset_none.id) {
+      app.img_knob_compound = app.assets->create_compound(sess);
+      if (app.img_knob_compound.id != asset_none.id) {
+        neui_asset_t cs = app.img_knob_compound;
+
+        // Background shell. FILL spans the whole widget; the asset draws
+        // aspect-preserving inside that rect.
+        auto bg_layer = app.compound->add_layer(sess, cs,
+                                                  NEUI_COMPOUND_LAYER_ASSET, 0);
+        app.compound->set_anchor(sess, cs, bg_layer,
+                                   NEUI_ANCHOR_CENTER, NEUI_ANCHOR_CENTER);
+        app.compound->set_int  (sess, cs, bg_layer, "width",  NEUI_COMPOUND_FILL);
+        app.compound->set_int  (sess, cs, bg_layer, "height", NEUI_COMPOUND_FILL);
+        app.compound->set_asset(sess, cs, bg_layer, "asset",  app.img_knob_bg);
+
+        // Moving overlay, sized below the shell so it fits inside the dial.
+        // The compound rotation runs around the layer's destination centre,
+        // and CENTER-CENTER anchoring on a square layer puts that pivot at
+        // the widget's centre. The shell bitmap carries bottom-edge shadow
+        // padding (122x134), so its optical centre sits above the geometric
+        // centre - shift the move layer up to land on the dial.
+        auto mv_layer = app.compound->add_layer(sess, cs,
+                                                  NEUI_COMPOUND_LAYER_ASSET, 1);
+        app.compound->set_anchor(sess, cs, mv_layer,
+                                   NEUI_ANCHOR_CENTER, NEUI_ANCHOR_CENTER);
+        app.compound->set_int  (sess, cs, mv_layer, "width",  70);
+        app.compound->set_int  (sess, cs, mv_layer, "height", 70);
+        app.compound->set_int  (sess, cs, mv_layer, "offset_y", -15);
+        app.compound->set_asset(sess, cs, mv_layer, "asset",  app.img_knob_move);
+        // 270° sweep: scale = 3π/2, offset = 0. Positive rotation is CW
+        // (renderer Y-down convention), matching "1.0 = 135° to the right".
+        const float three_half_pi = 4.71238898038f;
+        app.compound->bind(sess, cs, mv_layer, "rotation",
+                             NEUI_PARAM_VALUE, three_half_pi, 0.0f);
+      }
+
+      auto ik = app.widgets->create(sess, win, NEUI_W_CUSTOMDRAW,
+                                      875, 273, 110, 110, nullptr);
+      app.img_knob_widget_id = ik.id;
+      app.widgets->set_asset(sess, ik, app.img_knob_compound);
+      if (app.attrs) {
+        app.attrs->set_float(sess, ik, NEUI_PARAM_VALUE,   0.5f);
+        app.attrs->set_float(sess, ik, NEUI_PARAM_DEFAULT, 0.5f);
+      }
+
+      // Behavior: same four-handler bundle as cw_c (drag, wheel, keys,
+      // right-click reset), writing NEUI_PARAM_VALUE clamped to [0, 1].
+      neui_asset_t bk = app.assets->create_behavior(sess);
+      app.img_knob_behavior = bk;
+      neui_behavior_handler_t hdrag2 =
+        app.behavior->add_handler(sess, bk, NEUI_BEHAVIOR_KIND_DRAG_ROTATIONAL);
+      neui_behavior_handler_t hwheel2 =
+        app.behavior->add_handler(sess, bk, NEUI_BEHAVIOR_KIND_WHEEL);
+      neui_behavior_handler_t hkeys2 =
+        app.behavior->add_handler(sess, bk, NEUI_BEHAVIOR_KIND_KEY_STEP);
+      neui_behavior_handler_t hreset2 =
+        app.behavior->add_handler(sess, bk, NEUI_BEHAVIOR_KIND_CONTEXT_RESET);
+      neui_behavior_handler_t hs2[] = { hdrag2, hwheel2, hkeys2, hreset2 };
+      for (auto h : hs2) {
+        app.behavior->set_string(sess, bk, h, "target",         NEUI_PARAM_VALUE);
+        app.behavior->set_string(sess, bk, h, "target_default", NEUI_PARAM_DEFAULT);
+        app.behavior->set_float (sess, bk, h, "min", 0.0f);
+        app.behavior->set_float (sess, bk, h, "max", 1.0f);
+      }
+      app.behavior->set_float(sess, bk, hwheel2, "step",   0.02f);
+      app.behavior->set_float(sess, bk, hkeys2,  "step",   0.01f);
+      app.behavior->set_float(sess, bk, hkeys2,  "coarse", 0.10f);
+      app.widgets->set_asset(sess, ik, bk);
+    }
   }
 
 #if 0
@@ -1001,6 +1102,16 @@ int main(int argc, char** argv) {
     app.widgets->destroy(sess, neui_widget_t{ app.compound_widget_a });
   if (app.compound_widget_b != 0)
     app.widgets->destroy(sess, neui_widget_t{ app.compound_widget_b });
+  if (app.img_knob_widget_id != 0)
+    app.widgets->destroy(sess, neui_widget_t{ app.img_knob_widget_id });
+  if (app.assets && app.img_knob_compound.id != asset_none.id)
+    app.assets->destroy(sess, app.img_knob_compound);
+  if (app.assets && app.img_knob_behavior.id != asset_none.id)
+    app.assets->destroy(sess, app.img_knob_behavior);
+  if (app.assets && app.img_knob_bg.id != asset_none.id)
+    app.assets->destroy(sess, app.img_knob_bg);
+  if (app.assets && app.img_knob_move.id != asset_none.id)
+    app.assets->destroy(sess, app.img_knob_move);
   if (app.assets && app.compound_shape.id != asset_none.id)
     app.assets->destroy(sess, app.compound_shape);
   if (app.assets && app.customdraw_bg.id != asset_none.id)

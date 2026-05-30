@@ -72,7 +72,11 @@ if(MSVC)
   set_property(SOURCE examples/neui_example.rc APPEND PROPERTY OBJECT_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest"
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage.png"
-    "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage@2x.png")
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage@2x.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/knob_bg.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/knob_bg@2x.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/knob_move.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/knob_move@2x.png")
 elseif(WIN32)
   add_executable(neui_example WIN32 examples/main.cpp)
 elseif(APPLE)
@@ -84,6 +88,10 @@ elseif(APPLE)
   set(NEUI_EXAMPLE_RESOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage.png"
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage@2x.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/knob_bg.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/knob_bg@2x.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/knob_move.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/knob_move@2x.png"
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/lemur@2x.jpg"
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/lion@2x.jpg"
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/panda@2x.jpg")

@@ -25,6 +25,13 @@ CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "neui_example.manifest"
 "myimage.png"     PNG "myimage.png"
 "myimage@2x.png"  PNG "myimage@2x.png"
 
+// Knob shell + rotating moving part for the compound-driven image knob
+// in the example. Same lookup path as the other PNGs.
+"knob_bg.png"      PNG "knob_bg.png"
+"knob_bg@2x.png"   PNG "knob_bg@2x.png"
+"knob_move.png"    PNG "knob_move.png"
+"knob_move@2x.png" PNG "knob_move@2x.png"
+
 // Animal photos used by the image-source combobox in the example.
 // Shipped only as @2x (the user supplied HiDPI JPGs); at 96 DPI the
 // asset-resolver's @2x fallback picks these up. The "PNG" type tag is
