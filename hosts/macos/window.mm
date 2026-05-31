@@ -324,6 +324,10 @@ NSWindowStyleMask styles_for_appwindow()
   bool              dragging;
   float             drag_prev_angle;
   float             drag_continuous;
+  // Scroll-wheel accumulator (logical points for precise deltas, lines
+  // otherwise) so trackpad / Magic Mouse swipes emit one tick per unit
+  // rather than one tick per AppKit event.
+  CGFloat           wheel_accum_y;
 }
 @end
 
@@ -332,6 +336,12 @@ NSWindowStyleMask styles_for_appwindow()
 static constexpr float NEUI_KNOB_SWEEP_RAD   = 4.71238898f;  // 1.5*PI (270deg)
 static constexpr float NEUI_KNOB_DEAD_ZONE_R = 4.0f;          // logical px
 static constexpr float NEUI_KNOB_FINE_SCALE  = 0.2f;          // Shift = 1/5
+
+// Points of accumulated precise scroll delta = one tick. NSEvent reports
+// precise (trackpad / Magic Mouse) deltas in points, streaming dozens of
+// events per swipe. Picking a value close to a typical line height keeps a
+// gentle swipe in single-digit ticks (matches a few mouse-wheel notches).
+static constexpr CGFloat NEUI_WHEEL_PRECISE_POINTS_PER_TICK = 16.0;
 
 static float neui_knob_wrap_pi(float d)
 {
@@ -874,42 +884,62 @@ static float neui_snap_to_steps(float v, int steps)
 
 - (void)scrollWheel:(NSEvent*)event
 {
-  if ([self isKnob]) {
-    {
-      auto* wd = macos_host::widget_for_id(widget_id);
-      if (wd && !wd->enabled) return;  // disabled knob ignores the wheel
-    }
-    CGFloat raw = event.scrollingDeltaY;
-    if (raw == 0) return;
+  bool wants_knob = [self isKnob];
+  bool wants_cd   = !wants_knob && [self customDrawWantsInput];
+  if (!wants_knob && !wants_cd) { [super scrollWheel:event]; return; }
+
+  // Drop momentum-phase events. Inertial follow-through after a flick keeps
+  // streaming for hundreds of ms; on a parameter knob that feels like the
+  // value is still moving after the user let go. AppKit emits momentum events
+  // with momentumPhase != NSEventPhaseNone.
+  if (event.momentumPhase != NSEventPhaseNone) return;
+
+  CGFloat raw = event.scrollingDeltaY;
+  if (raw == 0) return;
+
+  // Normalize input to integer ticks (Win32 WHEEL_DELTA model). Traditional
+  // mouse wheels send ~1.0 per notch already; precise (trackpad / Magic
+  // Mouse) deltas arrive in points, many events per swipe, so divide before
+  // accumulating. Fractional remainder persists across events so slow swipes
+  // still register.
+  CGFloat scaled = event.hasPreciseScrollingDeltas
+    ? (raw / NEUI_WHEEL_PRECISE_POINTS_PER_TICK)
+    : raw;
+  wheel_accum_y += scaled;
+  int ticks = (int)wheel_accum_y;  // truncates toward zero
+  if (ticks == 0) return;
+  wheel_accum_y -= (CGFloat)ticks;
+
+  if (wants_knob) {
+    auto* wd = macos_host::widget_for_id(widget_id);
+    if (wd && !wd->enabled) return;  // disabled knob ignores the wheel
     // Match the xpl host's wheel-up = decrease convention (audio-plugin feel).
     bool fine = (event.modifierFlags & NSEventModifierFlagShift) != 0;
     int steps = [self knobSteps];
     float magnitude = (steps >= 2)
       ? (1.0f / (float)(steps - 1))
       : (fine ? 0.01f : 0.05f);
-    float sign = (raw > 0) ? -1.0f : 1.0f;
-    [self setKnobValueFromUser:[self knobValue] + sign * magnitude];
+    float sign = (ticks > 0) ? -1.0f : 1.0f;
+    int   mag_ticks = (ticks > 0) ? ticks : -ticks;
+    [self setKnobValueFromUser:[self knobValue]
+                                + sign * magnitude * (float)mag_ticks];
     return;
   }
-  if ([self customDrawWantsInput]) {
-    CGFloat raw = event.scrollingDeltaY;
-    int delta = (raw > 0) ? 1 : (raw < 0 ? -1 : 0);
-    if (delta == 0) return;
-    macos_host::Session* sess = nullptr;
-    auto* wd = macos_host::widget_for_id(widget_id, &sess);
-    if (!wd || !sess) return;
-    NSPoint p = [self localPoint:event];
-    neui_event_t ev = {};
-    ev.type              = NEUI_EVENT_MOUSE_WHEEL;
-    ev.data.wheel.widget = { wd->widget_id };
-    ev.data.wheel.x      = (int)p.x;
-    ev.data.wheel.y      = (int)p.y;
-    ev.data.wheel.delta  = delta;
-    sess->dispatch_event(&ev);
-    macos_host::dispatch_behavior_mouse(widget_id, &ev, (float)p.x, (float)p.y);
-    return;
-  }
-  [super scrollWheel:event];
+
+  // CUSTOMDRAW: forward as a single MOUSE_WHEEL event with delta=ticks (the
+  // behavior runtime multiplies by |delta|, matching Win32 line-count semantics).
+  macos_host::Session* sess = nullptr;
+  auto* wd = macos_host::widget_for_id(widget_id, &sess);
+  if (!wd || !sess) return;
+  NSPoint p = [self localPoint:event];
+  neui_event_t ev = {};
+  ev.type              = NEUI_EVENT_MOUSE_WHEEL;
+  ev.data.wheel.widget = { wd->widget_id };
+  ev.data.wheel.x      = (int)p.x;
+  ev.data.wheel.y      = (int)p.y;
+  ev.data.wheel.delta  = ticks;
+  sess->dispatch_event(&ev);
+  macos_host::dispatch_behavior_mouse(widget_id, &ev, (float)p.x, (float)p.y);
 }
 
 @end
