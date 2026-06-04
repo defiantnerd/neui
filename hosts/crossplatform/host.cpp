@@ -8,6 +8,7 @@
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_section.h"
 #include "../shared/widget_paint_compound.h"
+#include "../shared/widget_paint_grid.h"
 #include "../shared/theme_palette.h"
 #include "../shared/painter.h"
 #include "../shared/widget_font.h"
@@ -148,6 +149,7 @@ namespace xpl_host
   extern neui_asset_api_t     asset_api;
   extern neui_compound_api_t  compound_api;
   extern neui_behavior_api_t  behavior_api;
+  extern neui_grid_api_t      grid_api;
 
   // -------------------------------------------------------------------------
   // Session management
@@ -190,6 +192,7 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_ASSETS))    return &asset_api;
     if (!strcmp(iface, NEUI_API_COMPOUND))  return &compound_api;
     if (!strcmp(iface, NEUI_API_BEHAVIOR))  return &behavior_api;
+    if (!strcmp(iface, NEUI_API_GRID))      return &grid_api;
     return nullptr;
   }
 
@@ -4639,6 +4642,430 @@ namespace xpl_host
     fire_tree_selected(session, *this, prev_sel, selected_tree_item);
     repaint();
     return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // GridWidget - scrollable table. Cells are paint-state, not widgets;
+  // the model + paint helpers live in hosts/shared/grid_model.h and
+  // hosts/shared/widget_paint_grid.h so the native hosts can reuse them.
+
+  using neui_detail::GridColumn;
+  using neui_detail::GridModel;
+  using neui_detail::GridViewport;
+  using neui_detail::GridHit;
+  using neui_detail::GridHitRegion;
+
+  static neui_detail::GridPaintConfig xpl_grid_config(const GridWidget& g)
+  {
+    return neui_detail::grid_read_config(g.attrs.get());
+  }
+
+  static GridViewport xpl_grid_viewport(const GridWidget& g)
+  {
+    auto cfg = xpl_grid_config(g);
+    return neui_detail::grid_compute_viewport(g.model, g.width, g.height,
+                                                cfg.row_h, cfg.header_h);
+  }
+
+  static bool xpl_grid_fire_row_selected(GridWidget& g, int row)
+  {
+    if (!g.session) return false;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_ROW_SELECTED;
+    ev.data.grid_row.widget.id = g.widget_id;
+    ev.data.grid_row.row       = row;
+    return g.session->dispatch_event(&ev);
+  }
+
+  static bool xpl_grid_fire_cell_selected(GridWidget& g, int row, int col)
+  {
+    if (!g.session) return false;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_CELL_SELECTED;
+    ev.data.grid_cell.widget.id = g.widget_id;
+    ev.data.grid_cell.row       = row;
+    ev.data.grid_cell.col       = col;
+    return g.session->dispatch_event(&ev);
+  }
+
+  static bool xpl_grid_fire_cell_clicked(GridWidget& g, int row, int col)
+  {
+    if (!g.session) return false;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_CELL_CLICKED;
+    ev.data.grid_cell.widget.id = g.widget_id;
+    ev.data.grid_cell.row       = row;
+    ev.data.grid_cell.col       = col;
+    return g.session->dispatch_event(&ev);
+  }
+
+  static void xpl_grid_fire_row_activated(GridWidget& g, int row)
+  {
+    if (!g.session) return;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_ROW_ACTIVATED;
+    ev.data.grid_row.widget.id = g.widget_id;
+    ev.data.grid_row.row       = row;
+    g.session->dispatch_event(&ev);
+  }
+
+  static void xpl_grid_fire_column_resized(GridWidget& g, int col, int old_w, int new_w)
+  {
+    if (!g.session) return;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_COLUMN_RESIZED;
+    ev.data.grid_column_resize.widget.id = g.widget_id;
+    ev.data.grid_column_resize.col       = col;
+    ev.data.grid_column_resize.old_width = old_w;
+    ev.data.grid_column_resize.new_width = new_w;
+    g.session->dispatch_event(&ev);
+  }
+
+  // Run the dispatch ladder for a body click: ROW_SELECTED -> (cell_focus ?
+  // CELL_SELECTED : skip) -> CELL_CLICKED, stopping early at the first
+  // consumer. Always updates the widget's selected_row / selected_col.
+  static void xpl_grid_click_ladder(GridWidget& g, int row, int col)
+  {
+    auto cfg = xpl_grid_config(g);
+    g.model.selected_row = row;
+    if (cfg.cell_focus) g.model.selected_col = col;
+    if (xpl_grid_fire_row_selected(g, row)) return;
+    if (cfg.cell_focus) {
+      if (xpl_grid_fire_cell_selected(g, row, col)) return;
+    }
+    xpl_grid_fire_cell_clicked(g, row, col);
+  }
+
+  void GridWidget::paint(neui_render_backend_t* backend,
+                          neui_render_ctx_t ctx, bool is_focused)
+  {
+    neui_detail::paint_grid(backend, ctx,
+                              (float)x, (float)y,
+                              (float)width, (float)height,
+                              model, attrs.get(), is_focused);
+  }
+
+  bool GridWidget::on_keydown(uint32_t keycode, uint32_t modifiers)
+  {
+    using namespace neui_detail;
+    auto cfg = grid_read_config(attrs.get());
+    GridViewport vp = grid_compute_viewport(model, width, height,
+                                              cfg.row_h, cfg.header_h);
+    int n_rows = (int)model.rows.size();
+    int n_cols = (int)model.columns.size();
+    if (n_rows == 0) return false;
+
+    int prev_row = model.selected_row;
+    int prev_col = model.selected_col;
+    int vis = grid_visible_rows(vp, cfg.row_h);
+    if (vis < 1) vis = 1;
+    bool handled = true;
+
+    switch (keycode) {
+    case NEUI_KEY_UP:
+      if (model.selected_row > 0)        model.selected_row--;
+      else if (model.selected_row < 0)   model.selected_row = 0;
+      break;
+    case NEUI_KEY_DOWN:
+      if (model.selected_row < n_rows - 1) {
+        if (model.selected_row < 0) model.selected_row = 0;
+        else                         model.selected_row++;
+      }
+      break;
+    case NEUI_KEY_PAGEUP:
+      model.selected_row = (model.selected_row < 0)
+        ? 0
+        : std::max(0, model.selected_row - vis);
+      break;
+    case NEUI_KEY_PAGEDOWN:
+      model.selected_row = (model.selected_row < 0)
+        ? std::min(n_rows - 1, vis)
+        : std::min(n_rows - 1, model.selected_row + vis);
+      break;
+    case NEUI_KEY_HOME:
+      if (cfg.cell_focus && !(modifiers & NEUI_KMOD_CTRL)) {
+        model.selected_col = (n_cols > 0) ? 0 : -1;
+        if (model.selected_row < 0) model.selected_row = 0;
+      } else {
+        model.selected_row = 0;
+        if (cfg.cell_focus) model.selected_col = (n_cols > 0) ? 0 : -1;
+      }
+      break;
+    case NEUI_KEY_END:
+      if (cfg.cell_focus && !(modifiers & NEUI_KMOD_CTRL)) {
+        model.selected_col = (n_cols > 0) ? n_cols - 1 : -1;
+        if (model.selected_row < 0) model.selected_row = n_rows - 1;
+      } else {
+        model.selected_row = n_rows - 1;
+        if (cfg.cell_focus) model.selected_col = (n_cols > 0) ? n_cols - 1 : -1;
+      }
+      break;
+    case NEUI_KEY_LEFT:
+      if (cfg.cell_focus) {
+        if (model.selected_col > 0) model.selected_col--;
+        else if (model.selected_col < 0 && n_cols > 0) model.selected_col = 0;
+        if (model.selected_row < 0) model.selected_row = 0;
+      } else {
+        int step = grid_horizontal_step_px(model);
+        model.scroll_offset_x -= step;
+        grid_clamp_scroll(model, vp, cfg.row_h);
+        repaint();
+        return true;   // scrolled, no selection change
+      }
+      break;
+    case NEUI_KEY_RIGHT:
+      if (cfg.cell_focus) {
+        if (model.selected_col < n_cols - 1) {
+          if (model.selected_col < 0) model.selected_col = 0;
+          else                         model.selected_col++;
+        }
+        if (model.selected_row < 0) model.selected_row = 0;
+      } else {
+        int step = grid_horizontal_step_px(model);
+        model.scroll_offset_x += step;
+        grid_clamp_scroll(model, vp, cfg.row_h);
+        repaint();
+        return true;
+      }
+      break;
+    case NEUI_KEY_RETURN: {
+      int r = model.selected_row;
+      if (r < 0) return true;
+      xpl_grid_fire_row_activated(*this, r);
+      return true;
+    }
+    default:
+      handled = false;
+      break;
+    }
+
+    if (!handled) return false;
+
+    // Keep selection in view.
+    if (cfg.cell_focus && model.selected_col >= 0)
+      grid_ensure_cell_visible(model, vp, cfg.row_h,
+                                 model.selected_row, model.selected_col);
+    else
+      grid_ensure_row_visible(model, vp, cfg.row_h, model.selected_row);
+
+    if (model.selected_row != prev_row) {
+      xpl_grid_fire_row_selected(*this, model.selected_row);
+    }
+    if (cfg.cell_focus && (model.selected_row != prev_row ||
+                            model.selected_col != prev_col)) {
+      xpl_grid_fire_cell_selected(*this, model.selected_row, model.selected_col);
+    }
+    repaint();
+    return true;
+  }
+
+  bool GridWidget::on_mouse_event(neui_event_t* event)
+  {
+    using namespace neui_detail;
+    auto cfg = grid_read_config(attrs.get());
+    GridViewport vp = grid_compute_viewport(model, width, height,
+                                              cfg.row_h, cfg.header_h);
+
+    int lx = event->data.mouse.x - abs_x;
+    int ly = event->data.mouse.y - abs_y;
+
+    // --- column-resize drag in progress ---
+    if (model.column_resize_col >= 0) {
+      if (event->type == NEUI_EVENT_MOUSE_MOVE) {
+        int dx = event->data.mouse.x - model.column_resize_start_x;
+        int new_w = model.column_resize_start_w + dx;
+        int min_w = grid_column_min_width(model, model.column_resize_col,
+                                            cfg.col_min_w_def);
+        if (new_w < min_w) new_w = min_w;
+        if (new_w > 5000) new_w = 5000;
+        model.columns[(size_t)model.column_resize_col].width = new_w;
+        grid_clamp_scroll(model, vp, cfg.row_h);
+        platform_set_cursor(NEUI_CURSOR_EW_RESIZE);
+        repaint();
+        return true;
+      }
+      if (event->type == NEUI_EVENT_MOUSE_BUTTON_UP) {
+        int new_w = model.columns[(size_t)model.column_resize_col].width;
+        int col   = model.column_resize_col;
+        int old_w = model.column_resize_old_w;
+        model.column_resize_col     = -1;
+        model.column_resize_start_x = 0;
+        model.column_resize_start_w = 0;
+        platform_set_cursor(NEUI_CURSOR_DEFAULT);
+        if (new_w != old_w) xpl_grid_fire_column_resized(*this, col, old_w, new_w);
+        repaint();
+        return true;
+      }
+      return false;
+    }
+
+    // --- vertical scrollbar drag in progress ---
+    if (model.vert_drag.active) {
+      if (event->type == NEUI_EVENT_MOUSE_BUTTON_UP ||
+          (event->type == NEUI_EVENT_MOUSE_MOVE &&
+           !(event->data.mouse.buttonmap & NEUI_MK_LBUTTON))) {
+        model.vert_drag.active = false;
+        return true;
+      }
+      if (event->type == NEUI_EVENT_MOUSE_MOVE) {
+        int vis = grid_visible_rows(vp, cfg.row_h);
+        ScrollbarGeom g = compute_scrollbar(vp.body_h, 0,
+                                              (int)model.rows.size(), vis,
+                                              model.vert_drag.start_position);
+        int rel = ly - vp.body_y;
+        model.scroll_offset_y = scrollbar_drag_apply(model.vert_drag, rel, g,
+                                                        (int)model.rows.size(), vis);
+        grid_clamp_scroll(model, vp, cfg.row_h);
+        repaint();
+        return true;
+      }
+      return false;
+    }
+
+    // --- horizontal scrollbar drag in progress ---
+    if (model.horz_drag.active) {
+      if (event->type == NEUI_EVENT_MOUSE_BUTTON_UP ||
+          (event->type == NEUI_EVENT_MOUSE_MOVE &&
+           !(event->data.mouse.buttonmap & NEUI_MK_LBUTTON))) {
+        model.horz_drag.active = false;
+        return true;
+      }
+      if (event->type == NEUI_EVENT_MOUSE_MOVE) {
+        int content_w = grid_total_content_width(model);
+        ScrollbarGeom g = compute_scrollbar(vp.body_w, 0,
+                                              content_w, vp.body_w,
+                                              model.horz_drag.start_position);
+        int rel = lx - vp.body_x;
+        model.scroll_offset_x = scrollbar_drag_apply(model.horz_drag, rel, g,
+                                                       content_w, vp.body_w);
+        grid_clamp_scroll(model, vp, cfg.row_h);
+        repaint();
+        return true;
+      }
+      return false;
+    }
+
+    // --- mouse move: cursor feedback when over a header divider ---
+    if (event->type == NEUI_EVENT_MOUSE_MOVE) {
+      GridHit hit = grid_hit_test(model, vp, cfg.row_h,
+                                    width, height, lx, ly);
+      platform_set_cursor(hit.region == GridHitRegion::HeaderDivider
+                            ? NEUI_CURSOR_EW_RESIZE
+                            : NEUI_CURSOR_DEFAULT);
+      return false;
+    }
+
+    // --- wheel: vertical scroll by N rows ---
+    if (event->type == NEUI_EVENT_MOUSE_WHEEL) {
+      int delta = event->data.wheel.delta;
+      if (delta == 0) return false;
+      // Convention from LISTBOX / TREEVIEW: one wheel notch == one row.
+      model.scroll_offset_y -= delta;
+      grid_clamp_scroll(model, vp, cfg.row_h);
+      repaint();
+      return true;
+    }
+
+    // --- button down: hit-test + start drag / select ---
+    if (event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN ||
+        event->type == NEUI_EVENT_MOUSE_BUTTON_DBLCLICK)
+    {
+      GridHit hit = grid_hit_test(model, vp, cfg.row_h,
+                                    width, height, lx, ly);
+      switch (hit.region) {
+      case GridHitRegion::HeaderDivider:
+        if (event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN) {
+          model.column_resize_col     = hit.col;
+          model.column_resize_start_x = event->data.mouse.x;
+          model.column_resize_start_w = model.columns[(size_t)hit.col].width;
+          model.column_resize_old_w   = model.column_resize_start_w;
+          platform_set_cursor(NEUI_CURSOR_EW_RESIZE);
+          return true;
+        }
+        return true;
+      case GridHitRegion::Header:
+        // Reserved for column-header click semantics (sort etc).
+        return true;
+      case GridHitRegion::VertScrollTrack: {
+        int vis = grid_visible_rows(vp, cfg.row_h);
+        ScrollbarGeom g = compute_scrollbar(vp.body_h, 0,
+                                              (int)model.rows.size(), vis,
+                                              model.scroll_offset_y);
+        int rel = ly - vp.body_y;
+        if (g.visible && rel >= g.thumb_pos && rel < g.thumb_pos + g.thumb_len) {
+          model.vert_drag.active           = true;
+          model.vert_drag.start_axis_coord = rel;
+          model.vert_drag.start_position   = model.scroll_offset_y;
+        } else if (g.visible) {
+          int step = vis > 0 ? vis : 1;
+          if (rel < g.thumb_pos) model.scroll_offset_y -= step;
+          else                   model.scroll_offset_y += step;
+          grid_clamp_scroll(model, vp, cfg.row_h);
+          repaint();
+        }
+        return true;
+      }
+      case GridHitRegion::HorzScrollTrack: {
+        int content_w = grid_total_content_width(model);
+        ScrollbarGeom g = compute_scrollbar(vp.body_w, 0,
+                                              content_w, vp.body_w,
+                                              model.scroll_offset_x);
+        int rel = lx - vp.body_x;
+        if (g.visible && rel >= g.thumb_pos && rel < g.thumb_pos + g.thumb_len) {
+          model.horz_drag.active           = true;
+          model.horz_drag.start_axis_coord = rel;
+          model.horz_drag.start_position   = model.scroll_offset_x;
+        } else if (g.visible) {
+          int step = vp.body_w > 0 ? vp.body_w : 60;
+          if (rel < g.thumb_pos) model.scroll_offset_x -= step;
+          else                   model.scroll_offset_x += step;
+          grid_clamp_scroll(model, vp, cfg.row_h);
+          repaint();
+        }
+        return true;
+      }
+      case GridHitRegion::Cell: {
+        if (event->type == NEUI_EVENT_MOUSE_BUTTON_DBLCLICK) {
+          // Selection already updated by the prior DOWN; just activate.
+          xpl_grid_fire_row_activated(*this, hit.row);
+        } else {
+          // Skip the cell-click ladder for disabled cells - select the
+          // row but suppress CELL_CLICKED (matches per-cell enabled
+          // semantics).
+          const GridCellOverride* ov = grid_find_override(model, hit.row, hit.col);
+          bool cell_dis = ov && ov->has_enabled && !ov->enabled;
+          int prev_row = model.selected_row;
+          model.selected_row = hit.row;
+          if (cfg.cell_focus) model.selected_col = hit.col;
+          if (cell_dis) {
+            if (model.selected_row != prev_row)
+              xpl_grid_fire_row_selected(*this, hit.row);
+          } else {
+            xpl_grid_click_ladder(*this, hit.row, hit.col);
+          }
+        }
+        repaint();
+        return true;
+      }
+      case GridHitRegion::BodyEmpty:
+        // Click in empty area below the rows clears selection.
+        if (model.selected_row != -1) {
+          model.selected_row = -1;
+          model.selected_col = -1;
+          xpl_grid_fire_row_selected(*this, -1);
+          repaint();
+        }
+        return true;
+      case GridHitRegion::Corner:
+      case GridHitRegion::VertScrollThumb:
+      case GridHitRegion::HorzScrollThumb:
+      case GridHitRegion::None:
+      default:
+        return false;
+      }
+    }
+
+    return false;
   }
 
 } // namespace xpl_host

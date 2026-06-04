@@ -130,6 +130,7 @@ typedef struct neui_widget_api {
 #define NEUI_W_KNOB       "neui.std.knob"
 #define NEUI_W_SECTION    "neui.std.section"
 #define NEUI_W_CUSTOMDRAW "neui.std.customdraw"
+#define NEUI_W_GRID       "neui.std.grid"
 
 #ifdef __cplusplus
 }

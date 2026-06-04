@@ -127,6 +127,33 @@ if(APPLE)
   target_link_libraries(neui_example PRIVATE neui-macoshost)
 endif()
 
+# GRID widget example - standalone demo separate from the monolithic
+# neui_example so the new widget can be exercised on its own.
+# Reuses the same Win32 application manifest the main example uses (the
+# manifest is generic; it gates dark-mode HMENU theming + per-monitor v2
+# DPI + UTF-8 ACP, all of which apply identically to this app).
+if(MSVC)
+  add_executable(neui_grid_example WIN32
+    examples/grid_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_grid_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_grid_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_grid_example WIN32 examples/grid_example.cpp)
+elseif(APPLE)
+  add_executable(neui_grid_example MACOSX_BUNDLE examples/grid_example.cpp)
+else()
+  add_executable(neui_grid_example examples/grid_example.cpp)
+endif()
+target_link_libraries(neui_grid_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_grid_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_grid_example PRIVATE neui-macoshost)
+endif()
+
 # Minimal README example - input + button + label echo. Pure C; mirrors the
 # code block in README.md verbatim. Useful as a smoke test that the public
 # C API stays usable from a one-file client.

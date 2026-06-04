@@ -206,4 +206,21 @@ namespace xpl_host
   void  platform_menubar_set_item_shortcut(void* parent_hmenu, uint32_t cmd_id,
                                             uint32_t modifiers, uint32_t key);
 
+  // -------------------------------------------------------------------------
+  // Mouse cursor.
+  //
+  // Switching the cursor mid-widget (e.g. when hovering a column-resize
+  // divider in the GRID header band). One call per change; the platform
+  // is expected to track the active cursor and reapply on every
+  // WM_SETCURSOR / cursor-update message so the cursor stays sticky
+  // until set_cursor is called again.
+  //
+  // Default kind reverts to the OS arrow.
+  enum CursorKind {
+    NEUI_CURSOR_DEFAULT   = 0,
+    NEUI_CURSOR_EW_RESIZE = 1,   // double-headed horizontal arrow (column resize)
+  };
+
+  void platform_set_cursor(int kind /* CursorKind */);
+
 } // namespace xpl_host

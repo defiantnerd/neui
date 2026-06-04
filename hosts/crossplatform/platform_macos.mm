@@ -1394,4 +1394,16 @@ namespace xpl_host
 
   void platform_unregister_clipboard_listener(uint32_t /*handle*/) {}
 
+  // -------------------------------------------------------------------------
+  // Mouse cursor.
+
+  void platform_set_cursor(int kind)
+  {
+    switch (kind) {
+      case NEUI_CURSOR_EW_RESIZE: [[NSCursor resizeLeftRightCursor] set]; break;
+      case NEUI_CURSOR_DEFAULT:
+      default:                    [[NSCursor arrowCursor] set];          break;
+    }
+  }
+
 } // namespace xpl_host

@@ -87,5 +87,7 @@ namespace xpl_host
                                                  void* /*token*/)             { return 0;     }
   void     platform_unregister_clipboard_listener(uint32_t /*handle*/)        {}
 
+  void     platform_set_cursor(int /*kind*/)                                  {}
+
 } // namespace xpl_host
 

@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 #include <neui/d/attrs.h>
+#include <neui/d/grid.h>
 
 // Shared attribute bag used by both hosts. Stored lazily on a widget so the
 // per-widget overhead is one pointer when unused.
@@ -73,6 +74,12 @@ namespace neui_detail
     { NEUI_ATTR_FONT_WEIGHT,          AttrKind::INT    },
     { NEUI_PARAM_VALUE,               AttrKind::FLOAT  },
     { NEUI_PARAM_DEFAULT,             AttrKind::FLOAT  },
+    { NEUI_ATTR_GRID_ROW_HEIGHT,              AttrKind::INT },
+    { NEUI_ATTR_GRID_HEADER_HEIGHT,           AttrKind::INT },
+    { NEUI_ATTR_GRID_FOCUS_ROW_COLOR,         AttrKind::INT },
+    { NEUI_ATTR_GRID_SHOW_FOCUS_ROW,          AttrKind::INT },
+    { NEUI_ATTR_GRID_COLUMN_MIN_WIDTH_DEFAULT,AttrKind::INT },
+    { NEUI_ATTR_GRID_CELL_FOCUS,              AttrKind::INT },
   };
 
   // Lookup the documented kind for a well-known key. Returns nullptr when

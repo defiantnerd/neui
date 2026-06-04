@@ -22,6 +22,7 @@
 #include "d/commands.h"
 #include "d/menu.h"
 #include "d/theme.h"
+#include "d/grid.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -160,6 +160,8 @@ namespace xpl_host
       return std::make_unique<KnobWidget>();
     if (!strcmp(type, NEUI_W_CUSTOMDRAW))
       return std::make_unique<CustomDrawWidget>();
+    if (!strcmp(type, NEUI_W_GRID))
+      return std::make_unique<GridWidget>();
     return std::make_unique<WidgetData>(); // fallback for unknown types
   }
 
@@ -199,7 +201,8 @@ namespace xpl_host
                      !strcmp(type, NEUI_W_TREEVIEW)   ||
                      !strcmp(type, NEUI_W_SLIDER)     ||
                      !strcmp(type, NEUI_W_KNOB)       ||
-                     !strcmp(type, NEUI_W_CUSTOMDRAW);
+                     !strcmp(type, NEUI_W_CUSTOMDRAW) ||
+                     !strcmp(type, NEUI_W_GRID);
 
     obj->emit_events = !strcmp(type, NEUI_W_BUTTON)    ||
                        !strcmp(type, NEUI_W_INPUTBOX)   ||
@@ -211,7 +214,8 @@ namespace xpl_host
                        !strcmp(type, NEUI_W_TREEVIEW)   ||
                        !strcmp(type, NEUI_W_SLIDER)     ||
                        !strcmp(type, NEUI_W_KNOB)       ||
-                       !strcmp(type, NEUI_W_CUSTOMDRAW);
+                       !strcmp(type, NEUI_W_CUSTOMDRAW) ||
+                       !strcmp(type, NEUI_W_GRID);
 
     uint32_t idx = s->_widgets.add_child(parent_idx, std::move(obj));
     if (idx == 0) return { UINT32_MAX };
@@ -2094,6 +2098,452 @@ namespace xpl_host
     be_set_int,
     be_set_float,
     be_set_string,
+  };
+
+  // -------------------------------------------------------------------------
+  // Grid API (NEUI_API_GRID) - thin wrapper over GridWidget::model.
+
+  static GridWidget* resolve_grid(neui_session_t session, neui_widget_t widget,
+                                    Session** out_sess = nullptr)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (out_sess) *out_sess = s;
+    if (!s) return nullptr;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return nullptr;
+    return dynamic_cast<GridWidget*>(&s->_widgets[idx]);
+  }
+
+  static void grid_invalidate(Session* s, GridWidget* g)
+  {
+    if (!s || !g) return;
+    void* frame = s->find_parent_native_handle(g->index);
+    if (frame) platform_invalidate(frame);
+  }
+
+  static int NEUI_ABI gr_add_column(neui_session_t session, neui_widget_t widget,
+                                      const char* header, int width_logical)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return -1;
+    neui_detail::GridColumn c;
+    c.header = header ? header : "";
+    c.width  = (width_logical > 0) ? width_logical : neui_detail::GRID_DEFAULT_NEW_COLUMN_W;
+    g->model.columns.push_back(std::move(c));
+    neui_detail::grid_resize_rows_to_columns(g->model,
+                                                (int)g->model.columns.size());
+    grid_invalidate(s, g);
+    return (int)g->model.columns.size() - 1;
+  }
+
+  static int NEUI_ABI gr_get_column_count(neui_session_t session, neui_widget_t widget)
+  {
+    auto* g = resolve_grid(session, widget);
+    return g ? (int)g->model.columns.size() : 0;
+  }
+
+  static void NEUI_ABI gr_set_column_width(neui_session_t session, neui_widget_t widget,
+                                             int col, int width_logical)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g || col < 0 || col >= (int)g->model.columns.size()) return;
+    auto cfg = neui_detail::grid_read_config(g->attrs.get());
+    int min_w = neui_detail::grid_column_min_width(g->model, col, cfg.col_min_w_def);
+    if (width_logical < min_w) width_logical = min_w;
+    g->model.columns[(size_t)col].width = width_logical;
+    grid_invalidate(s, g);
+  }
+
+  static int NEUI_ABI gr_get_column_width(neui_session_t session, neui_widget_t widget, int col)
+  {
+    auto* g = resolve_grid(session, widget);
+    if (!g || col < 0 || col >= (int)g->model.columns.size()) return 0;
+    return g->model.columns[(size_t)col].width;
+  }
+
+  static void NEUI_ABI gr_set_column_min_width(neui_session_t session, neui_widget_t widget,
+                                                  int col, int min_w)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g || col < 0 || col >= (int)g->model.columns.size()) return;
+    g->model.columns[(size_t)col].min_width = min_w;
+    if (g->model.columns[(size_t)col].width < min_w)
+      g->model.columns[(size_t)col].width = min_w;
+    grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_set_column_align(neui_session_t session, neui_widget_t widget,
+                                             int col, const char* align)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g || col < 0 || col >= (int)g->model.columns.size()) return;
+    g->model.columns[(size_t)col].align = neui_detail::grid_parse_align(align);
+    grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_set_column_header(neui_session_t session, neui_widget_t widget,
+                                              int col, const char* text)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g || col < 0 || col >= (int)g->model.columns.size()) return;
+    g->model.columns[(size_t)col].header = text ? text : "";
+    grid_invalidate(s, g);
+  }
+
+  static int NEUI_ABI gr_get_column_header(neui_session_t session, neui_widget_t widget,
+                                             int col, char* buf, int buflen)
+  {
+    auto* g = resolve_grid(session, widget);
+    if (!g || col < 0 || col >= (int)g->model.columns.size()) return -1;
+    const std::string& h = g->model.columns[(size_t)col].header;
+    int need = (int)h.size() + 1;
+    if (buf && buflen > 0) {
+      int copy = (need < buflen) ? need : buflen;
+      memcpy(buf, h.c_str(), (size_t)copy);
+      buf[copy - 1] = 0;
+    }
+    return need;
+  }
+
+  static void NEUI_ABI gr_remove_column(neui_session_t session, neui_widget_t widget, int col)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g || col < 0 || col >= (int)g->model.columns.size()) return;
+    g->model.columns.erase(g->model.columns.begin() + col);
+    // Drop the matching cell from every row.
+    for (auto& r : g->model.rows) {
+      if (col < (int)r.cells.size()) r.cells.erase(r.cells.begin() + col);
+    }
+    // Drop cell overrides on the removed column; shift higher-col entries left.
+    std::unordered_map<uint64_t, neui_detail::GridCellOverride> remap;
+    for (auto& kv : g->model.cell_overrides) {
+      int r = (int)(kv.first >> 32);
+      int c = (int)(kv.first & 0xFFFFFFFF);
+      if (c == col) continue;
+      int nc = (c > col) ? c - 1 : c;
+      remap[neui_detail::grid_cell_key(r, nc)] = kv.second;
+    }
+    g->model.cell_overrides = std::move(remap);
+    if (g->model.selected_col >= (int)g->model.columns.size())
+      g->model.selected_col = (int)g->model.columns.size() - 1;
+    grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_clear_columns(neui_session_t session, neui_widget_t widget)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return;
+    g->model.columns.clear();
+    g->model.rows.clear();
+    g->model.cell_overrides.clear();
+    g->model.selected_row = -1;
+    g->model.selected_col = -1;
+    g->model.scroll_offset_x = 0;
+    g->model.scroll_offset_y = 0;
+    grid_invalidate(s, g);
+  }
+
+  static int NEUI_ABI gr_add_row(neui_session_t session, neui_widget_t widget,
+                                   const char* const* values_utf8)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return -1;
+    neui_detail::GridRow row;
+    row.cells.resize(g->model.columns.size());
+    if (values_utf8) {
+      for (size_t i = 0; i < g->model.columns.size() && values_utf8[i]; ++i)
+        row.cells[i] = values_utf8[i];
+    }
+    g->model.rows.push_back(std::move(row));
+    grid_invalidate(s, g);
+    return (int)g->model.rows.size() - 1;
+  }
+
+  static int NEUI_ABI gr_get_row_count(neui_session_t session, neui_widget_t widget)
+  {
+    auto* g = resolve_grid(session, widget);
+    return g ? (int)g->model.rows.size() : 0;
+  }
+
+  static void NEUI_ABI gr_remove_row(neui_session_t session, neui_widget_t widget, int row)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g || row < 0 || row >= (int)g->model.rows.size()) return;
+    g->model.rows.erase(g->model.rows.begin() + row);
+    // Drop overrides on the removed row; shift higher rows down.
+    std::unordered_map<uint64_t, neui_detail::GridCellOverride> remap;
+    for (auto& kv : g->model.cell_overrides) {
+      int r = (int)(kv.first >> 32);
+      int c = (int)(kv.first & 0xFFFFFFFF);
+      if (r == row) continue;
+      int nr = (r > row) ? r - 1 : r;
+      remap[neui_detail::grid_cell_key(nr, c)] = kv.second;
+    }
+    g->model.cell_overrides = std::move(remap);
+    if (g->model.selected_row >= (int)g->model.rows.size())
+      g->model.selected_row = (int)g->model.rows.size() - 1;
+    grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_clear_rows(neui_session_t session, neui_widget_t widget)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return;
+    g->model.rows.clear();
+    g->model.cell_overrides.clear();
+    g->model.selected_row = -1;
+    g->model.scroll_offset_y = 0;
+    grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_set_cell_text(neui_session_t session, neui_widget_t widget,
+                                          int row, int col, const char* utf8)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g || row < 0 || row >= (int)g->model.rows.size()) return;
+    if (col < 0 || col >= (int)g->model.columns.size()) return;
+    auto& r = g->model.rows[(size_t)row];
+    if ((int)r.cells.size() <= col) r.cells.resize((size_t)col + 1);
+    r.cells[(size_t)col] = utf8 ? utf8 : "";
+    grid_invalidate(s, g);
+  }
+
+  static int NEUI_ABI gr_get_cell_text(neui_session_t session, neui_widget_t widget,
+                                         int row, int col, char* buf, int buflen)
+  {
+    auto* g = resolve_grid(session, widget);
+    if (!g || row < 0 || row >= (int)g->model.rows.size()) return -1;
+    if (col < 0 || col >= (int)g->model.columns.size()) return -1;
+    const auto& r = g->model.rows[(size_t)row];
+    static const std::string empty;
+    const std::string& src = (col < (int)r.cells.size()) ? r.cells[(size_t)col] : empty;
+    int need = (int)src.size() + 1;
+    if (buf && buflen > 0) {
+      int copy = (need < buflen) ? need : buflen;
+      memcpy(buf, src.c_str(), (size_t)copy);
+      buf[copy - 1] = 0;
+    }
+    return need;
+  }
+
+  static void NEUI_ABI gr_set_cell_color(neui_session_t session, neui_widget_t widget,
+                                           int row, int col, uint32_t argb)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g || row < 0 || row >= (int)g->model.rows.size()) return;
+    if (col < 0 || col >= (int)g->model.columns.size()) return;
+    if (argb == 0) {
+      auto* ov = neui_detail::grid_find_override(g->model, row, col);
+      if (ov) {
+        ov->has_color = false;
+        ov->color     = 0;
+        neui_detail::grid_prune_override(g->model, row, col);
+      }
+    } else {
+      auto& ov = neui_detail::grid_ensure_override(g->model, row, col);
+      ov.color     = argb;
+      ov.has_color = true;
+    }
+    grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_set_cell_enabled(neui_session_t session, neui_widget_t widget,
+                                             int row, int col, bool enabled)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g || row < 0 || row >= (int)g->model.rows.size()) return;
+    if (col < 0 || col >= (int)g->model.columns.size()) return;
+    auto& ov = neui_detail::grid_ensure_override(g->model, row, col);
+    ov.enabled     = enabled;
+    ov.has_enabled = true;
+    if (enabled) {
+      ov.has_enabled = !enabled ? true : true;
+      // When re-enabling and that's the only override, drop it.
+      if (enabled && !ov.has_color) {
+        ov.has_enabled = false;
+        neui_detail::grid_prune_override(g->model, row, col);
+      }
+    }
+    grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_clear_cell_overrides(neui_session_t session, neui_widget_t widget,
+                                                  int row, int col)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return;
+    g->model.cell_overrides.erase(neui_detail::grid_cell_key(row, col));
+    grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_set_selected_row(neui_session_t session, neui_widget_t widget, int row)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return;
+    int n = (int)g->model.rows.size();
+    if (row < -1)  row = -1;
+    if (row >= n)  row = n - 1;
+    g->model.selected_row = row;
+    auto cfg = neui_detail::grid_read_config(g->attrs.get());
+    if (cfg.cell_focus && g->model.selected_col < 0 &&
+        !g->model.columns.empty())
+      g->model.selected_col = 0;
+    if (row >= 0) {
+      auto vp = neui_detail::grid_compute_viewport(g->model, g->width, g->height,
+                                                     cfg.row_h, cfg.header_h);
+      neui_detail::grid_ensure_row_visible(g->model, vp, cfg.row_h, row);
+    }
+    grid_invalidate(s, g);
+  }
+
+  static int NEUI_ABI gr_get_selected_row(neui_session_t session, neui_widget_t widget)
+  {
+    auto* g = resolve_grid(session, widget);
+    return g ? g->model.selected_row : -1;
+  }
+
+  static void NEUI_ABI gr_set_selected_cell(neui_session_t session, neui_widget_t widget,
+                                              int row, int col)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return;
+    int n_rows = (int)g->model.rows.size();
+    int n_cols = (int)g->model.columns.size();
+    if (row < -1)       row = -1;
+    if (row >= n_rows)  row = n_rows - 1;
+    if (col < -1)       col = -1;
+    if (col >= n_cols)  col = n_cols - 1;
+    g->model.selected_row = row;
+    g->model.selected_col = col;
+    if (row >= 0 && col >= 0) {
+      auto cfg = neui_detail::grid_read_config(g->attrs.get());
+      auto vp  = neui_detail::grid_compute_viewport(g->model, g->width, g->height,
+                                                      cfg.row_h, cfg.header_h);
+      neui_detail::grid_ensure_cell_visible(g->model, vp, cfg.row_h, row, col);
+    }
+    grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_get_selected_cell(neui_session_t session, neui_widget_t widget,
+                                              int* out_row, int* out_col)
+  {
+    auto* g = resolve_grid(session, widget);
+    if (out_row) *out_row = g ? g->model.selected_row : -1;
+    if (out_col) {
+      if (!g) { *out_col = -1; return; }
+      auto cfg = neui_detail::grid_read_config(g->attrs.get());
+      *out_col = cfg.cell_focus ? g->model.selected_col : -1;
+    }
+  }
+
+  static void NEUI_ABI gr_ensure_row_visible(neui_session_t session, neui_widget_t widget, int row)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return;
+    auto cfg = neui_detail::grid_read_config(g->attrs.get());
+    auto vp  = neui_detail::grid_compute_viewport(g->model, g->width, g->height,
+                                                    cfg.row_h, cfg.header_h);
+    neui_detail::grid_ensure_row_visible(g->model, vp, cfg.row_h, row);
+    grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_ensure_cell_visible(neui_session_t session, neui_widget_t widget,
+                                                int row, int col)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return;
+    auto cfg = neui_detail::grid_read_config(g->attrs.get());
+    auto vp  = neui_detail::grid_compute_viewport(g->model, g->width, g->height,
+                                                    cfg.row_h, cfg.header_h);
+    neui_detail::grid_ensure_cell_visible(g->model, vp, cfg.row_h, row, col);
+    grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_set_scroll_x(neui_session_t session, neui_widget_t widget, int x)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return;
+    g->model.scroll_offset_x = x;
+    auto cfg = neui_detail::grid_read_config(g->attrs.get());
+    auto vp  = neui_detail::grid_compute_viewport(g->model, g->width, g->height,
+                                                    cfg.row_h, cfg.header_h);
+    neui_detail::grid_clamp_scroll(g->model, vp, cfg.row_h);
+    grid_invalidate(s, g);
+  }
+
+  static int NEUI_ABI gr_get_scroll_x(neui_session_t session, neui_widget_t widget)
+  {
+    auto* g = resolve_grid(session, widget);
+    return g ? g->model.scroll_offset_x : 0;
+  }
+
+  static int NEUI_ABI gr_hit_test(neui_session_t session, neui_widget_t widget,
+                                    int lx, int ly, int* out_row, int* out_col)
+  {
+    auto* g = resolve_grid(session, widget);
+    if (out_row) *out_row = -1;
+    if (out_col) *out_col = -1;
+    if (!g) return 0;
+    auto cfg = neui_detail::grid_read_config(g->attrs.get());
+    auto vp  = neui_detail::grid_compute_viewport(g->model, g->width, g->height,
+                                                    cfg.row_h, cfg.header_h);
+    auto hit = neui_detail::grid_hit_test(g->model, vp, cfg.row_h,
+                                            g->width, g->height, lx, ly);
+    if (hit.region != neui_detail::GridHitRegion::Cell) return 0;
+    if (out_row) *out_row = hit.row;
+    if (out_col) *out_col = hit.col;
+    return 1;
+  }
+
+  neui_grid_api_t grid_api = {
+    NEUI_VERSION,
+    gr_add_column,
+    gr_get_column_count,
+    gr_set_column_width,
+    gr_get_column_width,
+    gr_set_column_min_width,
+    gr_set_column_align,
+    gr_set_column_header,
+    gr_get_column_header,
+    gr_remove_column,
+    gr_clear_columns,
+    gr_add_row,
+    gr_get_row_count,
+    gr_remove_row,
+    gr_clear_rows,
+    gr_set_cell_text,
+    gr_get_cell_text,
+    gr_set_cell_color,
+    gr_set_cell_enabled,
+    gr_clear_cell_overrides,
+    gr_set_selected_row,
+    gr_get_selected_row,
+    gr_set_selected_cell,
+    gr_get_selected_cell,
+    gr_ensure_row_visible,
+    gr_ensure_cell_visible,
+    gr_set_scroll_x,
+    gr_get_scroll_x,
+    gr_hit_test,
   };
 
 } // namespace xpl_host

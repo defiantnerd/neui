@@ -21,6 +21,7 @@ extern "C" {
 #define DEF_WIDGET_EVENT(x) (((x)<<16) | 0x0003)
 #define DEF_ITEM_EVENT(x)   (((x)<<16) | 0x0004)
 #define DEF_TREE_EVENT(x)   (((x)<<16) | 0x0005)
+#define DEF_GRID_EVENT(x)   (((x)<<16) | 0x0006)
 
   typedef enum neui_event_type
   {
@@ -55,9 +56,16 @@ extern "C" {
     NEUI_EVENT_TREE_ITEM_SELECTED       = DEF_TREE_EVENT(1),  // treeview: selection changed
     NEUI_EVENT_TREE_ITEM_ACTIVATED      = DEF_TREE_EVENT(2),  // treeview: dbl-click/Enter; menu: item clicked
 
+    NEUI_EVENT_GRID_ROW_SELECTED        = DEF_GRID_EVENT(1),  // grid: selected row changed
+    NEUI_EVENT_GRID_CELL_SELECTED       = DEF_GRID_EVENT(2),  // grid (cell-focus mode): (row, col) cursor moved
+    NEUI_EVENT_GRID_ROW_ACTIVATED       = DEF_GRID_EVENT(3),  // grid: dbl-click / Enter on a row
+    NEUI_EVENT_GRID_CELL_CLICKED        = DEF_GRID_EVENT(4),  // grid: raw "click at (row, col)" fallback - only fires if the high-level events above weren't consumed by the client
+    NEUI_EVENT_GRID_COLUMN_RESIZED      = DEF_GRID_EVENT(5),  // grid: user-driven column-divider drag released
+
     NEUI_EVENT_CUSTOM                   = 0x1ffff,
   } neui_event_type_t;
 
+#undef DEF_GRID_EVENT
 #undef DEF_TREE_EVENT
 #undef DEF_ITEM_EVENT
 #undef DEF_WIDGET_EVENT
@@ -185,6 +193,37 @@ extern "C" {
     uint8_t*      data;
   } neui_event_custom_t;
 
+  // Grid row event - row selected (NEUI_EVENT_GRID_ROW_SELECTED) or
+  // activated by dbl-click / Enter (NEUI_EVENT_GRID_ROW_ACTIVATED).
+  // row is 0-based; -1 indicates the selection was cleared.
+  typedef struct neui_event_grid_row
+  {
+    neui_widget_t widget;
+    int           row;
+  } neui_event_grid_row_t;
+
+  // Grid cell event - cell-focus cursor moved (NEUI_EVENT_GRID_CELL_SELECTED)
+  // or raw cell click fallback (NEUI_EVENT_GRID_CELL_CLICKED, fires only
+  // when the higher-level row/cell selected events were not consumed by
+  // the client's onevent).
+  typedef struct neui_event_grid_cell
+  {
+    neui_widget_t widget;
+    int           row;
+    int           col;
+  } neui_event_grid_cell_t;
+
+  // Grid column resize event - fires once on mouse-up at the end of a
+  // user-driven column-divider drag. Programmatic set_column_width does
+  // NOT fire it (mirrors NEUI_EVENT_VALUE_CHANGED semantics).
+  typedef struct neui_event_grid_column_resize
+  {
+    neui_widget_t widget;
+    int           col;
+    int           old_width;
+    int           new_width;
+  } neui_event_grid_column_resize_t;
+
   // Forward-declarations for the curated paint surface. Clients that
   // handle NEUI_EVENT_WIDGET_PAINT include <neui/d/painter.h> (or just
   // <neui/neui.h>) to call painter_api->* functions on the handle.
@@ -231,6 +270,9 @@ extern "C" {
       neui_event_attr_t      attr;
       neui_event_paint_t     paint;
       neui_event_custom_t    custom;
+      neui_event_grid_row_t           grid_row;
+      neui_event_grid_cell_t          grid_cell;
+      neui_event_grid_column_resize_t grid_column_resize;
     } data;
 
     // more event data can be added here

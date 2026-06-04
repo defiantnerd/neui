@@ -7,6 +7,7 @@
 #include "../shared/edit_history.h"
 #include "../shared/theme_palette.h"
 #include "../shared/behavior_runtime.h"
+#include "../shared/grid_model.h"
 #include "asset_manager.h"
 
 #include <string>
@@ -453,6 +454,19 @@ namespace xpl_host
     // override - the behavior path is the only one).
     bool on_mouse_event(neui_event_t* event) override;
     bool on_keydown(uint32_t keycode, uint32_t modifiers) override;
+  };
+
+  // GRID - scrollable multi-column table. Cells are paint-state (not
+  // widgets) - a 10000 x 8 grid is one widget. Two focus modes via
+  // NEUI_ATTR_GRID_CELL_FOCUS: row-focus (default) or cell-focus with
+  // a (row, col) cursor. See include/neui/d/grid.h.
+  class GridWidget : public WidgetData {
+  public:
+    neui_detail::GridModel model;
+
+    void paint(neui_render_backend_t*, neui_render_ctx_t, bool is_focused) override;
+    bool on_keydown(uint32_t keycode, uint32_t modifiers) override;
+    bool on_mouse_event(neui_event_t* event) override;
   };
 
   // MENUBAR - native menu bar handle + all item bookkeeping

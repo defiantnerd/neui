@@ -1503,4 +1503,29 @@ namespace xpl_host
     neui_detail::unregister_clipboard_listener(handle);
   }
 
+  // -------------------------------------------------------------------------
+  // Mouse cursor. Win32 cursor management is per-message: WM_SETCURSOR
+  // fires every time the cursor moves over a window, and unless we set
+  // the cursor ourselves the OS reverts to whatever the window class
+  // registered. We track the active kind in a thread-local and use a
+  // hook in WM_SETCURSOR to reapply it; for now we set immediately
+  // (good enough for the GRID's drag-resize feedback, which is active
+  // for the duration of the hover + drag).
+
+  static int s_cursor_kind = NEUI_CURSOR_DEFAULT;
+
+  void platform_set_cursor(int kind)
+  {
+    s_cursor_kind = kind;
+    HCURSOR cur = nullptr;
+    // IDC_* are LPCSTR resource ids; cast keeps them usable with the W
+    // LoadCursor variant. The resource-id form ignores the char width.
+    switch (kind) {
+      case NEUI_CURSOR_EW_RESIZE: cur = LoadCursorW(nullptr, (LPCWSTR)IDC_SIZEWE); break;
+      case NEUI_CURSOR_DEFAULT:
+      default:                    cur = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);  break;
+    }
+    if (cur) SetCursor(cur);
+  }
+
 } // namespace xpl_host
