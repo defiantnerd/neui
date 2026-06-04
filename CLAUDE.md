@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for Claude Code when working in this repository.
+Guidance for Claude Code in this repository.
 
 ## Project Overview
 
@@ -18,7 +18,7 @@ cmake -B out/build -DCMAKE_BUILD_TYPE=Debug && cmake --build out/build
 cmake -B out/build -G Xcode && cmake --build out/build --config Debug
 ```
 
-Outputs - Windows: `out/build/Debug/{neui_example.exe, neui.lib, neui-win32host.lib, neui-xplhost.lib, neui-backend-d2d.lib}`. macOS: `out/build/Debug/{neui_example.app, libneui.a}` + per-subdir `libneui-*.a`.
+Outputs - Windows: `out/build/Debug/{neui_example.exe, neui.lib, neui-win32host.lib, neui-xplhost.lib, neui-backend-d2d.lib}`. macOS: `out/build/Debug/{neui_example.app, libneui.a}` + per-subdir `libneui-*.a`. Example apps: `neui_example`, `neui_grid_example`.
 
 ## Per-platform host + backend selection
 
@@ -30,123 +30,121 @@ Top-level CMakeLists gates each platform-specific subdirectory; the example link
 
 ## Architecture (file map)
 
-- **Public C API** `include/neui/`: `neui.h` (`neui_init` + `neui_register` + `neui_get_api`); sub-headers under `d/`: `api.h`, `keys.h`, `widgets.h`, `events.h`, `items.h`, `tree.h`, `attrs.h`, `clipboard.h`, `commands.h`, `renderer.h`, `painter.h`, `assets.h`, `compound.h`, `behavior.h`, `menu.h`, `theme.h`.
+- **Public C API** `include/neui/`: `neui.h` (`neui_init` + `neui_register` + `neui_get_api`); sub-headers under `d/`: `api.h`, `keys.h`, `widgets.h`, `events.h`, `items.h`, `tree.h`, `attrs.h`, `clipboard.h`, `commands.h`, `renderer.h`, `painter.h`, `assets.h`, `compound.h`, `behavior.h`, `grid.h`, `menu.h`, `theme.h`.
 - **Core library** `src/neui.c`: host registry + `neui_init()` (fans out to per-host registration wrappers gated by `NEUI_HAS_*HOST` defines CMake sets on the `neui` target).
-- **Shared portable utilities** `hosts/shared/`, header-only, ODR-safe via `inline`: `tree.h` (`Tree<T>` slot-reused), `attrs.h` (`AttrBag` type-strict + `attr_as_float` INT-promoting reader), `clipboard_item.h`, `edit_history.h`, `shortcut_format.h`, `theme_palette.h` (`ColorRole` + `Palette` + `current_palette()` + `ScopedPaletteOverride`), `compound.h` (`CompoundLayer` / `CompoundAsset` / `CompoundBinding` + `{key}` template parser + 9-point anchor resolver + `apply_*` mutator helpers), `behavior.h` (`BehaviorAsset` / `BehaviorHandler` + slot-reused handler table + prop setters + hit-rect resolver), `behavior_runtime.h` (`BehaviorRuntime` per-widget drag state + `BehaviorDispatchCtx` host-callback seam + `behavior_dispatch_mouse` / `behavior_dispatch_key` + the shared sweep / fine-modifier / snap-to-steps math), `painter.h` (`neui_painter` struct + `k_painter_api` singleton), `widget_font.h` (`EffectiveFont` + `read_widget_font` / `push_widget_font` / `pop_widget_font` - reads `NEUI_ATTR_FONT_*` from a widget's bag and brackets the font stack around its `draw_text` calls), `widget_paint_knob.h` / `widget_paint_section.h` / `widget_paint_compound.h`.
+- **Shared portable utilities** `hosts/shared/`, header-only, ODR-safe via `inline`: `tree.h` (`Tree<T>` slot-reused), `attrs.h` (`AttrBag` + `attr_as_float` + `k_well_known_attrs`), `clipboard_item.h`, `edit_history.h`, `shortcut_format.h`, `theme_palette.h` (`ColorRole` / `Palette` / `current_palette()` / `ScopedPaletteOverride`), `compound.h` (`CompoundLayer` / `CompoundAsset` / `CompoundBinding` + `{key}` parser + 9-pt anchor resolver), `behavior.h` (`BehaviorAsset` / `BehaviorHandler` + prop setters), `behavior_runtime.h` (`BehaviorRuntime` drag state + `BehaviorDispatchCtx` seam + `behavior_dispatch_mouse`/`_key` + sweep/fine/snap math), `grid_model.h` (column/row/scroll/selection model + viewport / hit-test + smooth-scroll & rubber-band math), `widget_paint_grid.h`, `scrollbar.h`, `painter.h` (`neui_painter` + `k_painter_api`), `widget_font.h` (`EffectiveFont` + `read_/push_/pop_widget_font`), `widget_paint_knob.h` / `_section.h` / `_compound.h`.
 - **Shared platform-specific** `hosts/shared/win32/` (clipboard, accel table, icon, theme provider + brushes, dark menu / menubar) and `hosts/shared/macos/` (clipboard, theme provider, image loader, keys, menubar).
 - **Win32 Host** `hosts/win32/`: native HWND host. `window.cpp` WinMain + pump; `host.cpp` Session + `get_interface`; `widgets.cpp` full API; `host.h` `WidgetData`; `asset_manager_w32.h` `W32AssetManager`.
-- **macOS Host** `hosts/macos/`: native AppKit host (`neui.host.macos`). `host.{h,mm}` Session; `widgets.mm` full API; `window.mm` NSApp + `NEUINativeContentView` (`isFlipped=YES`) + `NEUINativePaintedView` (per-widget CG context; hosts IMAGE / KNOB / SECTION / CUSTOMDRAW via per-type branch in `drawRect:`); `asset_manager_macos.h` `MacOSAssetManager`. IMAGE source (path via `set_text` or handle via `set_asset`) resolves through `MacOSAssetManager` like win32 - no per-view bitmap cache; the view's per-ctx GPU cache is dropped in `release_native_control_macos` (mirrors win32's `release_context` on `WM_DESTROY`). `NEUINativePaintedView` forwards raw input for CUSTOMDRAW (emit_events): mouse down/up/dblclick + rbutton + move/enter/leave (NSTrackingArea) + wheel as `NEUI_EVENT_MOUSE_*`, and key down/up/char as `NEUI_EVENT_KEY*` once it's first responder (grabbed on click). KNOB keeps its own internal drag + wheel + right-click "Reset to default" popup.
-- **Crossplatform Host** `hosts/crossplatform/`: polymorphic widget hierarchy (registers as `neui.host.crossplatform`). `host.{h,cpp}` `WidgetData` base + subclasses (`FrameWidget`, `LabelWidget`, `ButtonWidget`, `InputBoxWidget`, `MultilineWidget`, `CheckboxWidget`, `ListItemsWidget`→`ComboBoxWidget`, `TreeviewWidget`, `MenubarWidget`, `KnobWidget`, `ImageWidget`, `CustomDrawWidget`) with virtuals `paint`, `paint_after_children`, `on_keydown`, `on_keychar`, `on_mouse_event`, `hit_test`, `on_destroy`, `on_composition`, `is_frame`, `is_menubar`, `perform_command`, `can_perform_command`. `widgets.cpp` full API + `make_widget()` factory. `platform.h` cross-cutting seam (window / menubar / image / clipboard / IME / modal / focus); per-OS implementations in `platform_win32.cpp` / `platform_macos.mm` / `platform_null.cpp`.
+- **macOS Host** `hosts/macos/`: native AppKit host (`neui.host.macos`). `host.{h,mm}` Session; `widgets.mm` full API; `window.mm` NSApp + `NEUINativeContentView` (`isFlipped=YES`) + `NEUINativePaintedView` (per-widget CG context; IMAGE / KNOB / SECTION / CUSTOMDRAW / GRID via per-type `drawRect:` branch); `asset_manager_macos.h` `MacOSAssetManager`. The painted view forwards raw input for CUSTOMDRAW as `NEUI_EVENT_MOUSE_*` / `_KEY*`, and runs internal handling for KNOB (drag + wheel + reset popup) and GRID (selection ladder + nav + smooth scroll). Per-ctx GPU cache dropped in `release_native_control_macos`.
+- **Crossplatform Host** `hosts/crossplatform/`: polymorphic widget hierarchy (`neui.host.crossplatform`). `host.{h,cpp}` `WidgetData` base + per-type subclasses (`FrameWidget` … `GridWidget`) with virtuals (`paint` / `paint_after_children` / `on_keydown` / `on_keychar` / `on_mouse_event` / `hit_test` / `on_destroy` / `on_composition` / `is_frame` / `is_menubar` / `perform_command` / `can_perform_command` / `grid_model_ptr`). `widgets.cpp` full API + `make_widget()` factory. `platform.h` cross-cutting seam (window / menubar / image / clipboard / IME / modal / focus); per-OS impls `platform_{win32.cpp,macos.mm,null.cpp}`.
 - **Backends** `backends/`: `d2d/` (Direct2D, `ID2D1HwndRenderTarget`), `cg/` (CoreGraphics, one `CGContextRef` per frame via `set_current_frame` from `drawRect:`), `null/` (no-op).
 
 ## Rendering Backend (`d/renderer.h`)
 
-`neui_render_backend_t` is the implementation interface backends fill in: `create_context` / `destroy_context` / `resize`, `begin_frame` / `end_frame`, `fill_rect` / `draw_rect`, `get_scale_factor` / `update_dpi`, `draw_text` / `measure_text`, `push_clip` / `pop_clip` (nestable), `create_bitmap` / `destroy_bitmap` / `draw_bitmap` (host-internal; clients reach bitmaps via `painter_api->draw_asset`), path API, transform stack, `get_context_generation` (bumped on device-loss; cached target-bound resources re-upload on mismatch), alpha stack `push_alpha` / `pop_alpha` (cumulative 0..1 opacity multiplied into every subsequent fill / stroke / text / path / bitmap draw; reset on `begin_frame`; software stack on D2D + CG, no-op on null), font stack `push_font` / `pop_font` ((family, weight) pair feeding `draw_text` / `measure_text`; size stays per-call; reset on `begin_frame`; honoured by d2d (`IDWriteTextFormat`) + cg (`CTFont`/`NSFont`, keyed by family+weight+size), no-op on null). Transform / alpha / font stacks reset to identity / empty at every `begin_frame`. Coordinates: logical pixels at 96 DPI. Colour: `0xAARRGGBB`.
+`neui_render_backend_t` is the interface backends fill in: context lifecycle + `resize`, `begin_frame`/`end_frame`, `fill_rect`/`draw_rect`, `draw_text`/`measure_text`, `get_scale_factor`/`update_dpi`, nestable `push_clip`/`pop_clip`, `create/destroy/draw_bitmap` (host-internal; clients use `painter_api->draw_asset`), path API, transform stack, `get_context_generation` (bumped on device-loss; cached resources re-upload on mismatch), **alpha stack** `push_alpha`/`pop_alpha` (cumulative 0..1 opacity; D2D + CG software stack, no-op null), **font stack** `push_font`/`pop_font` ((family, weight); size per-call; d2d `IDWriteTextFormat` + cg `CTFont`/`NSFont`, no-op null). Transform / alpha / font stacks reset at every `begin_frame`. Coordinates: logical px at 96 DPI. Colour `0xAARRGGBB`.
 
 ## Events (`d/events.h`)
 
-App: `APP_QUIT`. Mouse: `MOUSE_MOVE/ENTER/LEAVE`, `MOUSE_BUTTON_DOWN/UP/CLICK/DBLCLICK`, `MOUSE_RBUTTON_DOWN/UP`, `MOUSE_WHEEL`. Key: `KEYDOWN/KEYCHAR/KEYUP`. Widget: `WIDGET_UPDATED/PREUPDATE/FOCUS/PAINT`, `CHECKBOX_CHANGED`, `RESIZE`, `VALUE_CHANGED`, `ATTR_CHANGED`. Item: `ITEM_SELECTED`. Tree: `TREE_ITEM_SELECTED/ACTIVATED`. `WIDGET_PAINT` fires only on `NEUI_W_CUSTOMDRAW` (and only when no compound asset is attached). `CHECKBOX_CHANGED` fires on every user-driven toggle (click / space) on all three hosts - the xpl `CheckboxWidget` dispatches it via `checkbox_dispatch_changed` to match the native hosts. `VALUE_CHANGED` is the widget-scoped (no attr name) user-driven event for the native KNOB / SLIDER; `ATTR_CHANGED` (`{ widget, attr_key, value }`) is the parallel event fired by a behavior asset when it writes through. `KEYDOWN.modifiers` + accelerator modifiers share `NEUI_KMOD_*` bits. `NEUI_MK_*` mouse-modifier bits (matching Win32 `MK_*`) live in `<neui/d/events.h>` so behavior handlers can read them from `mouse.buttonmap` portably; `NEUI_MK_ALT` is reserved but not yet populated by the Win32 / macOS layers.
+App: `APP_QUIT`. Mouse: `MOUSE_MOVE/ENTER/LEAVE`, `MOUSE_BUTTON_DOWN/UP/CLICK/DBLCLICK`, `MOUSE_RBUTTON_DOWN/UP`, `MOUSE_WHEEL`. Key: `KEYDOWN/KEYCHAR/KEYUP`. Widget: `WIDGET_UPDATED/PREUPDATE/FOCUS/PAINT`, `CHECKBOX_CHANGED`, `RESIZE`, `VALUE_CHANGED`, `ATTR_CHANGED`. Item: `ITEM_SELECTED`. Tree: `TREE_ITEM_SELECTED/ACTIVATED`. Grid: `GRID_ROW_SELECTED`, `GRID_CELL_SELECTED`, `GRID_CELL_CLICKED`, `GRID_ROW_ACTIVATED`, `GRID_COLUMN_RESIZED`.
+
+`WIDGET_PAINT` fires only on `NEUI_W_CUSTOMDRAW` (and only when no compound asset is attached). `CHECKBOX_CHANGED` fires on every user-driven toggle on all three hosts. `VALUE_CHANGED` is the widget-scoped (no attr name) user-driven event for the native KNOB / SLIDER; `ATTR_CHANGED` (`{ widget, attr_key, value }`) is the parallel event a behavior asset fires when it writes through. `KEYDOWN.modifiers` + accelerator modifiers share `NEUI_KMOD_*` bits. `NEUI_MK_*` mouse-modifier bits (matching Win32 `MK_*`) live in `<neui/d/events.h>` so behavior handlers can read `mouse.buttonmap` portably; `NEUI_MK_ALT` reserved but not yet populated.
 
 ## Per-widget implementation details
 
-Implementation-specific constants, scrollbar geometry, multiline cursor math, edit-history coalescing rules, IME composition state machine, dark-mode uxtheme ordinals - all live in the code with comments. Read the relevant file when working there:
-
-- `hosts/crossplatform/host.cpp` - the heavy lifting (LISTBOX / COMBOBOX / TREEVIEW / MULTILINE / KNOB drag / popup overlay / combo overlay).
-- `hosts/shared/edit_history.h` - undo coalescing.
-- `hosts/shared/win32/dark_menu_win32.h` / `dark_menubar_win32.h` - uxtheme dark mode HMENU.
-- `hosts/shared/win32/theme_provider_win32.h` / `hosts/shared/macos/theme_provider_macos.h` - palette sources.
+Implementation-specific constants, scrollbar geometry, multiline cursor math, edit-history coalescing, IME composition state machine, dark-mode uxtheme ordinals - all live in code with comments. Heavy lifting: `hosts/crossplatform/host.cpp` (LISTBOX / COMBOBOX / TREEVIEW / MULTILINE / KNOB / GRID / overlays); undo in `hosts/shared/edit_history.h`; dark HMENU in `hosts/shared/win32/dark_menu*.h`; palette sources in the `theme_provider_*.h` files.
 
 ## Clipboard
 
-`NEUI_API_CLIPBOARD`: convenience `set_text` / `get_text` / `has_text`; item-based `read`, `create_item`, `release`, `write`, `item_set_format(mime, data, len)`, `item_get_format`, `item_has_format`. v1 only round-trips `NEUI_CLIPBOARD_MIME_TEXT = "text/plain;charset=utf-8"`; shape forward-compatible. Optional `neui_clipboard_client_t { onchange(token) }` via `get_interface(NEUI_API_CLIPBOARD_CLIENT)`. Per-session `ClipboardItemStore` (slot-reused). xpl text widgets handle Ctrl+C/X/V via `xpl_host::platform_clipboard_*`; native `Edit` (Win32) does it automatically. macOS native: AppKit does *not* synthesize a standard Edit menu, so `NEUINativeContentView::performKeyEquivalent:` routes ⌘C/⌘X/⌘V/⌘A (+ ⌘Z/⌘⇧Z) through `invoke_focused_command_macos` to the focused text field's field editor - making copy/paste work without the client adding Edit-menu items (client menu key-equivalents still win, since NSApp matches the main menu first).
+`NEUI_API_CLIPBOARD`: convenience `set_text` / `get_text` / `has_text`; item-based `read`, `create_item`, `release`, `write`, `item_set_format(mime, data, len)`, `item_get_format`, `item_has_format`. v1 only round-trips `NEUI_CLIPBOARD_MIME_TEXT = "text/plain;charset=utf-8"`. Optional `neui_clipboard_client_t { onchange(token) }` via `get_interface(NEUI_API_CLIPBOARD_CLIENT)`. Per-session `ClipboardItemStore`. xpl text widgets handle Ctrl+C/X/V via `xpl_host::platform_clipboard_*`; native `Edit` (Win32) does it automatically. macOS native: `NEUINativeContentView::performKeyEquivalent:` routes ⌘C/⌘X/⌘V/⌘A/⌘Z/⌘⇧Z through `invoke_focused_command_macos` to the focused field editor (client menu key-equivalents still win, since NSApp matches the main menu first).
 
 ## Attribute API
 
-`NEUI_API_ATTRS`. String-keyed bag per widget (`std::unique_ptr<AttrBag>` on `WidgetData`, lazy). API: `set_int`/`get_int(default)`, `set_float`/`get_float(default)`, `set_string`/`get_string`, `has`, `remove`. Type-strict: wrong-kind returns the default. **Well-known keys are debug-asserted to match their documented kind at set time** via `k_well_known_attrs` in `hosts/shared/attrs.h`; mismatches abort under `assert()` in debug builds (with a `key=... expected=... actual=...` stderr line), release silently stores the wrong kind so reads keep returning the default. Session-level: `set_session_int`/`get_session_int` on `Session::_session_attrs`. `NEUI_ATTR_THEME_MODE` is the only session key with behaviour today.
+`NEUI_API_ATTRS`. String-keyed bag per widget (`std::unique_ptr<AttrBag>` on `WidgetData`, lazy). API: `set_int`/`get_int(default)`, `set_float`/`get_float(default)`, `set_string`/`get_string`, `has`, `remove`. Type-strict: wrong-kind returns the default. Well-known keys are debug-asserted to match their documented kind at set time via `k_well_known_attrs` (`hosts/shared/attrs.h`); release silently stores the wrong kind so reads keep returning the default. **A new `NEUI_ATTR_*` / `NEUI_PARAM_*` macro needs a matching row in `k_well_known_attrs`.** Session-level: `set_session_int`/`get_session_int`. `NEUI_ATTR_THEME_MODE` is the only session key with behaviour today.
 
-**Well-known keys**:
+**Well-known keys** (all `neui.attr.<name>`; macros `NEUI_ATTR_*`):
 
 | Key | Type | Applies | Notes |
 |---|---|---|---|
 | `tristate` | int | CHECKBOX | Implicit on CHECKBOX3. |
 | `multiline` | int | INPUTBOX | Implicit on MULTILINE. |
 | `readonly` | int | INPUTBOX, MULTILINE | Gates modifying keys. |
-| `password` / `border` / `align_text` | int / int / string | various | Reserved (impl pending) — except `align_text` on SECTION, live. |
+| `password` / `border` / `align_text` | int / int / string | various | Reserved — except `align_text` on SECTION, live. |
 | `tab_stop` | int | focusable | Replaces deprecated `widgets->set_tab_stop`. |
-| `min_width` / `min_height` / `max_width` / `max_height` | int (logical px) | APPWINDOW | Drives `WM_GETMINMAXINFO` / `NSWindow.min/maxSize`. |
-| `icon_path` | string | APPWINDOW | `.ico` / `.png` / `.bmp` / `.jpg`. Live-applied. |
+| `min_width` / `min_height` / `max_width` / `max_height` | int (logical px) | APPWINDOW | Drives `WM_GETMINMAXINFO` / `NSWindow.min/maxSize`. `max < min` = no maximum. |
+| `icon_path` | string | APPWINDOW | `.ico` / `.png` / `.bmp` / `.jpg`. Live. |
 | `modal` | int | DIALOG | `1`/unset → owner disabled. Read once at `widget_show`. |
-| `background` | int ARGB | KNOB, IMAGE, painted widgets, frame on xpl | Honoured **unconditionally** (independent of follow-system-theme). |
-| `follow_system_theme` | int bool | APPWINDOW, PLUGWINDOW, DIALOG | Per-frame opt-in: `1` = DWM dark + dark HMENU + theme-aware `WM_CTLCOLOR*`; `0`/unset = OS-default chrome, no auto-invalidate on theme flips. |
-| `rotation` | float (rad) | IMAGE | Around the destination centre. Positive = clockwise (Y-down). Live. |
+| `background` | int ARGB | KNOB, IMAGE, painted widgets, frame on xpl | Honoured unconditionally (independent of follow-system-theme). |
+| `follow_system_theme` | int bool | APPWINDOW, PLUGWINDOW, DIALOG | `1` = DWM dark + dark HMENU + theme-aware `WM_CTLCOLOR*` + invalidate on theme flip; `0`/unset = OS-default chrome, no auto-invalidate. Default off. |
+| `rotation` | float (rad) | IMAGE | Around dest centre. Positive = clockwise (Y-down). Live. |
 | `polarity` | string | KNOB | `"min"` (default) / `"center"` / `"max"`. Anchor end of fill arc. |
 | `steps` | int | SLIDER, KNOB | `>=2` snaps to N positions on `[0..1]` + draws ticks; `<2` continuous. Also snaps programmatic `set_float(NEUI_PARAM_VALUE)`. |
 | `orientation` | string | SLIDER | `"horizontal"` (default) / `"vertical"`. Read at `widget_show`. |
 | `value_text` | string | KNOB | Overlay text below the disc. Read each paint. |
-| `knob_mode` | int | KNOB | Drag style: `NEUI_KNOB_MODE_ROTATIONAL=0` (default) / `_VERTICAL=1` / `_HORIZONTAL=2`. Cached at mouse-down. |
-| `font_family` | string | text-bearing widgets | Family name (e.g. `"Consolas"`). Empty / unset = host default (Segoe UI on D2D, system UI font on cg). Honoured by the d2d + cg backends (painted text via the font stack) and by native controls (win32 per-widget `HFONT` via `WM_SETFONT`; macOS per-control `NSFont` via `apply_font_native_macos`, unknown families fall back to the system font). null ignores. Live. |
-| `font_size` | float (logical px) | text-bearing widgets | Overrides each widget's hardcoded default (typically 12). Honoured everywhere `draw_text` / `measure_text` flow through the widget's paint code, including MULTILINE caret + IME composition geometry. Live. |
-| `font_weight` | int | text-bearing widgets | CSS-style 100..900. 400 = Normal, 700 = Bold; 0 / unset = Normal. Mapped to nearest `DWRITE_FONT_WEIGHT_*` (d2d) / `FW_*` (HFONT) / `NSFontWeight*` (cg + macOS `NSFont`). Italic not exposed in v1. Live. |
+| `knob_mode` | int | KNOB | `NEUI_KNOB_MODE_ROTATIONAL=0` (default) / `_VERTICAL=1` / `_HORIZONTAL=2`. Cached at mouse-down. |
+| `font_family` / `font_size` / `font_weight` | string / float px / int | text-bearing | Empty/unset = host default. Weight CSS 100..900 (400 Normal, 700 Bold). Honoured by d2d + cg backends + native controls (win32 `HFONT`, macOS `NSFont`; unknown families fall back); null ignores. Italic not exposed. Live. |
 | `theme_mode` | int session-level | session | AUTO (0) follows OS; LIGHT (1) / DARK (2) force the palette. Accent stays live. |
+| `grid.row_height` | int (px) | GRID | Body row height. Default 22. |
+| `grid.header_height` | int (px) | GRID | Sticky header band height. Default 24. |
+| `grid.focus_row_color` | int ARGB | GRID | Focus-row band colour. 0/unset = accent @ 0x33 alpha. |
+| `grid.show_focus_row` | int bool | GRID | Paint focus-row highlight. Default 1. |
+| `grid.column_min_width_default` | int (px) | GRID | Default per-column min width. Default 24. |
+| `grid.cell_focus` | int bool | GRID | 0 = row-focus (default); 1 = cell (row,col) cursor. Live. |
 
-(All keys are `neui.attr.<name>`; macros `NEUI_ATTR_*`. Namespace `neui.attr.*` reserved; clients use their own. Host-specific reserved: `neui.win32.*`, `neui.macos.*`, `neui.linux.*`. Unknown keys are stored but inert.)
+Namespace `neui.attr.*` reserved; clients use their own. Host-specific reserved: `neui.win32.*`, `neui.macos.*`, `neui.linux.*`. Unknown keys stored but inert.
 
 ## Routed commands
 
-`NEUI_API_COMMANDS`. `neui_command_t`: `NONE/UNDO/REDO/CUT/COPY/PASTE/SELECT_ALL/DELETE`, `USER_BASE = 0x10000`. API: `invoke_focused(cmd) → bool`, `invoke(widget, cmd) → bool`. `tree->set_menu_cmd(menubar, item, cmd)` binds a menu item to a built-in command. On activation, `dispatch_menu_event` calls `invoke_focused_command(cmd)` first; if a focused widget consumes it, no `TREE_ITEM_ACTIVATED` fires. Otherwise (or `cmd == 0` / `cmd >= USER_BASE`) the event reaches the client. `WidgetData::perform_command(cmd) → bool` is the virtual seam; xpl text widgets route to `on_keydown` with a synthetic Ctrl+letter. macOS native (`invoke_focused_command_macos`) routes to the key window's first responder via AppKit's standard editing actions - `cut:`/`copy:`/`paste:`/`selectAll:`/`delete:` through `-[NSApp sendAction:to:nil from:nil]`, and `UNDO`/`REDO` through the responder's `NSUndoManager`; `set_menu_cmd` is consulted in `neuiNativeMenuPick`.
+`NEUI_API_COMMANDS`. `neui_command_t`: `NONE/UNDO/REDO/CUT/COPY/PASTE/SELECT_ALL/DELETE`, `USER_BASE = 0x10000`. API: `invoke_focused(cmd) → bool`, `invoke(widget, cmd) → bool`. `tree->set_menu_cmd(menubar, item, cmd)` binds a menu item to a built-in command. On activation, `dispatch_menu_event` calls `invoke_focused_command(cmd)` first; if a focused widget consumes it, no `TREE_ITEM_ACTIVATED` fires (otherwise, or `cmd == 0` / `cmd >= USER_BASE`, the event reaches the client). `WidgetData::perform_command(cmd)` is the virtual seam; xpl text widgets route to `on_keydown` with a synthetic Ctrl+letter; macOS native (`invoke_focused_command_macos`) routes to the first responder via AppKit editing actions + `NSUndoManager` for UNDO/REDO.
+
+Menu-item auto-disable on popup-open: built-in commands gray via `WidgetData::can_perform_command`; optional `neui_menu_client_t` (`NEUI_API_MENU_CLIENT`) `validate(token, menubar, item, cmd)` per non-separator item. Final `enabled = mi.enabled && (no built-in OR can_focused) && (no validate OR validate())`.
 
 ## Popup menus
 
-`widgets->popup_menu(session, anchor, x, y, items[])` - blocking; items is NULL-terminated UTF-8 (`"-"` = separator). Returns 1-based pick or 0 on dismiss. Win32: `TrackPopupMenuEx` with `TPM_RETURNCMD`. macOS: `run_popup_menu_macos` builds an `NSMenu` and presents it blocking via `popUpMenuPositioningItem:atLocation:inView:`, capturing the pick through a per-item target (`NEUIPopupCollector`); separators consume an index, matching win32. xpl: Session-level overlay + nested message pump via `platform_run_modal_until(bool*)`. Used by the KNOB right-click context menu ("Reset to default" → `NEUI_PARAM_DEFAULT`); right-click is `NEUI_EVENT_MOUSE_RBUTTON_DOWN`.
+`widgets->popup_menu(session, anchor, x, y, items[])` - blocking; items NULL-terminated UTF-8 (`"-"` = separator); returns 1-based pick or 0. Win32: `TrackPopupMenuEx` + `TPM_RETURNCMD`. macOS: `run_popup_menu_macos` (`NSMenu`, per-item target; separators consume an index). xpl: session overlay + nested pump via `platform_run_modal_until(bool*)`. Used by the KNOB right-click "Reset to default" menu (`NEUI_EVENT_MOUSE_RBUTTON_DOWN`).
 
 ## Keyboard shortcuts and accelerators
 
-`tree->set_shortcut(menubar, item, modifiers, key)` (`NEUI_KMOD_*` bits + `NEUI_KEY_*`). `NEUI_KEY_NONE` clears. Display formatted by `shortcut_format.h`, appended to menu text after `\t`. Win32 builds an HACCEL via `accel_table_win32.h` and walks it from the pump via `try_translate_accel(MSG*)` before `TranslateMessage`. macOS sets `NSMenuItem.keyEquivalent` + `keyEquivalentModifierMask` directly. `NEUI_KMOD_CTRL` = platform-primary (Cmd on macOS, Ctrl on Win/Linux); `NEUI_KMOD_META` = secondary (Control on macOS).
+`tree->set_shortcut(menubar, item, modifiers, key)` (`NEUI_KMOD_*` bits + `NEUI_KEY_*`). `NEUI_KEY_NONE` clears. Display formatted by `shortcut_format.h`, appended after `\t`. Win32 builds an HACCEL (`accel_table_win32.h`), walked from the pump via `try_translate_accel(MSG*)` before `TranslateMessage` (and before `IsDialogMessage` on xpl). macOS sets `NSMenuItem.keyEquivalent` + `keyEquivalentModifierMask`. `NEUI_KMOD_CTRL` = platform-primary (Cmd on macOS, Ctrl on Win/Linux); `NEUI_KMOD_META` = secondary (Control on macOS).
 
 ## Enabled / disabled state
 
-`widgets->set_enabled(sess, w, bool)` / `get_enabled(sess, w)`. Default for every widget is enabled=true. Disabled widgets paint dimmed and do not receive input.
+`widgets->set_enabled(sess, w, bool)` / `get_enabled(sess, w)`. Default enabled=true. Disabled widgets paint dimmed and don't receive input.
 
-- **win32 native**: `EnableWindow(hwnd, enabled)`. If the HWND has not been created yet (deferred), the flag is stored on `WidgetData::enabled` and applied in `create_child_windows` right after HWND creation + custom-font setup.
-- **xpl**: `WidgetData::enabled` flag. Paint brackets `wd.paint()` with `push_alpha(0.5)` / `pop_alpha` (per-widget dim, not subtree). Hit-test (`widget_at_recursive`) skips disabled widgets so clicks fall through to ancestors (matches Win32 EnableWindow click-transparency); `collect_tab_stops` skips them; `dispatch_mouse_event` bails on disabled. If the focused widget becomes disabled, focus advances to the next tab-stop.
-- **macOS native**: `apply_enabled_native_macos(wd)` (in `window.mm`) pushes the flag into the live control - `[NSControl setEnabled:]` for the NSControl-backed leaves (LABEL / BUTTON / INPUTBOX / CHECKBOX / COMBOBOX / SLIDER), document-view disable for NSScrollView-hosted controls (LISTBOX / TREEVIEW = NSTableView / NSOutlineView; MULTILINE = NSTextView gated via `editable` / `selectable` + `disabledControlTextColor`). Painted views (IMAGE / KNOB / CUSTOMDRAW / SECTION) dim in `drawRect:` via `push_alpha(0.5)` bracketing the content paint (after `begin_frame`, which resets the alpha stack), and the KNOB mouse / wheel handlers bail when disabled. Deferred-creation parity: `create_native_for_widget` re-applies `wd.enabled` right after instantiation, mirroring win32's `create_child_windows`.
+- **win32 native**: `EnableWindow(hwnd, enabled)`; deferred flag applied in `create_child_windows` if HWND not yet created.
+- **xpl**: `WidgetData::enabled` flag; paint brackets `wd.paint()` with `push_alpha(0.5)`; hit-test / `collect_tab_stops` / `dispatch_mouse_event` skip disabled. Focused-then-disabled advances focus.
+- **macOS native**: `apply_enabled_native_macos(wd)` - `[NSControl setEnabled:]` for control leaves, document-view disable for scroll-hosted controls, `push_alpha(0.5)` dim in `drawRect:` for painted views. Re-applied in `create_native_for_widget`.
 
-Frames + non-interactive containers (SECTION, MENUBAR) accept the call but the effect is host-defined.
+Frames + non-interactive containers (SECTION, MENUBAR) accept the call; effect host-defined.
 
 ## Frame resize, window icon, focus
 
-Resize: Win32 `WM_SIZE` (skip `SIZE_MINIMIZED`; physical → logical via `MulDiv(phys, 96, dpi)`); macOS `windowDidResize:`. Both emit `RESIZE { widget, width, height }` in logical px. Min/max attrs drive `WM_GETMINMAXINFO` / `NSWindow.min/maxSize`. `max < min` = "no maximum". `WM_DPICHANGED` triggers a follow-up `WM_SIZE`. Icon (`NEUI_ATTR_ICON_PATH`): Win32 `icon_win32.h` → `WM_SETICON`; macOS → `NSApp.applicationIconImage`.
+Resize: Win32 `WM_SIZE` (skip `SIZE_MINIMIZED`; physical→logical via `MulDiv(phys, 96, dpi)`); macOS `windowDidResize:`. Both emit `RESIZE { widget, width, height }` in logical px. Min/max attrs drive `WM_GETMINMAXINFO` / `NSWindow.min/maxSize`. `WM_DPICHANGED` triggers a follow-up `WM_SIZE`. Icon (`NEUI_ATTR_ICON_PATH`): Win32 `WM_SETICON`; macOS `NSApp.applicationIconImage`.
 
-Focus: clients see **logical** focus only. Tab traversal is hand-rolled on xpl (`Session::_focused_widget`, `focus_next`); Win32 relies on `IsDialogMessage` + `WS_TABSTOP`; macOS builds the key-view loop manually in **widget-creation order** (`rebuild_key_view_loop_macos` after `create_descendants_native`: pre-order DFS over the tab-stop set - BUTTON / INPUTBOX / MULTILINE / CHECKBOX[3] / LISTBOX / COMBOBOX / TREEVIEW / SLIDER / CUSTOMDRAW, honouring `NEUI_ATTR_TAB_STOP=0`; scroll-hosted controls use their document view), chained via `setNextKeyView:`. `autorecalculatesKeyViewLoop` is deliberately OFF - it orders by geometry, which would diverge from win32/xpl. Disabled controls stay in the chain but AppKit skips them (they refuse first responder). Which controls Tab actually visits beyond text fields + lists still follows the macOS system Full-Keyboard-Access setting. Frame's `WM_SETFOCUS` / `WM_KILLFOCUS` (Win32) / `NSWindowDidBecomeKey` / `DidResignKey` (macOS) → `WIDGET_FOCUS`. `Session::_os_focused`: when false, paint reports "no focus" → caret + focus outline hide; logical state preserved. **Tier B** (real focus-proxy HWND for UIAutomation) deferred.
+Focus: clients see **logical** focus only. Tab traversal hand-rolled on xpl (`Session::_focused_widget`, `focus_next`); Win32 uses `IsDialogMessage` + `WS_TABSTOP`; macOS builds the key-view loop in **widget-creation order** (`rebuild_key_view_loop_macos`: pre-order DFS over the tab-stop set - BUTTON / INPUTBOX / MULTILINE / CHECKBOX[3] / LISTBOX / COMBOBOX / TREEVIEW / SLIDER / CUSTOMDRAW / GRID, honouring `NEUI_ATTR_TAB_STOP=0`; scroll-hosted controls use their document view), chained via `setNextKeyView:` (`autorecalculatesKeyViewLoop` off). Frame focus → `WIDGET_FOCUS`. `Session::_os_focused` false → paint reports "no focus" (caret + outline hide; logical state preserved).
 
 ## Theme palette
 
-Process-wide `neui_detail::Palette` (`theme_palette.h`) - flat array indexed by `ColorRole` (frame_bg, panel_bg, control_bg, accent, text_primary, border, scrollbar_*, ime_underline_*, …). Win32 + macOS providers populate from system sources and fire `Session::on_theme_changed` on system flips.
+Process-wide `neui_detail::Palette` (`theme_palette.h`) - flat array indexed by `ColorRole` (frame_bg, panel_bg, control_bg, accent, text_primary, border, scrollbar_*, ime_underline_*, …); Win32 + macOS providers populate from system sources and fire `Session::on_theme_changed` on flips.
 
-**Per-session override** (`NEUI_ATTR_THEME_MODE`): Session computes `_effective_palette` per mode (AUTO/LIGHT/DARK), points `active_palette_override_ptr()` at it; `current_palette()` consults the override first. AUTO copies system; LIGHT/DARK start from defaults overlaid with live system accent. Multi-session: last-set-wins (process-wide override; documented limitation).
+**Per-session override** (`NEUI_ATTR_THEME_MODE`): Session computes `_effective_palette` per mode and points `active_palette_override_ptr()` at it; `current_palette()` consults it first. AUTO copies system; LIGHT/DARK = defaults + live system accent. **Per-frame opt-in** (`NEUI_ATTR_FOLLOW_SYSTEM_THEME = 1`): DWM dark title bar + dark HMENU + palette-driven brushes + invalidate on theme flip; without it OS-default chrome, no auto-invalidate.
 
-**Per-frame opt-in** via `NEUI_ATTR_FOLLOW_SYSTEM_THEME = 1`. With it: DWM dark title bar + dark HMENU on Win32, palette-driven brushes for native controls, and the frame invalidates on every theme flip. Without it: OS-default chrome, no auto-invalidate (the session's `_effective_palette` still tracks system colours - painted widgets that invalidate for unrelated reasons pick up the new palette). Default off so an audio-plugin host can own the look.
-
-**Win32 application manifest** (`examples/neui_example.manifest`) declares Win10/11 `supportedOS` GUIDs + Per-monitor v2 DPI + UTF-8 ACP. Without the GUIDs, Windows gates off uxtheme dark mode. `NEUI_API_THEME_CLIENT` (`d/theme.h`) - optional client theme-change callback, fires after framework invalidation.
+**Win32 manifest** (`examples/neui_example.manifest`) declares Win10/11 `supportedOS` GUIDs + Per-monitor v2 DPI + UTF-8 ACP (without the GUIDs Windows gates off uxtheme dark mode). `NEUI_API_THEME_CLIENT` - optional client theme-change callback, fires after framework invalidation.
 
 ## Key Design Patterns
 
-- **Host registry** - `neui_register(id, api)` at startup; `neui_get_api(NULL)` returns first registered. IDs: `"neui.host.win32"`, `"neui.host.macos"`, `"neui.host.crossplatform"`. **Clients call `neui_init()` once** to register every host the linked neuilib has compiled in (gated on `NEUI_HAS_*HOST` CMake defines on the `neui` target). Order: native first, then xpl, so `neui_get_api(NULL)` picks the native host where one exists.
-- **Per-host registration wrappers** - each host static lib exposes `extern "C"` wrappers (`neui_register_xplhost` / `neui_register_win32host` / `neui_register_macoshost`) that thunk to the namespaced `register_host()`. These also serve as the linker forced-symbol references that pull each host's object files out of its static lib. `neui_init()` fans out to whichever wrappers are compiled in; the wrappers remain callable individually as escape hatches.
-- **Named interface dispatch** - `get_interface(sess, name)` with version suffix (`/0`). Active: `NEUI_API_WIDGETS/_ITEMS/_TREE/_ATTRS/_CLIPBOARD/_COMMANDS/_ASSETS/_COMPOUND`. Optional client-side: `_CLIPBOARD_CLIENT`, `_MENU_CLIENT`, `_THEME_CLIENT`.
-- **Session model** - 32-bit ID; slot-reused vector. Client passes `neui_client_t` with `get_interface` callback; host passes opaque token back on every callback. Explicit dtor unregisters listeners.
-- **Widget IDs** - upper 16 = owning session id, lower 16 = tree slot. Every API entry validates via `get_session_for_widget`; cross-session handles silently dropped. Sentinels (`widget_root = 0`, `widget_none = UINT32_MAX`) pass. Stale-after-slot-reuse not detected (no generation counter; deferred).
-- **Deferred HWND** (win32 host) - logical state stored immediately; HWND / HMENU / HACCEL / HICON created on `widget_show()`; pending state flushed in `create_child_windows()`. Guard every API call with `hwnd == nullptr`.
+- **Host registry** - `neui_register(id, api)` at startup; `neui_get_api(NULL)` returns first registered. IDs: `"neui.host.win32"`, `"neui.host.macos"`, `"neui.host.crossplatform"`. Clients call `neui_init()` once to register every compiled-in host (gated on `NEUI_HAS_*HOST`). Order: native first, then xpl.
+- **Per-host registration wrappers** - each host static lib exposes `extern "C"` wrappers (`neui_register_xplhost` / `_win32host` / `_macoshost`) thunking to the namespaced `register_host()`; they double as the linker forced-symbol references pulling the host's objects out of its static lib.
+- **Named interface dispatch** - `get_interface(sess, name)` with version suffix (`/0`). Active: `NEUI_API_WIDGETS/_ITEMS/_TREE/_ATTRS/_CLIPBOARD/_COMMANDS/_ASSETS/_COMPOUND/_BEHAVIOR/_GRID`. Optional client-side: `_CLIPBOARD_CLIENT`, `_MENU_CLIENT`, `_THEME_CLIENT`.
+- **Session model** - 32-bit ID; slot-reused vector. Client passes `neui_client_t` with `get_interface` callback; host passes opaque token back on every callback.
+- **Widget IDs** - upper 16 = owning session id, lower 16 = tree slot. Every API entry validates via `get_session_for_widget`; cross-session handles silently dropped. Sentinels (`widget_root = 0`, `widget_none = UINT32_MAX`) pass. Stale-after-slot-reuse not detected (deferred).
+- **Deferred HWND** (win32) - logical state stored immediately; HWND / HMENU / HACCEL / HICON created on `widget_show()`; pending state flushed in `create_child_windows()`. Guard every API call with `hwnd == nullptr`.
 - **Event routing** - host → client via `neui_widget_client_t::onevent()`. Client gets first chance for mouse events; false forwards to `widget->on_mouse_event()`.
-- **`emit_events` gate** - `widget_at()` and `dispatch_mouse_event()` both require `emit_events = true`. Auto-set for BUTTON, INPUTBOX, CHECKBOX, CHECKBOX3, LISTBOX, COMBOBOX, MULTILINE, TREEVIEW, CUSTOMDRAW.
-- **Coordinates** - logical pixels at 96 DPI. Child widget x/y is **relative to the immediate parent's top-left** on all three hosts. Top-level children of a frame are frame-local. Win32 native: HWND parenting takes care of it. macOS native: NSView subview parenting via `create_descendants_native` (recognises container types like SECTION so children land in the right subview). xpl: stored as parent-relative `x`/`y` on `WidgetData`, with frame-local `abs_x`/`abs_y` recomputed top-down each frame by `paint_widgets_recursive`; the paint walk pushes `translate(wd.x, wd.y)` on the renderer transform stack around the recursive descent so widget `paint()` overrides keep drawing at `(this->x, this->y)`.
-- **`NEUI_ABI` (`__cdecl`)** on all API function pointers.
-- **`DEF_` prefix on event macros** - avoids collision with Windows SDK `MOUSE_EVENT` / `KEY_EVENT` in `wincontypes.h`.
-- **`interface` reserved by MSVC** - parameters use `iface`.
-- **Type-as-default + attributes-override** - implicit variants (CHECKBOX3, MULTILINE) set their attr at create; runtime reads the attr.
-- **Vtable-append for evolution** - append new methods at end of any public-API struct so slot offsets stay stable. Pre-1.0: slots can change when all hosts rebuild.
-- **Shared inline-only headers** - both static libs include the same defs; ODR-safe via `inline` storage.
-- **`platform_clipboard_*` / `platform_menubar_*` are the cross-cutting seams.** xpl text widgets + public clipboard API call `platform_clipboard_*` rather than into `hosts/shared/{win32,macos}/clipboard_*` directly. Same shape for menubar.
+- **`emit_events` gate** - `widget_at()` and `dispatch_mouse_event()` both require `emit_events = true`. Auto-set for BUTTON, INPUTBOX, CHECKBOX, CHECKBOX3, LISTBOX, COMBOBOX, MULTILINE, TREEVIEW, CUSTOMDRAW, KNOB, SLIDER, GRID.
+- **Coordinates** - logical pixels at 96 DPI; child x/y relative to the immediate parent's top-left on all hosts. Win32: HWND parenting. macOS: NSView subview parenting via `create_descendants_native` (recognises containers like SECTION). xpl: parent-relative `x`/`y` + frame-local `abs_x`/`abs_y` recomputed each frame; the paint walk pushes `translate(wd.x, wd.y)` around the descent.
+- **`NEUI_ABI` (`__cdecl`)** on all API function pointers. **`DEF_` prefix on event macros** avoids Windows SDK `MOUSE_EVENT` / `KEY_EVENT` collision. **`interface` reserved by MSVC** - parameters use `iface`.
+- **Type-as-default + attributes-override** - implicit variants (CHECKBOX3, MULTILINE) set their attr at create; runtime reads the attr. Public type strings stay even though they map to base+attr internally.
+- **Vtable-append for evolution** - append new methods at the end of any public-API struct so slot offsets stay stable. Pre-1.0: slots can change when all hosts rebuild.
+- **`platform_clipboard_*` / `platform_menubar_*`** are the cross-cutting seams; xpl text widgets + public clipboard API call them rather than into `hosts/shared/{win32,macos}/*` directly.
 
 ## Widget Types
 
@@ -162,94 +160,73 @@ Process-wide `neui_detail::Palette` (`theme_palette.h`) - flat array indexed by 
 | `TREEVIEW` | Per-item expanded; chevrons; Treeview keys. |
 | `MENUBAR` | No HWND. `tree->set_shortcut` + `tree->set_menu_cmd` configure items. |
 | `SLIDER` | Horizontal / vertical via `orientation`; `steps` snaps. |
-| `KNOB` | Painted rotary; right-click → "Reset to default" popup; drag mode switchable via `NEUI_ATTR_KNOB_MODE`. |
-| `IMAGE` | Source = file path (`set_text`) OR pre-loaded handle (`set_asset`). Last-set-wins; `""` / `asset_none` clears. Aspect-preserving fit; honours `NEUI_ATTR_ROTATION`. The widget does NOT retain a refcount on the asset - clear or destroy the widget before `assets->destroy`. |
-| `SECTION` | Non-interactive container. Body filled with `NEUI_ATTR_BACKGROUND` (fallback: `shade(frame_bg, +24)`; macOS native flips the lift direction when +24 saturates against the light system background). Optional `set_text` header drawn as a "title chip" in a top band; rest of the band is transparent (parent shows through). Chip position via `NEUI_ATTR_ALIGN_TEXT`. `emit_events=false` - clicks pass through. Children paint on top via normal tree traversal. |
-| `CUSTOMDRAW` | Client-rendered surface. Emits `NEUI_EVENT_WIDGET_PAINT` each frame with `neui_painter_api_t* painter_api` + opaque `neui_painter_t* p` + widget-local size + focus state. Origin (0, 0) is widget-local; framework wraps the dispatch in `push_transform / push_clip(widget bounds) / pop_clip / pop_transform`. Standard MOUSE / KEY events flow normally (`emit_events` auto-set). Supported on all three hosts. Client invalidates with `widgets->invalidate(session, widget)`. CUSTOMDRAW also accepts a **compound asset** (visual) and a **behavior asset** (input) via `widgets->set_asset` - `set_asset` kind-routes the handle. Compound replaces WIDGET_PAINT with a declarative layer walk; behavior routes mouse / key / wheel through `hosts/shared/behavior_runtime.h` so the widget mutates its own attrs without client `onevent` plumbing. The two are independent and compose. |
+| `KNOB` | Painted rotary; right-click → "Reset to default" popup; drag mode via `NEUI_ATTR_KNOB_MODE`. |
+| `IMAGE` | Source = file path (`set_text`) OR pre-loaded handle (`set_asset`); last-set-wins, `""` / `asset_none` clears. Aspect-preserving fit; honours `NEUI_ATTR_ROTATION`. No refcount on the asset - clear/destroy widget before `assets->destroy`. |
+| `SECTION` | Non-interactive container. Body filled with `NEUI_ATTR_BACKGROUND` (fallback `shade(frame_bg, +24)`; macOS flips lift direction when it saturates light bg). Optional `set_text` header as a "title chip" (rest of band transparent), positioned via `NEUI_ATTR_ALIGN_TEXT`. `emit_events=false`. Children paint on top. |
+| `CUSTOMDRAW` | Client-rendered surface. Emits `WIDGET_PAINT` each frame with `neui_painter_api_t* painter_api` + opaque `neui_painter_t* p` + widget-local size + focus. Origin (0,0) widget-local; framework wraps dispatch in `push_transform / push_clip(bounds) / pop_*`. MOUSE / KEY flow normally. All three hosts. Invalidate via `widgets->invalidate`. Also accepts a **compound asset** (visual) and **behavior asset** (input) via `widgets->set_asset` (kind-routed); the two are independent and compose. |
+| `GRID` | Scrollable multi-column table; cells are paint-state, not widgets. See below. |
 
 ## Painter + asset API
 
 Two public interfaces back `NEUI_W_CUSTOMDRAW`:
 
-**`neui_painter_api_t`** (`include/neui/d/painter.h`) - curated drawing surface handed to clients via `WIDGET_PAINT`. Exposes only the draw-safe subset of `neui_render_backend_t`: shapes (`fill_rect`/`draw_rect`/`draw_text`), path API, state stack (`push_clip`/`pop_clip`/`push_transform`/`pop_transform`/`translate`/`rotate`/`scale`/`push_alpha`/`pop_alpha`), queries (`get_scale_factor`/`measure_text`), and handle-based `draw_asset`. **Excluded by design**: context lifecycle, `begin_frame`/`end_frame`, raw `create_bitmap`/`destroy_bitmap`. The opaque `neui_painter_t*` (defined in `hosts/shared/painter.h`) carries `backend`, `ctx`, `host_token`, `draw_asset_thunk`; hosts stack-allocate one per WIDGET_PAINT dispatch. The vtable singleton is `neui_detail::k_painter_api` (inline-static).
+**`neui_painter_api_t`** (`include/neui/d/painter.h`) - curated drawing surface handed to clients via `WIDGET_PAINT`: the draw-safe subset of `neui_render_backend_t` (shapes, path API, transform/clip/alpha/font state stacks, `get_scale_factor`/`measure_text`, handle-based `draw_asset`), excluding context lifecycle + raw bitmap create/destroy. Opaque `neui_painter_t*` (`hosts/shared/painter.h`) carries `backend`/`ctx`/`host_token`/`draw_asset_thunk`, stack-allocated per dispatch. Vtable singleton `neui_detail::k_painter_api`.
 
-`push_alpha(p, factor)` / `pop_alpha(p)` multiplies a cumulative 0..1 opacity into every subsequent draw call until popped. Backend support: D2D + CG software stack; null no-op.
+**`neui_asset_api_t`** (`include/neui/d/assets.h`, `NEUI_API_ASSETS`) - session-scoped media handles loaded outside the paint loop: `create_bitmap`, `create_from_file` (resolves `@2x`/`@3x`), `destroy`, `get_size`, `get_kind`, `create_compound`. Returns `neui_asset_t` (handle `(session_id << 16) | slot`; cross-session rejected). `neui_asset_kind_t`: `BITMAP=1`, `COMPOUND=2`, `BEHAVIOR=3` (SVG / vector / font reserved). Clients reach bitmap draws via `painter_api->draw_asset` (lazy per-(asset, ctx) upload, cached for the ctx lifetime).
 
-`push_font(p, family_utf8, weight)` / `pop_font(p)` selects the active font family + weight for every subsequent `draw_text` / `measure_text`. Family / weight default to host system (Segoe UI / Normal on D2D) when the stack is empty; `font_size` stays a per-call parameter. Weight is CSS-style 100..900 (400 = Normal, 700 = Bold). D2D resolves to a cached `IDWriteTextFormat` keyed by `(family, weight, size_q10)`; cg + null are no-op for now.
-
-**`neui_asset_api_t`** (`include/neui/d/assets.h`, `NEUI_API_ASSETS`) - session-scoped media handles loaded **outside** the paint loop. Methods: `create_bitmap(sess, w_px, h_px, bgra, scale)`, `create_from_file(sess, path)` (resolves `@2x` / `@3x` per current display scale), `destroy`, `get_size`, `get_kind`, `create_compound(sess)`. Returns `neui_asset_t` (handle layout `(session_id << 16) | slot`, matching `neui_widget_t`); cross-session handles rejected. `neui_asset_kind_t`: `NEUI_ASSET_KIND_BITMAP = 1`, `NEUI_ASSET_KIND_COMPOUND = 2`; SVG / vector / font reserved.
-
-The renderer struct's `create_bitmap`/`destroy_bitmap`/`draw_bitmap` are **internal** to the host's image / asset pipeline - clients reach bitmap draws through `painter_api->draw_asset(p, asset, x, y, w, h)`, which resolves the handle and uploads to the current ctx lazily (one upload per (asset, ctx) pair, cached for the ctx's lifetime).
-
-**Asset storage**: xpl extends `neui_detail::AssetManager` (`hosts/crossplatform/asset_manager.{h,cpp}`) with a slot-reused handle table alongside the legacy path-keyed cache used by `NEUI_W_IMAGE`. Win32 native has `W32AssetManager` (`hosts/win32/asset_manager_w32.h`). macOS native has `MacOSAssetManager` (`hosts/macos/asset_manager_macos.h`) - same slot-vector + free-list + per-ctx GPU cache shape (CG `CGImageRef` is device-independent so the per-ctx generation check is structurally redundant but kept for symmetry). All managers release per-ctx caches when the owning paint context goes away.
-
-**Device-loss recovery** (D2D only): `EndDraw` returning `D2DERR_RECREATE_TARGET` triggers an in-place rebuild in the next `begin_frame` from stashed `hwnd`/`width`/`height`/`dpi` on `D2DContext`; per-ctx `generation` bump. Asset managers key their per-ctx GPU cache by `(ctx, generation)` and re-upload on mismatch. CG + null backends return a constant generation.
+**Asset storage**: xpl `neui_detail::AssetManager`, win32 `W32AssetManager`, macOS `MacOSAssetManager` - all slot-vector + free-list + per-ctx GPU cache, released when the owning paint context dies. **Device-loss** (D2D only): `EndDraw` → `D2DERR_RECREATE_TARGET` rebuilds next `begin_frame` from stashed `hwnd`/`width`/`height`/`dpi`; per-ctx `generation` bump; asset caches keyed by `(ctx, generation)` re-upload on mismatch (CG + null return a constant generation).
 
 ## Compound drawables
 
-A **compound** is `NEUI_ASSET_KIND_COMPOUND` - a mutable, declarative shape attachable to a CUSTOMDRAW widget. Owns a slot-reused layer stack; each layer is `text` or `asset` (v1 kinds), positioned by a 9-point anchor pair (parent + self) + `(offset_x, offset_y)` + `(width, height)` with `NEUI_COMPOUND_FILL = -1` per axis to span the widget; signed-int `z` interleaves layers with the widget's children (`z<0` below, `z>=0` above; insertion order breaks ties). When attached, the framework walks the layers and `WIDGET_PAINT` is suppressed.
+A **compound** is `NEUI_ASSET_KIND_COMPOUND` - a mutable, declarative shape attachable to a CUSTOMDRAW widget. Owns a slot-reused layer stack; each layer is `text` or `asset` (v1), positioned by a 9-point anchor pair (parent + self) + `(offset_x, offset_y)` + `(width, height)` with `NEUI_COMPOUND_FILL = -1` per axis to span; signed-int `z` interleaves with the widget's children (`z<0` below, `z>=0` above). When attached, `WIDGET_PAINT` is suppressed.
 
-**API surface** (`include/neui/d/compound.h`, `NEUI_API_COMPOUND`): `add_layer(kind, z)`, `remove_layer` / `clear` / `set_z`, `set_anchor`, typed setters `set_int` / `set_float` / `set_string` (templates) / `set_asset`, numeric `bind(prop, attr_key, scale, offset)`, asset `bind_asset(prop, attr_key)`, `unbind`. Recognised props - **text**: `text` (template), `size`, `color` (optional, theme-fallback), `align_x` / `align_y`; **asset**: `asset`, `rotation`; **both**: `offset_x` / `offset_y` / `width` / `height` / `alpha` / `show_when`.
+**API** (`include/neui/d/compound.h`, `NEUI_API_COMPOUND`): `add_layer(kind, z)`, `remove_layer`/`clear`/`set_z`, `set_anchor`, typed `set_int`/`set_float`/`set_string`(templates)/`set_asset`, numeric `bind(prop, attr_key, scale, offset)`, `bind_asset(prop, attr_key)`, `unbind`. Props - **text**: `text` (template), `size`, `color` (optional, → `ColorRole::text_primary`), `align_x`/`align_y`; **asset**: `asset`, `rotation`; **both**: `offset_x`/`offset_y`/`width`/`height`/`alpha`/`show_when`.
 
-**State-filtered layers** (`NEUI_PROP_SHOW_WHEN`, set via `set_int`): a layer with `show_when = 0` (default) is visible in every state; otherwise the mask is an **AND** filter across three axes (enabled, hovered, pressed). Each axis has a positive bit (`NEUI_LAYER_STATE_ENABLED` / `_HOVERED` / `_PRESSED`) and a negated bit (`_NOT_ENABLED` / `_NOT_HOVERED` / `_NOT_PRESSED`); a layer can require the positive side, the negated side, or neither (don't-care). Visibility rule: `(show_when & ~current_state) == 0` - every bit set in `show_when` must be present in `current_state`. `current_state` is composed each paint and always carries exactly one bit per axis (positive when the widget is in that state, NOT_ form otherwise). Drop `NOT_ENABLED` rather than a separate `DISABLED` flag - the two are the same axis. Setting both bits on one axis (e.g. `ENABLED | NOT_ENABLED`) is a contradiction and never paints. Wired purely off internal hover / press / enabled detection - no client `onevent` plumbing. The framework invalidates the widget on each transition only when its attached compound `has_state_filters` (cheap linear scan over the layer table; `compound_has_state_filters` in `hosts/shared/compound.h`), so compounds with no `show_when` set anywhere stay free of extra repaints. Per-host wiring: xpl populates `wd.hovered` / `wd.pressed` in `Session::set_hovered` / `set_pressed`; win32 native populates them in `PaintedWndProc`'s WM_MOUSEMOVE / WM_MOUSELEAVE / WM_LBUTTONDOWN / WM_LBUTTONUP; macOS native populates them in `NEUINativePaintedView`'s mouseEntered: / mouseExited: / mouseDown: / mouseUp:.
+**State-filtered layers** (`NEUI_PROP_SHOW_WHEN`, `set_int`): `0` (default) = always visible; otherwise an AND filter across three axes (enabled, hovered, pressed), each with a positive bit (`NEUI_LAYER_STATE_ENABLED`/`_HOVERED`/`_PRESSED`) and a negated `_NOT_*`; rule `(show_when & ~current_state) == 0` (current_state carries one bit per axis each paint). The framework invalidates on transitions only when the compound `has_state_filters`; per-host wiring populates `wd.hovered`/`wd.pressed`.
 
-**Values live in the widget's `AttrBag`**, not on the compound. A text layer with `text = "{label}: {value}"` resolves the keys against the widget's attrs at paint time; `bind(layer, "rotation", "value", 2π, 0)` reads `value` as float (int promotes via `attr_as_float`, string/missing yields 0), computes `scale * x + offset`, and applies. Float-to-int prop targets round to nearest. One compound can back many widgets - shape is shared, attrbag is per-widget.
+**Data plane = the widget's `AttrBag`** (no parallel store on the compound). Text layer `"{label}: {value}"` resolves keys against attrs at paint time; `bind(layer, "rotation", "value", 2π, 0)` reads `value` as float (`attr_as_float`), computes `scale*x + offset` (float→int targets round). One compound backs many widgets - shape shared, attrbag per-widget. Template `{key}` substitution, `{{`/`}}` literal braces, malformed/missing → empty/pass-through, pre-parsed at `set_string` (`{key:.2f}` reserved). `attrs->set_*` on a widget with a compound invalidates it; compound mutations invalidate every CUSTOMDRAW whose `compound_asset` matches.
 
-**Template syntax**: `{key}` substitution with `{{` / `}}` for literal braces. Malformed or missing keys yield empty / literal pass-through (no throws). Pre-parsed at `set_string`. `{key:.2f}` format specs reserved but deferred.
-
-**Invalidation**: any `attrs->set_*` on a widget with a compound attached invalidates the widget; compound mutations walk session widgets and invalidate every CUSTOMDRAW whose `compound_asset` matches.
-
-**Storage + paint**: `AssetEntry` / `W32AssetEntry` / `MacOSAssetEntry` carry a `std::unique_ptr<CompoundAsset>`. Layer table + parsing + geometry + binding eval in `hosts/shared/compound.h`; paint pass in `hosts/shared/widget_paint_compound.h::paint_compound_below` / `paint_compound_above`. All three hosts call `_below` before child descent and `_above` after - xpl wires `_above` through `WidgetData::paint_after_children` so layer z interleaves with child widgets; native hosts call them back-to-back inside the parent's paint, so z relative to children only works on xpl (child HWNDs / NSView subviews always paint above the parent surface).
+**Storage + paint**: `AssetEntry` / `W32AssetEntry` / `MacOSAssetEntry` carry a `std::unique_ptr<CompoundAsset>`. Layer table + parse + geometry + binding eval in `compound.h`; paint in `widget_paint_compound.h::paint_compound_below` / `_above`. All hosts call `_below` before child descent, `_above` after - xpl wires `_above` through `paint_after_children` so z interleaves with children (native hosts call them back-to-back, so child-relative z is xpl-only).
 
 ## Interactive behaviors
 
-A **behavior** is `NEUI_ASSET_KIND_BEHAVIOR` (`3`) - a mutable list of input handlers attachable to a CUSTOMDRAW widget. While a compound asset turns CUSTOMDRAW into a declarative *visual*, a behavior asset turns it into a declarative *input target* without any client `onevent` plumbing. Mouse / key / wheel events arriving at the widget run through the asset's handler list; the matching handler manipulates a named float attr in the widget's `AttrBag`. Companion compound bindings on that attr re-render the visual the same way a programmatic `attrs->set_float` would. One widget can have both a compound (visual) and a behavior (input) attached simultaneously.
+A **behavior** is `NEUI_ASSET_KIND_BEHAVIOR` (`3`) - a mutable list of input handlers for a CUSTOMDRAW widget (declarative *input target*, parallel to compound's *visual*; a widget can have both). Mouse / key / wheel events run the handler list; the matching handler mutates a named float attr in the `AttrBag`; companion compound bindings re-render.
 
-**Handler kinds** (v1): `DRAG_VERTICAL`, `DRAG_HORIZONTAL`, `DRAG_ROTATIONAL`, `DRAG_BIAXIAL`, `WHEEL`, `KEY_STEP`, `CLICK_TOGGLE`, `CLICK_CYCLE`, `CONTEXT_RESET`. Inserting more than one (e.g. drag + wheel + key + reset) bundles a full rotary-knob feel into a single asset.
+**Handler kinds** (v1): `DRAG_VERTICAL`, `DRAG_HORIZONTAL`, `DRAG_ROTATIONAL`, `DRAG_BIAXIAL`, `WHEEL`, `KEY_STEP`, `CLICK_TOGGLE`, `CLICK_CYCLE`, `CONTEXT_RESET`.
 
-**API surface** (`include/neui/d/behavior.h`, `NEUI_API_BEHAVIOR`): `add_handler(kind)`, `remove_handler`, `clear`, typed `set_int` / `set_float` / `set_string`. Recognised props per handler - **common**: `target` (attr key written, default `neui.param.value`), `target_default` (for CONTEXT_RESET, default `neui.param.default`), `min` / `max`, `step` / `coarse` (key + wheel), `snap_attr` (default `neui.attr.steps`), `fine_modifier` (`"shift"`/`"ctrl"`/`"alt"`/`"none"`), `fine_scale` (default 0.2, matches KNOB), `cursor` (advisory, no-op v1); **drag-only**: `sweep` (default 200 px = matches KNOB), `sweep_y` (BIAXIAL), `deadzone` (rotational, default 4 px); **cycle-only**: `wrap`; **hit region (any kind)**: `anchor_parent` / `anchor_self` / `offset_x` / `offset_y` / `width` / `height` - reuses the compound 9-pt anchor system (defaults to whole widget).
+**API** (`include/neui/d/behavior.h`, `NEUI_API_BEHAVIOR`): `add_handler(kind)`, `remove_handler`, `clear`, typed `set_int`/`set_float`/`set_string`. Props - **common**: `target` (default `neui.param.value`), `target_default` (CONTEXT_RESET), `min`/`max`, `step`/`coarse`, `snap_attr` (default `neui.attr.steps`), `fine_modifier`/`fine_scale` (default 0.2), `cursor` (no-op v1); **drag**: `sweep` (200 px), `sweep_y` (BIAXIAL), `deadzone` (rotational, 4 px); **cycle**: `wrap`; **hit region**: `anchor_parent`/`anchor_self`/`offset_x`/`offset_y`/`width`/`height` (compound 9-pt anchor, defaults whole widget).
 
-**Attachment**: `widgets->set_asset` kind-routes - a BEHAVIOR handle lands in `WidgetData::behavior_asset`, a COMPOUND handle in `compound_asset`. Both slots are independent.
+**Attachment**: `widgets->set_asset` kind-routes - BEHAVIOR → `WidgetData::behavior_asset`, COMPOUND → `compound_asset` (independent slots). **Dispatch**: hosts feed mouse / key / wheel into `behavior_dispatch_mouse` / `_key` (`behavior_runtime.h`) after the client's `onevent` returned false; a `BehaviorDispatchCtx` of host callbacks (`invalidate` / `emit_attr_changed` / `popup_menu`) keeps it platform-free. Wheel dispatch multiplies by `|delta|` (one notch = `step * lines_per_notch`). `NEUI_EVENT_ATTR_CHANGED` fires on user-driven writes; programmatic `attrs->set_*` stays silent.
 
-**Storage + dispatch**: `AssetEntry` / `W32AssetEntry` / `MacOSAssetEntry` gain a `std::unique_ptr<BehaviorAsset>` slot; `WidgetData` gains a `neui_asset_t behavior_asset` plus a lazy `std::unique_ptr<BehaviorRuntime>` (drag state). All three hosts feed mouse / key / wheel events into `neui_detail::behavior_dispatch_mouse` / `behavior_dispatch_key` (`hosts/shared/behavior_runtime.h`) after the client's `onevent` returned false. The runtime ships a `BehaviorDispatchCtx` of callbacks the host supplies for `invalidate` / `emit_attr_changed` / `popup_menu` so the shared dispatch stays platform-free.
+## GRID widget (`NEUI_W_GRID`, `NEUI_API_GRID`)
 
-**Wheel magnitude**: dispatch multiplies by `|delta|` so one wheel notch advances by `step * lines_per_notch` (Win32 maps `WHEEL_DELTA` notches through `SPI_GETWHEELSCROLLLINES`). Without this the wheel is imperceptible at typical step values (~0.01..0.05).
+Scrollable multi-column table (`include/neui/d/grid.h`). Cells are paint-state, not widgets (a 10000×8 grid is one widget). All three hosts; shared logic in `grid_model.h` (`GridModel` state + viewport / hit-test / clamp / ensure-visible) + `widget_paint_grid.h` (sticky header, per-column-aligned cells, focus-row band, dual scrollbars, cell-focus outline) + `scrollbar.h`.
 
-**ATTR_CHANGED event** (`NEUI_EVENT_ATTR_CHANGED`, payload `{ widget, attr_key, value }`) fires on every user-driven attr write a behavior performs; programmatic `attrs->set_*` stays silent (mirrors the existing KNOB `VALUE_CHANGED` rule).
+**API** (28 thin methods over `GridModel`): column add/remove/width/min-width/align/header, row add/remove/clear/count, cell text/color/enabled/clear-overrides, selection (`set/get_selected_row`, `set/get_selected_cell`), `ensure_row_visible`/`ensure_cell_visible`, `set/get_scroll_x`, `hit_test`.
+
+**Two focus modes** via `NEUI_ATTR_GRID_CELL_FOCUS`: 0 = row-focus (arrows move row), 1 = cell-focus ((row,col) cursor as 1px accent outline; Left/Right move column, Home/End row endpoints, Ctrl+Home/End grid corners). **Click event ladder** (each fires only if the prior wasn't consumed): `GRID_ROW_SELECTED` → (cell-focus) `GRID_CELL_SELECTED` → `GRID_CELL_CLICKED`. Double-click / Return → `GRID_ROW_ACTIVATED`. Header-divider drag resizes a column (ew-resize cursor) → `GRID_COLUMN_RESIZED` on release (programmatic `set_column_width` does not fire it). Per-cell sparse color / enabled overrides (disabled cell paints dimmed + suppresses `GRID_CELL_CLICKED`). Keyboard nav: Up/Down, PgUp/PgDn, Home/End, Ctrl+Home/End, Left/Right, Return; one tab stop. Per-host glue: win32 `widgets.cpp`, macOS `window.mm` + `widgets.mm`, xpl `host.cpp::GridWidget`.
+
+**Smooth scroll + elastic rubber-band** (macOS only): vertical scroll is row-indexed (`scroll_offset_y`) plus a fine `scroll_px_offset` for sub-row-smooth motion, with inertial momentum + WebKit-style overscroll. Math + tuning live once in `grid_model.h` (`GridScrollKinetics` in `GridModel.scroll_kin`; `grid_scroll_wheel` / `_bounce_step` / `_commit` + `GRID_SCROLL_*` constants). Both macOS hosts feed NSEvent phase/momentum/precise-delta in and run a 60 Hz `NSTimer` spring-back (native: per-`NEUINativePaintedView`; xpl: per-`NEUIView`). Classic mouse wheels hard-clamp. Keyboard / scrollbar-drag / API snap `scroll_px_offset` to 0; the bounce self-cancels if the position moves externally. win32 / null keep the row-stepped wheel (`scroll_px_offset` stays 0 → paint + hit-test unchanged).
 
 ## Typical Client Usage
 
-```cpp
-static neui_widget_client_t widget_client = {
-  NEUI_VERSION,
-  [](void*, neui_widget_t, void*) { /* ondestroy */ },
-  [](void*, neui_event_t*) -> bool { return false; }
-};
-static neui_client_t host_client = {
-  NEUI_VERSION,
-  [](void*, const char* iface) -> void* {
-    if (!strcmp(iface, NEUI_API_WIDGETS)) return &widget_client;
-    return nullptr;
-  }
-};
+Client passes a `neui_client_t { version, get_interface }`; `get_interface(iface)` returns a `neui_widget_client_t { version, ondestroy, onevent }` for `NEUI_API_WIDGETS`. Then:
 
+```cpp
 neui_init();
-neui_api_t*          neui    = neui_get_api(NULL);   // or pass an explicit host id
-neui_session_t       sess    = neui->create_session(&host_client, &app);
-neui_widget_api_t*   widgets = (neui_widget_api_t*) neui->get_interface(sess, NEUI_API_WIDGETS);
-neui_tree_api_t*     tree    = (neui_tree_api_t*)   neui->get_interface(sess, NEUI_API_TREE);
-neui_attr_api_t*     attrs   = (neui_attr_api_t*)   neui->get_interface(sess, NEUI_API_ATTRS);
+neui_api_t*        neui    = neui_get_api(NULL);   // or an explicit host id
+neui_session_t     sess    = neui->create_session(&host_client, &app);
+neui_widget_api_t* widgets = (neui_widget_api_t*) neui->get_interface(sess, NEUI_API_WIDGETS);
+neui_attr_api_t*   attrs   = (neui_attr_api_t*)   neui->get_interface(sess, NEUI_API_ATTRS);
+neui_tree_api_t*   tree    = (neui_tree_api_t*)   neui->get_interface(sess, NEUI_API_TREE);
 
 neui_widget_t win = widgets->create(sess, widget_none, NEUI_W_APPWINDOW, 100, 100, 800, 600, nullptr);
-attrs->set_int   (sess, win, NEUI_ATTR_MIN_WIDTH,  400);
-attrs->set_string(sess, win, NEUI_ATTR_ICON_PATH,  "app.ico");
-
-auto mb       = widgets->create(sess, win, NEUI_W_MENUBAR, 0, 0, 0, 0, nullptr);
-auto edit_pop = tree->add(sess, mb, tree_item_root, "Edit", nullptr);
-auto undo_it  = tree->add(sess, mb, edit_pop, "Undo", nullptr);
-tree->set_shortcut(sess, mb, undo_it, NEUI_KMOD_CTRL, NEUI_KEY_Z);
-tree->set_menu_cmd(sess, mb, undo_it, NEUI_CMD_UNDO);
-
+attrs->set_int(sess, win, NEUI_ATTR_MIN_WIDTH, 400);
+auto mb  = widgets->create(sess, win, NEUI_W_MENUBAR, 0, 0, 0, 0, nullptr);
+auto pop = tree->add(sess, mb, tree_item_root, "Edit", nullptr);
+auto it  = tree->add(sess, mb, pop, "Undo", nullptr);
+tree->set_shortcut(sess, mb, it, NEUI_KMOD_CTRL, NEUI_KEY_Z);
+tree->set_menu_cmd(sess, mb, it, NEUI_CMD_UNDO);
 widgets->show(sess, win);
 neui->run(sess);
 ```
@@ -259,57 +236,35 @@ neui->run(sess);
 Win32:
 - **`HTREEITEM` is 64-bit on x64** - bidirectional maps; never truncate.
 - **Treeview text** - always `SendMessageW(..., TVM_INSERTITEMW, ...)`.
-- **Menu separator IDs** - `AppendMenuW(MF_SEPARATOR)` ignores ID. Use `InsertMenuItemW` with `MIIM_TYPE | MIIM_ID | MFT_SEPARATOR`.
+- **Menu separator IDs** - `AppendMenuW(MF_SEPARATOR)` ignores ID; use `InsertMenuItemW` with `MIIM_TYPE | MIIM_ID | MFT_SEPARATOR`.
 - **`EnableMenuItem` for submenus** - `HMENU` is 64-bit; never cast to `UINT`. Use `GetSubMenu` + `MF_BYPOSITION`.
-- **Deferred HWND** - guard every API call with `hwnd == nullptr`; flush pending state in `create_child_windows()`.
+- **Deferred HWND** - guard every API call with `hwnd == nullptr`; flush in `create_child_windows()`.
 - **`WM_CHAR` surrogate pairs** - two messages per supplementary codepoint; assemble via `pending_surrogate`.
-- **`CS_DBLCLKS`** required for `WM_LBUTTONDBLCLK` → `MOUSE_BUTTON_DBLCLICK`. Widgets that need every click (CheckboxWidget) treat DOWN and DBLCLICK identically.
-- **`TranslateAccelerator` order** - runs *before* `TranslateMessage` and (xpl) *before* `IsDialogMessage`. `set_menu_cmd` routing is what keeps widget-local Ctrl+Z working when a shortcut is bound.
-- **HACCEL / HICON / HMENU lifetimes** - owned per widget; freed on destroy / replace; rebuilt on `set_shortcut` / `tree_remove` / `tree_clear`.
-- **`WM_COMMAND` ID space partitioned** - control IDs `[1, 0x7FFF]` (tree slots, debug-asserted in `CreateChildHwnd`); menu cmd_ids `[0x8000, 0xFFFF]` (recycled via `WidgetData::free_menu_cmd_ids`). Don't cross-pollinate.
+- **`CS_DBLCLKS`** required for `WM_LBUTTONDBLCLK` → `MOUSE_BUTTON_DBLCLICK`. CheckboxWidget treats DOWN and DBLCLICK identically.
+- **`TranslateAccelerator` order** - runs before `TranslateMessage` and (xpl) before `IsDialogMessage`; `set_menu_cmd` routing keeps widget-local Ctrl+Z working.
+- **HACCEL / HICON / HMENU lifetimes** - owned per widget; freed on destroy/replace; rebuilt on `set_shortcut` / `tree_remove` / `tree_clear`.
+- **`WM_COMMAND` ID space** - control IDs `[1, 0x7FFF]` (tree slots); menu cmd_ids `[0x8000, 0xFFFF]` (recycled via `free_menu_cmd_ids`). Don't cross-pollinate.
 
 macOS:
-- **`NEUIView.isFlipped = YES`** - CGContext CTM matches Y-down renderer convention without an explicit flip.
-- **`drawRect:` rect is logical pixels** - backing scale via `NSWindow.backingScaleFactor`; `CGContextScaleCTM` already accounts for it.
-- **`keyEquivalent`** is a single lowercase character string (`@"z"`), modifier mask is `NSEventModifierFlagCommand | ...`.
-- **NSPasteboard change-count** - no `NSPasteboardDidChange` notification; listener polls `changeCount` on activate + each runloop tick (cheap int compare).
-- **Cmd-Q quit** - `applicationShouldTerminate:` calls `Session::request_quit`; let runloop unwind cleanly rather than `exit()`.
-- **Xcode bundle: `XCODE_ATTRIBUTE_COMBINE_HIDPI_IMAGES NO`** - default Xcode pipeline combines `name.png` + `name@2x.png` into a single `name.tiff`, breaking the path-keyed image loader. Set the property on the example target when adding new HiDPI images.
-
-## Architecture rules to not relitigate
-
-- **String hashing in attribute lookup is fine** (~50 ns × hundreds/sec ≪ frame budget). Don't shorten `neui.attr.`. If a profile proves hot, cache the parsed value as a direct field.
-- **Adding a new `NEUI_ATTR_*` / `NEUI_PARAM_*` macro requires a matching row in `k_well_known_attrs`** (`hosts/shared/attrs.h`). The setter assert relies on that table to catch client kind-mismatches in debug; an unregistered new key would silently fall through and only surface as a "why doesn't my attribute work" mystery downstream.
-- **CHECKBOX3 / MULTILINE stay as public type strings** even though they map to `CHECKBOX + tristate` / `INPUTBOX + multiline` internally. Public constructor identity > internal compression.
-- **Shortcut display is framework-formatted** - clients pass `(mods, key)`; Win/Linux get `"Ctrl+S"` labels; macOS uses `NSMenuItem.keyEquivalent` directly.
-- **Client undo/redo via menu** uses routed commands. Client binds `NEUI_CMD_UNDO` to Edit > Undo; framework routes Ctrl+Z and the menu pick to the focused text widget's history.
-- **Menu-item validation (auto-disable on popup-open)** - built-in commands auto-gray via `WidgetData::can_perform_command` → `Session::can_focused_perform_command`. Optional `neui_menu_client_t` (`NEUI_API_MENU_CLIENT`) → `validate(token, menubar, item, cmd) → bool` for every non-separator item. `enabled = mi.enabled && (no built-in OR can_focused) && (no validate OR validate())`.
-- **IME composition lives on the widget.** `WidgetData::on_composition(kind, utf8, len, caret_byte)` is the platform-agnostic seam. State on `InputBoxWidget`/`MultilineWidget`. `text` is not mutated until `COMP_RESULT`, which pushes one `EditHistory` entry against the pre-composition snapshot (kanji undoes as one unit). `caret_rect_local` reused for `ImmSetCompositionWindow` / `firstRectForCharacterRange:`. Win32 native inherits IME via native `Edit`.
-- **xpl static-text widgets are palette-driven, not stub-coloured.** `LabelWidget` draws text only (parent surface shows through); `ButtonWidget` fills `panel_bg` with `border` outline; `CheckboxWidget` paints glyph + check + text with no surrounding rect. The xpl `CheckboxWidget` also fires `NEUI_EVENT_CHECKBOX_CHANGED` on user toggle (was previously silent - native hosts always emitted it); event carries the full packed `widget_id`, matching the slider/knob `VALUE_CHANGED` convention.
-- **Knob drag-mode is widget-attribute, mode-cached-at-down.** `NEUI_ATTR_KNOB_MODE` is read once at `MOUSE_BUTTON_DOWN` / `WM_LBUTTONDOWN` and stashed on the drag state so per-frame mouse-move is a single int branch. Slider modes use `KNOB_SLIDER_SWEEP_PX = 200`; rotational keeps the `1.5π` sweep + 4-px centre dead-zone. All three modes share the `drag_continuous` accumulator so STEPS snapping behaves identically.
-- **Compound is a new asset kind, not a new widget type.** CUSTOMDRAW is the host; attaching a `NEUI_ASSET_KIND_COMPOUND` via `set_asset` switches its paint mode from imperative WIDGET_PAINT to declarative layer walk. Compounds are mutable + shareable across widgets; per-widget state lives in the widget's existing `AttrBag` (no parallel "values" store on the compound). Mixing modes (WIDGET_PAINT + compound on the same widget) is not supported in v1.
-- **Behavior is another asset kind, parallel to compound, not a subset.** `NEUI_ASSET_KIND_BEHAVIOR` is for input; `_COMPOUND` is for paint. `set_asset` kind-routes the handle into `behavior_asset` / `compound_asset` slots on `WidgetData`; both slots can be set independently and the widget composes them. One behavior asset is a list of handlers (drag / wheel / key / click / context-reset); attaching one is how you build a knob-flavoured CUSTOMDRAW without per-widget input code. Handler defaults match the existing KNOB (sweep 200 px, fine_scale 0.2, audio-plugin wheel direction) so the two feel identical when configured for the same params. Wheel dispatch multiplies by `|delta|`: Windows sends delta in lines (typically 3 / notch), so without the magnitude scale `step` would be imperceptible at typical values.
-- **Behaviors mutate attrs; the compound's bindings re-render.** There is no parallel "values" store on a behavior either - the entire data plane is the widget's `AttrBag`. That keeps "shared visual + shared input + per-widget state" the same triangle as compound. NEUI_EVENT_ATTR_CHANGED is the user-driven signal (programmatic `attrs->set_*` stays silent, mirroring NEUI_EVENT_VALUE_CHANGED on native KNOB / SLIDER).
-- **Text-layer `color` is optional** - falls back to `ColorRole::text_primary` from the active palette when neither set explicitly nor bound, so labels stay legible across system theme flips without client follow-up.
-- **Compound bindings always read attrs as float** via `attr_as_float`. String props use template substitution (`{key}`) instead of bindings - the two paths don't overlap. Asset props use a separate `bind_asset` because asset handles aren't meaningfully float-arithmeticable.
-- **macOS section bg uses a direction-aware lift.** The default `shade(frame_bg, +24)` saturates against macOS's light-mode `windowBackgroundColor`; the macOS paint helper detects no-op lifts and shades the other direction so the section reads as a depressed panel in light mode and a raised panel in dark mode.
+- **`isFlipped = YES`** on content + painted views - CGContext CTM matches Y-down renderer convention.
+- **`drawRect:` rect is logical pixels** - backing scale via `NSWindow.backingScaleFactor`; `CGContextScaleCTM` accounts for it.
+- **`keyEquivalent`** is a single lowercase character string (`@"z"`); modifier mask `NSEventModifierFlagCommand | ...`.
+- **NSPasteboard change-count** - no notification; listener polls `changeCount` on activate + each runloop tick.
+- **Cmd-Q quit** - `applicationShouldTerminate:` calls `Session::request_quit`; let the runloop unwind rather than `exit()`.
+- **Xcode bundle: `XCODE_ATTRIBUTE_COMBINE_HIDPI_IMAGES NO`** - default pipeline combines `name.png` + `name@2x.png` into one `.tiff`, breaking the path-keyed loader. Set on the example target when adding HiDPI images.
 
 ## Deferred Issues
 
-**win32 ↔ macOS native hosts are at functional parity** (events, CUSTOMDRAW input, focus + creation-order Tab, layout, popup menus, routed commands, clipboard text + item API, IMAGE via the asset manager, enabled/disabled, fonts). Two small macOS-only divergences remain:
-
-- **KNOB is not a keyboard tab-stop on macOS** - win32 gives it `WS_TABSTOP`; the macOS `NSView` refuses first responder so Tab skips it (CUSTOMDRAW is a tab-stop on both). Needs the KNOB made focusable + arrow-key value handling.
-- **macOS Tab participation follows the system Full-Keyboard-Access setting** - the traversal *order* matches win32 (widget-creation order via `rebuild_key_view_loop_macos`), but *which* control types Tab visits beyond text fields / lists is OS policy (buttons / checkboxes / sliders only when FKA is on), whereas win32 always visits every `WS_TABSTOP`. Hand-roll Tab (cf. xpl `focus_next`) for fully deterministic cross-platform traversal.
-
-- Tier B focus parity (xpl proxy HWND per widget for UIAutomation / accessibility on Windows; NSAccessibility seam on macOS).
-- Custom clipboard formats (HTML / image); v1 only routes `text/plain` (API shape forward-compatible).
-- Multi-level redo on win32 host - `NEUI_CMD_REDO` maps to `EM_UNDO` (toggle, single-level). macOS native routes REDO through `NSUndoManager` (multi-level) and xpl text widgets use `EditHistory` (multi-level); only the win32 native path is single-level.
-- Multi-session palette correctness - `active_palette_override_ptr` is process-wide (last-set-wins). Fine for single-session.
-- Compound layer kinds beyond `text` / `asset`: `rect` / `path` / `group` (the last unlocks nested transform scopes). Template format specs (`{key:.2f}`). Asset-layer `tint` (ARGB multiplier) reserved but not wired.
-- **Behavior detent / plateau modifier.** A per-handler "sticky values" list - e.g. centre 0.5 on a pan knob, 0 dB on a gain knob. Crossing a detent point pulls the continuous value toward it within a radius; pushing past requires drag past a release threshold. Distinct from `steps` (which quantizes everywhere) - detents resist near specific points and stay continuous elsewhere. Likely shape: `set_string(h, "detents", "0.5:0.02:0.04")` (`value:pull_radius:release_threshold`, semicolon-separated), evaluated in `behavior_runtime.h` between range-clamp and step-snap; `fine_modifier` probably bypasses it.
-- Behavior pen pressure / tilt (host plumbing not in place; current pen surfaces as mouse). `cursor` prop on handlers is parsed but no-op in v1 (no public set_cursor). Handler-side `bind`-style attr indirection (min/max bound to attrs) - v1 takes static numbers. Wheel modifier-fine - `neui_event_wheel_t` carries no buttonmap today; needs an event-payload extension before WHEEL can honour `fine_modifier`.
-- Native blocking modal (Cocoa `runModalForWindow`, Win32 `DialogBoxIndirect`). Current non-blocking modal matches the event-loop shape.
+- **KNOB not a keyboard tab-stop on macOS** - the NSView refuses first responder. Needs focusable + arrow-key value handling.
+- **macOS Tab participation follows the system Full-Keyboard-Access setting** - traversal *order* matches win32, but *which* control types Tab visits beyond text fields / lists is OS policy. Hand-roll Tab for fully deterministic traversal.
+- **Tier B focus parity** (xpl proxy HWND per widget for UIAutomation; NSAccessibility seam on macOS).
+- **Custom clipboard formats** (HTML / image); v1 routes `text/plain` only.
+- **Multi-level redo on win32** - `NEUI_CMD_REDO` maps to `EM_UNDO` (single-level toggle); macOS native + xpl are multi-level.
+- **Multi-session palette** - `active_palette_override_ptr` is process-wide (last-set-wins).
+- **Compound layer kinds** beyond `text` / `asset`: `rect` / `path` / `group`; template format specs (`{key:.2f}`); asset-layer `tint`.
+- **Behavior detent / plateau modifier** - per-handler "sticky values" that resist near specific points (distinct from `steps`); behavior pen pressure / tilt (pen surfaces as mouse); `cursor` prop no-op; wheel modifier-fine needs a `neui_event_wheel_t` payload extension.
+- **Native blocking modal** (Cocoa `runModalForWindow`, Win32 `DialogBoxIndirect`); current non-blocking modal matches the event-loop shape.
 
 ## Plans
 
-Design plans live in `plans/`: `painter-and-asset-api.md` (compound + asset infrastructure, shipped - kept for rationale), `winui3-host.md` (feasibility analysis, deferred), `how-to-port.md` (reference playbook for new platform ports). Smaller features (fonts, attribute-kind asserts, enabled/disabled state) shipped without a dedicated plan file - their rationale lives in this file and the relevant TODO.md entries.
+`plans/`: `painter-and-asset-api.md` (compound + asset, shipped), `grid-macos-port.md` (GRID macOS port, shipped), `winui3-host.md` (deferred), `how-to-port.md` (new-platform playbook).
