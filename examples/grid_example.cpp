@@ -2,9 +2,9 @@
 // monolithic neui_example so the grid feature can be exercised on its
 // own (and the existing example doesn't grow further).
 //
-// The GRID widget is implemented in the xpl host for v1, so this app
-// explicitly selects "neui.host.crossplatform" regardless of platform.
-// Native-host GRID is a v1.1 follow-up.
+// GRID is now implemented in every host that ships in this build. Pick
+// the native host first; fall back to crossplatform if the build is
+// xpl-only (e.g. the null platform).
 
 #include "neui/neui.h"
 #include <stdio.h>
@@ -17,7 +17,13 @@
 #include <windows.h>
 #endif
 
+#ifdef _WIN32
+#define GRID_HOST "neui.host.win32"
+#elif defined(__APPLE__)
 #define GRID_HOST "neui.host.crossplatform"
+#else
+#define GRID_HOST "neui.host.crossplatform"
+#endif
 
 static void dbglog(const char* fmt, ...)
 {

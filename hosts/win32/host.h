@@ -6,6 +6,7 @@
 #include "../shared/clipboard_item.h"
 #include "../shared/theme_palette.h"
 #include "../shared/behavior_runtime.h"
+#include "../shared/grid_model.h"
 #include "asset_manager_w32.h"
 #include <memory>
 #include <string>
@@ -209,6 +210,11 @@ namespace win32_host {
     int   paint_drag_prev_y     = 0;
     float paint_drag_prev_angle = 0.0f;  // last cursor angle (rad) relative to centre (rotational mode)
     float paint_drag_continuous = 0.0f;  // continuous unsnapped value during drag
+
+    // GRID (NEUI_W_GRID) state - column model, row data, scroll position,
+    // selection, column-resize / scrollbar drag state. Lazy-allocated;
+    // every other widget pays a single pointer.
+    std::unique_ptr<neui_detail::GridModel> grid_model;
   };
 
   class Session {

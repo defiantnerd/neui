@@ -17,6 +17,7 @@
 #include "../shared/shortcut_format.h"
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_section.h"
+#include "../shared/widget_paint_grid.h"
 #include "../shared/theme_palette.h"
 #include "../shared/painter.h"
 #include "../shared/widget_paint_compound.h"
@@ -47,6 +48,16 @@ namespace win32_host
   // because widget_set_text / cascade_dpi / create_child_windows all
   // allocate internal asset slots for the legacy path-source IMAGE branch.
   static neui_asset_t pack_asset_w32(uint32_t session_id, uint32_t slot);
+
+  // GRID painted-widget hooks. Defined at the bottom of this TU; the
+  // forward declarations let CreateChildHwnd reference them.
+  static void paint_grid_w32(neui_render_backend_t* backend,
+                              neui_render_ctx_t      ctx,
+                              float w, float h,
+                              WidgetData&            wd,
+                              bool                   focused);
+  static void painted_msg_grid_w32(WidgetData& wd, UINT msg,
+                                    WPARAM wParam, LPARAM lParam);
 
   neui_widget_t IndexToWidget(uint32_t session_id, uint32_t idx)
   {
@@ -1157,6 +1168,32 @@ namespace win32_host
       return hwnd;
     }
 
+    // GRID: shared painted-class HWND, paint_grid_w32 + painted_msg_grid_w32
+    // do the heavy lifting via hosts/shared/widget_paint_grid.h. ChildSubclass
+    // fires standard mouse / key events to the client (emit_events auto-set
+    // above); the painted_msg hook runs after the client and dispatches the
+    // GRID-specific event ladder (ROW_SELECTED -> CELL_SELECTED -> CELL_CLICKED).
+    if (!strcmp(wd.type, NEUI_W_GRID)) {
+      DWORD style = WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS;
+      if (wd.visible) style |= WS_VISIBLE;
+      wd.paint_fn       = &paint_grid_w32;
+      wd.painted_msg_fn = &painted_msg_grid_w32;
+      HWND hwnd = CreateWindowExW(0, L"neui.painted", L"", style,
+        LogicalToPhysical(wd.x, parent_dpi),
+        LogicalToPhysical(wd.y, parent_dpi),
+        LogicalToPhysical(wd.width, parent_dpi),
+        LogicalToPhysical(wd.height, parent_dpi),
+        parent_hwnd,
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(wd.index)),
+        get_hinstance(),
+        &wd);
+      if (hwnd) {
+        SetWindowSubclass(hwnd, ChildSubclassProc, 1, reinterpret_cast<DWORD_PTR>(&wd));
+        wd.has_subclass = true;
+      }
+      return hwnd;
+    }
+
     // Section: non-interactive painted container. No tab stop, no mouse
     // hook. WS_CLIPSIBLINGS so the section's paint stays clipped out of
     // its child siblings' rects (children parent to the frame and sit on
@@ -1529,7 +1566,8 @@ namespace win32_host
                                         !strcmp(type, NEUI_W_TREEVIEW)   ||
                                         !strcmp(type, NEUI_W_SLIDER)     ||
                                         !strcmp(type, NEUI_W_KNOB)       ||
-                                        !strcmp(type, NEUI_W_CUSTOMDRAW));
+                                        !strcmp(type, NEUI_W_CUSTOMDRAW) ||
+                                        !strcmp(type, NEUI_W_GRID));
     widget_data->userdata    = userdata;
     widget_data->session     = this;
     widget_data->session_id  = _session_id;
@@ -3946,5 +3984,925 @@ namespace win32_host
     be_set_int,
     be_set_float,
     be_set_string,
+  };
+
+  // -------------------------------------------------------------------------
+  // GRID (NEUI_W_GRID) - hosted on the shared "neui.painted" class.
+  // Visual state + dispatch model live in hosts/shared/grid_model.h and
+  // hosts/shared/widget_paint_grid.h; this file only carries the win32
+  // glue (paint_fn, painted_msg_fn, the C API table).
+
+  // Cursor seam (private to the win32 host - the xpl host's
+  // platform_set_cursor lives in a different namespace). Mirrors
+  // xpl_host::CursorKind values.
+  enum { NEUI_CURSOR_DEFAULT = 0, NEUI_CURSOR_EW_RESIZE = 1 };
+  static void platform_set_cursor_w32(int kind)
+  {
+    HCURSOR cur = nullptr;
+    switch (kind) {
+      case NEUI_CURSOR_EW_RESIZE: cur = LoadCursorW(nullptr, (LPCWSTR)IDC_SIZEWE); break;
+      default:                    cur = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);  break;
+    }
+    if (cur) SetCursor(cur);
+  }
+
+  // Lazy-allocate the model so non-GRID widgets pay only a pointer.
+  static neui_detail::GridModel& ensure_grid_model_w32(WidgetData& wd)
+  {
+    if (!wd.grid_model)
+      wd.grid_model = std::make_unique<neui_detail::GridModel>();
+    return *wd.grid_model;
+  }
+
+  static neui_detail::GridModel* grid_model_w32(WidgetData& wd)
+  {
+    return wd.grid_model.get();
+  }
+
+  // Convert a physical-pixel HWND-local coord to a logical-pixel one.
+  static int phys_to_log_w32(int physical, UINT dpi)
+  {
+    if (dpi == 0) dpi = 96;
+    return MulDiv(physical, 96, static_cast<int>(dpi));
+  }
+
+  // -------- Event dispatch helpers ---------------------------------------
+
+  static bool grid_fire_row_selected_w32(WidgetData& wd, int row)
+  {
+    if (!wd.session) return false;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_ROW_SELECTED;
+    ev.data.grid_row.widget.id = wd.widget_id;
+    ev.data.grid_row.row       = row;
+    return wd.session->dispatch_event(&ev);
+  }
+
+  static bool grid_fire_cell_selected_w32(WidgetData& wd, int row, int col)
+  {
+    if (!wd.session) return false;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_CELL_SELECTED;
+    ev.data.grid_cell.widget.id = wd.widget_id;
+    ev.data.grid_cell.row       = row;
+    ev.data.grid_cell.col       = col;
+    return wd.session->dispatch_event(&ev);
+  }
+
+  static bool grid_fire_cell_clicked_w32(WidgetData& wd, int row, int col)
+  {
+    if (!wd.session) return false;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_CELL_CLICKED;
+    ev.data.grid_cell.widget.id = wd.widget_id;
+    ev.data.grid_cell.row       = row;
+    ev.data.grid_cell.col       = col;
+    return wd.session->dispatch_event(&ev);
+  }
+
+  static void grid_fire_row_activated_w32(WidgetData& wd, int row)
+  {
+    if (!wd.session) return;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_ROW_ACTIVATED;
+    ev.data.grid_row.widget.id = wd.widget_id;
+    ev.data.grid_row.row       = row;
+    wd.session->dispatch_event(&ev);
+  }
+
+  static void grid_fire_column_resized_w32(WidgetData& wd, int col, int old_w, int new_w)
+  {
+    if (!wd.session) return;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_COLUMN_RESIZED;
+    ev.data.grid_column_resize.widget.id = wd.widget_id;
+    ev.data.grid_column_resize.col       = col;
+    ev.data.grid_column_resize.old_width = old_w;
+    ev.data.grid_column_resize.new_width = new_w;
+    wd.session->dispatch_event(&ev);
+  }
+
+  // Dispatch ladder run after a body cell click: always update selection,
+  // then ROW_SELECTED -> (cell_focus ? CELL_SELECTED : skip) -> CELL_CLICKED.
+  static void grid_click_ladder_w32(WidgetData& wd, int row, int col)
+  {
+    auto& m = ensure_grid_model_w32(wd);
+    auto cfg = neui_detail::grid_read_config(wd.attrs.get());
+    m.selected_row = row;
+    if (cfg.cell_focus) m.selected_col = col;
+    if (grid_fire_row_selected_w32(wd, row)) return;
+    if (cfg.cell_focus) {
+      if (grid_fire_cell_selected_w32(wd, row, col)) return;
+    }
+    grid_fire_cell_clicked_w32(wd, row, col);
+  }
+
+  // -------- paint_fn ------------------------------------------------------
+
+  static void paint_grid_w32(neui_render_backend_t* backend,
+                              neui_render_ctx_t      ctx,
+                              float w, float h,
+                              WidgetData&            wd,
+                              bool                   focused)
+  {
+    auto& m = ensure_grid_model_w32(wd);
+    neui_detail::paint_grid(backend, ctx, 0.0f, 0.0f, w, h,
+                              m, wd.attrs.get(), focused);
+  }
+
+  // -------- painted_msg_fn -----------------------------------------------
+
+  // Compute the GridViewport for the current widget, taking the live HWND
+  // client-rect size in logical pixels (so it tracks resizes).
+  static neui_detail::GridViewport grid_viewport_w32(WidgetData& wd,
+                                                       UINT* out_dpi = nullptr)
+  {
+    UINT dpi = wd.session ? wd.session->get_dpi_for_widget(wd.index) : 96;
+    if (dpi == 0) dpi = 96;
+    if (out_dpi) *out_dpi = dpi;
+    auto& m = ensure_grid_model_w32(wd);
+    auto cfg = neui_detail::grid_read_config(wd.attrs.get());
+    RECT rc{};
+    if (wd.hwnd) GetClientRect(wd.hwnd, &rc);
+    int lw = phys_to_log_w32(rc.right,  dpi);
+    int lh = phys_to_log_w32(rc.bottom, dpi);
+    return neui_detail::grid_compute_viewport(m, lw, lh, cfg.row_h, cfg.header_h);
+  }
+
+  static void grid_repaint_w32(WidgetData& wd)
+  {
+    if (wd.hwnd) InvalidateRect(wd.hwnd, nullptr, FALSE);
+  }
+
+  static void painted_msg_grid_w32(WidgetData& wd, UINT msg,
+                                     WPARAM wParam, LPARAM lParam)
+  {
+    using namespace neui_detail;
+    if (!wd.session) return;
+    auto& m = ensure_grid_model_w32(wd);
+    auto cfg = grid_read_config(wd.attrs.get());
+
+    UINT dpi = wd.session->get_dpi_for_widget(wd.index);
+    if (dpi == 0) dpi = 96;
+
+    RECT rc{}; if (wd.hwnd) GetClientRect(wd.hwnd, &rc);
+    int widget_w = phys_to_log_w32(rc.right,  dpi);
+    int widget_h = phys_to_log_w32(rc.bottom, dpi);
+    GridViewport vp = grid_compute_viewport(m, widget_w, widget_h,
+                                              cfg.row_h, cfg.header_h);
+
+    // Wheel - vertical scroll by N rows.
+    if (msg == WM_MOUSEWHEEL) {
+      short delta_raw = (short)HIWORD(wParam);
+      int   delta_lines = delta_raw / WHEEL_DELTA;
+      if (delta_lines == 0) delta_lines = (delta_raw > 0) ? 1 : -1;
+      m.scroll_offset_y -= delta_lines;
+      grid_clamp_scroll(m, vp, cfg.row_h);
+      grid_repaint_w32(wd);
+      return;
+    }
+
+    if (msg == WM_KEYDOWN) {
+      // Map VK_* to NEUI_KEY_* then call into the shared keydown logic.
+      // We mirror the xpl host's GridWidget::on_keydown here directly to
+      // avoid a virtual call cross-host. NEUI_KEY_* numeric values match
+      // VK_* for the keys we care about so wParam can be passed through.
+      uint32_t keycode = (uint32_t)wParam;
+      uint32_t mods    = 0;
+      if (GetKeyState(VK_SHIFT)   & 0x8000) mods |= NEUI_KMOD_SHIFT;
+      if (GetKeyState(VK_CONTROL) & 0x8000) mods |= NEUI_KMOD_CTRL;
+      if (GetKeyState(VK_MENU)    & 0x8000) mods |= NEUI_KMOD_ALT;
+
+      int n_rows = (int)m.rows.size();
+      int n_cols = (int)m.columns.size();
+      if (n_rows == 0) return;
+
+      int prev_row = m.selected_row;
+      int prev_col = m.selected_col;
+      int vis = grid_visible_rows(vp, cfg.row_h);
+      if (vis < 1) vis = 1;
+      bool handled = true;
+      switch (keycode) {
+      case VK_UP:
+        if (m.selected_row > 0)        m.selected_row--;
+        else if (m.selected_row < 0)   m.selected_row = 0;
+        break;
+      case VK_DOWN:
+        if (m.selected_row < n_rows - 1) {
+          if (m.selected_row < 0) m.selected_row = 0;
+          else                     m.selected_row++;
+        }
+        break;
+      case VK_PRIOR:
+        m.selected_row = (m.selected_row < 0)
+          ? 0
+          : (m.selected_row - vis > 0 ? m.selected_row - vis : 0);
+        break;
+      case VK_NEXT: {
+        int target = (m.selected_row < 0) ? vis : (m.selected_row + vis);
+        if (target > n_rows - 1) target = n_rows - 1;
+        m.selected_row = target;
+        break;
+      }
+      case VK_HOME:
+        if (cfg.cell_focus && !(mods & NEUI_KMOD_CTRL)) {
+          m.selected_col = (n_cols > 0) ? 0 : -1;
+          if (m.selected_row < 0) m.selected_row = 0;
+        } else {
+          m.selected_row = 0;
+          if (cfg.cell_focus) m.selected_col = (n_cols > 0) ? 0 : -1;
+        }
+        break;
+      case VK_END:
+        if (cfg.cell_focus && !(mods & NEUI_KMOD_CTRL)) {
+          m.selected_col = (n_cols > 0) ? n_cols - 1 : -1;
+          if (m.selected_row < 0) m.selected_row = n_rows - 1;
+        } else {
+          m.selected_row = n_rows - 1;
+          if (cfg.cell_focus) m.selected_col = (n_cols > 0) ? n_cols - 1 : -1;
+        }
+        break;
+      case VK_LEFT:
+        if (cfg.cell_focus) {
+          if (m.selected_col > 0) m.selected_col--;
+          else if (m.selected_col < 0 && n_cols > 0) m.selected_col = 0;
+          if (m.selected_row < 0) m.selected_row = 0;
+        } else {
+          m.scroll_offset_x -= grid_horizontal_step_px(m);
+          grid_clamp_scroll(m, vp, cfg.row_h);
+          grid_repaint_w32(wd);
+          return;
+        }
+        break;
+      case VK_RIGHT:
+        if (cfg.cell_focus) {
+          if (m.selected_col < n_cols - 1) {
+            if (m.selected_col < 0) m.selected_col = 0;
+            else                     m.selected_col++;
+          }
+          if (m.selected_row < 0) m.selected_row = 0;
+        } else {
+          m.scroll_offset_x += grid_horizontal_step_px(m);
+          grid_clamp_scroll(m, vp, cfg.row_h);
+          grid_repaint_w32(wd);
+          return;
+        }
+        break;
+      case VK_RETURN: {
+        int r = m.selected_row;
+        if (r < 0) return;
+        grid_fire_row_activated_w32(wd, r);
+        return;
+      }
+      default:
+        handled = false; break;
+      }
+      if (!handled) return;
+      if (cfg.cell_focus && m.selected_col >= 0)
+        grid_ensure_cell_visible(m, vp, cfg.row_h, m.selected_row, m.selected_col);
+      else
+        grid_ensure_row_visible(m, vp, cfg.row_h, m.selected_row);
+      if (m.selected_row != prev_row)
+        grid_fire_row_selected_w32(wd, m.selected_row);
+      if (cfg.cell_focus &&
+          (m.selected_row != prev_row || m.selected_col != prev_col))
+        grid_fire_cell_selected_w32(wd, m.selected_row, m.selected_col);
+      grid_repaint_w32(wd);
+      return;
+    }
+
+    // Mouse coordinates in logical pixels, HWND-local.
+    int phys_x = GET_X_LPARAM(lParam);
+    int phys_y = GET_Y_LPARAM(lParam);
+    int lx = phys_to_log_w32(phys_x, dpi);
+    int ly = phys_to_log_w32(phys_y, dpi);
+
+    // --- column-resize drag in progress ---
+    if (m.column_resize_col >= 0) {
+      if (msg == WM_MOUSEMOVE) {
+        int dx = phys_x - m.column_resize_start_x;
+        // Convert pixel delta to logical pixels before adding to width.
+        int dx_log = phys_to_log_w32(dx, dpi);
+        int new_w  = m.column_resize_start_w + dx_log;
+        int min_w  = grid_column_min_width(m, m.column_resize_col,
+                                              cfg.col_min_w_def);
+        if (new_w < min_w) new_w = min_w;
+        if (new_w > 5000)  new_w = 5000;
+        m.columns[(size_t)m.column_resize_col].width = new_w;
+        grid_clamp_scroll(m, vp, cfg.row_h);
+        platform_set_cursor_w32(NEUI_CURSOR_EW_RESIZE);
+        grid_repaint_w32(wd);
+        return;
+      }
+      if (msg == WM_LBUTTONUP) {
+        int new_w = m.columns[(size_t)m.column_resize_col].width;
+        int col   = m.column_resize_col;
+        int old_w = m.column_resize_old_w;
+        m.column_resize_col = -1;
+        platform_set_cursor_w32(NEUI_CURSOR_DEFAULT);
+        if (new_w != old_w) grid_fire_column_resized_w32(wd, col, old_w, new_w);
+        grid_repaint_w32(wd);
+        return;
+      }
+      return;
+    }
+
+    // --- vertical scrollbar drag in progress ---
+    if (m.vert_drag.active) {
+      if (msg == WM_LBUTTONUP ||
+          (msg == WM_MOUSEMOVE && !(wParam & MK_LBUTTON))) {
+        m.vert_drag.active = false;
+        return;
+      }
+      if (msg == WM_MOUSEMOVE) {
+        int vis = grid_visible_rows(vp, cfg.row_h);
+        ScrollbarGeom g = compute_scrollbar(vp.body_h, 0,
+                                              (int)m.rows.size(), vis,
+                                              m.vert_drag.start_position);
+        int rel = ly - vp.body_y;
+        m.scroll_offset_y = scrollbar_drag_apply(m.vert_drag, rel, g,
+                                                    (int)m.rows.size(), vis);
+        grid_clamp_scroll(m, vp, cfg.row_h);
+        grid_repaint_w32(wd);
+        return;
+      }
+      return;
+    }
+
+    // --- horizontal scrollbar drag in progress ---
+    if (m.horz_drag.active) {
+      if (msg == WM_LBUTTONUP ||
+          (msg == WM_MOUSEMOVE && !(wParam & MK_LBUTTON))) {
+        m.horz_drag.active = false;
+        return;
+      }
+      if (msg == WM_MOUSEMOVE) {
+        int content_w = grid_total_content_width(m);
+        ScrollbarGeom g = compute_scrollbar(vp.body_w, 0,
+                                              content_w, vp.body_w,
+                                              m.horz_drag.start_position);
+        int rel = lx - vp.body_x;
+        m.scroll_offset_x = scrollbar_drag_apply(m.horz_drag, rel, g,
+                                                   content_w, vp.body_w);
+        grid_clamp_scroll(m, vp, cfg.row_h);
+        grid_repaint_w32(wd);
+        return;
+      }
+      return;
+    }
+
+    // --- mouse move: cursor feedback for header divider ---
+    if (msg == WM_MOUSEMOVE) {
+      GridHit hit = grid_hit_test(m, vp, cfg.row_h,
+                                    widget_w, widget_h, lx, ly);
+      platform_set_cursor_w32(hit.region == GridHitRegion::HeaderDivider
+                                ? NEUI_CURSOR_EW_RESIZE
+                                : NEUI_CURSOR_DEFAULT);
+      return;
+    }
+
+    // --- button down / dbl-click ---
+    if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) {
+      // Always take focus so subsequent key events route here.
+      if (wd.hwnd) SetFocus(wd.hwnd);
+      GridHit hit = grid_hit_test(m, vp, cfg.row_h, widget_w, widget_h, lx, ly);
+      switch (hit.region) {
+      case GridHitRegion::HeaderDivider:
+        if (msg == WM_LBUTTONDOWN) {
+          m.column_resize_col     = hit.col;
+          m.column_resize_start_x = phys_x;     // store physical for delta math
+          m.column_resize_start_w = m.columns[(size_t)hit.col].width;
+          m.column_resize_old_w   = m.column_resize_start_w;
+          platform_set_cursor_w32(NEUI_CURSOR_EW_RESIZE);
+        }
+        return;
+      case GridHitRegion::Header:
+        return;
+      case GridHitRegion::VertScrollTrack: {
+        int vis = grid_visible_rows(vp, cfg.row_h);
+        ScrollbarGeom g = compute_scrollbar(vp.body_h, 0,
+                                              (int)m.rows.size(), vis,
+                                              m.scroll_offset_y);
+        int rel = ly - vp.body_y;
+        if (g.visible && rel >= g.thumb_pos && rel < g.thumb_pos + g.thumb_len) {
+          m.vert_drag.active           = true;
+          m.vert_drag.start_axis_coord = rel;
+          m.vert_drag.start_position   = m.scroll_offset_y;
+        } else if (g.visible) {
+          int step = vis > 0 ? vis : 1;
+          if (rel < g.thumb_pos) m.scroll_offset_y -= step;
+          else                   m.scroll_offset_y += step;
+          grid_clamp_scroll(m, vp, cfg.row_h);
+          grid_repaint_w32(wd);
+        }
+        return;
+      }
+      case GridHitRegion::HorzScrollTrack: {
+        int content_w = grid_total_content_width(m);
+        ScrollbarGeom g = compute_scrollbar(vp.body_w, 0,
+                                              content_w, vp.body_w,
+                                              m.scroll_offset_x);
+        int rel = lx - vp.body_x;
+        if (g.visible && rel >= g.thumb_pos && rel < g.thumb_pos + g.thumb_len) {
+          m.horz_drag.active           = true;
+          m.horz_drag.start_axis_coord = rel;
+          m.horz_drag.start_position   = m.scroll_offset_x;
+        } else if (g.visible) {
+          int step = vp.body_w > 0 ? vp.body_w : 60;
+          if (rel < g.thumb_pos) m.scroll_offset_x -= step;
+          else                   m.scroll_offset_x += step;
+          grid_clamp_scroll(m, vp, cfg.row_h);
+          grid_repaint_w32(wd);
+        }
+        return;
+      }
+      case GridHitRegion::Cell: {
+        if (msg == WM_LBUTTONDBLCLK) {
+          grid_fire_row_activated_w32(wd, hit.row);
+        } else {
+          const GridCellOverride* ov = grid_find_override(m, hit.row, hit.col);
+          bool cell_dis = ov && ov->has_enabled && !ov->enabled;
+          int prev_row = m.selected_row;
+          m.selected_row = hit.row;
+          if (cfg.cell_focus) m.selected_col = hit.col;
+          if (cell_dis) {
+            if (m.selected_row != prev_row)
+              grid_fire_row_selected_w32(wd, hit.row);
+          } else {
+            grid_click_ladder_w32(wd, hit.row, hit.col);
+          }
+        }
+        grid_repaint_w32(wd);
+        return;
+      }
+      case GridHitRegion::BodyEmpty:
+        if (m.selected_row != -1) {
+          m.selected_row = -1;
+          m.selected_col = -1;
+          grid_fire_row_selected_w32(wd, -1);
+          grid_repaint_w32(wd);
+        }
+        return;
+      default:
+        return;
+      }
+    }
+
+    if (msg == WM_LBUTTONUP) {
+      // Stray UP (e.g. drag started outside) - reset transient state.
+      m.vert_drag.active = false;
+      m.horz_drag.active = false;
+      return;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Grid API (NEUI_API_GRID) - thin wrappers over WidgetData::grid_model.
+
+  static WidgetData* resolve_grid_w32(neui_session_t session, neui_widget_t widget,
+                                        Session** out_sess = nullptr)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (out_sess) *out_sess = s;
+    if (!s) return nullptr;
+    uint32_t idx = WidgetToIndex(widget);
+    WidgetData* wd = s->get_widget(idx);
+    if (!wd || !wd->type || strcmp(wd->type, NEUI_W_GRID) != 0) return nullptr;
+    return wd;
+  }
+
+  static void grid_invalidate_w32(WidgetData* wd)
+  {
+    if (wd && wd->hwnd) InvalidateRect(wd->hwnd, nullptr, FALSE);
+  }
+
+  static int NEUI_ABI gr_add_column(neui_session_t session, neui_widget_t widget,
+                                      const char* header, int width_logical)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd) return -1;
+    auto& m = ensure_grid_model_w32(*wd);
+    neui_detail::GridColumn c;
+    c.header = header ? header : "";
+    c.width  = (width_logical > 0) ? width_logical : neui_detail::GRID_DEFAULT_NEW_COLUMN_W;
+    m.columns.push_back(std::move(c));
+    neui_detail::grid_resize_rows_to_columns(m, (int)m.columns.size());
+    grid_invalidate_w32(wd);
+    return (int)m.columns.size() - 1;
+  }
+
+  static int NEUI_ABI gr_get_column_count(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    return wd && wd->grid_model ? (int)wd->grid_model->columns.size() : 0;
+  }
+
+  static void NEUI_ABI gr_set_column_width(neui_session_t session, neui_widget_t widget,
+                                             int col, int width_logical)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+    int min_w = neui_detail::grid_column_min_width(m, col, cfg.col_min_w_def);
+    if (width_logical < min_w) width_logical = min_w;
+    m.columns[(size_t)col].width = width_logical;
+    grid_invalidate_w32(wd);
+  }
+
+  static int NEUI_ABI gr_get_column_width(neui_session_t session, neui_widget_t widget, int col)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return 0;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return 0;
+    return m.columns[(size_t)col].width;
+  }
+
+  static void NEUI_ABI gr_set_column_min_width(neui_session_t session, neui_widget_t widget,
+                                                  int col, int min_w)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns[(size_t)col].min_width = min_w;
+    if (m.columns[(size_t)col].width < min_w)
+      m.columns[(size_t)col].width = min_w;
+    grid_invalidate_w32(wd);
+  }
+
+  static void NEUI_ABI gr_set_column_align(neui_session_t session, neui_widget_t widget,
+                                             int col, const char* align)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns[(size_t)col].align = neui_detail::grid_parse_align(align);
+    grid_invalidate_w32(wd);
+  }
+
+  static void NEUI_ABI gr_set_column_header(neui_session_t session, neui_widget_t widget,
+                                              int col, const char* text)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns[(size_t)col].header = text ? text : "";
+    grid_invalidate_w32(wd);
+  }
+
+  static int NEUI_ABI gr_get_column_header(neui_session_t session, neui_widget_t widget,
+                                             int col, char* buf, int buflen)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return -1;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return -1;
+    const std::string& h = m.columns[(size_t)col].header;
+    int need = (int)h.size() + 1;
+    if (buf && buflen > 0) {
+      int copy = (need < buflen) ? need : buflen;
+      memcpy(buf, h.c_str(), (size_t)copy);
+      buf[copy - 1] = 0;
+    }
+    return need;
+  }
+
+  static void NEUI_ABI gr_remove_column(neui_session_t session, neui_widget_t widget, int col)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns.erase(m.columns.begin() + col);
+    for (auto& r : m.rows)
+      if (col < (int)r.cells.size()) r.cells.erase(r.cells.begin() + col);
+    std::unordered_map<uint64_t, neui_detail::GridCellOverride> remap;
+    for (auto& kv : m.cell_overrides) {
+      int r = (int)(kv.first >> 32);
+      int c = (int)(kv.first & 0xFFFFFFFF);
+      if (c == col) continue;
+      int nc = (c > col) ? c - 1 : c;
+      remap[neui_detail::grid_cell_key(r, nc)] = kv.second;
+    }
+    m.cell_overrides = std::move(remap);
+    if (m.selected_col >= (int)m.columns.size())
+      m.selected_col = (int)m.columns.size() - 1;
+    grid_invalidate_w32(wd);
+  }
+
+  static void NEUI_ABI gr_clear_columns(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_w32(*wd);
+    m.columns.clear();
+    m.rows.clear();
+    m.cell_overrides.clear();
+    m.selected_row = -1;
+    m.selected_col = -1;
+    m.scroll_offset_x = 0;
+    m.scroll_offset_y = 0;
+    grid_invalidate_w32(wd);
+  }
+
+  static int NEUI_ABI gr_add_row(neui_session_t session, neui_widget_t widget,
+                                   const char* const* values_utf8)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd) return -1;
+    auto& m = ensure_grid_model_w32(*wd);
+    neui_detail::GridRow row;
+    row.cells.resize(m.columns.size());
+    if (values_utf8) {
+      for (size_t i = 0; i < m.columns.size() && values_utf8[i]; ++i)
+        row.cells[i] = values_utf8[i];
+    }
+    m.rows.push_back(std::move(row));
+    grid_invalidate_w32(wd);
+    return (int)m.rows.size() - 1;
+  }
+
+  static int NEUI_ABI gr_get_row_count(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    return wd && wd->grid_model ? (int)wd->grid_model->rows.size() : 0;
+  }
+
+  static void NEUI_ABI gr_remove_row(neui_session_t session, neui_widget_t widget, int row)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (row < 0 || row >= (int)m.rows.size()) return;
+    m.rows.erase(m.rows.begin() + row);
+    std::unordered_map<uint64_t, neui_detail::GridCellOverride> remap;
+    for (auto& kv : m.cell_overrides) {
+      int r = (int)(kv.first >> 32);
+      int c = (int)(kv.first & 0xFFFFFFFF);
+      if (r == row) continue;
+      int nr = (r > row) ? r - 1 : r;
+      remap[neui_detail::grid_cell_key(nr, c)] = kv.second;
+    }
+    m.cell_overrides = std::move(remap);
+    if (m.selected_row >= (int)m.rows.size())
+      m.selected_row = (int)m.rows.size() - 1;
+    grid_invalidate_w32(wd);
+  }
+
+  static void NEUI_ABI gr_clear_rows(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    m.rows.clear();
+    m.cell_overrides.clear();
+    m.selected_row = -1;
+    m.scroll_offset_y = 0;
+    grid_invalidate_w32(wd);
+  }
+
+  static void NEUI_ABI gr_set_cell_text(neui_session_t session, neui_widget_t widget,
+                                          int row, int col, const char* utf8)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (row < 0 || row >= (int)m.rows.size()) return;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    auto& r = m.rows[(size_t)row];
+    if ((int)r.cells.size() <= col) r.cells.resize((size_t)col + 1);
+    r.cells[(size_t)col] = utf8 ? utf8 : "";
+    grid_invalidate_w32(wd);
+  }
+
+  static int NEUI_ABI gr_get_cell_text(neui_session_t session, neui_widget_t widget,
+                                         int row, int col, char* buf, int buflen)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return -1;
+    auto& m = *wd->grid_model;
+    if (row < 0 || row >= (int)m.rows.size()) return -1;
+    if (col < 0 || col >= (int)m.columns.size()) return -1;
+    const auto& r = m.rows[(size_t)row];
+    static const std::string empty;
+    const std::string& src = (col < (int)r.cells.size()) ? r.cells[(size_t)col] : empty;
+    int need = (int)src.size() + 1;
+    if (buf && buflen > 0) {
+      int copy = (need < buflen) ? need : buflen;
+      memcpy(buf, src.c_str(), (size_t)copy);
+      buf[copy - 1] = 0;
+    }
+    return need;
+  }
+
+  static void NEUI_ABI gr_set_cell_color(neui_session_t session, neui_widget_t widget,
+                                           int row, int col, uint32_t argb)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (row < 0 || row >= (int)m.rows.size()) return;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    if (argb == 0) {
+      auto* ov = neui_detail::grid_find_override(m, row, col);
+      if (ov) {
+        ov->has_color = false;
+        ov->color     = 0;
+        neui_detail::grid_prune_override(m, row, col);
+      }
+    } else {
+      auto& ov = neui_detail::grid_ensure_override(m, row, col);
+      ov.color     = argb;
+      ov.has_color = true;
+    }
+    grid_invalidate_w32(wd);
+  }
+
+  static void NEUI_ABI gr_set_cell_enabled(neui_session_t session, neui_widget_t widget,
+                                             int row, int col, bool enabled)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (row < 0 || row >= (int)m.rows.size()) return;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    auto& ov = neui_detail::grid_ensure_override(m, row, col);
+    ov.enabled     = enabled;
+    ov.has_enabled = true;
+    if (enabled && !ov.has_color) {
+      ov.has_enabled = false;
+      neui_detail::grid_prune_override(m, row, col);
+    }
+    grid_invalidate_w32(wd);
+  }
+
+  static void NEUI_ABI gr_clear_cell_overrides(neui_session_t session, neui_widget_t widget,
+                                                  int row, int col)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    wd->grid_model->cell_overrides.erase(neui_detail::grid_cell_key(row, col));
+    grid_invalidate_w32(wd);
+  }
+
+  static void NEUI_ABI gr_set_selected_row(neui_session_t session, neui_widget_t widget, int row)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_w32(*wd);
+    int n = (int)m.rows.size();
+    if (row < -1)  row = -1;
+    if (row >= n)  row = n - 1;
+    m.selected_row = row;
+    auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+    if (cfg.cell_focus && m.selected_col < 0 && !m.columns.empty())
+      m.selected_col = 0;
+    if (row >= 0) {
+      UINT dpi = 0;
+      auto vp = grid_viewport_w32(*wd, &dpi);
+      neui_detail::grid_ensure_row_visible(m, vp, cfg.row_h, row);
+    }
+    grid_invalidate_w32(wd);
+  }
+
+  static int NEUI_ABI gr_get_selected_row(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    return wd && wd->grid_model ? wd->grid_model->selected_row : -1;
+  }
+
+  static void NEUI_ABI gr_set_selected_cell(neui_session_t session, neui_widget_t widget,
+                                              int row, int col)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_w32(*wd);
+    int n_rows = (int)m.rows.size();
+    int n_cols = (int)m.columns.size();
+    if (row < -1)       row = -1;
+    if (row >= n_rows)  row = n_rows - 1;
+    if (col < -1)       col = -1;
+    if (col >= n_cols)  col = n_cols - 1;
+    m.selected_row = row;
+    m.selected_col = col;
+    if (row >= 0 && col >= 0) {
+      auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+      auto vp  = grid_viewport_w32(*wd);
+      neui_detail::grid_ensure_cell_visible(m, vp, cfg.row_h, row, col);
+    }
+    grid_invalidate_w32(wd);
+  }
+
+  static void NEUI_ABI gr_get_selected_cell(neui_session_t session, neui_widget_t widget,
+                                              int* out_row, int* out_col)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (out_row) *out_row = (wd && wd->grid_model) ? wd->grid_model->selected_row : -1;
+    if (out_col) {
+      if (!wd || !wd->grid_model) { *out_col = -1; return; }
+      auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+      *out_col = cfg.cell_focus ? wd->grid_model->selected_col : -1;
+    }
+  }
+
+  static void NEUI_ABI gr_ensure_row_visible(neui_session_t session, neui_widget_t widget, int row)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_w32(*wd);
+    auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+    auto vp  = grid_viewport_w32(*wd);
+    neui_detail::grid_ensure_row_visible(m, vp, cfg.row_h, row);
+    grid_invalidate_w32(wd);
+  }
+
+  static void NEUI_ABI gr_ensure_cell_visible(neui_session_t session, neui_widget_t widget,
+                                                int row, int col)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_w32(*wd);
+    auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+    auto vp  = grid_viewport_w32(*wd);
+    neui_detail::grid_ensure_cell_visible(m, vp, cfg.row_h, row, col);
+    grid_invalidate_w32(wd);
+  }
+
+  static void NEUI_ABI gr_set_scroll_x(neui_session_t session, neui_widget_t widget, int x)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_w32(*wd);
+    m.scroll_offset_x = x;
+    auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+    auto vp  = grid_viewport_w32(*wd);
+    neui_detail::grid_clamp_scroll(m, vp, cfg.row_h);
+    grid_invalidate_w32(wd);
+  }
+
+  static int NEUI_ABI gr_get_scroll_x(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    return wd && wd->grid_model ? wd->grid_model->scroll_offset_x : 0;
+  }
+
+  static int NEUI_ABI gr_hit_test(neui_session_t session, neui_widget_t widget,
+                                    int lx, int ly, int* out_row, int* out_col)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (out_row) *out_row = -1;
+    if (out_col) *out_col = -1;
+    if (!wd || !wd->grid_model) return 0;
+    auto& m = *wd->grid_model;
+    auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+    auto vp  = grid_viewport_w32(*wd);
+    RECT rc{}; if (wd->hwnd) GetClientRect(wd->hwnd, &rc);
+    UINT dpi = wd->session ? wd->session->get_dpi_for_widget(wd->index) : 96;
+    if (dpi == 0) dpi = 96;
+    int widget_w = phys_to_log_w32(rc.right,  dpi);
+    int widget_h = phys_to_log_w32(rc.bottom, dpi);
+    auto hit = neui_detail::grid_hit_test(m, vp, cfg.row_h,
+                                            widget_w, widget_h, lx, ly);
+    if (hit.region != neui_detail::GridHitRegion::Cell) return 0;
+    if (out_row) *out_row = hit.row;
+    if (out_col) *out_col = hit.col;
+    return 1;
+  }
+
+  neui_grid_api_t grid_api = {
+    NEUI_VERSION,
+    gr_add_column,
+    gr_get_column_count,
+    gr_set_column_width,
+    gr_get_column_width,
+    gr_set_column_min_width,
+    gr_set_column_align,
+    gr_set_column_header,
+    gr_get_column_header,
+    gr_remove_column,
+    gr_clear_columns,
+    gr_add_row,
+    gr_get_row_count,
+    gr_remove_row,
+    gr_clear_rows,
+    gr_set_cell_text,
+    gr_get_cell_text,
+    gr_set_cell_color,
+    gr_set_cell_enabled,
+    gr_clear_cell_overrides,
+    gr_set_selected_row,
+    gr_get_selected_row,
+    gr_set_selected_cell,
+    gr_get_selected_cell,
+    gr_ensure_row_visible,
+    gr_ensure_cell_visible,
+    gr_set_scroll_x,
+    gr_get_scroll_x,
+    gr_hit_test,
   };
 }

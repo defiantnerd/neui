@@ -30,6 +30,7 @@ namespace win32_host
   extern neui_asset_api_t     asset_api;
   extern neui_compound_api_t  compound_api;
   extern neui_behavior_api_t  behavior_api;
+  extern neui_grid_api_t      grid_api;
 
   neui_session_t create_session(neui_client_t* client, void* token)
   {
@@ -70,6 +71,7 @@ namespace win32_host
     if (!strcmp(iface, NEUI_API_ASSETS))    return &win32_host::asset_api;
     if (!strcmp(iface, NEUI_API_COMPOUND))  return &win32_host::compound_api;
     if (!strcmp(iface, NEUI_API_BEHAVIOR))  return &win32_host::behavior_api;
+    if (!strcmp(iface, NEUI_API_GRID))      return &win32_host::grid_api;
     return nullptr;
   }
 
