@@ -4841,6 +4841,10 @@ namespace xpl_host
 
     if (!handled) return false;
 
+    // Keyboard row nav snaps back to exact row alignment (drops any
+    // smooth-scroll fine offset; also self-cancels an in-flight rubber-band).
+    model.scroll_px_offset = 0;
+
     // Keep selection in view.
     if (cfg.cell_focus && model.selected_col >= 0)
       grid_ensure_cell_visible(model, vp, cfg.row_h,
@@ -4915,6 +4919,7 @@ namespace xpl_host
         int rel = ly - vp.body_y;
         model.scroll_offset_y = scrollbar_drag_apply(model.vert_drag, rel, g,
                                                         (int)model.rows.size(), vis);
+        model.scroll_px_offset = 0;   // scrollbar drag = exact row alignment
         grid_clamp_scroll(model, vp, cfg.row_h);
         repaint();
         return true;
@@ -5000,6 +5005,7 @@ namespace xpl_host
           int step = vis > 0 ? vis : 1;
           if (rel < g.thumb_pos) model.scroll_offset_y -= step;
           else                   model.scroll_offset_y += step;
+          model.scroll_px_offset = 0;   // page step = exact row alignment
           grid_clamp_scroll(model, vp, cfg.row_h);
           repaint();
         }

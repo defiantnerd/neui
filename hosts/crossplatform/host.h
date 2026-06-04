@@ -119,6 +119,9 @@ namespace xpl_host
     // Type classification - avoids strcmp in hot paths.
     virtual bool is_frame()   const { return false; }
     virtual bool is_menubar() const { return false; }
+    // GRID widgets expose their scroll model so the platform layer can drive
+    // pixel-precise smooth scrolling / rubber-band (macOS). nullptr otherwise.
+    virtual neui_detail::GridModel* grid_model_ptr() { return nullptr; }
     bool is_dialog() const { return type && !strcmp(type, NEUI_W_DIALOG); }
 
     // Try to perform a built-in command (neui_command_t) on this widget.
@@ -467,6 +470,7 @@ namespace xpl_host
     void paint(neui_render_backend_t*, neui_render_ctx_t, bool is_focused) override;
     bool on_keydown(uint32_t keycode, uint32_t modifiers) override;
     bool on_mouse_event(neui_event_t* event) override;
+    neui_detail::GridModel* grid_model_ptr() override { return &model; }
   };
 
   // MENUBAR - native menu bar handle + all item bookkeeping

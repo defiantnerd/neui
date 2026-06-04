@@ -416,6 +416,9 @@ namespace macos_host {
         handled = false; break;
       }
       if (!handled) return;
+      // Keyboard row nav snaps back to exact row alignment (drops any
+      // smooth-scroll fine offset left by a prior wheel gesture).
+      m.scroll_px_offset = 0;
       if (cfg.cell_focus && m.selected_col >= 0)
         grid_ensure_cell_visible(m, vp, cfg.row_h, m.selected_row, m.selected_col);
       else
@@ -468,6 +471,7 @@ namespace macos_host {
         int rel = ly - vp.body_y;
         m.scroll_offset_y = scrollbar_drag_apply(m.vert_drag, rel, g,
                                                   (int)m.rows.size(), vis);
+        m.scroll_px_offset = 0;   // scrollbar drag = exact row alignment
         grid_clamp_scroll(m, vp, cfg.row_h);
         grid_repaint_macos(wd);
         return;
@@ -533,6 +537,7 @@ namespace macos_host {
           int step = vis > 0 ? vis : 1;
           if (rel < g.thumb_pos) m.scroll_offset_y -= step;
           else                   m.scroll_offset_y += step;
+          m.scroll_px_offset = 0;   // page step = exact row alignment
           grid_clamp_scroll(m, vp, cfg.row_h);
           grid_repaint_macos(wd);
         }
@@ -741,8 +746,14 @@ NSWindowStyleMask styles_for_appwindow()
   float             drag_continuous;
   // Scroll-wheel accumulator (logical points for precise deltas, lines
   // otherwise) so trackpad / Magic Mouse swipes emit one tick per unit
-  // rather than one tick per AppKit event.
+  // rather than one tick per AppKit event. Used by KNOB / CUSTOMDRAW.
   CGFloat           wheel_accum_y;
+
+  // GRID smooth-scroll: the kinetics state (raw px integral, last-commit, and
+  // momentum-suppression flag) lives in the widget's GridModel.scroll_kin so
+  // it is shared with the elastic math in grid_model.h. The view only owns the
+  // spring-back animation timer.
+  NSTimer*          grid_bounce_timer;
 }
 @end
 
@@ -783,6 +794,11 @@ static float neui_snap_to_steps(float v, int steps)
   return std::round(v * n) / n;
 }
 
+// GRID elastic-scroll math + tuning live in hosts/shared/grid_model.h
+// (grid_scroll_* + GRID_SCROLL_* constants) so the native + xpl macOS hosts
+// behave identically. This view only supplies the NSEvent plumbing + the
+// spring-back animation timer.
+
 @implementation NEUINativePaintedView
 
 - (BOOL)isFlipped { return YES; }
@@ -806,6 +822,8 @@ static float neui_snap_to_steps(float v, int steps)
   auto* wd = macos_host::widget_for_id(widget_id, &sess);
   // GRID owns its keyboard navigation (arrows / page / home / end / return).
   if (wd && sess && wd->enabled && wd->type && !strcmp(wd->type, NEUI_W_GRID)) {
+    [self gridStopBounce];   // user input cancels any spring-back animation
+    macos_host::ensure_grid_model_macos(*wd).scroll_kin.suppress_momentum = false;
     uint32_t kc   = neui_detail::mac_keycode_to_neui(event.keyCode);
     uint32_t mods = neui_detail::mac_modifiers_to_neui(event.modifierFlags);
     macos_host::grid_painted_msg_macos(*wd, macos_host::GridMsg::Key,
@@ -870,6 +888,9 @@ static float neui_snap_to_steps(float v, int steps)
 
 - (void)dealloc
 {
+  // Stop any in-flight GRID spring-back animation (the timer retains self,
+  // so it normally self-terminates first; this is belt-and-suspenders).
+  [self gridStopBounce];
   // The IMAGE bitmap now lives in the session's MacOSAssetManager, not on
   // the view; its per-ctx GPU cache for this render_ctx is dropped by
   // release_native_control_macos before teardown. Here we only destroy the
@@ -1246,6 +1267,8 @@ static float neui_snap_to_steps(float v, int steps)
   if (auto* gwd = [self gridInputWidget]) {
     // Grab keyboard focus so arrow/page nav routes to keyDown:, then run the
     // shared grid mouse dispatch (selection ladder, scrollbar / divider drag).
+    [self gridStopBounce];   // a click cancels any spring-back animation
+    macos_host::ensure_grid_model_macos(*gwd).scroll_kin.suppress_momentum = false;
     [self.window makeFirstResponder:self];
     NSPoint p = [self localPoint:event];
     macos_host::GridMsg k = (event.clickCount >= 2)
@@ -1355,12 +1378,83 @@ static float neui_snap_to_steps(float v, int steps)
   [super rightMouseUp:event];
 }
 
+// --- GRID smooth-scroll plumbing -------------------------------------------
+
+// Decompose the (rubber-mapped) raw pixel scroll position into the model's
+// row index + fine pixel offset, then repaint. grid_last_commit_px records
+// the integer position so the next wheel event can detect external mutations
+// (keyboard / drag / API) and resync.
+- (void)gridStopBounce
+{
+  if (grid_bounce_timer) { [grid_bounce_timer invalidate]; grid_bounce_timer = nil; }
+}
+
+- (void)gridStartBounce
+{
+  [self gridStopBounce];
+  grid_bounce_timer = [NSTimer timerWithTimeInterval:1.0 / 60.0
+                                              target:self
+                                            selector:@selector(gridBounceTick:)
+                                            userInfo:nil
+                                             repeats:YES];
+  // Common modes so the spring-back keeps animating during event tracking.
+  [[NSRunLoop currentRunLoop] addTimer:grid_bounce_timer
+                               forMode:NSRunLoopCommonModes];
+}
+
+- (void)gridBounceTick:(NSTimer*)timer
+{
+  (void)timer;
+  auto* wd = [self gridInputWidget];
+  if (!wd) { [self gridStopBounce]; return; }
+  auto& m   = macos_host::ensure_grid_model_macos(*wd);
+  auto  cfg = neui_detail::grid_read_config(wd->attrs.get());
+  auto  vp  = macos_host::grid_viewport_macos(*wd);
+  bool more = neui_detail::grid_scroll_bounce_step(m, vp, cfg.row_h);
+  [self setNeedsDisplay:YES];
+  if (!more) [self gridStopBounce];
+}
+
+- (void)gridScrollWheel:(NSEvent*)event widget:(macos_host::WidgetData*)wd
+{
+  auto& m   = macos_host::ensure_grid_model_macos(*wd);
+  auto  cfg = neui_detail::grid_read_config(wd->attrs.get());
+  auto  vp  = macos_host::grid_viewport_macos(*wd);
+
+  neui_detail::GridWheelInput in;
+  // Precise (trackpad / Magic Mouse) deltas are in points; legacy mouse-wheel
+  // deltas are in lines (one line == one row).
+  in.precise        = event.hasPreciseScrollingDeltas;
+  double dy         = (double)event.scrollingDeltaY;
+  in.delta_px       = in.precise ? dy : dy * (double)(cfg.row_h > 0 ? cfg.row_h : 1);
+  in.phase_began    = (event.phase == NSEventPhaseBegan);
+  in.phase_changed  = (event.phase == NSEventPhaseChanged);
+  in.phase_ended    = (event.phase == NSEventPhaseEnded) ||
+                      (event.phase == NSEventPhaseCancelled);
+  in.momentum       = (event.momentumPhase != NSEventPhaseNone);
+  in.momentum_ended = (event.momentumPhase == NSEventPhaseEnded);
+
+  neui_detail::GridWheelAction act = neui_detail::grid_scroll_wheel(m, vp, cfg.row_h, in);
+  if (act.stop_bounce)  [self gridStopBounce];
+  if (act.changed)      [self setNeedsDisplay:YES];
+  if (act.start_bounce) [self gridStartBounce];
+}
+
 - (void)scrollWheel:(NSEvent*)event
 {
   bool wants_knob = [self isKnob];
-  bool wants_grid = !wants_knob && ([self gridInputWidget] != nullptr);
+  macos_host::WidgetData* grid_wd = wants_knob ? nullptr : [self gridInputWidget];
+  bool wants_grid = (grid_wd != nullptr);
   bool wants_cd   = !wants_knob && !wants_grid && [self customDrawWantsInput];
   if (!wants_knob && !wants_grid && !wants_cd) { [super scrollWheel:event]; return; }
+
+  // GRID gets pixel-precise smooth scrolling with inertial momentum + elastic
+  // rubber-band - it consumes momentum events rather than dropping them, so it
+  // must run before the knob / customdraw tick model below.
+  if (wants_grid) {
+    [self gridScrollWheel:event widget:grid_wd];
+    return;
+  }
 
   // Drop momentum-phase events. Inertial follow-through after a flick keeps
   // streaming for hundreds of ms; on a parameter knob that feels like the
@@ -1397,15 +1491,6 @@ static float neui_snap_to_steps(float v, int steps)
     int   mag_ticks = (ticks > 0) ? ticks : -ticks;
     [self setKnobValueFromUser:[self knobValue]
                                 + sign * magnitude * (float)mag_ticks];
-    return;
-  }
-
-  if (wants_grid) {
-    // One accumulated tick = one row of vertical scroll (win32 WHEEL_DELTA
-    // notch model). grid_painted_msg_macos applies the natural-scroll sign.
-    if (auto* gwd = [self gridInputWidget])
-      macos_host::grid_painted_msg_macos(*gwd, macos_host::GridMsg::Wheel,
-                                          0, 0, 0, 0, ticks);
     return;
   }
 

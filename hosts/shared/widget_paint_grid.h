@@ -111,12 +111,17 @@ namespace neui_detail
 
       int vis_rows = grid_visible_rows(vp, cfg.row_h);
       int first    = m.scroll_offset_y;
-      int last     = first + vis_rows + 1;   // +1 to draw the partially-visible bottom row
+      // Fine sub-row pixel offset (macOS smooth scroll / rubber-band; 0 on
+      // win32 / xpl). Content is shifted up by pxoff, so the body window
+      // starts mid-row; draw one extra trailing row when pxoff != 0 to fill
+      // the gap a fractional offset opens at the bottom.
+      const float pxoff = (float)m.scroll_px_offset;
+      int last     = first + vis_rows + (m.scroll_px_offset != 0 ? 2 : 1);
       if (last > (int)m.rows.size()) last = (int)m.rows.size();
 
       // --- Focus-row highlight (under the cell text) ---
       if (cfg.show_focus_row && m.selected_row >= first && m.selected_row < last) {
-        float ry = fy + (float)vp.body_y +
+        float ry = fy + (float)vp.body_y - pxoff +
                     (float)((m.selected_row - first) * cfg.row_h);
         backend->fill_rect(ctx, fx + (float)vp.body_x, ry,
                             (float)vp.body_w, (float)cfg.row_h,
@@ -127,7 +132,7 @@ namespace neui_detail
       int n_cols = (int)m.columns.size();
       for (int row = first; row < last; ++row) {
         const auto& rd = m.rows[(size_t)row];
-        float ry = fy + (float)vp.body_y +
+        float ry = fy + (float)vp.body_y - pxoff +
                     (float)((row - first) * cfg.row_h);
         float cx_running = fx + (float)vp.body_x - (float)m.scroll_offset_x;
         for (int col = 0; col < n_cols; ++col) {
@@ -218,7 +223,7 @@ namespace neui_detail
           m.selected_row >= 0 && m.selected_col >= 0 &&
           m.selected_col < n_cols) {
         if (m.selected_row >= first && m.selected_row < last) {
-          float ry = fy + (float)vp.body_y +
+          float ry = fy + (float)vp.body_y - pxoff +
                       (float)((m.selected_row - first) * cfg.row_h);
           int col_left_content = grid_column_left(m, m.selected_col);
           int col_w            = m.columns[(size_t)m.selected_col].width;

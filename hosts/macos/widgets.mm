@@ -2037,6 +2037,7 @@ namespace macos_host
     m.selected_col = -1;
     m.scroll_offset_x = 0;
     m.scroll_offset_y = 0;
+    m.scroll_px_offset = 0;
     grid_invalidate_macos(wd);
   }
 
@@ -2093,6 +2094,7 @@ namespace macos_host
     m.cell_overrides.clear();
     m.selected_row = -1;
     m.scroll_offset_y = 0;
+    m.scroll_px_offset = 0;
     grid_invalidate_macos(wd);
   }
 
@@ -2193,6 +2195,7 @@ namespace macos_host
     if (cfg.cell_focus && m.selected_col < 0 && !m.columns.empty())
       m.selected_col = 0;
     if (row >= 0) {
+      m.scroll_px_offset = 0;   // programmatic selection snaps to row alignment
       auto vp = grid_viewport_macos_api(*wd);
       neui_detail::grid_ensure_row_visible(m, vp, cfg.row_h, row);
     }
@@ -2220,6 +2223,7 @@ namespace macos_host
     m.selected_row = row;
     m.selected_col = col;
     if (row >= 0 && col >= 0) {
+      m.scroll_px_offset = 0;   // programmatic selection snaps to row alignment
       auto cfg = neui_detail::grid_read_config(wd->attrs.get());
       auto vp  = grid_viewport_macos_api(*wd);
       neui_detail::grid_ensure_cell_visible(m, vp, cfg.row_h, row, col);
@@ -2244,6 +2248,7 @@ namespace macos_host
     auto* wd = resolve_grid_macos(session, widget);
     if (!wd) return;
     auto& m = ensure_grid_model_macos_api(*wd);
+    m.scroll_px_offset = 0;   // snap to row alignment
     auto cfg = neui_detail::grid_read_config(wd->attrs.get());
     auto vp  = grid_viewport_macos_api(*wd);
     neui_detail::grid_ensure_row_visible(m, vp, cfg.row_h, row);
@@ -2256,6 +2261,7 @@ namespace macos_host
     auto* wd = resolve_grid_macos(session, widget);
     if (!wd) return;
     auto& m = ensure_grid_model_macos_api(*wd);
+    m.scroll_px_offset = 0;   // snap to row alignment
     auto cfg = neui_detail::grid_read_config(wd->attrs.get());
     auto vp  = grid_viewport_macos_api(*wd);
     neui_detail::grid_ensure_cell_visible(m, vp, cfg.row_h, row, col);

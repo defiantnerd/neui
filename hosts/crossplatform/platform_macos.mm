@@ -89,6 +89,11 @@ void wake_app_event_pump()
   // text length (UTF-16 chars) is used to answer markedRange queries.
   BOOL               _composing;
   NSUInteger         _marked_text_len;
+  // GRID smooth-scroll spring-back animation. _grid_bounce_widget is the tree
+  // slot of the grid currently bouncing; the kinetics state itself lives in
+  // that grid's GridModel.scroll_kin (shared with the elastic math).
+  NSTimer*           _grid_bounce_timer;
+  uint32_t           _grid_bounce_widget;
 }
 @end
 
@@ -294,12 +299,79 @@ void wake_app_event_pump()
   (void)event;
 }
 
+// --- GRID smooth-scroll spring-back animation ------------------------------
+
+- (void)gridStopBounce
+{
+  if (_grid_bounce_timer) { [_grid_bounce_timer invalidate]; _grid_bounce_timer = nil; }
+}
+
+- (void)gridStartBounce:(uint32_t)widgetIdx
+{
+  [self gridStopBounce];
+  _grid_bounce_widget = widgetIdx;
+  _grid_bounce_timer = [NSTimer timerWithTimeInterval:1.0 / 60.0
+                                               target:self
+                                             selector:@selector(gridBounceTick:)
+                                             userInfo:nil
+                                              repeats:YES];
+  [[NSRunLoop currentRunLoop] addTimer:_grid_bounce_timer
+                               forMode:NSRunLoopCommonModes];
+}
+
+- (void)gridBounceTick:(NSTimer*)timer
+{
+  (void)timer;
+  if (!session) { [self gridStopBounce]; return; }
+  auto* hw = session->get_widget(_grid_bounce_widget);
+  neui_detail::GridModel* model = hw ? hw->grid_model_ptr() : nullptr;
+  if (!model) { [self gridStopBounce]; return; }
+  auto cfg = neui_detail::grid_read_config(hw->attrs.get());
+  neui_detail::GridViewport vp =
+    neui_detail::grid_compute_viewport(*model, hw->width, hw->height,
+                                        cfg.row_h, cfg.header_h);
+  bool more = neui_detail::grid_scroll_bounce_step(*model, vp, cfg.row_h);
+  [self setNeedsDisplay:YES];
+  if (!more) [self gridStopBounce];
+}
+
 - (void)scrollWheel:(NSEvent*)event
 {
   if (!session) return;
   NSPoint p = [self localPointForEvent:event];
   float lx = (float)p.x;
   float ly = (float)p.y;
+
+  uint32_t hit = session->widget_at(lx, ly, widget_index);
+  if (hit == 0) return;
+  auto* hw = session->get_widget(hit);
+  if (!hw) return;
+
+  // GRID: pixel-precise smooth scroll + inertial momentum + elastic
+  // rubber-band, using the shared kinetics in grid_model.h (identical to the
+  // native macOS host). All other widgets keep the line-delta wheel model.
+  if (neui_detail::GridModel* model = hw->grid_model_ptr()) {
+    using namespace neui_detail;
+    auto cfg = grid_read_config(hw->attrs.get());
+    GridViewport vp = grid_compute_viewport(*model, hw->width, hw->height,
+                                             cfg.row_h, cfg.header_h);
+    GridWheelInput in;
+    in.precise        = event.hasPreciseScrollingDeltas;
+    double dy         = (double)event.scrollingDeltaY;
+    in.delta_px       = in.precise ? dy : dy * (double)(cfg.row_h > 0 ? cfg.row_h : 1);
+    in.phase_began    = (event.phase == NSEventPhaseBegan);
+    in.phase_changed  = (event.phase == NSEventPhaseChanged);
+    in.phase_ended    = (event.phase == NSEventPhaseEnded) ||
+                        (event.phase == NSEventPhaseCancelled);
+    in.momentum       = (event.momentumPhase != NSEventPhaseNone);
+    in.momentum_ended = (event.momentumPhase == NSEventPhaseEnded);
+
+    GridWheelAction act = grid_scroll_wheel(*model, vp, cfg.row_h, in);
+    if (act.stop_bounce)  [self gridStopBounce];
+    if (act.changed)      [self setNeedsDisplay:YES];
+    if (act.start_bounce) [self gridStartBounce:hit];
+    return;
+  }
 
   // Win32 normalises wheel delta to lines (positive = scroll up). macOS:
   // event.scrollingDeltaY in lines if hasPreciseScrollingDeltas == NO,
@@ -314,11 +386,6 @@ void wake_app_event_pump()
     if (delta == 0 && raw != 0.0) delta = (raw > 0) ? 1 : -1;
   }
   if (delta == 0) return;
-
-  uint32_t hit = session->widget_at(lx, ly, widget_index);
-  if (hit == 0) return;
-  auto* hw = session->get_widget(hit);
-  if (!hw) return;
 
   neui_event_t ev = {};
   ev.type              = NEUI_EVENT_MOUSE_WHEEL;

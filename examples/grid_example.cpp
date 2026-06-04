@@ -44,6 +44,7 @@ struct AppState {
   neui_widget_api_t* widgets = nullptr;
   neui_grid_api_t*   grid    = nullptr;
   neui_attr_api_t*   attrs   = nullptr;
+  neui_tree_api_t*   tree    = nullptr;
   neui_session_t     session = {0};
 
   uint32_t win_id        = 0;
@@ -104,6 +105,17 @@ static bool on_event(void* token, neui_event_t* ev)
   case NEUI_EVENT_APP_QUIT:
     dbglog("[grid_example] APP_QUIT\n");
     return true;
+
+  case NEUI_EVENT_TREE_ITEM_ACTIVATED: {
+    // Menubar pick. The Quit item carries userdata (void*)1; end the
+    // session to unwind the run loop on every host.
+    void* ud = app->tree
+      ? app->tree->get_userdata(app->session, ev->data.tree.widget, ev->data.tree.item)
+      : nullptr;
+    if (ud == (void*)1 && app->neui)
+      app->neui->endsession(app->session);
+    return true;
+  }
 
   case NEUI_EVENT_GRID_ROW_SELECTED:
     set_status(app, "ROW_SELECTED row=%d", ev->data.grid_row.row);
@@ -220,7 +232,8 @@ int main(int /*argc*/, char** /*argv*/)
   app.widgets = (neui_widget_api_t*)app.neui->get_interface(app.session, NEUI_API_WIDGETS);
   app.grid    = (neui_grid_api_t*)  app.neui->get_interface(app.session, NEUI_API_GRID);
   app.attrs   = (neui_attr_api_t*)  app.neui->get_interface(app.session, NEUI_API_ATTRS);
-  if (!app.widgets || !app.grid || !app.attrs) {
+  app.tree    = (neui_tree_api_t*)  app.neui->get_interface(app.session, NEUI_API_TREE);
+  if (!app.widgets || !app.grid || !app.attrs || !app.tree) {
     dbglog("[grid_example] missing required interface(s)\n");
     return 1;
   }
@@ -233,6 +246,15 @@ int main(int /*argc*/, char** /*argv*/)
   app.attrs->set_int(app.session, win, NEUI_ATTR_MIN_WIDTH,  500);
   app.attrs->set_int(app.session, win, NEUI_ATTR_MIN_HEIGHT, 360);
   app.attrs->set_int(app.session, win, NEUI_ATTR_FOLLOW_SYSTEM_THEME, 1);
+
+  // Menubar with a File > Quit item. Host-agnostic: win32 builds an HMENU,
+  // macOS a system NSMenu, xpl a painted menubar. Quit carries userdata
+  // (void*)1 and is handled in on_event via TREE_ITEM_ACTIVATED.
+  auto menubar = app.widgets->create(app.session, win, NEUI_W_MENUBAR,
+                                      0, 0, 0, 0, &app);
+  auto file_menu = app.tree->add(app.session, menubar, tree_item_root, "File", nullptr);
+  auto quit_item = app.tree->add(app.session, menubar, file_menu, "Quit", (void*)1);
+  app.tree->set_shortcut(app.session, menubar, quit_item, NEUI_KMOD_CTRL, NEUI_KEY_Q);
 
   // Toolbar of buttons + checkbox along the top.
   int x = 10, y = 10;

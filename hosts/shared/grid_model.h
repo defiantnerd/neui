@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -74,6 +75,19 @@ namespace neui_detail
     std::vector<std::string> cells;
   };
 
+  // Smooth-scroll kinetics for pixel-precise vertical scrolling with inertial
+  // momentum + elastic rubber-band (driven by hosts that have the rich wheel
+  // data - macOS today). raw_px is the unbounded integral of scroll deltas in
+  // logical pixels; the rubber-band map turns it into the committed position.
+  // last_commit_px is the integer position last written to the model, used to
+  // detect external (keyboard / drag / API) changes and resync. Inert on hosts
+  // that don't drive it (win32 leaves the row-stepped scroll path untouched).
+  struct GridScrollKinetics {
+    double raw_px            = 0.0;
+    int    last_commit_px    = 0;
+    bool   suppress_momentum = false;
+  };
+
   // Two scrollbars, two axes of scroll state, one cursor (row or row+col)
   // plus per-cell sparse overrides. The struct stays a POD-of-collections
   // so it can live inline on a widget without extra heap.
@@ -92,6 +106,16 @@ namespace neui_detail
     int scroll_offset_y = 0;
     int scroll_offset_x = 0;
 
+    // Fine vertical pixel offset applied on top of the row-indexed
+    // scroll_offset_y, for sub-row-smooth scrolling + elastic overscroll.
+    // The body content is shifted UP by this many logical pixels; a
+    // negative value (top rubber-band) shifts it DOWN, leaving a blank
+    // band above the first row. Default 0 -> pixel-exact row alignment.
+    // Only the macOS host drives this non-zero (smooth wheel + momentum +
+    // rubber-band); win32 / xpl leave it at 0, so their paint + hit-test
+    // are unchanged.
+    int scroll_px_offset = 0;
+
     // Column resize drag state. -1 = not dragging.
     int column_resize_col       = -1;
     int column_resize_start_x   = 0;
@@ -101,6 +125,10 @@ namespace neui_detail
     // Vertical + horizontal scrollbar drag state.
     ScrollbarDrag vert_drag;
     ScrollbarDrag horz_drag;
+
+    // Smooth-scroll / rubber-band kinetics (see GridScrollKinetics). Used by
+    // the macOS hosts; inert elsewhere.
+    GridScrollKinetics scroll_kin;
   };
 
   // ---- Cell-override key helpers ------------------------------------------
@@ -343,7 +371,13 @@ namespace neui_detail
     // Body.
     if (ly < vp.header_h + vp.body_h) {
       int local_y = ly - vp.header_h;
-      int row = m.scroll_offset_y + (local_y / row_h);
+      // Fold in the fine pixel offset (content shifted up by scroll_px_offset)
+      // so a partially-scrolled / overscrolled row maps to the right index.
+      int content_y = local_y + m.scroll_px_offset;
+      int row = (row_h > 0) ? (m.scroll_offset_y + (content_y >= 0
+                                ? content_y / row_h
+                                : -((-content_y + row_h - 1) / row_h)))
+                            : m.scroll_offset_y;
       if (row < 0 || row >= (int)m.rows.size()) {
         hit.region = GridHitRegion::BodyEmpty;
         return hit;
@@ -437,6 +471,179 @@ namespace neui_detail
     for (const auto& c : m.columns) sum += c.width;
     int avg = (int)(sum / (long long)m.columns.size());
     return avg > 0 ? avg : GRID_LEFT_RIGHT_STEP_PX_FALLBACK;
+  }
+
+  // ---- Smooth scroll + elastic rubber-band --------------------------------
+  // Pixel-precise vertical scrolling with inertial momentum + elastic
+  // overscroll. Shared by every host that can feed rich wheel data (macOS
+  // native + macOS xpl today). The host owns the event plumbing + the
+  // spring-back animation timer; this code owns the math + model mutation so
+  // both hosts behave identically and the tuning lives in one place.
+
+  // Spring-back lerp factor per 60 Hz tick (higher = snappier). Exponential
+  // ease, so halving the per-tick decay roughly doubles the settle time.
+  inline constexpr double GRID_SCROLL_BOUNCE_LERP = 0.29;
+  // Below this pixel distance the spring-back snaps to target and stops.
+  inline constexpr double GRID_SCROLL_BOUNCE_EPS = 0.5;
+  // Hard cap on how far the content can elastically stretch past an edge
+  // (logical px) - keeps the rubber-band tight on a hard flick.
+  inline constexpr double GRID_SCROLL_OVERSCROLL_MAX = 60.0;
+  // Stretch stiffness: smaller = more resistance (less travel per unit pull).
+  inline constexpr double GRID_SCROLL_OVERSCROLL_STIFFNESS = 0.5;
+
+  // WebKit-style rubber-band overshoot: maps an unbounded pull distance `x`
+  // (>= 0) into a damped, asymptotically-bounded display distance. It
+  // approaches `limit` (a capped fraction of the viewport) but never reaches
+  // it, so the further you pull the less it gives.
+  inline double grid_scroll_overshoot(double x, double dim)
+  {
+    double limit = dim * 0.5;
+    if (limit > GRID_SCROLL_OVERSCROLL_MAX) limit = GRID_SCROLL_OVERSCROLL_MAX;
+    if (limit <= 0.0) limit = 1.0;
+    return (1.0 - 1.0 / (x * GRID_SCROLL_OVERSCROLL_STIFFNESS / limit + 1.0)) * limit;
+  }
+
+  // Map the unbounded raw scroll position to the elastic display position.
+  // In-range values pass through; out-of-range values are damped.
+  inline double grid_scroll_rubber(double raw, double max_px, double dim)
+  {
+    if (raw < 0.0)    return -grid_scroll_overshoot(-raw, dim);
+    if (raw > max_px) return  max_px + grid_scroll_overshoot(raw - max_px, dim);
+    return raw;
+  }
+
+  // Maximum legal vertical scroll position in logical pixels (0 when the
+  // content fits).
+  inline double grid_scroll_max_px(const GridModel& m,
+                                    const GridViewport& vp, int row_h)
+  {
+    double v = (double)((int)m.rows.size() * row_h - vp.body_h);
+    return v < 0.0 ? 0.0 : v;
+  }
+
+  // Decompose the (rubber-mapped) raw position into the model's row index +
+  // fine pixel offset. Records last_commit_px so the next wheel event can
+  // detect external mutations. Does NOT repaint - the host does that.
+  inline void grid_scroll_commit(GridModel& m, const GridViewport& vp, int row_h)
+  {
+    if (row_h <= 0) row_h = 1;
+    double max_px = grid_scroll_max_px(m, vp, row_h);
+    double pos = grid_scroll_rubber(m.scroll_kin.raw_px, max_px, (double)vp.body_h);
+    if (pos <= 0.0) {
+      m.scroll_offset_y  = 0;
+      m.scroll_px_offset = (int)std::lround(pos);   // <= 0 -> top rubber-band gap
+    } else {
+      int row = (int)(pos / (double)row_h);
+      m.scroll_offset_y  = row;
+      m.scroll_px_offset = (int)std::lround(pos - (double)row * row_h);
+    }
+    m.scroll_kin.last_commit_px = m.scroll_offset_y * row_h + m.scroll_px_offset;
+  }
+
+  // Platform-neutral description of a wheel event (the host fills this in from
+  // its native event - NSEvent on macOS).
+  struct GridWheelInput {
+    double delta_px      = 0.0;    // logical px; subtracted from raw (natural scroll)
+    bool   precise       = false;  // trackpad / Magic Mouse (vs classic wheel)
+    bool   phase_began   = false;  // finger-down gesture started
+    bool   phase_changed = false;  // finger-down gesture moving
+    bool   phase_ended   = false;  // finger lifted / cancelled
+    bool   momentum      = false;  // an inertial (post-lift) event
+    bool   momentum_ended = false; // last inertial event
+  };
+
+  // Outcome of grid_scroll_wheel - tells the host how to drive its bounce
+  // timer + repaint.
+  struct GridWheelAction {
+    bool stop_bounce  = false;   // a new gesture began - cancel any spring-back
+    bool start_bounce = false;   // overscrolled + released - begin spring-back
+    bool changed      = false;   // model scroll position changed - repaint
+  };
+
+  // Apply a wheel event to the kinetics + model. Mirrors the elastic logic:
+  // free pixel scrolling in-range, damped stretch past the edges, and an
+  // immediate spring-back when an inertial event runs into an edge (the
+  // remaining momentum stream is then swallowed so it can't re-stretch).
+  inline GridWheelAction grid_scroll_wheel(GridModel& m, const GridViewport& vp,
+                                            int row_h, const GridWheelInput& in)
+  {
+    if (row_h <= 0) row_h = 1;
+    auto& k = m.scroll_kin;
+    GridWheelAction act;
+    double max_px = grid_scroll_max_px(m, vp, row_h);
+
+    // A new finger-down gesture cancels any spring-back + momentum suppression.
+    if (in.phase_began) {
+      act.stop_bounce = true;
+      k.suppress_momentum = false;
+    }
+
+    // Already springing back from a momentum overscroll: swallow the rest of
+    // the inertial stream so it can't re-stretch the edge mid-settle.
+    if (in.momentum && k.suppress_momentum) {
+      if (in.momentum_ended) k.suppress_momentum = false;
+      return act;
+    }
+
+    // Resync the raw integral if something else moved the model (keyboard nav,
+    // scrollbar drag, or the grid API) since the last commit.
+    int committed = m.scroll_offset_y * row_h + m.scroll_px_offset;
+    if (committed != k.last_commit_px) k.raw_px = (double)committed;
+
+    k.raw_px -= in.delta_px;
+
+    // Classic mouse wheel (no precise deltas, no gesture phase) doesn't
+    // rubber-band on macOS - hard-clamp instead.
+    bool legacy = !in.precise && !in.phase_began && !in.phase_changed &&
+                  !in.phase_ended && !in.momentum;
+    if (legacy) {
+      if (k.raw_px < 0.0)         k.raw_px = 0.0;
+      else if (k.raw_px > max_px) k.raw_px = max_px;
+    }
+
+    grid_scroll_commit(m, vp, row_h);
+    act.changed = true;
+
+    bool overscrolled = (k.raw_px < 0.0 || k.raw_px > max_px);
+    bool finger_down  = in.phase_began || in.phase_changed;
+    // Spring back the moment we're overscrolled and the user is no longer
+    // dragging (finger lifted, or an inertial event hit the edge). Suppress
+    // the residual momentum so the bounce isn't fought.
+    if (overscrolled && !finger_down) {
+      if (in.momentum) k.suppress_momentum = true;
+      act.start_bounce = true;
+    }
+    if (in.momentum_ended) k.suppress_momentum = false;
+    return act;
+  }
+
+  // One spring-back animation step (call at ~60 Hz). Returns true while still
+  // animating, false once settled (the host stops its timer). Does NOT repaint.
+  inline bool grid_scroll_bounce_step(GridModel& m, const GridViewport& vp,
+                                       int row_h)
+  {
+    if (row_h <= 0) row_h = 1;
+    auto& k = m.scroll_kin;
+    // Abort if something else moved the scroll position since the last commit
+    // (keyboard nav, scrollbar drag, or the grid API) - it owns the position
+    // now, so the spring-back must yield rather than clobber it.
+    int committed = m.scroll_offset_y * row_h + m.scroll_px_offset;
+    if (committed != k.last_commit_px) return false;
+    double max_px = grid_scroll_max_px(m, vp, row_h);
+    double target = k.raw_px;
+    if (target < 0.0)         target = 0.0;
+    else if (target > max_px) target = max_px;
+    double d = target - k.raw_px;
+    if (std::fabs(d) < GRID_SCROLL_BOUNCE_EPS) {
+      k.raw_px = target;
+      grid_scroll_commit(m, vp, row_h);
+      // NB: leave suppress_momentum set - the inertial stream can outlast the
+      // spring-back; it is cleared on momentum-end / new gesture.
+      return false;
+    }
+    k.raw_px += d * GRID_SCROLL_BOUNCE_LERP;
+    grid_scroll_commit(m, vp, row_h);
+    return true;
   }
 
   // Read NEUI_ATTR_GRID_* into a GridPaintConfig in one pass. Defaults
