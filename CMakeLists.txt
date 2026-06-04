@@ -29,6 +29,15 @@ endif()
 add_subdirectory("backends/null")
 add_subdirectory("hosts/crossplatform")
 
+# Tier 1 unit tests for the portable shared logic (hosts/shared/*.h). They
+# depend only on the public headers + the shared utilities, so they build
+# everywhere. Toggle with -DNEUI_BUILD_TESTS=OFF.
+option(NEUI_BUILD_TESTS "Build the neui unit tests" ON)
+if(NEUI_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory("tests")
+endif()
+
 # neui_init() (src/neui.c) is gated on these defines so it
 # only references registration wrappers for hosts that are actually being
 # built. The defines are PRIVATE: they're an implementation detail of the

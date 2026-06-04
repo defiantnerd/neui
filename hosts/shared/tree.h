@@ -92,21 +92,18 @@ namespace neui_detail
 
     void remove(uint32_t ndx)
     {
-      auto& leaf = _data[ndx];
-      if (leaf.first_child_ndx > 0) {
-        auto n = leaf.first_child_ndx;
-        leaf.first_child_ndx = 0;
-        while (n > 0) {
-          auto n2 = _data[n].next_sibling;
-          remove(n);
-          n = n2;
-        }
-      }
-      leaf.object.reset();
-
+      // Splice ndx out of its parent/sibling chain first, while the link that
+      // points AT ndx (a parent's first_child_ndx or a sibling's next_sibling)
+      // is still intact. Doing this before tearing down the subtree avoids the
+      // orphaned-owner lookup that a recursive teardown would otherwise hit.
       auto* hold = get_pointing_node(ndx);
-      *hold = leaf.next_sibling;
-      leaf.next_sibling = 0;
+      if (hold) *hold = _data[ndx].next_sibling;
+      _data[ndx].next_sibling = 0;
+
+      // Now destroy ndx and its whole subtree. The children's owner is ndx,
+      // which is going away, so they need no chain fixup - a plain recursive
+      // reset suffices.
+      destroy_subtree(ndx);
     }
 
     bool exists(uint32_t ndx) const {
@@ -144,6 +141,23 @@ namespace neui_detail
     }
 
   private:
+    // Recursively reset ndx and all descendants without touching the
+    // parent/sibling chain (the caller has already detached ndx). Each freed
+    // slot becomes available to alloc_free_index again.
+    void destroy_subtree(uint32_t ndx)
+    {
+      auto& leaf = _data[ndx];
+      uint32_t n = leaf.first_child_ndx;
+      leaf.first_child_ndx = 0;
+      while (n > 0) {
+        uint32_t n2 = _data[n].next_sibling;
+        destroy_subtree(n);
+        n = n2;
+      }
+      leaf.object.reset();
+      leaf.next_sibling = 0;
+    }
+
     void _private_addchilds(std::vector<uint32_t>& v, uint32_t ndx) const
     {
       auto w = _data[ndx].first_child_ndx;
