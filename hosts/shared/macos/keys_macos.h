@@ -85,6 +85,8 @@ inline uint32_t mac_keycode_to_neui(uint16_t mac_code)
     case kVK_ForwardDelete: return NEUI_KEY_DELETE;
     case kVK_Home:          return NEUI_KEY_HOME;
     case kVK_End:           return NEUI_KEY_END;
+    case kVK_PageUp:        return NEUI_KEY_PAGEUP;
+    case kVK_PageDown:      return NEUI_KEY_PAGEDOWN;
     case kVK_LeftArrow:     return NEUI_KEY_LEFT;
     case kVK_RightArrow:    return NEUI_KEY_RIGHT;
     case kVK_UpArrow:       return NEUI_KEY_UP;

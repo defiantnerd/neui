@@ -6,6 +6,7 @@
 #include "../shared/clipboard_item.h"
 #include "../shared/theme_palette.h"
 #include "../shared/behavior_runtime.h"
+#include "../shared/grid_model.h"
 #include "asset_manager_macos.h"
 
 #include <memory>
@@ -113,6 +114,11 @@ namespace macos_host
     std::vector<uint32_t>                  tree_items_ordered;
     uint32_t                               next_tree_id      = 1;
     uint32_t                               selected_tree_item = UINT32_MAX;
+
+    // GRID (NEUI_W_GRID) state - column model, row data, scroll state,
+    // selection, column-resize / scrollbar drag state. Lazy-allocated;
+    // every other widget pays a single pointer.
+    std::unique_ptr<neui_detail::GridModel> grid_model;
   };
 
   class Session

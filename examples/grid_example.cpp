@@ -20,7 +20,7 @@
 #ifdef _WIN32
 #define GRID_HOST "neui.host.win32"
 #elif defined(__APPLE__)
-#define GRID_HOST "neui.host.crossplatform"
+#define GRID_HOST "neui.host.macos"
 #else
 #define GRID_HOST "neui.host.crossplatform"
 #endif

@@ -93,7 +93,8 @@ namespace macos_host
       !strcmp(type, NEUI_W_TREEVIEW) ||
       !strcmp(type, NEUI_W_SLIDER)   ||
       !strcmp(type, NEUI_W_KNOB)     ||
-      !strcmp(type, NEUI_W_CUSTOMDRAW));
+      !strcmp(type, NEUI_W_CUSTOMDRAW)||
+      !strcmp(type, NEUI_W_GRID));
 
     // Implicit type variants: CHECKBOX3 = CHECKBOX + tristate=1; MULTILINE
     // = INPUTBOX + multiline=1. Same shape as win32 / xpl.
@@ -1858,6 +1859,481 @@ namespace macos_host
     be_set_int,
     be_set_float,
     be_set_string,
+  };
+
+  // -------------------------------------------------------------------------
+  // Grid API (NEUI_API_GRID) - thin wrappers over WidgetData::grid_model.
+  // Mechanical translation of hosts/win32/widgets.cpp::grid_api; the input +
+  // paint glue lives in window.mm (the painted view). macOS coordinates are
+  // logical points, so the viewport reads the view bounds directly (no DPI
+  // conversion like win32's phys_to_log).
+
+  static WidgetData* resolve_grid_macos(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return nullptr;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return nullptr;
+    WidgetData* wd = &s->_widgets[idx];
+    if (!wd->type || strcmp(wd->type, NEUI_W_GRID) != 0) return nullptr;
+    return wd;
+  }
+
+  static neui_detail::GridModel& ensure_grid_model_macos_api(WidgetData& wd)
+  {
+    if (!wd.grid_model)
+      wd.grid_model = std::make_unique<neui_detail::GridModel>();
+    return *wd.grid_model;
+  }
+
+  static void grid_invalidate_macos(WidgetData* wd)
+  {
+    if (wd && wd->native_control)
+      [(__bridge NSView*)wd->native_control setNeedsDisplay:YES];
+  }
+
+  // Viewport from the painted view's current bounds (logical points).
+  static neui_detail::GridViewport grid_viewport_macos_api(WidgetData& wd)
+  {
+    auto& m   = ensure_grid_model_macos_api(wd);
+    auto  cfg = neui_detail::grid_read_config(wd.attrs.get());
+    int lw = 0, lh = 0;
+    if (wd.native_control) {
+      NSSize sz = ((__bridge NSView*)wd.native_control).bounds.size;
+      lw = (int)sz.width;
+      lh = (int)sz.height;
+    }
+    return neui_detail::grid_compute_viewport(m, lw, lh, cfg.row_h, cfg.header_h);
+  }
+
+  static int NEUI_ABI gr_add_column(neui_session_t session, neui_widget_t widget,
+                                      const char* header, int width_logical)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd) return -1;
+    auto& m = ensure_grid_model_macos_api(*wd);
+    neui_detail::GridColumn c;
+    c.header = header ? header : "";
+    c.width  = (width_logical > 0) ? width_logical : neui_detail::GRID_DEFAULT_NEW_COLUMN_W;
+    m.columns.push_back(std::move(c));
+    neui_detail::grid_resize_rows_to_columns(m, (int)m.columns.size());
+    grid_invalidate_macos(wd);
+    return (int)m.columns.size() - 1;
+  }
+
+  static int NEUI_ABI gr_get_column_count(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    return wd && wd->grid_model ? (int)wd->grid_model->columns.size() : 0;
+  }
+
+  static void NEUI_ABI gr_set_column_width(neui_session_t session, neui_widget_t widget,
+                                             int col, int width_logical)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+    int min_w = neui_detail::grid_column_min_width(m, col, cfg.col_min_w_def);
+    if (width_logical < min_w) width_logical = min_w;
+    m.columns[(size_t)col].width = width_logical;
+    grid_invalidate_macos(wd);
+  }
+
+  static int NEUI_ABI gr_get_column_width(neui_session_t session, neui_widget_t widget, int col)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return 0;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return 0;
+    return m.columns[(size_t)col].width;
+  }
+
+  static void NEUI_ABI gr_set_column_min_width(neui_session_t session, neui_widget_t widget,
+                                                  int col, int min_w)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns[(size_t)col].min_width = min_w;
+    if (m.columns[(size_t)col].width < min_w)
+      m.columns[(size_t)col].width = min_w;
+    grid_invalidate_macos(wd);
+  }
+
+  static void NEUI_ABI gr_set_column_align(neui_session_t session, neui_widget_t widget,
+                                             int col, const char* align)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns[(size_t)col].align = neui_detail::grid_parse_align(align);
+    grid_invalidate_macos(wd);
+  }
+
+  static void NEUI_ABI gr_set_column_header(neui_session_t session, neui_widget_t widget,
+                                              int col, const char* text)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns[(size_t)col].header = text ? text : "";
+    grid_invalidate_macos(wd);
+  }
+
+  static int NEUI_ABI gr_get_column_header(neui_session_t session, neui_widget_t widget,
+                                             int col, char* buf, int buflen)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return -1;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return -1;
+    const std::string& h = m.columns[(size_t)col].header;
+    int need = (int)h.size() + 1;
+    if (buf && buflen > 0) {
+      int copy = (need < buflen) ? need : buflen;
+      memcpy(buf, h.c_str(), (size_t)copy);
+      buf[copy - 1] = 0;
+    }
+    return need;
+  }
+
+  static void NEUI_ABI gr_remove_column(neui_session_t session, neui_widget_t widget, int col)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns.erase(m.columns.begin() + col);
+    for (auto& r : m.rows)
+      if (col < (int)r.cells.size()) r.cells.erase(r.cells.begin() + col);
+    std::unordered_map<uint64_t, neui_detail::GridCellOverride> remap;
+    for (auto& kv : m.cell_overrides) {
+      int r = (int)(kv.first >> 32);
+      int c = (int)(kv.first & 0xFFFFFFFF);
+      if (c == col) continue;
+      int nc = (c > col) ? c - 1 : c;
+      remap[neui_detail::grid_cell_key(r, nc)] = kv.second;
+    }
+    m.cell_overrides = std::move(remap);
+    if (m.selected_col >= (int)m.columns.size())
+      m.selected_col = (int)m.columns.size() - 1;
+    grid_invalidate_macos(wd);
+  }
+
+  static void NEUI_ABI gr_clear_columns(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_macos_api(*wd);
+    m.columns.clear();
+    m.rows.clear();
+    m.cell_overrides.clear();
+    m.selected_row = -1;
+    m.selected_col = -1;
+    m.scroll_offset_x = 0;
+    m.scroll_offset_y = 0;
+    grid_invalidate_macos(wd);
+  }
+
+  static int NEUI_ABI gr_add_row(neui_session_t session, neui_widget_t widget,
+                                   const char* const* values_utf8)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd) return -1;
+    auto& m = ensure_grid_model_macos_api(*wd);
+    neui_detail::GridRow row;
+    row.cells.resize(m.columns.size());
+    if (values_utf8) {
+      for (size_t i = 0; i < m.columns.size() && values_utf8[i]; ++i)
+        row.cells[i] = values_utf8[i];
+    }
+    m.rows.push_back(std::move(row));
+    grid_invalidate_macos(wd);
+    return (int)m.rows.size() - 1;
+  }
+
+  static int NEUI_ABI gr_get_row_count(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    return wd && wd->grid_model ? (int)wd->grid_model->rows.size() : 0;
+  }
+
+  static void NEUI_ABI gr_remove_row(neui_session_t session, neui_widget_t widget, int row)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (row < 0 || row >= (int)m.rows.size()) return;
+    m.rows.erase(m.rows.begin() + row);
+    std::unordered_map<uint64_t, neui_detail::GridCellOverride> remap;
+    for (auto& kv : m.cell_overrides) {
+      int r = (int)(kv.first >> 32);
+      int c = (int)(kv.first & 0xFFFFFFFF);
+      if (r == row) continue;
+      int nr = (r > row) ? r - 1 : r;
+      remap[neui_detail::grid_cell_key(nr, c)] = kv.second;
+    }
+    m.cell_overrides = std::move(remap);
+    if (m.selected_row >= (int)m.rows.size())
+      m.selected_row = (int)m.rows.size() - 1;
+    grid_invalidate_macos(wd);
+  }
+
+  static void NEUI_ABI gr_clear_rows(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    m.rows.clear();
+    m.cell_overrides.clear();
+    m.selected_row = -1;
+    m.scroll_offset_y = 0;
+    grid_invalidate_macos(wd);
+  }
+
+  static void NEUI_ABI gr_set_cell_text(neui_session_t session, neui_widget_t widget,
+                                          int row, int col, const char* utf8)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (row < 0 || row >= (int)m.rows.size()) return;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    auto& r = m.rows[(size_t)row];
+    if ((int)r.cells.size() <= col) r.cells.resize((size_t)col + 1);
+    r.cells[(size_t)col] = utf8 ? utf8 : "";
+    grid_invalidate_macos(wd);
+  }
+
+  static int NEUI_ABI gr_get_cell_text(neui_session_t session, neui_widget_t widget,
+                                         int row, int col, char* buf, int buflen)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return -1;
+    auto& m = *wd->grid_model;
+    if (row < 0 || row >= (int)m.rows.size()) return -1;
+    if (col < 0 || col >= (int)m.columns.size()) return -1;
+    const auto& r = m.rows[(size_t)row];
+    static const std::string empty;
+    const std::string& src = (col < (int)r.cells.size()) ? r.cells[(size_t)col] : empty;
+    int need = (int)src.size() + 1;
+    if (buf && buflen > 0) {
+      int copy = (need < buflen) ? need : buflen;
+      memcpy(buf, src.c_str(), (size_t)copy);
+      buf[copy - 1] = 0;
+    }
+    return need;
+  }
+
+  static void NEUI_ABI gr_set_cell_color(neui_session_t session, neui_widget_t widget,
+                                           int row, int col, uint32_t argb)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (row < 0 || row >= (int)m.rows.size()) return;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    if (argb == 0) {
+      auto* ov = neui_detail::grid_find_override(m, row, col);
+      if (ov) {
+        ov->has_color = false;
+        ov->color     = 0;
+        neui_detail::grid_prune_override(m, row, col);
+      }
+    } else {
+      auto& ov = neui_detail::grid_ensure_override(m, row, col);
+      ov.color     = argb;
+      ov.has_color = true;
+    }
+    grid_invalidate_macos(wd);
+  }
+
+  static void NEUI_ABI gr_set_cell_enabled(neui_session_t session, neui_widget_t widget,
+                                             int row, int col, bool enabled)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (row < 0 || row >= (int)m.rows.size()) return;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    auto& ov = neui_detail::grid_ensure_override(m, row, col);
+    ov.enabled     = enabled;
+    ov.has_enabled = true;
+    if (enabled && !ov.has_color) {
+      ov.has_enabled = false;
+      neui_detail::grid_prune_override(m, row, col);
+    }
+    grid_invalidate_macos(wd);
+  }
+
+  static void NEUI_ABI gr_clear_cell_overrides(neui_session_t session, neui_widget_t widget,
+                                                  int row, int col)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    wd->grid_model->cell_overrides.erase(neui_detail::grid_cell_key(row, col));
+    grid_invalidate_macos(wd);
+  }
+
+  static void NEUI_ABI gr_set_selected_row(neui_session_t session, neui_widget_t widget, int row)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_macos_api(*wd);
+    int n = (int)m.rows.size();
+    if (row < -1)  row = -1;
+    if (row >= n)  row = n - 1;
+    m.selected_row = row;
+    auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+    if (cfg.cell_focus && m.selected_col < 0 && !m.columns.empty())
+      m.selected_col = 0;
+    if (row >= 0) {
+      auto vp = grid_viewport_macos_api(*wd);
+      neui_detail::grid_ensure_row_visible(m, vp, cfg.row_h, row);
+    }
+    grid_invalidate_macos(wd);
+  }
+
+  static int NEUI_ABI gr_get_selected_row(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    return wd && wd->grid_model ? wd->grid_model->selected_row : -1;
+  }
+
+  static void NEUI_ABI gr_set_selected_cell(neui_session_t session, neui_widget_t widget,
+                                              int row, int col)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_macos_api(*wd);
+    int n_rows = (int)m.rows.size();
+    int n_cols = (int)m.columns.size();
+    if (row < -1)       row = -1;
+    if (row >= n_rows)  row = n_rows - 1;
+    if (col < -1)       col = -1;
+    if (col >= n_cols)  col = n_cols - 1;
+    m.selected_row = row;
+    m.selected_col = col;
+    if (row >= 0 && col >= 0) {
+      auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+      auto vp  = grid_viewport_macos_api(*wd);
+      neui_detail::grid_ensure_cell_visible(m, vp, cfg.row_h, row, col);
+    }
+    grid_invalidate_macos(wd);
+  }
+
+  static void NEUI_ABI gr_get_selected_cell(neui_session_t session, neui_widget_t widget,
+                                              int* out_row, int* out_col)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (out_row) *out_row = (wd && wd->grid_model) ? wd->grid_model->selected_row : -1;
+    if (out_col) {
+      if (!wd || !wd->grid_model) { *out_col = -1; return; }
+      auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+      *out_col = cfg.cell_focus ? wd->grid_model->selected_col : -1;
+    }
+  }
+
+  static void NEUI_ABI gr_ensure_row_visible(neui_session_t session, neui_widget_t widget, int row)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_macos_api(*wd);
+    auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+    auto vp  = grid_viewport_macos_api(*wd);
+    neui_detail::grid_ensure_row_visible(m, vp, cfg.row_h, row);
+    grid_invalidate_macos(wd);
+  }
+
+  static void NEUI_ABI gr_ensure_cell_visible(neui_session_t session, neui_widget_t widget,
+                                                int row, int col)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_macos_api(*wd);
+    auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+    auto vp  = grid_viewport_macos_api(*wd);
+    neui_detail::grid_ensure_cell_visible(m, vp, cfg.row_h, row, col);
+    grid_invalidate_macos(wd);
+  }
+
+  static void NEUI_ABI gr_set_scroll_x(neui_session_t session, neui_widget_t widget, int x)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_macos_api(*wd);
+    m.scroll_offset_x = x;
+    auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+    auto vp  = grid_viewport_macos_api(*wd);
+    neui_detail::grid_clamp_scroll(m, vp, cfg.row_h);
+    grid_invalidate_macos(wd);
+  }
+
+  static int NEUI_ABI gr_get_scroll_x(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    return wd && wd->grid_model ? wd->grid_model->scroll_offset_x : 0;
+  }
+
+  static int NEUI_ABI gr_hit_test(neui_session_t session, neui_widget_t widget,
+                                    int lx, int ly, int* out_row, int* out_col)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (out_row) *out_row = -1;
+    if (out_col) *out_col = -1;
+    if (!wd || !wd->grid_model) return 0;
+    auto& m = *wd->grid_model;
+    auto cfg = neui_detail::grid_read_config(wd->attrs.get());
+    auto vp  = grid_viewport_macos_api(*wd);
+    int widget_w = 0, widget_h = 0;
+    if (wd->native_control) {
+      NSSize sz = ((__bridge NSView*)wd->native_control).bounds.size;
+      widget_w = (int)sz.width;
+      widget_h = (int)sz.height;
+    }
+    auto hit = neui_detail::grid_hit_test(m, vp, cfg.row_h,
+                                           widget_w, widget_h, lx, ly);
+    if (hit.region != neui_detail::GridHitRegion::Cell) return 0;
+    if (out_row) *out_row = hit.row;
+    if (out_col) *out_col = hit.col;
+    return 1;
+  }
+
+  neui_grid_api_t grid_api = {
+    NEUI_VERSION,
+    gr_add_column,
+    gr_get_column_count,
+    gr_set_column_width,
+    gr_get_column_width,
+    gr_set_column_min_width,
+    gr_set_column_align,
+    gr_set_column_header,
+    gr_get_column_header,
+    gr_remove_column,
+    gr_clear_columns,
+    gr_add_row,
+    gr_get_row_count,
+    gr_remove_row,
+    gr_clear_rows,
+    gr_set_cell_text,
+    gr_get_cell_text,
+    gr_set_cell_color,
+    gr_set_cell_enabled,
+    gr_clear_cell_overrides,
+    gr_set_selected_row,
+    gr_get_selected_row,
+    gr_set_selected_cell,
+    gr_get_selected_cell,
+    gr_ensure_row_visible,
+    gr_ensure_cell_visible,
+    gr_set_scroll_x,
+    gr_get_scroll_x,
+    gr_hit_test,
   };
 
 } // namespace macos_host

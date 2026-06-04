@@ -16,6 +16,7 @@
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_compound.h"
 #include "../shared/widget_paint_section.h"
+#include "../shared/widget_paint_grid.h"
 #include "../shared/painter.h"
 #include "../../backends/cg/cg_backend.h"
 
@@ -180,6 +181,420 @@ namespace macos_host {
     if (!wd || !wd->native_control || !items) return 0;
     NSView* anchor = (__bridge NSView*)wd->native_control;
     return run_popup_menu_macos(anchor, local_x, local_y, items);
+  }
+
+  // ------------------------------------------------------------------------
+  // GRID (NEUI_W_GRID) input dispatch. Direct translation of
+  // hosts/win32/widgets.cpp::painted_msg_grid_w32. The visual + model live
+  // in hosts/shared/grid_model.h + widget_paint_grid.h; this only carries
+  // the macOS glue (event -> shared model mutation -> repaint + events).
+  //
+  // The win32 host runs the whole thing from one WndProc switch; AppKit
+  // splits mouse events across mouseDown:/mouseDragged:/mouseUp:/mouseMoved:
+  // /scrollWheel:/keyDown:, so we funnel each through grid_painted_msg_macos
+  // with a small kind tag. macOS coordinates are already logical points (no
+  // phys_to_log conversion); a held-button move arrives as GridMsg::Drag.
+
+  static neui_detail::GridModel& ensure_grid_model_macos(WidgetData& wd)
+  {
+    if (!wd.grid_model)
+      wd.grid_model = std::make_unique<neui_detail::GridModel>();
+    return *wd.grid_model;
+  }
+
+  static void grid_repaint_macos(WidgetData& wd)
+  {
+    if (wd.native_control)
+      [(__bridge NSView*)wd.native_control setNeedsDisplay:YES];
+  }
+
+  // Widget-local logical size from the painted view's bounds.
+  static void grid_widget_size_macos(WidgetData& wd, int* out_w, int* out_h)
+  {
+    *out_w = 0; *out_h = 0;
+    if (!wd.native_control) return;
+    NSSize sz = ((__bridge NSView*)wd.native_control).bounds.size;
+    *out_w = (int)sz.width;
+    *out_h = (int)sz.height;
+  }
+
+  static neui_detail::GridViewport grid_viewport_macos(WidgetData& wd)
+  {
+    auto& m   = ensure_grid_model_macos(wd);
+    auto  cfg = neui_detail::grid_read_config(wd.attrs.get());
+    int   lw = 0, lh = 0;
+    grid_widget_size_macos(wd, &lw, &lh);
+    return neui_detail::grid_compute_viewport(m, lw, lh, cfg.row_h, cfg.header_h);
+  }
+
+  // -------- Event dispatch helpers (mirror the _w32 versions) ------------
+
+  static bool grid_fire_row_selected_macos(WidgetData& wd, int row)
+  {
+    if (!wd.session) return false;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_ROW_SELECTED;
+    ev.data.grid_row.widget.id = wd.widget_id;
+    ev.data.grid_row.row       = row;
+    return wd.session->dispatch_event(&ev);
+  }
+
+  static bool grid_fire_cell_selected_macos(WidgetData& wd, int row, int col)
+  {
+    if (!wd.session) return false;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_CELL_SELECTED;
+    ev.data.grid_cell.widget.id = wd.widget_id;
+    ev.data.grid_cell.row       = row;
+    ev.data.grid_cell.col       = col;
+    return wd.session->dispatch_event(&ev);
+  }
+
+  static bool grid_fire_cell_clicked_macos(WidgetData& wd, int row, int col)
+  {
+    if (!wd.session) return false;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_CELL_CLICKED;
+    ev.data.grid_cell.widget.id = wd.widget_id;
+    ev.data.grid_cell.row       = row;
+    ev.data.grid_cell.col       = col;
+    return wd.session->dispatch_event(&ev);
+  }
+
+  static void grid_fire_row_activated_macos(WidgetData& wd, int row)
+  {
+    if (!wd.session) return;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_ROW_ACTIVATED;
+    ev.data.grid_row.widget.id = wd.widget_id;
+    ev.data.grid_row.row       = row;
+    wd.session->dispatch_event(&ev);
+  }
+
+  static void grid_fire_column_resized_macos(WidgetData& wd, int col,
+                                               int old_w, int new_w)
+  {
+    if (!wd.session) return;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_COLUMN_RESIZED;
+    ev.data.grid_column_resize.widget.id = wd.widget_id;
+    ev.data.grid_column_resize.col       = col;
+    ev.data.grid_column_resize.old_width = old_w;
+    ev.data.grid_column_resize.new_width = new_w;
+    wd.session->dispatch_event(&ev);
+  }
+
+  // Dispatch ladder run after a body-cell click: always update selection,
+  // then ROW_SELECTED -> (cell_focus ? CELL_SELECTED) -> CELL_CLICKED, each
+  // only firing if the prior wasn't consumed.
+  static void grid_click_ladder_macos(WidgetData& wd, int row, int col)
+  {
+    auto& m   = ensure_grid_model_macos(wd);
+    auto  cfg = neui_detail::grid_read_config(wd.attrs.get());
+    m.selected_row = row;
+    if (cfg.cell_focus) m.selected_col = col;
+    if (grid_fire_row_selected_macos(wd, row)) return;
+    if (cfg.cell_focus) {
+      if (grid_fire_cell_selected_macos(wd, row, col)) return;
+    }
+    grid_fire_cell_clicked_macos(wd, row, col);
+  }
+
+  // Funnelled input kind. AppKit hands us one of these per native event.
+  enum class GridMsg { Down, DblClick, Drag, Up, Move, Wheel, Key };
+
+  static void grid_painted_msg_macos(WidgetData& wd, GridMsg kind,
+                                       float lxf, float lyf,
+                                       uint32_t keycode, uint32_t mods,
+                                       int wheel_ticks)
+  {
+    using namespace neui_detail;
+    if (!wd.session) return;
+    auto& m   = ensure_grid_model_macos(wd);
+    auto  cfg = grid_read_config(wd.attrs.get());
+
+    int widget_w = 0, widget_h = 0;
+    grid_widget_size_macos(wd, &widget_w, &widget_h);
+    GridViewport vp = grid_compute_viewport(m, widget_w, widget_h,
+                                              cfg.row_h, cfg.header_h);
+    int lx = (int)lxf;
+    int ly = (int)lyf;
+
+    // Wheel - vertical scroll by N rows. macOS scrollingDeltaY is already
+    // normalised to integer ticks by the caller; positive = swipe-down
+    // (natural scrolling reveals earlier rows), matching win32's `-=`.
+    if (kind == GridMsg::Wheel) {
+      m.scroll_offset_y -= wheel_ticks;
+      grid_clamp_scroll(m, vp, cfg.row_h);
+      grid_repaint_macos(wd);
+      return;
+    }
+
+    if (kind == GridMsg::Key) {
+      int n_rows = (int)m.rows.size();
+      int n_cols = (int)m.columns.size();
+      if (n_rows == 0) return;
+
+      int prev_row = m.selected_row;
+      int prev_col = m.selected_col;
+      int vis = grid_visible_rows(vp, cfg.row_h);
+      if (vis < 1) vis = 1;
+      bool handled = true;
+      switch (keycode) {
+      case NEUI_KEY_UP:
+        if (m.selected_row > 0)        m.selected_row--;
+        else if (m.selected_row < 0)   m.selected_row = 0;
+        break;
+      case NEUI_KEY_DOWN:
+        if (m.selected_row < n_rows - 1) {
+          if (m.selected_row < 0) m.selected_row = 0;
+          else                     m.selected_row++;
+        }
+        break;
+      case NEUI_KEY_PAGEUP:
+        m.selected_row = (m.selected_row < 0)
+          ? 0
+          : (m.selected_row - vis > 0 ? m.selected_row - vis : 0);
+        break;
+      case NEUI_KEY_PAGEDOWN: {
+        int target = (m.selected_row < 0) ? vis : (m.selected_row + vis);
+        if (target > n_rows - 1) target = n_rows - 1;
+        m.selected_row = target;
+        break;
+      }
+      case NEUI_KEY_HOME:
+        if (cfg.cell_focus && !(mods & NEUI_KMOD_CTRL)) {
+          m.selected_col = (n_cols > 0) ? 0 : -1;
+          if (m.selected_row < 0) m.selected_row = 0;
+        } else {
+          m.selected_row = 0;
+          if (cfg.cell_focus) m.selected_col = (n_cols > 0) ? 0 : -1;
+        }
+        break;
+      case NEUI_KEY_END:
+        if (cfg.cell_focus && !(mods & NEUI_KMOD_CTRL)) {
+          m.selected_col = (n_cols > 0) ? n_cols - 1 : -1;
+          if (m.selected_row < 0) m.selected_row = n_rows - 1;
+        } else {
+          m.selected_row = n_rows - 1;
+          if (cfg.cell_focus) m.selected_col = (n_cols > 0) ? n_cols - 1 : -1;
+        }
+        break;
+      case NEUI_KEY_LEFT:
+        if (cfg.cell_focus) {
+          if (m.selected_col > 0) m.selected_col--;
+          else if (m.selected_col < 0 && n_cols > 0) m.selected_col = 0;
+          if (m.selected_row < 0) m.selected_row = 0;
+        } else {
+          m.scroll_offset_x -= grid_horizontal_step_px(m);
+          grid_clamp_scroll(m, vp, cfg.row_h);
+          grid_repaint_macos(wd);
+          return;
+        }
+        break;
+      case NEUI_KEY_RIGHT:
+        if (cfg.cell_focus) {
+          if (m.selected_col < n_cols - 1) {
+            if (m.selected_col < 0) m.selected_col = 0;
+            else                     m.selected_col++;
+          }
+          if (m.selected_row < 0) m.selected_row = 0;
+        } else {
+          m.scroll_offset_x += grid_horizontal_step_px(m);
+          grid_clamp_scroll(m, vp, cfg.row_h);
+          grid_repaint_macos(wd);
+          return;
+        }
+        break;
+      case NEUI_KEY_RETURN: {
+        int r = m.selected_row;
+        if (r < 0) return;
+        grid_fire_row_activated_macos(wd, r);
+        return;
+      }
+      default:
+        handled = false; break;
+      }
+      if (!handled) return;
+      if (cfg.cell_focus && m.selected_col >= 0)
+        grid_ensure_cell_visible(m, vp, cfg.row_h, m.selected_row, m.selected_col);
+      else
+        grid_ensure_row_visible(m, vp, cfg.row_h, m.selected_row);
+      if (m.selected_row != prev_row)
+        grid_fire_row_selected_macos(wd, m.selected_row);
+      if (cfg.cell_focus &&
+          (m.selected_row != prev_row || m.selected_col != prev_col))
+        grid_fire_cell_selected_macos(wd, m.selected_row, m.selected_col);
+      grid_repaint_macos(wd);
+      return;
+    }
+
+    // --- column-resize drag in progress ---
+    if (m.column_resize_col >= 0) {
+      if (kind == GridMsg::Drag) {
+        int dx_log = lx - m.column_resize_start_x;  // both logical points
+        int new_w  = m.column_resize_start_w + dx_log;
+        int min_w  = grid_column_min_width(m, m.column_resize_col,
+                                             cfg.col_min_w_def);
+        if (new_w < min_w) new_w = min_w;
+        if (new_w > 5000)  new_w = 5000;
+        m.columns[(size_t)m.column_resize_col].width = new_w;
+        grid_clamp_scroll(m, vp, cfg.row_h);
+        [[NSCursor resizeLeftRightCursor] set];
+        grid_repaint_macos(wd);
+        return;
+      }
+      if (kind == GridMsg::Up) {
+        int new_w = m.columns[(size_t)m.column_resize_col].width;
+        int col   = m.column_resize_col;
+        int old_w = m.column_resize_old_w;
+        m.column_resize_col = -1;
+        [[NSCursor arrowCursor] set];
+        if (new_w != old_w) grid_fire_column_resized_macos(wd, col, old_w, new_w);
+        grid_repaint_macos(wd);
+        return;
+      }
+      return;
+    }
+
+    // --- vertical scrollbar drag in progress ---
+    if (m.vert_drag.active) {
+      if (kind == GridMsg::Up) { m.vert_drag.active = false; return; }
+      if (kind == GridMsg::Drag) {
+        int vis = grid_visible_rows(vp, cfg.row_h);
+        ScrollbarGeom g = compute_scrollbar(vp.body_h, 0,
+                                             (int)m.rows.size(), vis,
+                                             m.vert_drag.start_position);
+        int rel = ly - vp.body_y;
+        m.scroll_offset_y = scrollbar_drag_apply(m.vert_drag, rel, g,
+                                                  (int)m.rows.size(), vis);
+        grid_clamp_scroll(m, vp, cfg.row_h);
+        grid_repaint_macos(wd);
+        return;
+      }
+      return;
+    }
+
+    // --- horizontal scrollbar drag in progress ---
+    if (m.horz_drag.active) {
+      if (kind == GridMsg::Up) { m.horz_drag.active = false; return; }
+      if (kind == GridMsg::Drag) {
+        int content_w = grid_total_content_width(m);
+        ScrollbarGeom g = compute_scrollbar(vp.body_w, 0,
+                                             content_w, vp.body_w,
+                                             m.horz_drag.start_position);
+        int rel = lx - vp.body_x;
+        m.scroll_offset_x = scrollbar_drag_apply(m.horz_drag, rel, g,
+                                                  content_w, vp.body_w);
+        grid_clamp_scroll(m, vp, cfg.row_h);
+        grid_repaint_macos(wd);
+        return;
+      }
+      return;
+    }
+
+    // --- mouse move: cursor feedback for header divider ---
+    if (kind == GridMsg::Move) {
+      GridHit hit = grid_hit_test(m, vp, cfg.row_h,
+                                   widget_w, widget_h, lx, ly);
+      if (hit.region == GridHitRegion::HeaderDivider)
+        [[NSCursor resizeLeftRightCursor] set];
+      else
+        [[NSCursor arrowCursor] set];
+      return;
+    }
+
+    // --- button down / dbl-click ---
+    if (kind == GridMsg::Down || kind == GridMsg::DblClick) {
+      GridHit hit = grid_hit_test(m, vp, cfg.row_h, widget_w, widget_h, lx, ly);
+      switch (hit.region) {
+      case GridHitRegion::HeaderDivider:
+        if (kind == GridMsg::Down) {
+          m.column_resize_col     = hit.col;
+          m.column_resize_start_x = lx;       // logical points
+          m.column_resize_start_w = m.columns[(size_t)hit.col].width;
+          m.column_resize_old_w   = m.column_resize_start_w;
+          [[NSCursor resizeLeftRightCursor] set];
+        }
+        return;
+      case GridHitRegion::Header:
+        return;
+      case GridHitRegion::VertScrollTrack: {
+        int vis = grid_visible_rows(vp, cfg.row_h);
+        ScrollbarGeom g = compute_scrollbar(vp.body_h, 0,
+                                             (int)m.rows.size(), vis,
+                                             m.scroll_offset_y);
+        int rel = ly - vp.body_y;
+        if (g.visible && rel >= g.thumb_pos && rel < g.thumb_pos + g.thumb_len) {
+          m.vert_drag.active           = true;
+          m.vert_drag.start_axis_coord = rel;
+          m.vert_drag.start_position   = m.scroll_offset_y;
+        } else if (g.visible) {
+          int step = vis > 0 ? vis : 1;
+          if (rel < g.thumb_pos) m.scroll_offset_y -= step;
+          else                   m.scroll_offset_y += step;
+          grid_clamp_scroll(m, vp, cfg.row_h);
+          grid_repaint_macos(wd);
+        }
+        return;
+      }
+      case GridHitRegion::HorzScrollTrack: {
+        int content_w = grid_total_content_width(m);
+        ScrollbarGeom g = compute_scrollbar(vp.body_w, 0,
+                                             content_w, vp.body_w,
+                                             m.scroll_offset_x);
+        int rel = lx - vp.body_x;
+        if (g.visible && rel >= g.thumb_pos && rel < g.thumb_pos + g.thumb_len) {
+          m.horz_drag.active           = true;
+          m.horz_drag.start_axis_coord = rel;
+          m.horz_drag.start_position   = m.scroll_offset_x;
+        } else if (g.visible) {
+          int step = vp.body_w > 0 ? vp.body_w : 60;
+          if (rel < g.thumb_pos) m.scroll_offset_x -= step;
+          else                   m.scroll_offset_x += step;
+          grid_clamp_scroll(m, vp, cfg.row_h);
+          grid_repaint_macos(wd);
+        }
+        return;
+      }
+      case GridHitRegion::Cell: {
+        if (kind == GridMsg::DblClick) {
+          grid_fire_row_activated_macos(wd, hit.row);
+        } else {
+          const GridCellOverride* ov = grid_find_override(m, hit.row, hit.col);
+          bool cell_dis = ov && ov->has_enabled && !ov->enabled;
+          int prev_row = m.selected_row;
+          m.selected_row = hit.row;
+          if (cfg.cell_focus) m.selected_col = hit.col;
+          if (cell_dis) {
+            if (m.selected_row != prev_row)
+              grid_fire_row_selected_macos(wd, hit.row);
+          } else {
+            grid_click_ladder_macos(wd, hit.row, hit.col);
+          }
+        }
+        grid_repaint_macos(wd);
+        return;
+      }
+      case GridHitRegion::BodyEmpty:
+        if (m.selected_row != -1) {
+          m.selected_row = -1;
+          m.selected_col = -1;
+          grid_fire_row_selected_macos(wd, -1);
+          grid_repaint_macos(wd);
+        }
+        return;
+      default:
+        return;
+      }
+    }
+
+    if (kind == GridMsg::Up) {
+      // Stray UP (drag started outside) - reset transient state.
+      m.vert_drag.active = false;
+      m.horz_drag.active = false;
+      return;
+    }
   }
 
 } // namespace macos_host
@@ -374,18 +789,29 @@ static float neui_snap_to_steps(float v, int steps)
 - (BOOL)isOpaque  { return NO; }
 - (BOOL)acceptsFirstMouse:(NSEvent*)event { (void)event; return YES; }
 
-// Only CUSTOMDRAW takes keyboard focus - it forwards keys to the client.
-// KNOB / IMAGE / SECTION don't need key input.
+// CUSTOMDRAW (forwards keys to the client) and GRID (handles arrow / page /
+// home / end / return nav itself) take keyboard focus. KNOB / IMAGE / SECTION
+// don't need key input.
 - (BOOL)acceptsFirstResponder
 {
   auto* wd = macos_host::widget_for_id(widget_id);
-  return wd && wd->type && !strcmp(wd->type, NEUI_W_CUSTOMDRAW);
+  if (!wd || !wd->type) return NO;
+  return !strcmp(wd->type, NEUI_W_CUSTOMDRAW) ||
+         !strcmp(wd->type, NEUI_W_GRID);
 }
 
 - (void)keyDown:(NSEvent*)event
 {
   macos_host::Session* sess = nullptr;
   auto* wd = macos_host::widget_for_id(widget_id, &sess);
+  // GRID owns its keyboard navigation (arrows / page / home / end / return).
+  if (wd && sess && wd->enabled && wd->type && !strcmp(wd->type, NEUI_W_GRID)) {
+    uint32_t kc   = neui_detail::mac_keycode_to_neui(event.keyCode);
+    uint32_t mods = neui_detail::mac_modifiers_to_neui(event.modifierFlags);
+    macos_host::grid_painted_msg_macos(*wd, macos_host::GridMsg::Key,
+                                        0, 0, kc, mods, 0);
+    return;
+  }
   bool cd = wd && sess && wd->emit_events && wd->type
             && !strcmp(wd->type, NEUI_W_CUSTOMDRAW);
   if (!cd) { [super keyDown:event]; return; }
@@ -594,6 +1020,16 @@ static float neui_snap_to_steps(float v, int steps)
 
     if (backend->pop_clip)      backend->pop_clip(render_ctx);
     if (backend->pop_transform) backend->pop_transform(render_ctx);
+  } else if (wd->type && !strcmp(wd->type, NEUI_W_GRID)) {
+    // GRID: the shared paint pass owns the whole surface (it issues an
+    // unconditional body fill_rect, so the begin_frame clear above is just
+    // overpainted). Mirror of paint_grid_w32.
+    auto& m = macos_host::ensure_grid_model_macos(*wd);
+    bool focused = (self.window.isKeyWindow
+                     && self.window.firstResponder == self);
+    neui_detail::paint_grid(backend, render_ctx,
+                             0.0f, 0.0f, (float)sz.width, (float)sz.height,
+                             m, wd->attrs.get(), focused);
   } else if (is_section) {
     // SECTION body + title chip. The shared helper leaves the band's
     // non-chip area UNPAINTED (transparent clear above) so the parent's
@@ -699,6 +1135,16 @@ static float neui_snap_to_steps(float v, int steps)
          && !strcmp(wd->type, NEUI_W_CUSTOMDRAW);
 }
 
+// Returns the WidgetData* if this view is an enabled GRID (so it should run
+// the shared grid input dispatch), nullptr otherwise.
+- (macos_host::WidgetData*)gridInputWidget
+{
+  auto* wd = macos_host::widget_for_id(widget_id);
+  if (wd && wd->enabled && wd->type && !strcmp(wd->type, NEUI_W_GRID))
+    return wd;
+  return nullptr;
+}
+
 - (NSPoint)localPoint:(NSEvent*)event
 {
   // Widget-local, flipped (top-left origin) - matches the WIDGET_PAINT origin.
@@ -757,6 +1203,12 @@ static float neui_snap_to_steps(float v, int steps)
 }
 - (void)mouseMoved:(NSEvent*)event
 {
+  if (auto* gwd = [self gridInputWidget]) {
+    NSPoint p = [self localPoint:event];
+    macos_host::grid_painted_msg_macos(*gwd, macos_host::GridMsg::Move,
+                                        (float)p.x, (float)p.y, 0, 0, 0);
+    return;
+  }
   if (![self customDrawWantsInput]) { [super mouseMoved:event]; return; }
   [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event] buttonmap:0];
 }
@@ -791,6 +1243,16 @@ static float neui_snap_to_steps(float v, int steps)
     drag_continuous = [self knobValue];
     return;
   }
+  if (auto* gwd = [self gridInputWidget]) {
+    // Grab keyboard focus so arrow/page nav routes to keyDown:, then run the
+    // shared grid mouse dispatch (selection ladder, scrollbar / divider drag).
+    [self.window makeFirstResponder:self];
+    NSPoint p = [self localPoint:event];
+    macos_host::GridMsg k = (event.clickCount >= 2)
+      ? macos_host::GridMsg::DblClick : macos_host::GridMsg::Down;
+    macos_host::grid_painted_msg_macos(*gwd, k, (float)p.x, (float)p.y, 0, 0, 0);
+    return;
+  }
   if ([self customDrawWantsInput]) {
     // Grab keyboard focus so subsequent keyDown / keyUp route here (and the
     // paint pass reports focused = YES). NSView doesn't auto-focus on click.
@@ -809,6 +1271,12 @@ static float neui_snap_to_steps(float v, int steps)
 
 - (void)mouseDragged:(NSEvent*)event
 {
+  if (auto* gwd = [self gridInputWidget]) {
+    NSPoint p = [self localPoint:event];
+    macos_host::grid_painted_msg_macos(*gwd, macos_host::GridMsg::Drag,
+                                        (float)p.x, (float)p.y, 0, 0, 0);
+    return;
+  }
   if ([self isKnob]) {
     if (!dragging) { [super mouseDragged:event]; return; }
     NSPoint p = [self localPointForKnobEvent:event];
@@ -840,6 +1308,11 @@ static float neui_snap_to_steps(float v, int steps)
 
 - (void)mouseUp:(NSEvent*)event
 {
+  if (auto* gwd = [self gridInputWidget]) {
+    macos_host::grid_painted_msg_macos(*gwd, macos_host::GridMsg::Up,
+                                        0, 0, 0, 0, 0);
+    return;
+  }
   if ([self isKnob]) { dragging = false; return; }
   if ([self customDrawWantsInput]) {
     if (auto* wd = macos_host::widget_for_id(widget_id); wd && wd->pressed) {
@@ -885,8 +1358,9 @@ static float neui_snap_to_steps(float v, int steps)
 - (void)scrollWheel:(NSEvent*)event
 {
   bool wants_knob = [self isKnob];
-  bool wants_cd   = !wants_knob && [self customDrawWantsInput];
-  if (!wants_knob && !wants_cd) { [super scrollWheel:event]; return; }
+  bool wants_grid = !wants_knob && ([self gridInputWidget] != nullptr);
+  bool wants_cd   = !wants_knob && !wants_grid && [self customDrawWantsInput];
+  if (!wants_knob && !wants_grid && !wants_cd) { [super scrollWheel:event]; return; }
 
   // Drop momentum-phase events. Inertial follow-through after a flick keeps
   // streaming for hundreds of ms; on a parameter knob that feels like the
@@ -923,6 +1397,15 @@ static float neui_snap_to_steps(float v, int steps)
     int   mag_ticks = (ticks > 0) ? ticks : -ticks;
     [self setKnobValueFromUser:[self knobValue]
                                 + sign * magnitude * (float)mag_ticks];
+    return;
+  }
+
+  if (wants_grid) {
+    // One accumulated tick = one row of vertical scroll (win32 WHEEL_DELTA
+    // notch model). grid_painted_msg_macos applies the natural-scroll sign.
+    if (auto* gwd = [self gridInputWidget])
+      macos_host::grid_painted_msg_macos(*gwd, macos_host::GridMsg::Wheel,
+                                          0, 0, 0, 0, ticks);
     return;
   }
 
@@ -2306,6 +2789,7 @@ namespace macos_host
     } else if (!strcmp(w.type, NEUI_W_IMAGE)
             || !strcmp(w.type, NEUI_W_KNOB)
             || !strcmp(w.type, NEUI_W_CUSTOMDRAW)
+            || !strcmp(w.type, NEUI_W_GRID)
             || !strcmp(w.type, NEUI_W_SECTION)) {
       // SECTION uses a painted view for the body fill + title chip; child
       // widgets nest into it via the recursive descendant walker (see
@@ -2372,7 +2856,8 @@ namespace macos_host
       !strcmp(t, NEUI_W_MULTILINE)|| !strcmp(t, NEUI_W_CHECKBOX)  ||
       !strcmp(t, NEUI_W_CHECKBOX3)|| !strcmp(t, NEUI_W_LISTBOX)   ||
       !strcmp(t, NEUI_W_COMBOBOX) || !strcmp(t, NEUI_W_TREEVIEW)  ||
-      !strcmp(t, NEUI_W_SLIDER)   || !strcmp(t, NEUI_W_CUSTOMDRAW);
+      !strcmp(t, NEUI_W_SLIDER)   || !strcmp(t, NEUI_W_CUSTOMDRAW)||
+      !strcmp(t, NEUI_W_GRID);
     if (!is_stop) return nil;
     id obj = (__bridge id)w.native_control;
     if (![obj isKindOfClass:[NSView class]]) return nil;
