@@ -4960,13 +4960,16 @@ namespace xpl_host
       return false;
     }
 
-    // --- wheel: vertical scroll by N rows ---
+    // --- wheel: vertical scroll by N rows (STEPPED mode) ---
+    // SMOOTH mode is handled in the platform layer (platform_win32.cpp /
+    // platform_macos.mm) where the raw NSEvent / WM_MOUSEWHEEL info hasn't
+    // been quantized to lines yet; by the time it reaches here the only
+    // option is row-stepping. Convention from LISTBOX / TREEVIEW: one wheel
+    // notch == one row.
     if (event->type == NEUI_EVENT_MOUSE_WHEEL) {
       int delta = event->data.wheel.delta;
       if (delta == 0) return false;
-      // Convention from LISTBOX / TREEVIEW: one wheel notch == one row.
-      model.scroll_offset_y -= delta;
-      grid_clamp_scroll(model, vp, cfg.row_h);
+      grid_scroll_step_rows(model, vp, cfg.row_h, -delta);
       repaint();
       return true;
     }

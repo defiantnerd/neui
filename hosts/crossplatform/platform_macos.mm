@@ -355,6 +355,31 @@ void wake_app_event_pump()
     auto cfg = grid_read_config(hw->attrs.get());
     GridViewport vp = grid_compute_viewport(*model, hw->width, hw->height,
                                              cfg.row_h, cfg.header_h);
+
+    // macOS default = SMOOTH; the attr can flip it to STEPPED for a Win32-like
+    // coarse row scroll.
+    if (!grid_smooth_enabled(cfg, /*platform_default_smooth=*/true)) {
+      // Drop momentum events so a flick doesn't keep stepping after release.
+      if (event.momentumPhase != NSEventPhaseNone) return;
+      CGFloat raw = event.scrollingDeltaY;
+      if (raw == 0) return;
+      // Same accumulator math as the line-delta path below, but applied to
+      // the grid model rather than dispatched as MOUSE_WHEEL.
+      int delta;
+      if (event.hasPreciseScrollingDeltas) {
+        delta = (int)(raw / 16.0);
+        if (delta == 0 && raw != 0.0) delta = (raw > 0) ? 1 : -1;
+      } else {
+        delta = (int)raw;
+        if (delta == 0 && raw != 0.0) delta = (raw > 0) ? 1 : -1;
+      }
+      if (delta == 0) return;
+      [self gridStopBounce];
+      if (grid_scroll_step_rows(*model, vp, cfg.row_h, -delta))
+        [self setNeedsDisplay:YES];
+      return;
+    }
+
     GridWheelInput in;
     in.precise        = event.hasPreciseScrollingDeltas;
     double dy         = (double)event.scrollingDeltaY;

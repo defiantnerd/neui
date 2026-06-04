@@ -50,7 +50,21 @@ namespace neui_detail
     bool     cell_focus      = false;
     uint32_t bg_argb         = 0;
     bool     bg_explicit     = false;
+    // Wheel kinetics selector. 0 (NEUI_GRID_SCROLL_PLATFORM) = host picks the
+    // natural feel (macOS = smooth, Win32 / null = stepped). 1 = forced STEPPED,
+    // 2 = forced SMOOTH. Anything else is treated as PLATFORM.
+    int      scroll_mode     = 0;
   };
+
+  // Resolve the effective scroll mode for the host. Each host passes its own
+  // `platform_default_smooth` constant; PLATFORM (or unknown values) defer to it.
+  inline bool grid_smooth_enabled(const GridPaintConfig& cfg,
+                                    bool platform_default_smooth)
+  {
+    if (cfg.scroll_mode == NEUI_GRID_SCROLL_SMOOTH)  return true;
+    if (cfg.scroll_mode == NEUI_GRID_SCROLL_STEPPED) return false;
+    return platform_default_smooth;
+  }
 
   struct GridColumn {
     std::string  header;
@@ -473,6 +487,31 @@ namespace neui_detail
     return avg > 0 ? avg : GRID_LEFT_RIGHT_STEP_PX_FALLBACK;
   }
 
+  // ---- Stepped wheel path -------------------------------------------------
+  // Row-quantized vertical scroll. The wheel delta is interpreted as a whole
+  // number of rows (positive = scroll down / content moves up, matching the
+  // wheel-line convention on both Win32 and macOS) and applied to the row-
+  // indexed offset. Clamps hard at top / bottom and resets the smooth-scroll
+  // kinetics so a later switch back to SMOOTH starts cleanly. Returns true
+  // when the position changed.
+  inline bool grid_scroll_step_rows(GridModel& m, const GridViewport& vp,
+                                     int row_h, int row_step_signed)
+  {
+    if (row_h <= 0) row_h = 1;
+    int before_y  = m.scroll_offset_y;
+    int before_px = m.scroll_px_offset;
+    m.scroll_offset_y += row_step_signed;
+    m.scroll_px_offset = 0;
+    grid_clamp_scroll(m, vp, row_h);
+    // Resync the kinetics integrator so a later SMOOTH wheel event picks up
+    // from the now-committed position instead of springing back to wherever
+    // the integrator last was.
+    m.scroll_kin.raw_px         = (double)(m.scroll_offset_y * row_h);
+    m.scroll_kin.last_commit_px = m.scroll_offset_y * row_h;
+    m.scroll_kin.suppress_momentum = true;
+    return m.scroll_offset_y != before_y || m.scroll_px_offset != before_px;
+  }
+
   // ---- Smooth scroll + elastic rubber-band --------------------------------
   // Pixel-precise vertical scrolling with inertial momentum + elastic
   // overscroll. Shared by every host that can feed rich wheel data (macOS
@@ -665,6 +704,8 @@ namespace neui_detail
     c.focus_row_color = (uint32_t)bag->get_int(NEUI_ATTR_GRID_FOCUS_ROW_COLOR, 0);
     c.show_focus_row  = bag->get_int(NEUI_ATTR_GRID_SHOW_FOCUS_ROW, 1) != 0;
     c.cell_focus      = bag->get_int(NEUI_ATTR_GRID_CELL_FOCUS, 0) != 0;
+    c.scroll_mode     = bag->get_int(NEUI_ATTR_GRID_SCROLL_MODE,
+                                       NEUI_GRID_SCROLL_PLATFORM);
     if (bag->has(NEUI_ATTR_BACKGROUND)) {
       c.bg_argb     = (uint32_t)bag->get_int(NEUI_ATTR_BACKGROUND, 0);
       c.bg_explicit = true;

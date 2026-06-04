@@ -76,6 +76,25 @@ extern "C" {
 // Live - flipping the attr updates the cursor + next paint.
 #define NEUI_ATTR_GRID_CELL_FOCUS "neui.attr.grid.cell_focus"
 
+// int (neui_grid_scroll_mode_t): wheel kinetics selector.
+//   NEUI_GRID_SCROLL_PLATFORM (0, default) - host picks the natural feel.
+//                              macOS: SMOOTH. Win32 / null: STEPPED.
+//   NEUI_GRID_SCROLL_STEPPED  (1) - row-quantized wheel, hard-clamp at
+//                              top / bottom, no momentum, no rubber-band.
+//   NEUI_GRID_SCROLL_SMOOTH   (2) - pixel-precise sub-row motion with
+//                              WebKit-style elastic overscroll and a
+//                              60 Hz spring-back to the boundary.
+// Live - the next wheel tick uses the new mode. Flipping from SMOOTH to
+// STEPPED while a spring-back is animating cancels the animation and
+// snaps to the nearest row.
+#define NEUI_ATTR_GRID_SCROLL_MODE "neui.attr.grid.scroll_mode"
+
+typedef enum neui_grid_scroll_mode {
+  NEUI_GRID_SCROLL_PLATFORM = 0,
+  NEUI_GRID_SCROLL_STEPPED  = 1,
+  NEUI_GRID_SCROLL_SMOOTH   = 2,
+} neui_grid_scroll_mode_t;
+
 // Event payload structs (neui_event_grid_row_t, neui_event_grid_cell_t,
 // neui_event_grid_column_resize_t) and event type constants
 // (NEUI_EVENT_GRID_ROW_SELECTED, _CELL_SELECTED, _ROW_ACTIVATED,

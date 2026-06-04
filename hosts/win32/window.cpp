@@ -350,6 +350,12 @@ namespace win32_host
       // to the client first; this runs after.
       if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
       return 0;
+    case WM_TIMER:
+      // Grid uses this to drive the 60 Hz spring-back animation when smooth
+      // scroll is active. Forward so the widget's painted_msg_fn can step
+      // the animation and decide whether to kill the timer.
+      if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
+      return 0;
     case WM_GETDLGCODE:
       // Claim arrow keys so the dialog manager (IsDialogMessage in the
       // message pump) doesn't reinterpret them as focus navigation. Tab /
@@ -396,6 +402,9 @@ namespace win32_host
       return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
     case WM_DESTROY: {
+      // Give the grid (or any other painted widget) a chance to clean up
+      // timers / transient state before the HWND goes away.
+      if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
       if (wd && backend && wd->paint_ctx) {
         // Drop any asset-manager GPU bitmaps keyed on this ctx before
         // tearing it down (CUSTOMDRAW assets create per-ctx uploads on

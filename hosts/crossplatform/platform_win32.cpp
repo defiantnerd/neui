@@ -43,7 +43,16 @@ namespace xpl_host
     uint32_t widget_index;
     bool     tracking_mouse    = false;  // true while TrackMouseEvent is active
     WCHAR    pending_surrogate = 0;      // high surrogate waiting for its low pair
+    // SMOOTH-scroll grid bounce timer: when a grid overscrolls in SMOOTH mode
+    // we SetTimer the FRAME's HWND (grids on xpl have no HWND of their own)
+    // and track which grid is bouncing so the WM_TIMER tick can find it.
+    // Only one grid per frame is allowed to bounce at a time; a second
+    // overscrolling grid replaces the first (rare edge case).
+    uint32_t bouncing_grid_index = 0;
   };
+
+  // Timer ID for the grid spring-back animation on the frame's HWND.
+  static constexpr UINT_PTR XPL_GRID_BOUNCE_TIMER_ID = 0x6E78676B;  // 'nxgk'
 
   // UTF-8 -> UTF-16 helper used by menubar platform functions.
   static std::wstring to_wide(const char* utf8)
@@ -790,6 +799,30 @@ namespace xpl_host
       auto* hw = wud->session->get_widget(hit);
       if (!hw) break;
 
+      // GRID + SMOOTH mode: feed the raw pixel-precise delta into the shared
+      // kinetics so Win32 gets the same rubber-band + spring-back behaviour
+      // as macOS. The line-quantized `delta` above is dropped on this path
+      // since the kinetics integrator owns its own pixel accumulator.
+      if (neui_detail::GridModel* model = hw->grid_model_ptr()) {
+        using namespace neui_detail;
+        auto cfg = grid_read_config(hw->attrs.get());
+        if (grid_smooth_enabled(cfg, /*platform_default_smooth=*/false)) {
+          GridViewport vp = grid_compute_viewport(*model, hw->width, hw->height,
+                                                    cfg.row_h, cfg.header_h);
+          double notches = (double)raw_delta / (double)WHEEL_DELTA;
+          GridWheelInput in;
+          in.precise  = true;                 // delta_px is already in px
+          in.delta_px = notches * (double)scroll_lines * (double)cfg.row_h;
+          GridWheelAction act = grid_scroll_wheel(*model, vp, cfg.row_h, in);
+          if (act.changed) InvalidateRect(hwnd, nullptr, FALSE);
+          if (act.start_bounce) {
+            wud->bouncing_grid_index = hit;
+            SetTimer(hwnd, XPL_GRID_BOUNCE_TIMER_ID, 16, nullptr);
+          }
+          return 0;
+        }
+      }
+
       neui_event_t ev = {};
       ev.type              = NEUI_EVENT_MOUSE_WHEEL;
       ev.data.wheel.widget = { hw->widget_id };
@@ -797,6 +830,32 @@ namespace xpl_host
       ev.data.wheel.y      = static_cast<int>(ly);
       ev.data.wheel.delta  = delta;
       wud->session->dispatch_mouse_event(hit, &ev);
+      return 0;
+    }
+
+    case WM_TIMER: {
+      if (wParam != XPL_GRID_BOUNCE_TIMER_ID) break;
+      auto* wud = get_wud(hwnd);
+      if (!wud) { KillTimer(hwnd, XPL_GRID_BOUNCE_TIMER_ID); return 0; }
+      auto* hw = (wud->bouncing_grid_index != 0)
+                   ? wud->session->get_widget(wud->bouncing_grid_index)
+                   : nullptr;
+      neui_detail::GridModel* model = hw ? hw->grid_model_ptr() : nullptr;
+      if (!model) {
+        wud->bouncing_grid_index = 0;
+        KillTimer(hwnd, XPL_GRID_BOUNCE_TIMER_ID);
+        return 0;
+      }
+      using namespace neui_detail;
+      auto cfg = grid_read_config(hw->attrs.get());
+      GridViewport vp = grid_compute_viewport(*model, hw->width, hw->height,
+                                                cfg.row_h, cfg.header_h);
+      bool more = grid_scroll_bounce_step(*model, vp, cfg.row_h);
+      InvalidateRect(hwnd, nullptr, FALSE);
+      if (!more) {
+        wud->bouncing_grid_index = 0;
+        KillTimer(hwnd, XPL_GRID_BOUNCE_TIMER_ID);
+      }
       return 0;
     }
 

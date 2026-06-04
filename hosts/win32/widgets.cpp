@@ -4014,6 +4014,11 @@ namespace win32_host
     return *wd.grid_model;
   }
 
+  // 60 Hz spring-back timer for SMOOTH-mode grid scroll. Per-HWND so different
+  // grids tick independently; chosen well outside any other timer ID space we
+  // might use later (none today).
+  static constexpr UINT_PTR GRID_BOUNCE_TIMER_ID = 0x6E677562;  // 'ngub'
+
   static neui_detail::GridModel* grid_model_w32(WidgetData& wd)
   {
     return wd.grid_model.get();
@@ -4142,6 +4147,13 @@ namespace win32_host
     auto& m = ensure_grid_model_w32(wd);
     auto cfg = grid_read_config(wd.attrs.get());
 
+    // Tear-down: cancel any running bounce timer so the HWND-keyed slot stays
+    // clean across slot reuse.
+    if (msg == WM_DESTROY) {
+      if (wd.hwnd) KillTimer(wd.hwnd, GRID_BOUNCE_TIMER_ID);
+      return;
+    }
+
     UINT dpi = wd.session->get_dpi_for_widget(wd.index);
     if (dpi == 0) dpi = 96;
 
@@ -4151,14 +4163,48 @@ namespace win32_host
     GridViewport vp = grid_compute_viewport(m, widget_w, widget_h,
                                               cfg.row_h, cfg.header_h);
 
-    // Wheel - vertical scroll by N rows.
+    // Spring-back tick (SMOOTH mode). KillTimer is idempotent so an out-of-
+    // order WM_TIMER after the bounce ended is harmless.
+    if (msg == WM_TIMER && wParam == GRID_BOUNCE_TIMER_ID) {
+      bool more = grid_scroll_bounce_step(m, vp, cfg.row_h);
+      grid_repaint_w32(wd);
+      if (!more && wd.hwnd) KillTimer(wd.hwnd, GRID_BOUNCE_TIMER_ID);
+      return;
+    }
+
+    // Wheel - branch on the effective scroll mode. STEPPED (Win32 default) is
+    // the historical row-quantized scroll; SMOOTH opts into the shared pixel-
+    // precise kinetics with rubber-band overshoot + 60 Hz spring-back.
     if (msg == WM_MOUSEWHEEL) {
       short delta_raw = (short)HIWORD(wParam);
-      int   delta_lines = delta_raw / WHEEL_DELTA;
-      if (delta_lines == 0) delta_lines = (delta_raw > 0) ? 1 : -1;
-      m.scroll_offset_y -= delta_lines;
-      grid_clamp_scroll(m, vp, cfg.row_h);
-      grid_repaint_w32(wd);
+      if (!grid_smooth_enabled(cfg, /*platform_default_smooth=*/false)) {
+        int delta_lines = delta_raw / WHEEL_DELTA;
+        if (delta_lines == 0) delta_lines = (delta_raw > 0) ? 1 : -1;
+        if (wd.hwnd) KillTimer(wd.hwnd, GRID_BOUNCE_TIMER_ID);
+        grid_scroll_step_rows(m, vp, cfg.row_h, -delta_lines);
+        grid_repaint_w32(wd);
+        return;
+      }
+      // SMOOTH: feed the kinetics as a synthetic single-shot precise wheel.
+      // Win32 WM_MOUSEWHEEL has no gesture phase or momentum, so each notch
+      // looks like a stand-alone gesture - the rubber-band math reads raw_px
+      // overshoot directly from the accumulator and the WM_TIMER springs it
+      // back. SPI_GETWHEELSCROLLLINES is read once per event to honour the
+      // user's wheel-speed setting.
+      UINT lines_per_notch = 3;
+      SystemParametersInfo(SPI_GETWHEELSCROLLLINES, 0, &lines_per_notch, 0);
+      if (lines_per_notch == 0) lines_per_notch = 3;
+      double notches = (double)delta_raw / (double)WHEEL_DELTA;
+      GridWheelInput in;
+      in.precise        = true;   // already in px; do not re-multiply by row_h
+      in.delta_px       = notches * (double)lines_per_notch * (double)cfg.row_h;
+      // No phase / momentum on Win32; leave the bools false. grid_scroll_wheel
+      // treats the kinetics as already-released so an overscroll immediately
+      // triggers a spring-back.
+      GridWheelAction act = grid_scroll_wheel(m, vp, cfg.row_h, in);
+      if (act.changed) grid_repaint_w32(wd);
+      if (wd.hwnd && act.start_bounce)
+        SetTimer(wd.hwnd, GRID_BOUNCE_TIMER_ID, 16, nullptr);
       return;
     }
 

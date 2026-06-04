@@ -54,12 +54,34 @@ struct AppState {
   uint32_t del_row_btn   = 0;
   uint32_t clear_btn     = 0;
   uint32_t toggle_btn    = 0;
+  uint32_t scroll_chk    = 0;
   uint32_t focus_chk     = 0;
 
   int next_row_serial = 0;
   bool cell_focus     = false;
   bool show_focus_row = true;
 };
+
+// CHECKBOX3 state -> scroll mode. The tri-state checkbox cycles
+// unchecked -> checked -> indeterminate on each click, which the user reads
+// as off / on / platform-default.
+static int scroll_mode_from_check(neui_check_state_t s)
+{
+  switch (s) {
+    case NEUI_CHECK_CHECKED:       return NEUI_GRID_SCROLL_SMOOTH;
+    case NEUI_CHECK_UNCHECKED:     return NEUI_GRID_SCROLL_STEPPED;
+    default:                       return NEUI_GRID_SCROLL_PLATFORM;
+  }
+}
+
+static const char* scroll_mode_label(int mode)
+{
+  switch (mode) {
+    case NEUI_GRID_SCROLL_STEPPED: return "stepped";
+    case NEUI_GRID_SCROLL_SMOOTH:  return "smooth";
+    default:                       return "platform default";
+  }
+}
 
 static void set_status(AppState* app, const char* fmt, ...)
 {
@@ -189,6 +211,14 @@ static bool on_event(void* token, neui_event_t* ev)
       set_status(app, "show_focus_row = %d", app->show_focus_row ? 1 : 0);
       return true;
     }
+    if (w == app->scroll_chk) {
+      int mode = scroll_mode_from_check(ev->data.checkbox.state);
+      app->attrs->set_int(app->session, { app->grid_id },
+                            NEUI_ATTR_GRID_SCROLL_MODE, mode);
+      app->widgets->invalidate(app->session, { app->grid_id });
+      set_status(app, "Scroll: %s", scroll_mode_label(mode));
+      return true;
+    }
     return false;
   }
 
@@ -274,6 +304,15 @@ int main(int /*argc*/, char** /*argv*/)
   app.widgets->set_text(app.session, chk, "show_focus_row");
   app.widgets->set_check(app.session, chk, NEUI_CHECK_CHECKED);
   app.focus_chk = chk.id;
+  x += 160 + 6;
+
+  // Tri-state scroll-mode picker. Unchecked = stepped, checked = smooth,
+  // indeterminate = platform default (Win32 = stepped, macOS = smooth).
+  auto schk = app.widgets->create(app.session, win, NEUI_W_CHECKBOX3,
+                                    x, y + 5, 180, 22, &app);
+  app.widgets->set_text(app.session, schk, "smooth scroll");
+  app.widgets->set_check(app.session, schk, NEUI_CHECK_INDETERMINATE);
+  app.scroll_chk = schk.id;
 
   // Grid takes the bulk of the window.
   auto g = app.widgets->create(app.session, win, NEUI_W_GRID,

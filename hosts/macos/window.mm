@@ -1421,6 +1421,30 @@ static float neui_snap_to_steps(float v, int steps)
   auto  cfg = neui_detail::grid_read_config(wd->attrs.get());
   auto  vp  = macos_host::grid_viewport_macos(*wd);
 
+  // macOS default = SMOOTH (the natural trackpad feel); client can flip the
+  // attr to STEPPED for a Win32-like coarse row scroll.
+  if (!neui_detail::grid_smooth_enabled(cfg, /*platform_default_smooth=*/true)) {
+    // Drop momentum events so a flick doesn't keep stepping after release.
+    if (event.momentumPhase != NSEventPhaseNone) return;
+    CGFloat raw = event.scrollingDeltaY;
+    if (raw == 0) return;
+    // Match the knob / customdraw accumulator: precise deltas in points -> tick;
+    // classic mouse wheel already arrives ~1.0 per notch.
+    CGFloat scaled = event.hasPreciseScrollingDeltas
+      ? (raw / NEUI_WHEEL_PRECISE_POINTS_PER_TICK)
+      : raw;
+    wheel_accum_y += scaled;
+    int ticks = (int)wheel_accum_y;
+    if (ticks == 0) return;
+    wheel_accum_y -= (CGFloat)ticks;
+    // Wheel-up (positive scrollingDeltaY) = content moves down = scroll fewer
+    // rows = negative row_step. Mirror the SMOOTH path's natural-scroll sign.
+    [self gridStopBounce];
+    if (neui_detail::grid_scroll_step_rows(m, vp, cfg.row_h, -ticks))
+      [self setNeedsDisplay:YES];
+    return;
+  }
+
   neui_detail::GridWheelInput in;
   // Precise (trackpad / Magic Mouse) deltas are in points; legacy mouse-wheel
   // deltas are in lines (one line == one row).
