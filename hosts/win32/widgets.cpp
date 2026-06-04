@@ -4443,8 +4443,7 @@ namespace win32_host
       case GridHitRegion::Header:
         // Header click cycles the sort for a sortable column. Shift = add /
         // cycle a secondary level; plain click replaces the stack.
-        if (msg == WM_LBUTTONDOWN && hit.col >= 0 && hit.col < (int)m.columns.size()
-            && m.columns[(size_t)hit.col].sortable) {
+        if (msg == WM_LBUTTONDOWN && grid_header_click_allowed(m, hit.col)) {
           bool shift = (wParam & MK_SHIFT) != 0;
           neui_grid_sort_dir_t new_dir =
             grid_apply_header_click(m, hit.col, shift);

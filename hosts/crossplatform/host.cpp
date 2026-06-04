@@ -5014,8 +5014,7 @@ namespace xpl_host
         // Sort cycle on a sortable column header. Shift+click = add /
         // cycle a secondary level; plain click replaces the stack.
         if (event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN &&
-            hit.col >= 0 && hit.col < (int)model.columns.size() &&
-            model.columns[(size_t)hit.col].sortable) {
+            grid_header_click_allowed(model, hit.col)) {
           bool shift = (event->data.mouse.buttonmap & NEUI_MK_SHIFT) != 0;
           neui_grid_sort_dir_t new_dir =
             grid_apply_header_click(model, hit.col, shift);

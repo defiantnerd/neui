@@ -540,9 +540,7 @@ namespace macos_host {
       case GridHitRegion::Header:
         // Sort cycle on a sortable column header. Shift+click = add /
         // cycle a secondary level; plain click replaces the stack.
-        if (kind == GridMsg::Down &&
-            hit.col >= 0 && hit.col < (int)m.columns.size() &&
-            m.columns[(size_t)hit.col].sortable) {
+        if (kind == GridMsg::Down && grid_header_click_allowed(m, hit.col)) {
           bool shift = (mods & NEUI_KMOD_SHIFT) != 0;
           neui_grid_sort_dir_t new_dir =
             grid_apply_header_click(m, hit.col, shift);

@@ -923,6 +923,17 @@ namespace neui_detail
     return -1;
   }
 
+  // Gate for the user-driven header-click sort path: a click only cycles the
+  // sort when `col` is a valid, sortable column. Every host's header-click
+  // branch routes through this so the non-sortable rule can't drift between
+  // platforms. Programmatic grid_set_sort / grid_add_sort intentionally do NOT
+  // consult this - they bypass the `sortable` flag by design.
+  inline bool grid_header_click_allowed(const GridModel& m, int col)
+  {
+    if (col < 0 || col >= (int)m.columns.size()) return false;
+    return m.columns[(size_t)col].sortable;
+  }
+
   // Apply a header click. shift_held selects Shift+click semantics:
   //   - Plain click on the ONLY sorted column: cycle asc -> desc -> empty.
   //   - Plain click otherwise: replace stack with [{col, ASC}].

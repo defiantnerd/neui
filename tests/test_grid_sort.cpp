@@ -339,3 +339,53 @@ TEST_CASE("logical_to_visual is the inverse of visual_to_logical")
   CHECK_EQ(grid_logical_to_visual(m, 2), 1);
   CHECK_EQ(grid_logical_to_visual(m, 0), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Sortable gate (shared helper that every host's header-click branch uses)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("grid_header_click_allowed: gates on the column's sortable flag")
+{
+  GridModel m = make_sorted_grid(2, {{"a", "x"}, {"b", "y"}});
+  // Default: every column is sortable.
+  CHECK(grid_header_click_allowed(m, 0));
+  CHECK(grid_header_click_allowed(m, 1));
+
+  // Opting a column out blocks the header-click path for that column only.
+  m.columns[1].sortable = false;
+  CHECK(grid_header_click_allowed(m, 0));
+  CHECK_FALSE(grid_header_click_allowed(m, 1));
+}
+
+TEST_CASE("grid_header_click_allowed: rejects out-of-range columns")
+{
+  GridModel m = make_sorted_grid(2, {{"a", "x"}});
+  CHECK_FALSE(grid_header_click_allowed(m, -1));
+  CHECK_FALSE(grid_header_click_allowed(m, 2));
+  CHECK_FALSE(grid_header_click_allowed(m, 99));
+}
+
+TEST_CASE("sortable gate blocks the click path but NOT programmatic set/add_sort")
+{
+  GridModel m = make_sorted_grid(1, {{"c"}, {"a"}, {"b"}});
+  m.columns[0].sortable = false;
+
+  // The host glue would skip grid_apply_header_click for this column...
+  CHECK_FALSE(grid_header_click_allowed(m, 0));
+
+  // ...but programmatic sorting bypasses the gate by design.
+  grid_set_sort(m, 0, NEUI_GRID_SORT_ASC);
+  CHECK_EQ(grid_sort_stack_find(m, 0), 0);
+  auto asc = col0_in_visual_order(m);
+  CHECK_EQ(asc[0], "a");
+  CHECK_EQ(asc[1], "b");
+  CHECK_EQ(asc[2], "c");
+
+  grid_clear_sort(m);
+  grid_add_sort(m, 0, NEUI_GRID_SORT_DESC);
+  CHECK_EQ(grid_sort_stack_find(m, 0), 0);
+  auto desc = col0_in_visual_order(m);
+  CHECK_EQ(desc[0], "c");
+  CHECK_EQ(desc[1], "b");
+  CHECK_EQ(desc[2], "a");
+}
