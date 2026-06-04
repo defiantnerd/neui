@@ -95,6 +95,32 @@ typedef enum neui_grid_scroll_mode {
   NEUI_GRID_SCROLL_SMOOTH   = 2,
 } neui_grid_scroll_mode_t;
 
+// ---- Sorting -------------------------------------------------------------
+
+// Direction of a single sort level. NEUI_GRID_SORT_NONE used by set_sort to
+// clear the stack; never appears inside an active level.
+typedef enum neui_grid_sort_dir {
+  NEUI_GRID_SORT_NONE = 0,
+  NEUI_GRID_SORT_ASC  = 1,
+  NEUI_GRID_SORT_DESC = 2,
+} neui_grid_sort_dir_t;
+
+// How a column's cell strings are compared.
+//   STRING  - lexicographic (strcmp).
+//   INT     - parse via strtoll; unparseable values sort last on ASC.
+//   FLOAT   - parse via strtod; same fallback policy.
+//   NATURAL - alternating digit / non-digit runs ("Item 2" < "Item 10").
+typedef enum neui_grid_sort_kind {
+  NEUI_GRID_SORT_STRING  = 0,
+  NEUI_GRID_SORT_INT     = 1,
+  NEUI_GRID_SORT_FLOAT   = 2,
+  NEUI_GRID_SORT_NATURAL = 3,
+} neui_grid_sort_kind_t;
+
+// Soft cap on the number of active sort levels. A Shift+click that would
+// exceed this drops the oldest level (FIFO eviction) before pushing.
+#define NEUI_GRID_SORT_MAX_LEVELS 8
+
 // Event payload structs (neui_event_grid_row_t, neui_event_grid_cell_t,
 // neui_event_grid_column_resize_t) and event type constants
 // (NEUI_EVENT_GRID_ROW_SELECTED, _CELL_SELECTED, _ROW_ACTIVATED,
@@ -212,10 +238,77 @@ typedef struct neui_grid_api {
   // Resolve a widget-local point to (row, col). Returns 1 if the point
   // lies inside a body cell (out_row and out_col populated), 0 otherwise
   // (header band, scrollbar gutter, empty area below the last row).
-  // Either out pointer may be NULL.
+  // Either out pointer may be NULL. Row is LOGICAL (data-record index),
+  // not the sort-order position - use logical_to_visual_row to translate.
   int (NEUI_ABI *hit_test)(neui_session_t session, neui_widget_t grid,
                             int local_x, int local_y,
                             int* out_row, int* out_col);
+
+  // -------- Sorting -----------------------------------------------------
+  // Multi-column sort with a per-column on / off switch and per-column
+  // compare kind. The active sort is a stack of (col, dir) levels; level 0
+  // is primary. User-driven header clicks fire GRID_SORT_CHANGED;
+  // programmatic mutators below stay silent (mirrors COLUMN_RESIZED /
+  // VALUE_CHANGED semantics).
+  //
+  // All click events (GRID_ROW_SELECTED / _CELL_SELECTED / _CELL_CLICKED /
+  // _ROW_ACTIVATED) continue to deliver LOGICAL row indices - the same
+  // ones set_cell_text / cell_overrides / set_selected_row use. Call
+  // logical_to_visual_row(grid, row) to learn the row's position in the
+  // current sort order.
+
+  // Mark a column sortable / not-sortable. Default true. Non-sortable
+  // columns ignore header clicks but still accept programmatic set_sort /
+  // add_sort.
+  void (NEUI_ABI *set_column_sortable)  (neui_session_t session, neui_widget_t grid,
+                                          int col, bool sortable);
+
+  // Per-column compare kind. Default NEUI_GRID_SORT_STRING.
+  void (NEUI_ABI *set_column_sort_kind) (neui_session_t session, neui_widget_t grid,
+                                          int col, neui_grid_sort_kind_t kind);
+
+  // Replace the sort stack with a single level (col, dir). Pass dir =
+  // NEUI_GRID_SORT_NONE to clear the stack entirely (equivalent to
+  // clear_sort).
+  void (NEUI_ABI *set_sort)             (neui_session_t session, neui_widget_t grid,
+                                          int col, neui_grid_sort_dir_t dir);
+
+  // Push or update a level on the sort stack (Shift+click path).
+  //   - If `col` is already in the stack, that level's direction is set to
+  //     `dir`. Passing NEUI_GRID_SORT_NONE removes that level.
+  //   - Otherwise the new (col, dir) is appended. If the stack is already
+  //     at NEUI_GRID_SORT_MAX_LEVELS, the oldest level is evicted first.
+  //   - NEUI_GRID_SORT_NONE on a column not in the stack is a no-op.
+  void (NEUI_ABI *add_sort)             (neui_session_t session, neui_widget_t grid,
+                                          int col, neui_grid_sort_dir_t dir);
+
+  void (NEUI_ABI *clear_sort)           (neui_session_t session, neui_widget_t grid);
+
+  // Inspect the active sort stack. get_sort_count returns the number of
+  // levels (0 = unsorted). get_sort_level fills out_col + out_dir for the
+  // given level (0 = primary); out_col is set to -1 and out_dir to
+  // NEUI_GRID_SORT_NONE on out-of-range.
+  int  (NEUI_ABI *get_sort_count)       (neui_session_t session, neui_widget_t grid);
+  void (NEUI_ABI *get_sort_level)       (neui_session_t session, neui_widget_t grid,
+                                          int level,
+                                          int* out_col,
+                                          neui_grid_sort_dir_t* out_dir);
+
+  // Translate between logical (data-identity, stable) and visual (current
+  // sort position) row indices.
+  //   logical_to_visual_row -> the row's POSITION IN THE CURRENT SORT
+  //     ORDER (0 = topmost displayed row). Call on the row delivered by
+  //     any GRID_*_CLICKED / _SELECTED event to learn where the user saw
+  //     it on screen.
+  //   visual_to_logical_row -> the data-record (logical) row at sort
+  //     position v.
+  // Both return -1 on out-of-range. When no sort is active the mapping is
+  // identity. Both rebuild the sort if it is dirty, so they are safe to
+  // call right after add_row / set_cell_text.
+  int (NEUI_ABI *logical_to_visual_row) (neui_session_t session, neui_widget_t grid,
+                                          int logical_row);
+  int (NEUI_ABI *visual_to_logical_row) (neui_session_t session, neui_widget_t grid,
+                                          int visual_row);
 } neui_grid_api_t;
 
 #ifdef __cplusplus

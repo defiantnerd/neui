@@ -58,6 +58,77 @@ namespace neui_detail
     return with_alpha(color(ColorRole::accent), GRID_FOCUS_ROW_ALPHA);
   }
 
+  // Glyph metrics for the sort indicator in the header band. The glyph is a
+  // filled triangle drawn through the path API; the multi-level digit is a
+  // small text run rendered next to it. Tight fits when the column is wide
+  // enough; otherwise we just clip the trailing text and trust the existing
+  // header-cell clip.
+  inline constexpr float GRID_SORT_GLYPH_W   = 7.0f;
+  inline constexpr float GRID_SORT_GLYPH_H   = 5.0f;
+  inline constexpr float GRID_SORT_GLYPH_GAP = 4.0f;   // gap between text and glyph
+  inline constexpr float GRID_SORT_DIGIT_GAP = 2.0f;   // gap between glyph and digit
+
+  // Draw the sort indicator (triangle + optional level digit) right-aligned
+  // inside the header cell. `cx` is the cell's logical left edge AFTER the
+  // horizontal scroll has been applied. Returns the px width consumed so the
+  // caller can shrink the header text rect.
+  inline float grid_paint_sort_indicator(neui_render_backend_t* backend,
+                                          neui_render_ctx_t      ctx,
+                                          float                  cx,
+                                          float                  cy,
+                                          float                  cw,
+                                          float                  ch,
+                                          float                  font_size,
+                                          neui_grid_sort_dir_t   dir,
+                                          int                    level,
+                                          int                    total_levels,
+                                          uint32_t               color_argb)
+  {
+    if (!backend || !backend->fill_path) return 0.0f;
+    // Digit only when there are multiple levels (the common single-sort case
+    // stays clean).
+    char digit_buf[4] = { 0 };
+    float digit_w = 0.0f;
+    if (total_levels > 1) {
+      // level is 0-based; show 1-based to the user. Clamp to 9 (single digit).
+      int shown = level + 1;
+      if (shown > 9) shown = 9;
+      digit_buf[0] = (char)('0' + shown);
+      if (backend->measure_text)
+        digit_w = backend->measure_text(ctx, digit_buf, -1, font_size);
+    }
+    float total_w = GRID_SORT_GLYPH_W +
+                     (digit_w > 0.0f ? (GRID_SORT_DIGIT_GAP + digit_w) : 0.0f);
+    // Right-align inside the cell, with the same header-pad inset.
+    float right = cx + cw - (float)GRID_HEADER_PAD_X;
+    float gx    = right - total_w;
+    // Vertically centre the glyph against the header band.
+    float gy    = cy + (ch - GRID_SORT_GLYPH_H) * 0.5f;
+
+    backend->begin_path(ctx);
+    if (dir == NEUI_GRID_SORT_ASC) {
+      // Triangle pointing UP (apex at top).
+      backend->move_to(ctx, gx + GRID_SORT_GLYPH_W * 0.5f, gy);
+      backend->line_to(ctx, gx + GRID_SORT_GLYPH_W,        gy + GRID_SORT_GLYPH_H);
+      backend->line_to(ctx, gx,                            gy + GRID_SORT_GLYPH_H);
+    } else {
+      // Triangle pointing DOWN (apex at bottom).
+      backend->move_to(ctx, gx,                            gy);
+      backend->line_to(ctx, gx + GRID_SORT_GLYPH_W,        gy);
+      backend->line_to(ctx, gx + GRID_SORT_GLYPH_W * 0.5f, gy + GRID_SORT_GLYPH_H);
+    }
+    backend->close_path(ctx);
+    backend->fill_path(ctx, color_argb);
+
+    if (digit_w > 0.0f && backend->draw_text) {
+      backend->draw_text(ctx,
+                          gx + GRID_SORT_GLYPH_W + GRID_SORT_DIGIT_GAP, cy,
+                          digit_w, ch,
+                          digit_buf, font_size, color_argb);
+    }
+    return total_w + GRID_SORT_GLYPH_GAP;  // consumed width including trailing gap
+  }
+
   // Main paint entry. (fx, fy) is the widget's top-left in the
   // renderer's coordinate space (host-relative on Win32 native, since
   // each painted control has its own ctx; frame-relative + translated
@@ -66,18 +137,24 @@ namespace neui_detail
   //
   // is_focused is whether the widget itself has logical focus (drives
   // the focused-vs-unfocused border + selected-row tint).
+  //
+  // Takes the model by mutable reference so a sort_dirty flag (set by row
+  // mutations / sort changes between paints) can rebuild display_order
+  // lazily here.
   inline void paint_grid(neui_render_backend_t* backend,
                           neui_render_ctx_t      ctx,
                           float                  fx,
                           float                  fy,
                           float                  fw,
                           float                  fh,
-                          const GridModel&       m,
+                          GridModel&             m,
                           const AttrBag*         bag,
                           bool                   is_focused)
   {
     if (!backend || !ctx) return;
     if (fw <= 0 || fh <= 0) return;
+
+    grid_ensure_sort_clean(m);
 
     GridPaintConfig cfg = grid_read_config(bag);
     EffectiveFont   ef  = read_widget_font(bag, GRID_DEFAULT_FONT_SIZE);
@@ -120,20 +197,28 @@ namespace neui_detail
       if (last > (int)m.rows.size()) last = (int)m.rows.size();
 
       // --- Focus-row highlight (under the cell text) ---
-      if (cfg.show_focus_row && m.selected_row >= first && m.selected_row < last) {
+      // selected_row is a LOGICAL index; translate to visual position so
+      // the band paints under whatever row the user sees as selected after
+      // sorting. Identity mapping when no sort is active.
+      int selected_visual = grid_logical_to_visual(m, m.selected_row);
+      if (cfg.show_focus_row && selected_visual >= first && selected_visual < last) {
         float ry = fy + (float)vp.body_y - pxoff +
-                    (float)((m.selected_row - first) * cfg.row_h);
+                    (float)((selected_visual - first) * cfg.row_h);
         backend->fill_rect(ctx, fx + (float)vp.body_x, ry,
                             (float)vp.body_w, (float)cfg.row_h,
                             focus_band);
       }
 
       // --- Cell text per visible row ---
+      // The loop walks VISUAL row indices; grid_visual_to_logical resolves
+      // each to the logical row whose data we paint (identity when unsorted).
       int n_cols = (int)m.columns.size();
-      for (int row = first; row < last; ++row) {
+      for (int vrow = first; vrow < last; ++vrow) {
+        int row = grid_visual_to_logical(m, vrow);
+        if (row < 0) continue;
         const auto& rd = m.rows[(size_t)row];
         float ry = fy + (float)vp.body_y - pxoff +
-                    (float)((row - first) * cfg.row_h);
+                    (float)((vrow - first) * cfg.row_h);
         float cx_running = fx + (float)vp.body_x - (float)m.scroll_offset_x;
         for (int col = 0; col < n_cols; ++col) {
           float cw = (float)m.columns[(size_t)col].width;
@@ -219,12 +304,15 @@ namespace neui_detail
       }
 
       // --- Cell-focus outline (cell_focus mode only) -------------------
+      // selected_row is logical; translate to its visual position so the
+      // outline tracks the row the user sees after sorting.
       if (cfg.cell_focus && is_focused &&
           m.selected_row >= 0 && m.selected_col >= 0 &&
           m.selected_col < n_cols) {
-        if (m.selected_row >= first && m.selected_row < last) {
+        int sel_v = selected_visual;
+        if (sel_v >= first && sel_v < last) {
           float ry = fy + (float)vp.body_y - pxoff +
-                      (float)((m.selected_row - first) * cfg.row_h);
+                      (float)((sel_v - first) * cfg.row_h);
           int col_left_content = grid_column_left(m, m.selected_col);
           int col_w            = m.columns[(size_t)m.selected_col].width;
           float cx_scr = fx + (float)vp.body_x +
@@ -249,17 +337,35 @@ namespace neui_detail
 
       if (backend->push_clip && hw > 0.0f) {
         backend->push_clip(ctx, hx, hy, hw, hh);
-        int n_cols = (int)m.columns.size();
+        int n_cols       = (int)m.columns.size();
+        int total_levels = (int)m.sort_stack.size();
+        const uint32_t glyph_primary   = color(ColorRole::accent);
+        const uint32_t glyph_secondary = color(ColorRole::text_secondary);
         float cx_running = hx - (float)m.scroll_offset_x;
         for (int col = 0; col < n_cols; ++col) {
           float cw = (float)m.columns[(size_t)col].width;
           if (cx_running + cw < hx) { cx_running += cw; continue; }
           if (cx_running > hx + hw) break;
+
+          // Sort indicator (drawn first so the header text rect can shrink
+          // around it; without this a long header would draw over the glyph).
+          float indicator_w = 0.0f;
+          int   level       = grid_sort_stack_find(m, col);
+          if (level >= 0) {
+            uint32_t col_glyph = (level == 0) ? glyph_primary : glyph_secondary;
+            indicator_w = grid_paint_sort_indicator(
+              backend, ctx, cx_running, hy, cw, hh, ef.size,
+              m.sort_stack[(size_t)level].dir,
+              level, total_levels, col_glyph);
+          }
+
           const auto& h = m.columns[(size_t)col].header;
           if (!h.empty() && backend->draw_text) {
+            float text_w = cw - 2.0f * (float)GRID_HEADER_PAD_X - indicator_w;
+            if (text_w < 0.0f) text_w = 0.0f;
             backend->draw_text(ctx,
                                 cx_running + (float)GRID_HEADER_PAD_X, hy,
-                                cw - 2.0f * (float)GRID_HEADER_PAD_X, hh,
+                                text_w, hh,
                                 h.c_str(), ef.size, text_color);
           }
           // Column divider line on the right edge of this column.

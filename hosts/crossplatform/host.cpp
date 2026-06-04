@@ -4721,6 +4721,18 @@ namespace xpl_host
     g.session->dispatch_event(&ev);
   }
 
+  static void xpl_grid_fire_sort_changed(GridWidget& g, int col,
+                                            neui_grid_sort_dir_t dir)
+  {
+    if (!g.session) return;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_SORT_CHANGED;
+    ev.data.grid_sort.widget.id = g.widget_id;
+    ev.data.grid_sort.col       = col;
+    ev.data.grid_sort.dir       = (int)dir;
+    g.session->dispatch_event(&ev);
+  }
+
   // Run the dispatch ladder for a body click: ROW_SELECTED -> (cell_focus ?
   // CELL_SELECTED : skip) -> CELL_CLICKED, stopping early at the first
   // consumer. Always updates the widget's selected_row / selected_col.
@@ -4755,6 +4767,11 @@ namespace xpl_host
     int n_cols = (int)model.columns.size();
     if (n_rows == 0) return false;
 
+    // Nav walks visual order so Up / Down etc. move the cursor through the
+    // rows the user sees after sorting. grid_set_selected_visual writes the
+    // corresponding logical row into selected_row.
+    grid_ensure_sort_clean(model);
+
     int prev_row = model.selected_row;
     int prev_col = model.selected_col;
     int vis = grid_visible_rows(vp, cfg.row_h);
@@ -4762,41 +4779,41 @@ namespace xpl_host
     bool handled = true;
 
     switch (keycode) {
-    case NEUI_KEY_UP:
-      if (model.selected_row > 0)        model.selected_row--;
-      else if (model.selected_row < 0)   model.selected_row = 0;
+    case NEUI_KEY_UP: {
+      int v = grid_selected_visual(model);
+      grid_set_selected_visual(model, (v < 0) ? 0 : (v - 1));
       break;
-    case NEUI_KEY_DOWN:
-      if (model.selected_row < n_rows - 1) {
-        if (model.selected_row < 0) model.selected_row = 0;
-        else                         model.selected_row++;
-      }
+    }
+    case NEUI_KEY_DOWN: {
+      int v = grid_selected_visual(model);
+      grid_set_selected_visual(model, (v < 0) ? 0 : (v + 1));
       break;
-    case NEUI_KEY_PAGEUP:
-      model.selected_row = (model.selected_row < 0)
-        ? 0
-        : std::max(0, model.selected_row - vis);
+    }
+    case NEUI_KEY_PAGEUP: {
+      int v = grid_selected_visual(model);
+      grid_set_selected_visual(model, (v < 0) ? 0 : (v - vis));
       break;
-    case NEUI_KEY_PAGEDOWN:
-      model.selected_row = (model.selected_row < 0)
-        ? std::min(n_rows - 1, vis)
-        : std::min(n_rows - 1, model.selected_row + vis);
+    }
+    case NEUI_KEY_PAGEDOWN: {
+      int v = grid_selected_visual(model);
+      grid_set_selected_visual(model, (v < 0) ? vis : (v + vis));
       break;
+    }
     case NEUI_KEY_HOME:
       if (cfg.cell_focus && !(modifiers & NEUI_KMOD_CTRL)) {
         model.selected_col = (n_cols > 0) ? 0 : -1;
-        if (model.selected_row < 0) model.selected_row = 0;
+        if (model.selected_row < 0) grid_set_selected_visual(model, 0);
       } else {
-        model.selected_row = 0;
+        grid_set_selected_visual(model, 0);
         if (cfg.cell_focus) model.selected_col = (n_cols > 0) ? 0 : -1;
       }
       break;
     case NEUI_KEY_END:
       if (cfg.cell_focus && !(modifiers & NEUI_KMOD_CTRL)) {
         model.selected_col = (n_cols > 0) ? n_cols - 1 : -1;
-        if (model.selected_row < 0) model.selected_row = n_rows - 1;
+        if (model.selected_row < 0) grid_set_selected_visual(model, n_rows - 1);
       } else {
-        model.selected_row = n_rows - 1;
+        grid_set_selected_visual(model, n_rows - 1);
         if (cfg.cell_focus) model.selected_col = (n_cols > 0) ? n_cols - 1 : -1;
       }
       break;
@@ -4978,6 +4995,8 @@ namespace xpl_host
     if (event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN ||
         event->type == NEUI_EVENT_MOUSE_BUTTON_DBLCLICK)
     {
+      // hit-test reads display_order, rebuild it first if dirty.
+      grid_ensure_sort_clean(model);
       GridHit hit = grid_hit_test(model, vp, cfg.row_h,
                                     width, height, lx, ly);
       switch (hit.region) {
@@ -4992,7 +5011,17 @@ namespace xpl_host
         }
         return true;
       case GridHitRegion::Header:
-        // Reserved for column-header click semantics (sort etc).
+        // Sort cycle on a sortable column header. Shift+click = add /
+        // cycle a secondary level; plain click replaces the stack.
+        if (event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN &&
+            hit.col >= 0 && hit.col < (int)model.columns.size() &&
+            model.columns[(size_t)hit.col].sortable) {
+          bool shift = (event->data.mouse.buttonmap & NEUI_MK_SHIFT) != 0;
+          neui_grid_sort_dir_t new_dir =
+            grid_apply_header_click(model, hit.col, shift);
+          repaint();
+          xpl_grid_fire_sort_changed(*this, hit.col, new_dir);
+        }
         return true;
       case GridHitRegion::VertScrollTrack: {
         int vis = grid_visible_rows(vp, cfg.row_h);

@@ -61,6 +61,7 @@ extern "C" {
     NEUI_EVENT_GRID_ROW_ACTIVATED       = DEF_GRID_EVENT(3),  // grid: dbl-click / Enter on a row
     NEUI_EVENT_GRID_CELL_CLICKED        = DEF_GRID_EVENT(4),  // grid: raw "click at (row, col)" fallback - only fires if the high-level events above weren't consumed by the client
     NEUI_EVENT_GRID_COLUMN_RESIZED      = DEF_GRID_EVENT(5),  // grid: user-driven column-divider drag released
+    NEUI_EVENT_GRID_SORT_CHANGED        = DEF_GRID_EVENT(6),  // grid: user-driven header click changed the sort stack
 
     NEUI_EVENT_CUSTOM                   = 0x1ffff,
   } neui_event_type_t;
@@ -224,6 +225,19 @@ extern "C" {
     int           new_width;
   } neui_event_grid_column_resize_t;
 
+  // Grid sort-changed event - fires after a user-driven header click that
+  // mutates the sort stack (or removes a level). Carries the column that
+  // was clicked and its new direction in the stack; clients that need the
+  // full stack call grid->get_sort_count + grid->get_sort_level.
+  // Programmatic set_sort / add_sort / clear_sort do NOT fire this.
+  // dir == NEUI_GRID_SORT_NONE means the level was just removed.
+  typedef struct neui_event_grid_sort
+  {
+    neui_widget_t widget;
+    int           col;
+    int           dir;       // neui_grid_sort_dir_t
+  } neui_event_grid_sort_t;
+
   // Forward-declarations for the curated paint surface. Clients that
   // handle NEUI_EVENT_WIDGET_PAINT include <neui/d/painter.h> (or just
   // <neui/neui.h>) to call painter_api->* functions on the handle.
@@ -273,6 +287,7 @@ extern "C" {
       neui_event_grid_row_t           grid_row;
       neui_event_grid_cell_t          grid_cell;
       neui_event_grid_column_resize_t grid_column_resize;
+      neui_event_grid_sort_t          grid_sort;
     } data;
 
     // more event data can be added here

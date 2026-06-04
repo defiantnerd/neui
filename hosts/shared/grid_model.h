@@ -37,6 +37,15 @@ namespace neui_detail
 
   enum class GridColAlign : uint8_t { Left = 0, Center = 1, Right = 2 };
 
+  // Forward declarations for the sort helpers - grid_hit_test and
+  // grid_ensure_row_visible call them but the bodies live further down in
+  // this header (the sort engine block) so the inline definitions are below
+  // their callers. The bodies stay inline; this is a pure ordering fix.
+  struct GridModel;
+  inline void grid_ensure_sort_clean(GridModel& m);
+  inline int  grid_visual_to_logical(const GridModel& m, int vi);
+  inline int  grid_logical_to_visual(const GridModel& m, int li);
+
   // Runtime configuration resolved from the widget's AttrBag once per
   // paint / per dispatch pass. The fields mirror the well-known GRID
   // attrs but the struct is what hot paint / event code reads (one attr
@@ -71,6 +80,18 @@ namespace neui_detail
     int          width      = GRID_DEFAULT_NEW_COLUMN_W;
     int          min_width  = 0;    // 0 = use grid default
     GridColAlign align      = GridColAlign::Left;
+    // Sorting. `sortable` gates user-driven header clicks (default true);
+    // programmatic set_sort / add_sort always work. `sort_kind` selects how
+    // the cell strings in this column are compared.
+    bool                  sortable  = true;
+    neui_grid_sort_kind_t sort_kind = NEUI_GRID_SORT_STRING;
+  };
+
+  // One level in a multi-column sort stack. dir is always ASC or DESC inside
+  // the stack; NONE only appears in API calls and means "remove this level".
+  struct GridSortLevel {
+    int                  col;
+    neui_grid_sort_dir_t dir;
   };
 
   // Per-cell sparse override. Key in the owning map is (row << 32) | col.
@@ -143,6 +164,19 @@ namespace neui_detail
     // Smooth-scroll / rubber-band kinetics (see GridScrollKinetics). Used by
     // the macOS hosts; inert elsewhere.
     GridScrollKinetics scroll_kin;
+
+    // Multi-column sort. `sort_stack` is the active stack (level 0 = primary);
+    // empty == unsorted (identity mapping). `display_order` maps visual row
+    // index -> logical row index when a sort is active; empty when no sort
+    // (so the existing paint / hit-test fast path stays unchanged).
+    // `logical_to_visual` is the cached inverse, used by selection paint and
+    // by the public logical_to_visual_row API. `sort_dirty` flips on any
+    // mutation that could invalidate display_order; grid_ensure_sort_clean
+    // rebuilds before paint / hit-test / public translation queries read it.
+    std::vector<GridSortLevel> sort_stack;
+    std::vector<int>           display_order;
+    std::vector<int>           logical_to_visual;
+    bool                       sort_dirty = false;
   };
 
   // ---- Cell-override key helpers ------------------------------------------
@@ -388,11 +422,20 @@ namespace neui_detail
       // Fold in the fine pixel offset (content shifted up by scroll_px_offset)
       // so a partially-scrolled / overscrolled row maps to the right index.
       int content_y = local_y + m.scroll_px_offset;
-      int row = (row_h > 0) ? (m.scroll_offset_y + (content_y >= 0
-                                ? content_y / row_h
-                                : -((-content_y + row_h - 1) / row_h)))
-                            : m.scroll_offset_y;
-      if (row < 0 || row >= (int)m.rows.size()) {
+      // Compute the VISUAL row first (position in the displayed list), then
+      // translate to logical via display_order so callers always see logical
+      // row indices. Callers are responsible for calling grid_ensure_sort_clean
+      // before grid_hit_test so display_order is up-to-date.
+      int vrow = (row_h > 0) ? (m.scroll_offset_y + (content_y >= 0
+                                  ? content_y / row_h
+                                  : -((-content_y + row_h - 1) / row_h)))
+                              : m.scroll_offset_y;
+      if (vrow < 0 || vrow >= (int)m.rows.size()) {
+        hit.region = GridHitRegion::BodyEmpty;
+        return hit;
+      }
+      int row = grid_visual_to_logical(m, vrow);
+      if (row < 0) {
         hit.region = GridHitRegion::BodyEmpty;
         return hit;
       }
@@ -445,7 +488,10 @@ namespace neui_detail
     if (m.scroll_offset_x < 0)     m.scroll_offset_x = 0;
   }
 
-  // Ensure the selected row is fully visible after a cursor move.
+  // Ensure the selected row is fully visible after a cursor move. `row` is
+  // LOGICAL (the public API contract); the function translates to its current
+  // sort-order position before clamping scroll_offset_y, so a sorted grid
+  // scrolls to the row the user would see in the sorted view.
   inline void grid_ensure_row_visible(GridModel& m,
                                        const GridViewport& vp, int row_h,
                                        int row)
@@ -453,10 +499,13 @@ namespace neui_detail
     if (row < 0) return;
     int vis = grid_visible_rows(vp, row_h);
     if (vis <= 0) return;
-    if (row < m.scroll_offset_y)
-      m.scroll_offset_y = row;
-    else if (row >= m.scroll_offset_y + vis)
-      m.scroll_offset_y = row - vis + 1;
+    grid_ensure_sort_clean(m);
+    int vrow = grid_logical_to_visual(m, row);
+    if (vrow < 0) return;
+    if (vrow < m.scroll_offset_y)
+      m.scroll_offset_y = vrow;
+    else if (vrow >= m.scroll_offset_y + vis)
+      m.scroll_offset_y = vrow - vis + 1;
     grid_clamp_scroll(m, vp, row_h);
   }
 
@@ -683,6 +732,308 @@ namespace neui_detail
     k.raw_px += d * GRID_SCROLL_BOUNCE_LERP;
     grid_scroll_commit(m, vp, row_h);
     return true;
+  }
+
+  // ---- Sort engine --------------------------------------------------------
+  // Multi-column sort over the row table. Public API row indices stay
+  // LOGICAL; display_order provides the visual ordering. Comparator chain
+  // walks sort_stack; std::stable_sort gives free tie-breaking by insertion
+  // order so the result is deterministic.
+
+  // Compare two cell strings under the given sort kind. Returns negative /
+  // zero / positive like strcmp. Unparseable INT / FLOAT values group at one
+  // end (negative numbers / negative compare against "real" values), so the
+  // ASC caller naturally sorts them last by negating.
+  inline int grid_compare_cells(const std::string& a, const std::string& b,
+                                  neui_grid_sort_kind_t kind)
+  {
+    switch (kind) {
+    case NEUI_GRID_SORT_INT: {
+      const char* sa = a.c_str();
+      const char* sb = b.c_str();
+      char* ea = nullptr;
+      char* eb = nullptr;
+      long long va = std::strtoll(sa, &ea, 10);
+      long long vb = std::strtoll(sb, &eb, 10);
+      bool ok_a = (ea != sa);
+      bool ok_b = (eb != sb);
+      if (ok_a && ok_b) return (va < vb) ? -1 : (va > vb) ? 1 : 0;
+      // Unparseable values sort last on ASC: parsed < unparsed.
+      if (ok_a && !ok_b) return -1;
+      if (!ok_a && ok_b) return 1;
+      return std::strcmp(sa, sb);  // both unparseable - lexicographic
+    }
+    case NEUI_GRID_SORT_FLOAT: {
+      const char* sa = a.c_str();
+      const char* sb = b.c_str();
+      char* ea = nullptr;
+      char* eb = nullptr;
+      double va = std::strtod(sa, &ea);
+      double vb = std::strtod(sb, &eb);
+      bool ok_a = (ea != sa);
+      bool ok_b = (eb != sb);
+      if (ok_a && ok_b) return (va < vb) ? -1 : (va > vb) ? 1 : 0;
+      if (ok_a && !ok_b) return -1;
+      if (!ok_a && ok_b) return 1;
+      return std::strcmp(sa, sb);
+    }
+    case NEUI_GRID_SORT_NATURAL: {
+      // Walk alternating digit / non-digit runs. Digit runs compared
+      // numerically (with length tie-break for leading-zero stability),
+      // non-digit runs lexicographically. Pure-ASCII; UTF-8 bytes outside
+      // the digit class compare byte-wise.
+      const unsigned char* pa = (const unsigned char*)a.c_str();
+      const unsigned char* pb = (const unsigned char*)b.c_str();
+      while (*pa && *pb) {
+        bool da = (*pa >= '0' && *pa <= '9');
+        bool db = (*pb >= '0' && *pb <= '9');
+        if (da && db) {
+          const unsigned char* sa = pa;
+          const unsigned char* sb = pb;
+          while (*pa >= '0' && *pa <= '9') ++pa;
+          while (*pb >= '0' && *pb <= '9') ++pb;
+          // Strip leading zeros for the numeric compare; remember original
+          // lengths so a tied magnitude breaks on raw length (so "010" sorts
+          // after "10" stably).
+          const unsigned char* za = sa; while (za < pa && *za == '0') ++za;
+          const unsigned char* zb = sb; while (zb < pb && *zb == '0') ++zb;
+          ptrdiff_t la = pa - za;
+          ptrdiff_t lb = pb - zb;
+          if (la != lb) return (la < lb) ? -1 : 1;
+          while (za < pa) {
+            if (*za != *zb) return (*za < *zb) ? -1 : 1;
+            ++za; ++zb;
+          }
+          ptrdiff_t orig_a = pa - sa;
+          ptrdiff_t orig_b = pb - sb;
+          if (orig_a != orig_b) return (orig_a < orig_b) ? -1 : 1;
+          continue;
+        }
+        if (da != db) {
+          // A digit run sorts before / after a non-digit run consistently;
+          // pick digits-first so "Item 2" precedes "Item B".
+          return da ? -1 : 1;
+        }
+        if (*pa != *pb) return (*pa < *pb) ? -1 : 1;
+        ++pa; ++pb;
+      }
+      if (*pa) return 1;
+      if (*pb) return -1;
+      return 0;
+    }
+    case NEUI_GRID_SORT_STRING:
+    default:
+      return std::strcmp(a.c_str(), b.c_str());
+    }
+  }
+
+  // Rebuild display_order + logical_to_visual from the current sort_stack.
+  // Empty stack -> empty vectors (identity mapping). Stable across equal
+  // keys. Clears sort_dirty.
+  inline void grid_rebuild_display_order(GridModel& m)
+  {
+    m.sort_dirty = false;
+    if (m.sort_stack.empty()) {
+      m.display_order.clear();
+      m.logical_to_visual.clear();
+      return;
+    }
+    int n = (int)m.rows.size();
+    m.display_order.resize((size_t)n);
+    for (int i = 0; i < n; ++i) m.display_order[(size_t)i] = i;
+    auto& stack = m.sort_stack;
+    auto& cols  = m.columns;
+    auto& rows  = m.rows;
+    std::stable_sort(m.display_order.begin(), m.display_order.end(),
+      [&](int a, int b) -> bool {
+        for (const auto& lvl : stack) {
+          int c = lvl.col;
+          if (c < 0 || c >= (int)cols.size()) continue;
+          const std::string& ca = (c < (int)rows[(size_t)a].cells.size())
+                                    ? rows[(size_t)a].cells[(size_t)c]
+                                    : std::string();
+          const std::string& cb = (c < (int)rows[(size_t)b].cells.size())
+                                    ? rows[(size_t)b].cells[(size_t)c]
+                                    : std::string();
+          int cmp = grid_compare_cells(ca, cb, cols[(size_t)c].sort_kind);
+          if (cmp != 0) {
+            return (lvl.dir == NEUI_GRID_SORT_ASC) ? (cmp < 0) : (cmp > 0);
+          }
+        }
+        return false;  // equal under the whole stack - stable_sort preserves order
+      });
+    m.logical_to_visual.assign((size_t)n, -1);
+    for (int v = 0; v < n; ++v)
+      m.logical_to_visual[(size_t)m.display_order[(size_t)v]] = v;
+  }
+
+  // Rebuild display_order if needed. Cheap when clean; the public
+  // logical_to_visual / paint / hit-test paths all call this before reading
+  // the order so callers don't have to track sort_dirty themselves.
+  inline void grid_ensure_sort_clean(GridModel& m)
+  {
+    if (m.sort_dirty) grid_rebuild_display_order(m);
+  }
+
+  // Visual row -> logical row. Identity when no sort is active.
+  inline int grid_visual_to_logical(const GridModel& m, int vi)
+  {
+    if (m.display_order.empty()) return vi;
+    if (vi < 0 || vi >= (int)m.display_order.size()) return -1;
+    return m.display_order[(size_t)vi];
+  }
+
+  // Logical row -> visual row. Identity when no sort is active.
+  inline int grid_logical_to_visual(const GridModel& m, int li)
+  {
+    if (m.logical_to_visual.empty()) return li;
+    if (li < 0 || li >= (int)m.logical_to_visual.size()) return -1;
+    return m.logical_to_visual[(size_t)li];
+  }
+
+  // Keyboard nav helpers. Per-host code routes Up / Down / PgUp / PgDn /
+  // Home / End / Ctrl+Home / Ctrl+End through these so navigation operates
+  // on VISUAL order (matching what the user sees) while selected_row stays
+  // a stable logical index.
+
+  // Current sort-position of selected_row, or -1 if no selection.
+  inline int grid_selected_visual(const GridModel& m)
+  {
+    return grid_logical_to_visual(m, m.selected_row);
+  }
+
+  // Snap selected_row to the logical row at the given visual position,
+  // clamping the visual position to [0, n_rows-1]. No-op on an empty grid
+  // (selected_row -> -1). Does NOT fire events or touch scroll - the caller
+  // owns those.
+  inline void grid_set_selected_visual(GridModel& m, int vpos)
+  {
+    int n = (int)m.rows.size();
+    if (n <= 0) { m.selected_row = -1; return; }
+    if (vpos < 0) vpos = 0;
+    if (vpos >= n) vpos = n - 1;
+    m.selected_row = grid_visual_to_logical(m, vpos);
+  }
+
+  // Find a column's level in the sort stack, or -1 if not present.
+  inline int grid_sort_stack_find(const GridModel& m, int col)
+  {
+    for (int i = 0; i < (int)m.sort_stack.size(); ++i)
+      if (m.sort_stack[(size_t)i].col == col) return i;
+    return -1;
+  }
+
+  // Apply a header click. shift_held selects Shift+click semantics:
+  //   - Plain click on the ONLY sorted column: cycle asc -> desc -> empty.
+  //   - Plain click otherwise: replace stack with [{col, ASC}].
+  //   - Shift+click on a column already in the stack: cycle its level's dir
+  //     (asc -> desc -> remove level), keeping the rest of the stack.
+  //   - Shift+click on a new column: append {col, ASC}; if the stack is at
+  //     NEUI_GRID_SORT_MAX_LEVELS, evict sort_stack[0] (FIFO) first.
+  //   - Non-sortable columns are filtered by the caller.
+  // Marks the model sort_dirty. Returns the new direction for `col` (or
+  // NEUI_GRID_SORT_NONE if the level was just removed) so the caller can
+  // populate the GRID_SORT_CHANGED event.
+  inline neui_grid_sort_dir_t grid_apply_header_click(GridModel& m, int col,
+                                                       bool shift_held)
+  {
+    auto cycle_next = [](neui_grid_sort_dir_t d) -> neui_grid_sort_dir_t {
+      if (d == NEUI_GRID_SORT_ASC)  return NEUI_GRID_SORT_DESC;
+      if (d == NEUI_GRID_SORT_DESC) return NEUI_GRID_SORT_NONE;
+      return NEUI_GRID_SORT_ASC;
+    };
+
+    int existing = grid_sort_stack_find(m, col);
+    neui_grid_sort_dir_t result = NEUI_GRID_SORT_ASC;
+
+    if (!shift_held) {
+      // Plain click. If the stack is exactly [this column], cycle its dir;
+      // otherwise replace the stack with [{col, ASC}].
+      if (m.sort_stack.size() == 1 && existing == 0) {
+        neui_grid_sort_dir_t next = cycle_next(m.sort_stack[0].dir);
+        if (next == NEUI_GRID_SORT_NONE) {
+          m.sort_stack.clear();
+          result = NEUI_GRID_SORT_NONE;
+        } else {
+          m.sort_stack[0].dir = next;
+          result = next;
+        }
+      } else {
+        m.sort_stack.clear();
+        m.sort_stack.push_back({ col, NEUI_GRID_SORT_ASC });
+        result = NEUI_GRID_SORT_ASC;
+      }
+    } else {
+      // Shift+click.
+      if (existing >= 0) {
+        neui_grid_sort_dir_t next = cycle_next(m.sort_stack[(size_t)existing].dir);
+        if (next == NEUI_GRID_SORT_NONE) {
+          m.sort_stack.erase(m.sort_stack.begin() + existing);
+          result = NEUI_GRID_SORT_NONE;
+        } else {
+          m.sort_stack[(size_t)existing].dir = next;
+          result = next;
+        }
+      } else {
+        if ((int)m.sort_stack.size() >= NEUI_GRID_SORT_MAX_LEVELS)
+          m.sort_stack.erase(m.sort_stack.begin());  // FIFO evict oldest
+        m.sort_stack.push_back({ col, NEUI_GRID_SORT_ASC });
+        result = NEUI_GRID_SORT_ASC;
+      }
+    }
+    m.sort_dirty = true;
+    return result;
+  }
+
+  // Programmatic mutators. Mark sort_dirty + leave the stack to the caller
+  // (these are the targets of the public API methods).
+  inline void grid_set_sort(GridModel& m, int col, neui_grid_sort_dir_t dir)
+  {
+    m.sort_stack.clear();
+    if (dir != NEUI_GRID_SORT_NONE && col >= 0)
+      m.sort_stack.push_back({ col, dir });
+    m.sort_dirty = true;
+  }
+
+  inline void grid_add_sort(GridModel& m, int col, neui_grid_sort_dir_t dir)
+  {
+    if (col < 0) return;
+    int existing = grid_sort_stack_find(m, col);
+    if (existing >= 0) {
+      if (dir == NEUI_GRID_SORT_NONE) {
+        m.sort_stack.erase(m.sort_stack.begin() + existing);
+      } else {
+        m.sort_stack[(size_t)existing].dir = dir;
+      }
+    } else if (dir != NEUI_GRID_SORT_NONE) {
+      if ((int)m.sort_stack.size() >= NEUI_GRID_SORT_MAX_LEVELS)
+        m.sort_stack.erase(m.sort_stack.begin());
+      m.sort_stack.push_back({ col, dir });
+    }
+    m.sort_dirty = true;
+  }
+
+  inline void grid_clear_sort(GridModel& m)
+  {
+    m.sort_stack.clear();
+    m.sort_dirty = true;
+  }
+
+  // After a column is removed, every sort_stack entry with col == removed
+  // disappears and entries with col > removed shift down by one. After a
+  // remove_column / clear_columns it is safest to drop sort_stack entirely
+  // (the caller can pick this finer behaviour if it matters).
+  inline void grid_sort_on_column_removed(GridModel& m, int removed_col)
+  {
+    for (auto it = m.sort_stack.begin(); it != m.sort_stack.end(); ) {
+      if (it->col == removed_col) {
+        it = m.sort_stack.erase(it);
+      } else {
+        if (it->col > removed_col) --it->col;
+        ++it;
+      }
+    }
+    m.sort_dirty = true;
   }
 
   // Read NEUI_ATTR_GRID_* into a GridPaintConfig in one pass. Defaults

@@ -165,6 +165,19 @@ static bool on_event(void* token, neui_event_t* ev)
                ev->data.grid_column_resize.new_width);
     return true;
 
+  case NEUI_EVENT_GRID_SORT_CHANGED: {
+    int n = app->grid->get_sort_count(app->session, { app->grid_id });
+    const char* dirname = "?";
+    switch (ev->data.grid_sort.dir) {
+      case NEUI_GRID_SORT_ASC:  dirname = "asc";   break;
+      case NEUI_GRID_SORT_DESC: dirname = "desc";  break;
+      case NEUI_GRID_SORT_NONE: dirname = "none";  break;
+    }
+    set_status(app, "SORT_CHANGED col=%d dir=%s (%d level%s active)",
+               ev->data.grid_sort.col, dirname, n, n == 1 ? "" : "s");
+    return true;
+  }
+
   case NEUI_EVENT_MOUSE_BUTTON_CLICK: {
     uint32_t w = ev->data.mouse.widget.id;
     if (w == app->add_row_btn) {
@@ -333,6 +346,15 @@ int main(int /*argc*/, char** /*argv*/)
   app.grid->set_column_align(app.session, g, 0, "right");
   app.grid->set_column_align(app.session, g, 3, "right");
   app.grid->set_column_align(app.session, g, 4, "right");
+
+  // Sort kinds: numeric columns sort numerically so "9" < "10" (the default
+  // STRING kind would give the lexicographic surprise). Click a header to
+  // toggle asc / desc / none; Shift+click to stack a secondary level.
+  app.grid->set_column_sort_kind(app.session, g, 0, NEUI_GRID_SORT_INT);
+  app.grid->set_column_sort_kind(app.session, g, 3, NEUI_GRID_SORT_INT);
+  app.grid->set_column_sort_kind(app.session, g, 4, NEUI_GRID_SORT_FLOAT);
+  // Name column uses natural ordering so "Item 2" < "Item 10".
+  app.grid->set_column_sort_kind(app.session, g, 1, NEUI_GRID_SORT_NATURAL);
 
   populate_initial_rows(&app, 500);
 

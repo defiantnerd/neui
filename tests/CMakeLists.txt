@@ -7,6 +7,7 @@
 add_executable(neui_tests
   test_main.cpp
   test_grid_model.cpp
+  test_grid_sort.cpp
   test_compound.cpp
   test_behavior.cpp
   test_attrs.cpp

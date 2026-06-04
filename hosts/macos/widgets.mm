@@ -2022,6 +2022,7 @@ namespace macos_host
     m.cell_overrides = std::move(remap);
     if (m.selected_col >= (int)m.columns.size())
       m.selected_col = (int)m.columns.size() - 1;
+    neui_detail::grid_sort_on_column_removed(m, col);
     grid_invalidate_macos(wd);
   }
 
@@ -2038,6 +2039,10 @@ namespace macos_host
     m.scroll_offset_x = 0;
     m.scroll_offset_y = 0;
     m.scroll_px_offset = 0;
+    m.sort_stack.clear();
+    m.display_order.clear();
+    m.logical_to_visual.clear();
+    m.sort_dirty = false;
     grid_invalidate_macos(wd);
   }
 
@@ -2054,6 +2059,7 @@ namespace macos_host
         row.cells[i] = values_utf8[i];
     }
     m.rows.push_back(std::move(row));
+    m.sort_dirty = true;
     grid_invalidate_macos(wd);
     return (int)m.rows.size() - 1;
   }
@@ -2082,6 +2088,7 @@ namespace macos_host
     m.cell_overrides = std::move(remap);
     if (m.selected_row >= (int)m.rows.size())
       m.selected_row = (int)m.rows.size() - 1;
+    m.sort_dirty = true;
     grid_invalidate_macos(wd);
   }
 
@@ -2095,6 +2102,9 @@ namespace macos_host
     m.selected_row = -1;
     m.scroll_offset_y = 0;
     m.scroll_px_offset = 0;
+    m.display_order.clear();
+    m.logical_to_visual.clear();
+    m.sort_dirty = false;
     grid_invalidate_macos(wd);
   }
 
@@ -2109,6 +2119,7 @@ namespace macos_host
     auto& r = m.rows[(size_t)row];
     if ((int)r.cells.size() <= col) r.cells.resize((size_t)col + 1);
     r.cells[(size_t)col] = utf8 ? utf8 : "";
+    m.sort_dirty = true;
     grid_invalidate_macos(wd);
   }
 
@@ -2302,12 +2313,110 @@ namespace macos_host
       widget_w = (int)sz.width;
       widget_h = (int)sz.height;
     }
+    neui_detail::grid_ensure_sort_clean(m);
     auto hit = neui_detail::grid_hit_test(m, vp, cfg.row_h,
                                            widget_w, widget_h, lx, ly);
     if (hit.region != neui_detail::GridHitRegion::Cell) return 0;
     if (out_row) *out_row = hit.row;
     if (out_col) *out_col = hit.col;
     return 1;
+  }
+
+  // -------- Sort API ----------------------------------------------------
+
+  static void NEUI_ABI gr_set_column_sortable(neui_session_t session, neui_widget_t widget,
+                                                int col, bool sortable)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns[(size_t)col].sortable = sortable;
+  }
+
+  static void NEUI_ABI gr_set_column_sort_kind(neui_session_t session, neui_widget_t widget,
+                                                 int col, neui_grid_sort_kind_t kind)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns[(size_t)col].sort_kind = kind;
+    if (neui_detail::grid_sort_stack_find(m, col) >= 0) {
+      m.sort_dirty = true;
+      grid_invalidate_macos(wd);
+    }
+  }
+
+  static void NEUI_ABI gr_set_sort(neui_session_t session, neui_widget_t widget,
+                                     int col, neui_grid_sort_dir_t dir)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_macos_api(*wd);
+    neui_detail::grid_set_sort(m, col, dir);
+    grid_invalidate_macos(wd);
+  }
+
+  static void NEUI_ABI gr_add_sort(neui_session_t session, neui_widget_t widget,
+                                     int col, neui_grid_sort_dir_t dir)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_macos_api(*wd);
+    neui_detail::grid_add_sort(m, col, dir);
+    grid_invalidate_macos(wd);
+  }
+
+  static void NEUI_ABI gr_clear_sort(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_macos_api(*wd);
+    neui_detail::grid_clear_sort(m);
+    grid_invalidate_macos(wd);
+  }
+
+  static int NEUI_ABI gr_get_sort_count(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    return (wd && wd->grid_model) ? (int)wd->grid_model->sort_stack.size() : 0;
+  }
+
+  static void NEUI_ABI gr_get_sort_level(neui_session_t session, neui_widget_t widget,
+                                           int level, int* out_col,
+                                           neui_grid_sort_dir_t* out_dir)
+  {
+    if (out_col) *out_col = -1;
+    if (out_dir) *out_dir = NEUI_GRID_SORT_NONE;
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (level < 0 || level >= (int)m.sort_stack.size()) return;
+    if (out_col) *out_col = m.sort_stack[(size_t)level].col;
+    if (out_dir) *out_dir = m.sort_stack[(size_t)level].dir;
+  }
+
+  static int NEUI_ABI gr_logical_to_visual_row(neui_session_t session, neui_widget_t widget,
+                                                  int logical_row)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return -1;
+    auto& m = *wd->grid_model;
+    if (logical_row < 0 || logical_row >= (int)m.rows.size()) return -1;
+    neui_detail::grid_ensure_sort_clean(m);
+    return neui_detail::grid_logical_to_visual(m, logical_row);
+  }
+
+  static int NEUI_ABI gr_visual_to_logical_row(neui_session_t session, neui_widget_t widget,
+                                                  int visual_row)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return -1;
+    auto& m = *wd->grid_model;
+    if (visual_row < 0 || visual_row >= (int)m.rows.size()) return -1;
+    neui_detail::grid_ensure_sort_clean(m);
+    return neui_detail::grid_visual_to_logical(m, visual_row);
   }
 
   neui_grid_api_t grid_api = {
@@ -2340,6 +2449,15 @@ namespace macos_host
     gr_set_scroll_x,
     gr_get_scroll_x,
     gr_hit_test,
+    gr_set_column_sortable,
+    gr_set_column_sort_kind,
+    gr_set_sort,
+    gr_add_sort,
+    gr_clear_sort,
+    gr_get_sort_count,
+    gr_get_sort_level,
+    gr_logical_to_visual_row,
+    gr_visual_to_logical_row,
   };
 
 } // namespace macos_host

@@ -4087,6 +4087,18 @@ namespace win32_host
     wd.session->dispatch_event(&ev);
   }
 
+  static void grid_fire_sort_changed_w32(WidgetData& wd, int col,
+                                           neui_grid_sort_dir_t dir)
+  {
+    if (!wd.session) return;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_SORT_CHANGED;
+    ev.data.grid_sort.widget.id = wd.widget_id;
+    ev.data.grid_sort.col       = col;
+    ev.data.grid_sort.dir       = (int)dir;
+    wd.session->dispatch_event(&ev);
+  }
+
   // Dispatch ladder run after a body cell click: always update selection,
   // then ROW_SELECTED -> (cell_focus ? CELL_SELECTED : skip) -> CELL_CLICKED.
   static void grid_click_ladder_w32(WidgetData& wd, int row, int col)
@@ -4223,48 +4235,52 @@ namespace win32_host
       int n_cols = (int)m.columns.size();
       if (n_rows == 0) return;
 
+      // Navigation walks visual order so Up / Down move the cursor through
+      // the rows the user sees after sorting. grid_set_selected_visual then
+      // stores the corresponding logical row into selected_row.
+      grid_ensure_sort_clean(m);
+
       int prev_row = m.selected_row;
       int prev_col = m.selected_col;
       int vis = grid_visible_rows(vp, cfg.row_h);
       if (vis < 1) vis = 1;
       bool handled = true;
       switch (keycode) {
-      case VK_UP:
-        if (m.selected_row > 0)        m.selected_row--;
-        else if (m.selected_row < 0)   m.selected_row = 0;
+      case VK_UP: {
+        int v = grid_selected_visual(m);
+        grid_set_selected_visual(m, (v < 0) ? 0 : (v - 1));
         break;
-      case VK_DOWN:
-        if (m.selected_row < n_rows - 1) {
-          if (m.selected_row < 0) m.selected_row = 0;
-          else                     m.selected_row++;
-        }
+      }
+      case VK_DOWN: {
+        int v = grid_selected_visual(m);
+        grid_set_selected_visual(m, (v < 0) ? 0 : (v + 1));
         break;
-      case VK_PRIOR:
-        m.selected_row = (m.selected_row < 0)
-          ? 0
-          : (m.selected_row - vis > 0 ? m.selected_row - vis : 0);
+      }
+      case VK_PRIOR: {
+        int v = grid_selected_visual(m);
+        grid_set_selected_visual(m, (v < 0) ? 0 : (v - vis));
         break;
+      }
       case VK_NEXT: {
-        int target = (m.selected_row < 0) ? vis : (m.selected_row + vis);
-        if (target > n_rows - 1) target = n_rows - 1;
-        m.selected_row = target;
+        int v = grid_selected_visual(m);
+        grid_set_selected_visual(m, (v < 0) ? vis : (v + vis));
         break;
       }
       case VK_HOME:
         if (cfg.cell_focus && !(mods & NEUI_KMOD_CTRL)) {
           m.selected_col = (n_cols > 0) ? 0 : -1;
-          if (m.selected_row < 0) m.selected_row = 0;
+          if (m.selected_row < 0) grid_set_selected_visual(m, 0);
         } else {
-          m.selected_row = 0;
+          grid_set_selected_visual(m, 0);
           if (cfg.cell_focus) m.selected_col = (n_cols > 0) ? 0 : -1;
         }
         break;
       case VK_END:
         if (cfg.cell_focus && !(mods & NEUI_KMOD_CTRL)) {
           m.selected_col = (n_cols > 0) ? n_cols - 1 : -1;
-          if (m.selected_row < 0) m.selected_row = n_rows - 1;
+          if (m.selected_row < 0) grid_set_selected_visual(m, n_rows - 1);
         } else {
-          m.selected_row = n_rows - 1;
+          grid_set_selected_visual(m, n_rows - 1);
           if (cfg.cell_focus) m.selected_col = (n_cols > 0) ? n_cols - 1 : -1;
         }
         break;
@@ -4411,6 +4427,8 @@ namespace win32_host
     if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) {
       // Always take focus so subsequent key events route here.
       if (wd.hwnd) SetFocus(wd.hwnd);
+      // Hit-test reads display_order, so rebuild it first if dirty.
+      grid_ensure_sort_clean(m);
       GridHit hit = grid_hit_test(m, vp, cfg.row_h, widget_w, widget_h, lx, ly);
       switch (hit.region) {
       case GridHitRegion::HeaderDivider:
@@ -4423,6 +4441,16 @@ namespace win32_host
         }
         return;
       case GridHitRegion::Header:
+        // Header click cycles the sort for a sortable column. Shift = add /
+        // cycle a secondary level; plain click replaces the stack.
+        if (msg == WM_LBUTTONDOWN && hit.col >= 0 && hit.col < (int)m.columns.size()
+            && m.columns[(size_t)hit.col].sortable) {
+          bool shift = (wParam & MK_SHIFT) != 0;
+          neui_grid_sort_dir_t new_dir =
+            grid_apply_header_click(m, hit.col, shift);
+          grid_repaint_w32(wd);
+          grid_fire_sort_changed_w32(wd, hit.col, new_dir);
+        }
         return;
       case GridHitRegion::VertScrollTrack: {
         int vis = grid_visible_rows(vp, cfg.row_h);
@@ -4638,6 +4666,9 @@ namespace win32_host
     m.cell_overrides = std::move(remap);
     if (m.selected_col >= (int)m.columns.size())
       m.selected_col = (int)m.columns.size() - 1;
+    // Sort levels referencing the removed column disappear; later columns
+    // shift index down by one. Mark dirty for the rebuild.
+    neui_detail::grid_sort_on_column_removed(m, col);
     grid_invalidate_w32(wd);
   }
 
@@ -4653,6 +4684,10 @@ namespace win32_host
     m.selected_col = -1;
     m.scroll_offset_x = 0;
     m.scroll_offset_y = 0;
+    m.sort_stack.clear();
+    m.display_order.clear();
+    m.logical_to_visual.clear();
+    m.sort_dirty = false;
     grid_invalidate_w32(wd);
   }
 
@@ -4669,6 +4704,7 @@ namespace win32_host
         row.cells[i] = values_utf8[i];
     }
     m.rows.push_back(std::move(row));
+    m.sort_dirty = true;   // bulk insert collapses to one rebuild at next paint
     grid_invalidate_w32(wd);
     return (int)m.rows.size() - 1;
   }
@@ -4697,6 +4733,7 @@ namespace win32_host
     m.cell_overrides = std::move(remap);
     if (m.selected_row >= (int)m.rows.size())
       m.selected_row = (int)m.rows.size() - 1;
+    m.sort_dirty = true;
     grid_invalidate_w32(wd);
   }
 
@@ -4709,6 +4746,9 @@ namespace win32_host
     m.cell_overrides.clear();
     m.selected_row = -1;
     m.scroll_offset_y = 0;
+    m.display_order.clear();
+    m.logical_to_visual.clear();
+    m.sort_dirty = false;  // empty rows means nothing to sort
     grid_invalidate_w32(wd);
   }
 
@@ -4723,6 +4763,10 @@ namespace win32_host
     auto& r = m.rows[(size_t)row];
     if ((int)r.cells.size() <= col) r.cells.resize((size_t)col + 1);
     r.cells[(size_t)col] = utf8 ? utf8 : "";
+    // Only the sorted column's text changes the order; checking is cheap so
+    // mark dirty unconditionally and let the lazy rebuild bail when nothing
+    // sorted changed.
+    m.sort_dirty = true;
     grid_invalidate_w32(wd);
   }
 
@@ -4920,6 +4964,107 @@ namespace win32_host
     return 1;
   }
 
+  // -------- Sort API ----------------------------------------------------
+
+  static void NEUI_ABI gr_set_column_sortable(neui_session_t session, neui_widget_t widget,
+                                                int col, bool sortable)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns[(size_t)col].sortable = sortable;
+    // Clearing the sortable flag does NOT auto-remove an existing sort on
+    // that column - programmatic set_sort / add_sort should still work. Only
+    // user-driven header clicks are gated by this flag.
+  }
+
+  static void NEUI_ABI gr_set_column_sort_kind(neui_session_t session, neui_widget_t widget,
+                                                 int col, neui_grid_sort_kind_t kind)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns[(size_t)col].sort_kind = kind;
+    // If this column is in the active sort the next paint should re-sort.
+    if (neui_detail::grid_sort_stack_find(m, col) >= 0) {
+      m.sort_dirty = true;
+      grid_invalidate_w32(wd);
+    }
+  }
+
+  static void NEUI_ABI gr_set_sort(neui_session_t session, neui_widget_t widget,
+                                     int col, neui_grid_sort_dir_t dir)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_w32(*wd);
+    neui_detail::grid_set_sort(m, col, dir);
+    grid_invalidate_w32(wd);
+  }
+
+  static void NEUI_ABI gr_add_sort(neui_session_t session, neui_widget_t widget,
+                                     int col, neui_grid_sort_dir_t dir)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_w32(*wd);
+    neui_detail::grid_add_sort(m, col, dir);
+    grid_invalidate_w32(wd);
+  }
+
+  static void NEUI_ABI gr_clear_sort(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_w32(*wd);
+    neui_detail::grid_clear_sort(m);
+    grid_invalidate_w32(wd);
+  }
+
+  static int NEUI_ABI gr_get_sort_count(neui_session_t session, neui_widget_t widget)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    return (wd && wd->grid_model) ? (int)wd->grid_model->sort_stack.size() : 0;
+  }
+
+  static void NEUI_ABI gr_get_sort_level(neui_session_t session, neui_widget_t widget,
+                                           int level, int* out_col,
+                                           neui_grid_sort_dir_t* out_dir)
+  {
+    if (out_col) *out_col = -1;
+    if (out_dir) *out_dir = NEUI_GRID_SORT_NONE;
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return;
+    auto& m = *wd->grid_model;
+    if (level < 0 || level >= (int)m.sort_stack.size()) return;
+    if (out_col) *out_col = m.sort_stack[(size_t)level].col;
+    if (out_dir) *out_dir = m.sort_stack[(size_t)level].dir;
+  }
+
+  static int NEUI_ABI gr_logical_to_visual_row(neui_session_t session, neui_widget_t widget,
+                                                  int logical_row)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return -1;
+    auto& m = *wd->grid_model;
+    if (logical_row < 0 || logical_row >= (int)m.rows.size()) return -1;
+    neui_detail::grid_ensure_sort_clean(m);
+    return neui_detail::grid_logical_to_visual(m, logical_row);
+  }
+
+  static int NEUI_ABI gr_visual_to_logical_row(neui_session_t session, neui_widget_t widget,
+                                                  int visual_row)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return -1;
+    auto& m = *wd->grid_model;
+    if (visual_row < 0 || visual_row >= (int)m.rows.size()) return -1;
+    neui_detail::grid_ensure_sort_clean(m);
+    return neui_detail::grid_visual_to_logical(m, visual_row);
+  }
+
   neui_grid_api_t grid_api = {
     NEUI_VERSION,
     gr_add_column,
@@ -4950,5 +5095,14 @@ namespace win32_host
     gr_set_scroll_x,
     gr_get_scroll_x,
     gr_hit_test,
+    gr_set_column_sortable,
+    gr_set_column_sort_kind,
+    gr_set_sort,
+    gr_add_sort,
+    gr_clear_sort,
+    gr_get_sort_count,
+    gr_get_sort_level,
+    gr_logical_to_visual_row,
+    gr_visual_to_logical_row,
   };
 }

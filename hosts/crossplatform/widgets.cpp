@@ -2232,6 +2232,7 @@ namespace xpl_host
     g->model.cell_overrides = std::move(remap);
     if (g->model.selected_col >= (int)g->model.columns.size())
       g->model.selected_col = (int)g->model.columns.size() - 1;
+    neui_detail::grid_sort_on_column_removed(g->model, col);
     grid_invalidate(s, g);
   }
 
@@ -2247,6 +2248,10 @@ namespace xpl_host
     g->model.selected_col = -1;
     g->model.scroll_offset_x = 0;
     g->model.scroll_offset_y = 0;
+    g->model.sort_stack.clear();
+    g->model.display_order.clear();
+    g->model.logical_to_visual.clear();
+    g->model.sort_dirty = false;
     grid_invalidate(s, g);
   }
 
@@ -2263,6 +2268,7 @@ namespace xpl_host
         row.cells[i] = values_utf8[i];
     }
     g->model.rows.push_back(std::move(row));
+    g->model.sort_dirty = true;
     grid_invalidate(s, g);
     return (int)g->model.rows.size() - 1;
   }
@@ -2291,6 +2297,7 @@ namespace xpl_host
     g->model.cell_overrides = std::move(remap);
     if (g->model.selected_row >= (int)g->model.rows.size())
       g->model.selected_row = (int)g->model.rows.size() - 1;
+    g->model.sort_dirty = true;
     grid_invalidate(s, g);
   }
 
@@ -2303,6 +2310,9 @@ namespace xpl_host
     g->model.cell_overrides.clear();
     g->model.selected_row = -1;
     g->model.scroll_offset_y = 0;
+    g->model.display_order.clear();
+    g->model.logical_to_visual.clear();
+    g->model.sort_dirty = false;
     grid_invalidate(s, g);
   }
 
@@ -2316,6 +2326,7 @@ namespace xpl_host
     auto& r = g->model.rows[(size_t)row];
     if ((int)r.cells.size() <= col) r.cells.resize((size_t)col + 1);
     r.cells[(size_t)col] = utf8 ? utf8 : "";
+    g->model.sort_dirty = true;
     grid_invalidate(s, g);
   }
 
@@ -2506,12 +2517,106 @@ namespace xpl_host
     auto cfg = neui_detail::grid_read_config(g->attrs.get());
     auto vp  = neui_detail::grid_compute_viewport(g->model, g->width, g->height,
                                                     cfg.row_h, cfg.header_h);
+    neui_detail::grid_ensure_sort_clean(g->model);
     auto hit = neui_detail::grid_hit_test(g->model, vp, cfg.row_h,
                                             g->width, g->height, lx, ly);
     if (hit.region != neui_detail::GridHitRegion::Cell) return 0;
     if (out_row) *out_row = hit.row;
     if (out_col) *out_col = hit.col;
     return 1;
+  }
+
+  // -------- Sort API ----------------------------------------------------
+
+  static void NEUI_ABI gr_set_column_sortable(neui_session_t session, neui_widget_t widget,
+                                                int col, bool sortable)
+  {
+    auto* g = resolve_grid(session, widget);
+    if (!g) return;
+    if (col < 0 || col >= (int)g->model.columns.size()) return;
+    g->model.columns[(size_t)col].sortable = sortable;
+  }
+
+  static void NEUI_ABI gr_set_column_sort_kind(neui_session_t session, neui_widget_t widget,
+                                                 int col, neui_grid_sort_kind_t kind)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return;
+    if (col < 0 || col >= (int)g->model.columns.size()) return;
+    g->model.columns[(size_t)col].sort_kind = kind;
+    if (neui_detail::grid_sort_stack_find(g->model, col) >= 0) {
+      g->model.sort_dirty = true;
+      grid_invalidate(s, g);
+    }
+  }
+
+  static void NEUI_ABI gr_set_sort(neui_session_t session, neui_widget_t widget,
+                                     int col, neui_grid_sort_dir_t dir)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return;
+    neui_detail::grid_set_sort(g->model, col, dir);
+    grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_add_sort(neui_session_t session, neui_widget_t widget,
+                                     int col, neui_grid_sort_dir_t dir)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return;
+    neui_detail::grid_add_sort(g->model, col, dir);
+    grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_clear_sort(neui_session_t session, neui_widget_t widget)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return;
+    neui_detail::grid_clear_sort(g->model);
+    grid_invalidate(s, g);
+  }
+
+  static int NEUI_ABI gr_get_sort_count(neui_session_t session, neui_widget_t widget)
+  {
+    auto* g = resolve_grid(session, widget);
+    return g ? (int)g->model.sort_stack.size() : 0;
+  }
+
+  static void NEUI_ABI gr_get_sort_level(neui_session_t session, neui_widget_t widget,
+                                           int level, int* out_col,
+                                           neui_grid_sort_dir_t* out_dir)
+  {
+    if (out_col) *out_col = -1;
+    if (out_dir) *out_dir = NEUI_GRID_SORT_NONE;
+    auto* g = resolve_grid(session, widget);
+    if (!g) return;
+    if (level < 0 || level >= (int)g->model.sort_stack.size()) return;
+    if (out_col) *out_col = g->model.sort_stack[(size_t)level].col;
+    if (out_dir) *out_dir = g->model.sort_stack[(size_t)level].dir;
+  }
+
+  static int NEUI_ABI gr_logical_to_visual_row(neui_session_t session, neui_widget_t widget,
+                                                  int logical_row)
+  {
+    auto* g = resolve_grid(session, widget);
+    if (!g) return -1;
+    if (logical_row < 0 || logical_row >= (int)g->model.rows.size()) return -1;
+    neui_detail::grid_ensure_sort_clean(g->model);
+    return neui_detail::grid_logical_to_visual(g->model, logical_row);
+  }
+
+  static int NEUI_ABI gr_visual_to_logical_row(neui_session_t session, neui_widget_t widget,
+                                                  int visual_row)
+  {
+    auto* g = resolve_grid(session, widget);
+    if (!g) return -1;
+    if (visual_row < 0 || visual_row >= (int)g->model.rows.size()) return -1;
+    neui_detail::grid_ensure_sort_clean(g->model);
+    return neui_detail::grid_visual_to_logical(g->model, visual_row);
   }
 
   neui_grid_api_t grid_api = {
@@ -2544,6 +2649,15 @@ namespace xpl_host
     gr_set_scroll_x,
     gr_get_scroll_x,
     gr_hit_test,
+    gr_set_column_sortable,
+    gr_set_column_sort_kind,
+    gr_set_sort,
+    gr_add_sort,
+    gr_clear_sort,
+    gr_get_sort_count,
+    gr_get_sort_level,
+    gr_logical_to_visual_row,
+    gr_visual_to_logical_row,
   };
 
 } // namespace xpl_host

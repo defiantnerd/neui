@@ -284,6 +284,18 @@ namespace macos_host {
     wd.session->dispatch_event(&ev);
   }
 
+  static void grid_fire_sort_changed_macos(WidgetData& wd, int col,
+                                              neui_grid_sort_dir_t dir)
+  {
+    if (!wd.session) return;
+    neui_event_t ev{};
+    ev.type = NEUI_EVENT_GRID_SORT_CHANGED;
+    ev.data.grid_sort.widget.id = wd.widget_id;
+    ev.data.grid_sort.col       = col;
+    ev.data.grid_sort.dir       = (int)dir;
+    wd.session->dispatch_event(&ev);
+  }
+
   // Dispatch ladder run after a body-cell click: always update selection,
   // then ROW_SELECTED -> (cell_focus ? CELL_SELECTED) -> CELL_CLICKED, each
   // only firing if the prior wasn't consumed.
@@ -335,48 +347,50 @@ namespace macos_host {
       int n_cols = (int)m.columns.size();
       if (n_rows == 0) return;
 
+      // Walk visual order so Up / Down match the sorted display.
+      grid_ensure_sort_clean(m);
+
       int prev_row = m.selected_row;
       int prev_col = m.selected_col;
       int vis = grid_visible_rows(vp, cfg.row_h);
       if (vis < 1) vis = 1;
       bool handled = true;
       switch (keycode) {
-      case NEUI_KEY_UP:
-        if (m.selected_row > 0)        m.selected_row--;
-        else if (m.selected_row < 0)   m.selected_row = 0;
+      case NEUI_KEY_UP: {
+        int v = grid_selected_visual(m);
+        grid_set_selected_visual(m, (v < 0) ? 0 : (v - 1));
         break;
-      case NEUI_KEY_DOWN:
-        if (m.selected_row < n_rows - 1) {
-          if (m.selected_row < 0) m.selected_row = 0;
-          else                     m.selected_row++;
-        }
+      }
+      case NEUI_KEY_DOWN: {
+        int v = grid_selected_visual(m);
+        grid_set_selected_visual(m, (v < 0) ? 0 : (v + 1));
         break;
-      case NEUI_KEY_PAGEUP:
-        m.selected_row = (m.selected_row < 0)
-          ? 0
-          : (m.selected_row - vis > 0 ? m.selected_row - vis : 0);
+      }
+      case NEUI_KEY_PAGEUP: {
+        int v = grid_selected_visual(m);
+        grid_set_selected_visual(m, (v < 0) ? 0 : (v - vis));
         break;
+      }
       case NEUI_KEY_PAGEDOWN: {
-        int target = (m.selected_row < 0) ? vis : (m.selected_row + vis);
-        if (target > n_rows - 1) target = n_rows - 1;
-        m.selected_row = target;
+        int v = grid_selected_visual(m);
+        grid_set_selected_visual(m, (v < 0) ? vis : (v + vis));
         break;
       }
       case NEUI_KEY_HOME:
         if (cfg.cell_focus && !(mods & NEUI_KMOD_CTRL)) {
           m.selected_col = (n_cols > 0) ? 0 : -1;
-          if (m.selected_row < 0) m.selected_row = 0;
+          if (m.selected_row < 0) grid_set_selected_visual(m, 0);
         } else {
-          m.selected_row = 0;
+          grid_set_selected_visual(m, 0);
           if (cfg.cell_focus) m.selected_col = (n_cols > 0) ? 0 : -1;
         }
         break;
       case NEUI_KEY_END:
         if (cfg.cell_focus && !(mods & NEUI_KMOD_CTRL)) {
           m.selected_col = (n_cols > 0) ? n_cols - 1 : -1;
-          if (m.selected_row < 0) m.selected_row = n_rows - 1;
+          if (m.selected_row < 0) grid_set_selected_visual(m, n_rows - 1);
         } else {
-          m.selected_row = n_rows - 1;
+          grid_set_selected_visual(m, n_rows - 1);
           if (cfg.cell_focus) m.selected_col = (n_cols > 0) ? n_cols - 1 : -1;
         }
         break;
@@ -510,6 +524,8 @@ namespace macos_host {
 
     // --- button down / dbl-click ---
     if (kind == GridMsg::Down || kind == GridMsg::DblClick) {
+      // Hit-test reads display_order; rebuild it first if dirty.
+      grid_ensure_sort_clean(m);
       GridHit hit = grid_hit_test(m, vp, cfg.row_h, widget_w, widget_h, lx, ly);
       switch (hit.region) {
       case GridHitRegion::HeaderDivider:
@@ -522,6 +538,17 @@ namespace macos_host {
         }
         return;
       case GridHitRegion::Header:
+        // Sort cycle on a sortable column header. Shift+click = add /
+        // cycle a secondary level; plain click replaces the stack.
+        if (kind == GridMsg::Down &&
+            hit.col >= 0 && hit.col < (int)m.columns.size() &&
+            m.columns[(size_t)hit.col].sortable) {
+          bool shift = (mods & NEUI_KMOD_SHIFT) != 0;
+          neui_grid_sort_dir_t new_dir =
+            grid_apply_header_click(m, hit.col, shift);
+          grid_repaint_macos(wd);
+          grid_fire_sort_changed_macos(wd, hit.col, new_dir);
+        }
         return;
       case GridHitRegion::VertScrollTrack: {
         int vis = grid_visible_rows(vp, cfg.row_h);
@@ -1273,7 +1300,12 @@ static float neui_snap_to_steps(float v, int steps)
     NSPoint p = [self localPoint:event];
     macos_host::GridMsg k = (event.clickCount >= 2)
       ? macos_host::GridMsg::DblClick : macos_host::GridMsg::Down;
-    macos_host::grid_painted_msg_macos(*gwd, k, (float)p.x, (float)p.y, 0, 0, 0);
+    // Pass current modifier state in `mods` so the header-click sort logic
+    // can detect Shift for multi-column sort.
+    uint32_t click_mods =
+      neui_detail::mac_modifiers_to_neui(event.modifierFlags);
+    macos_host::grid_painted_msg_macos(*gwd, k, (float)p.x, (float)p.y,
+                                         0, click_mods, 0);
     return;
   }
   if ([self customDrawWantsInput]) {
