@@ -131,14 +131,6 @@ namespace xpl_host
   // Returns true if at least one format was captured.
   bool platform_clipboard_read_item(neui_detail::DataItem& item);
 
-  // Register a callback fired whenever the clipboard contents change (any
-  // app, including ours). Returns a non-zero handle on success, 0 if the
-  // platform doesn't support change notifications.
-  using ClipboardChangeCallback = void (*)(void* token);
-  uint32_t platform_register_clipboard_listener(ClipboardChangeCallback cb,
-                                                 void* token);
-  void     platform_unregister_clipboard_listener(uint32_t handle);
-
   // -------------------------------------------------------------------------
   // Drag & drop drop-target registration.
   //
@@ -159,6 +151,16 @@ namespace xpl_host
                                      void* session_ptr,
                                      uint32_t frame_widget_id);
   void platform_dnd_unregister_window(void* native_handle);
+
+  // Initiate a synchronous OS-level drag from `native_handle` (frame HWND
+  // on Win32; frame content NSView on macOS). Spins the OS drag loop /
+  // a nested runloop until the user drops or cancels. `item` is borrowed
+  // for the duration (caller still owns it - the platform layer
+  // snapshots formats before the loop). Returns the negotiated
+  // neui_dnd_action_t value; 0 on cancel.
+  uint32_t platform_dnd_begin_drag(void* native_handle,
+                                    neui_detail::DataItem* item,
+                                    uint32_t allowed_actions);
 
   // -------------------------------------------------------------------------
   // Native menu bar support.

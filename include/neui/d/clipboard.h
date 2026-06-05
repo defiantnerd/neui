@@ -28,15 +28,12 @@ extern "C" {
 // (build a multi-format item, then write it once; or inspect every
 // representation a drop payload carries).
 //
-// External clipboard-change notifications are opt-in via a separate
-// client-side interface (NEUI_API_CLIPBOARD_CLIENT). Implemented on Win32
-// today; macOS opt-in is deferred (NSPasteboard has no event, polling
-// changeCount is the workaround, not wired yet).
+// Clipboard-change polling is the supported pattern: callers (e.g. a
+// menu's WM_INITMENUPOPUP / NSMenuValidation handler) call has_text /
+// item_has_format on demand to gate Paste-like UI. There is no push-style
+// onchange callback in the API.
 
 // NEUI_API_CLIPBOARD is defined in d/api.h.
-
-#define NEUI_API_CLIPBOARD_CLIENT \
-  "com.defiantnerd.neui.extension.clipboard.client/0"
 
 // Standard mime types. Stable across versions.
 #define NEUI_MIME_TEXT      "text/plain;charset=utf-8"
@@ -117,17 +114,6 @@ typedef struct neui_clipboard_api {
                                     neui_data_item_t item,
                                     const char* mime);
 } neui_clipboard_api_t;
-
-// Optional client-side interface. The host calls
-// client->get_interface(token, NEUI_API_CLIPBOARD_CLIENT) once per session
-// at create time; if a non-null neui_clipboard_client_t is returned, the
-// host wires up a system clipboard listener and invokes onchange(token)
-// whenever the clipboard contents change (from any application, including
-// the current one).
-typedef struct neui_clipboard_client {
-  uint32_t neui_version;
-  void (NEUI_ABI *onchange)(void* token);
-} neui_clipboard_client_t;
 
 #ifdef __cplusplus
 }

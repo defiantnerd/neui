@@ -12,6 +12,7 @@
 #include "../../backends/d2d/d2d_backend.h"
 #include "../shared/win32/clipboard_win32.h"
 #include "../shared/win32/dnd_target_win32.h"
+#include "../shared/win32/dnd_source_win32.h"
 #include "../shared/win32/icon_win32.h"
 #include "../shared/win32/image_loader_win32.h"
 #include "../shared/win32/accel_table_win32.h"
@@ -5432,12 +5433,30 @@ namespace win32_host
     s->_last_accepted_action = static_cast<uint32_t>(action);
   }
 
+  static neui_dnd_action_t NEUI_ABI dnd_begin_drag(neui_session_t session,
+                                                    neui_widget_t source_widget,
+                                                    neui_data_item_t payload,
+                                                    uint32_t allowed_actions)
+  {
+    auto* s = get_session(session);
+    if (!s) return NEUI_DND_ACTION_NONE;
+    if (s->_in_dnd_dispatch) return NEUI_DND_ACTION_NONE;
+    auto* item = s->_data_items.get(payload.id);
+    if (!item) return NEUI_DND_ACTION_NONE;
+    HWND frame = s->find_parent_hwnd(WidgetToIndex(source_widget));
+    if (!frame) return NEUI_DND_ACTION_NONE;
+    uint32_t r = neui_detail::platform_dnd_begin_drag_w32(frame, item,
+                                                           allowed_actions);
+    return static_cast<neui_dnd_action_t>(r);
+  }
+
   neui_dnd_api_t dnd_api = {
     NEUI_VERSION,
     dnd_set_drop_target,
     dnd_get_drop_target,
     dnd_set_accepted_formats,
     dnd_accept,
+    dnd_begin_drag,
   };
 
   // -------------------------------------------------------------------------

@@ -74,6 +74,34 @@ typedef struct neui_dnd_api {
   // Calling outside a DnD dispatch is a no-op.
   void (NEUI_ABI *accept)(neui_session_t session,
                            neui_dnd_action_t action);
+
+  // Initiate an OS-level drag with `payload` as the data being dragged.
+  // Synchronous: blocks while the user moves the cursor; returns the
+  // negotiated action (NEUI_DND_ACTION_NONE if the user cancelled,
+  // dropped on a non-target, or no drop target accepted any of the
+  // payload's MIMEs).
+  //
+  // `source_widget` selects the owning frame whose native handle anchors
+  // the drag (macOS needs an NSView). The widget must be inside a
+  // visible frame; otherwise returns NONE.
+  //
+  // `payload` is allocated and released by the caller via the clipboard
+  // item API (clipboard_api->create_item / item_set_format / release).
+  // The framework snapshots formats before spinning the OS drag loop,
+  // so the caller may release the item the instant begin_drag returns.
+  //
+  // `allowed_actions` is an OR-bitmask of neui_dnd_action_t. The OS
+  // constrains the cursor to this set; targets that ask for an action
+  // outside the mask see DROPEFFECT_NONE.
+  //
+  // Re-entrancy: events keep firing while a drag is in flight (drop
+  // targets in this same session receive ENTER / MOVE / LEAVE / DROP
+  // normally). Do not call begin_drag from inside a DnD dispatch -
+  // returns NONE in that case.
+  neui_dnd_action_t (NEUI_ABI *begin_drag)(neui_session_t session,
+                                            neui_widget_t source_widget,
+                                            neui_data_item_t payload,
+                                            uint32_t allowed_actions);
 } neui_dnd_api_t;
 
 #ifdef __cplusplus

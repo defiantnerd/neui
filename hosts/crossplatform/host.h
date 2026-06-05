@@ -726,11 +726,9 @@ namespace xpl_host
     // can't reach a consumer right now.
     bool can_focused_perform_command(uint32_t cmd);
 
-    // Per-session data-item store (clipboard items + transient DnD drop
-    // payloads share storage) and optional clipboard listener registration.
+    // Per-session data-item store. Backs the item-based half of
+    // NEUI_API_CLIPBOARD and (transient) DnD drop payloads.
     neui_detail::DataItemStore _data_items;
-    neui_clipboard_client_t*   _clipboard_client          = nullptr;
-    uint32_t                   _clipboard_listener_handle = 0;
 
     // DnD dispatch state. _current_drop_target is the widget currently
     // receiving DND_ENTER/MOVE events (UINT32_MAX = none). _last_accepted_action

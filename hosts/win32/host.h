@@ -340,11 +340,9 @@ namespace win32_host {
     void invalidate_widgets_with_compound(uint32_t asset_id);
 
   public:
-    // Per-session data-item store (clipboard items + transient DnD drop
-    // payloads share storage) and optional clipboard listener registration.
+    // Per-session data-item store. Backs the item-based half of
+    // NEUI_API_CLIPBOARD and (transient) DnD drop payloads.
     neui_detail::DataItemStore _data_items;
-    neui_clipboard_client_t*   _clipboard_client          = nullptr;
-    uint32_t                   _clipboard_listener_handle = 0;
 
     // DnD dispatch state. See hosts/crossplatform/host.h for the same
     // fields' documentation. The IDropTarget COM object that the frame
@@ -371,14 +369,36 @@ namespace win32_host {
                                  uint32_t buttonmap,
                                  neui_detail::DataItem* drop_item);
   private:
-    // Internal helper used by dispatch_dnd_*; lives inside Session so it can
-    // touch the protected _widgets / _client_widget_api / _token directly.
+    // Internal helpers used by dispatch_dnd_*; live inside Session so they
+    // can touch the protected _widgets / _client_widget_api / _token directly.
+
+    // Walk the frame's subtree to find the deepest visible+enabled
+    // drop_target widget under (frame_x, frame_y) whose accepted_mimes
+    // intersects `formats`. Falls back to the frame itself if no
+    // descendant matches. out_abs_x / out_abs_y receive the matched
+    // widget's frame-local top-left. Returns 0 if nothing matches.
+    uint32_t find_drop_target_in_frame_w32(uint32_t frame_widget_idx,
+                                             int frame_x, int frame_y,
+                                             const char* const* formats,
+                                             uint32_t formats_count,
+                                             int& out_abs_x, int& out_abs_y);
+
+    // Send a single DnD event. (abs_x, abs_y) is the matched widget's
+    // top-left in frame-local coords so we can subtract for widget-local
+    // event x/y.
     void send_dnd_event_internal(uint32_t widget_idx, uint32_t type_u32,
                                   int frame_x, int frame_y,
+                                  int abs_x, int abs_y,
                                   const char* const* formats,
                                   uint32_t formats_count,
                                   uint32_t suggested, uint32_t buttonmap,
                                   neui_data_item_t data_item);
+
+    // Cached frame-local top-left of `_current_drop_target` so subsequent
+    // MOVE / LEAVE on the same widget can compute widget-local coords
+    // without re-walking the tree.
+    int _current_drop_abs_x = 0;
+    int _current_drop_abs_y = 0;
   public:
 
     // Optional menu-item validation callback. Polled at WM_INITMENUPOPUP.

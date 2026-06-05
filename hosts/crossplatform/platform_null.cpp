@@ -88,14 +88,14 @@ namespace xpl_host
   bool platform_clipboard_has_text()                                          { return false; }
   bool platform_clipboard_write_item(const neui_detail::DataItem& /*item*/)   { return false; }
   bool platform_clipboard_read_item(neui_detail::DataItem& /*item*/)          { return false; }
-  uint32_t platform_register_clipboard_listener(ClipboardChangeCallback /*cb*/,
-                                                 void* /*token*/)             { return 0;     }
-  void     platform_unregister_clipboard_listener(uint32_t /*handle*/)        {}
 
   // Drag & drop - no-op on platforms without window-system DnD support.
   bool platform_dnd_register_window(void* /*native_handle*/, void* /*session_ptr*/,
                                      uint32_t /*frame_widget_id*/)            { return false; }
   void platform_dnd_unregister_window(void* /*native_handle*/)                {}
+  uint32_t platform_dnd_begin_drag(void* /*native_handle*/,
+                                     neui_detail::DataItem* /*item*/,
+                                     uint32_t /*allowed_actions*/)            { return 0;     }
 
   void     platform_set_cursor(int /*kind*/)                                  {}
 

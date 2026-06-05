@@ -97,20 +97,33 @@ extensions are deferred:
   clients to NATURAL-sort ISO-8601 strings forever; defer until the
   parser policy (epoch / locale / formats accepted) is decided.
 
-## Clipboard
+## Clipboard / drag&drop
 
-- **Custom clipboard formats.** v1 only round-trips `text/plain`. API
-  shape is forward-compatible. HTML / PNG / image are the obvious
-  next kinds; each needs a Win32 + macOS converter plus the per-host
-  read/write seam.
+`text/plain`, `text/html`, `text/uri-list`, and arbitrary MIME passthrough
+are wired for both clipboard and drag&drop drop-target. See
+`plans/clipboard-and-dnd.md` for the full handoff. Remaining:
+
+- **Image formats.** `image/png` (or any bitmap MIME) is not yet on the
+  clipboard / DnD path. Needs Win32 `CF_DIBV5` ↔ PNG decode and macOS
+  `NSPasteboardTypePNG` / `NSPasteboardTypeTIFF` wrap. The asset API
+  already loads PNG bytes (`hosts/shared/win32/image_loader_win32.h`,
+  `hosts/shared/macos/image_loader_macos.h`) - the clipboard converters
+  can share that decode path.
+- **Drag source.** Drop-target side ships on all three hosts; the
+  next phase is letting widgets initiate drags from inside the app
+  (Win32 `DoDragDrop` + `IDataObject` wrapping a `DataItem`, macOS
+  `beginDraggingSessionWithItems:` + `<NSDraggingSource>`). API shape
+  will likely be `dnd->begin_drag(session, source_widget, payload,
+  allowed_actions)` plus (deferred) a behavior-asset handler kind.
+- **Per-child-widget DnD on macOS native.** `NEUINativeContentView`
+  dispatches drops at frame level; per-painted-view `<NSDraggingDestination>`
+  opt-in is deferred. Win32 native + xpl already walk the widget tree.
 
 ## Accessibility / IME
 
 - **Tier B native focus parity.** Real focus-proxy HWNDs per widget on
   win32; NSAccessibility seam on macOS. Defer until UIAutomation /
   VoiceOver work needs it - clients see only logical focus today.
-- **`NSPasteboardChanged` listener** on macOS, if Apple ever ships
-  one. Current change-count poll is cheap but not event-driven.
 
 ## Hosts
 
@@ -148,6 +161,7 @@ extensions are deferred:
 | `plans/painter-and-asset-api.md` | Shipped; kept for the design-decision rationale. |
 | `plans/grid-macos-port.md` | Shipped (GRID macOS native port). |
 | `plans/grid-sorting.md` | Shipped (multi-column sort + per-column kind/sortable + visual nav). |
+| `plans/clipboard-and-dnd.md` | Shipped (unified data-item, multi-format clipboard, DnD drop targets). Drag source is the next phase. |
 | `plans/winui3-host.md` | Feasibility analysis; deferred indefinitely. |
 | `plans/wasm-host.md` | Feasibility analysis; deferred. |
 | `plans/how-to-port.md` | Reference playbook for new platform ports. |

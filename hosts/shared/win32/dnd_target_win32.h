@@ -174,10 +174,27 @@ namespace neui_detail
     return action & (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK);
   }
 
-  inline uint32_t dnd_dropeffect_suggested(DWORD effects)
+  inline uint32_t dnd_dropeffect_suggested(DWORD effects, DWORD grfKeyState)
   {
-    // The OS-suggested effect; pick whichever bit the OS prefers. COPY
-    // takes priority since most external drags are copy-by-default.
+    // Modifier convention (matches Explorer / common Win32 apps):
+    //   Ctrl+Shift = Link
+    //   Ctrl       = Copy
+    //   Shift      = Move
+    //   (none)     = first available (Copy > Move > Link), matching the
+    //                pre-modifier default.
+    // The selected bit is masked against `effects` so we never suggest
+    // an action the source didn't advertise. Alt isn't checked here
+    // because IDropTarget's grfKeyState only carries MK_LBUTTON /
+    // MK_RBUTTON / MK_SHIFT / MK_CONTROL / MK_MBUTTON / MK_XBUTTON*;
+    // Alt comes through VK_MENU / GetKeyState, which a future revision
+    // could probe if needed.
+    const bool ctrl  = (grfKeyState & MK_CONTROL) != 0;
+    const bool shift = (grfKeyState & MK_SHIFT)   != 0;
+
+    if (ctrl && shift && (effects & DROPEFFECT_LINK)) return DROPEFFECT_LINK;
+    if (ctrl         && (effects & DROPEFFECT_COPY)) return DROPEFFECT_COPY;
+    if (shift        && (effects & DROPEFFECT_MOVE)) return DROPEFFECT_MOVE;
+
     if (effects & DROPEFFECT_COPY) return DROPEFFECT_COPY;
     if (effects & DROPEFFECT_MOVE) return DROPEFFECT_MOVE;
     if (effects & DROPEFFECT_LINK) return DROPEFFECT_LINK;
@@ -218,7 +235,7 @@ namespace neui_detail
                             POINTL pt, DWORD* pdwEffect) override
     {
       cache_formats(pDataObj);
-      uint32_t suggested = dnd_dropeffect_suggested(*pdwEffect);
+      uint32_t suggested = dnd_dropeffect_suggested(*pdwEffect, grfKeyState);
       int x, y;
       screen_to_client(pt, x, y);
       uint32_t accepted = 0;
@@ -238,7 +255,7 @@ namespace neui_detail
     STDMETHODIMP DragOver(DWORD grfKeyState, POINTL pt,
                            DWORD* pdwEffect) override
     {
-      uint32_t suggested = dnd_dropeffect_suggested(*pdwEffect);
+      uint32_t suggested = dnd_dropeffect_suggested(*pdwEffect, grfKeyState);
       int x, y;
       screen_to_client(pt, x, y);
       uint32_t accepted = 0;
@@ -271,7 +288,7 @@ namespace neui_detail
       // Refresh formats from the actual data object at drop time.
       cache_formats(pDataObj);
 
-      uint32_t suggested = dnd_dropeffect_suggested(*pdwEffect);
+      uint32_t suggested = dnd_dropeffect_suggested(*pdwEffect, grfKeyState);
       int x, y;
       screen_to_client(pt, x, y);
       uint32_t accepted = 0;

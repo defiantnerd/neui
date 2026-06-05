@@ -2785,12 +2785,29 @@ namespace xpl_host {
     s->_last_accepted_action = static_cast<uint32_t>(action);
   }
 
+  static neui_dnd_action_t NEUI_ABI dnd_begin_drag(neui_session_t session,
+                                                    neui_widget_t source_widget,
+                                                    neui_data_item_t payload,
+                                                    uint32_t allowed_actions)
+  {
+    auto* s = get_session_for_widget(session, source_widget);
+    if (!s) return NEUI_DND_ACTION_NONE;
+    if (s->_in_dnd_dispatch) return NEUI_DND_ACTION_NONE;  // no re-entry
+    auto* item = s->_data_items.get(payload.id);
+    if (!item) return NEUI_DND_ACTION_NONE;
+    void* native = s->find_parent_native_handle(WidgetToIndex(source_widget));
+    if (!native) return NEUI_DND_ACTION_NONE;
+    uint32_t r = platform_dnd_begin_drag(native, item, allowed_actions);
+    return static_cast<neui_dnd_action_t>(r);
+  }
+
   neui_dnd_api_t dnd_api = {
     NEUI_VERSION,
     dnd_set_drop_target,
     dnd_get_drop_target,
     dnd_set_accepted_formats,
     dnd_accept,
+    dnd_begin_drag,
   };
 
 } // namespace xpl_host

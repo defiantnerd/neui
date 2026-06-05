@@ -5,7 +5,6 @@
 #include "host.h"
 #include "window.h"
 #include "../../backends/d2d/d2d_backend.h"
-#include "../shared/win32/clipboard_listener_win32.h"
 #include "../shared/win32/theme_provider_win32.h"
 #include "../shared/win32/theme_brushes_win32.h"
 #include "../shared/win32/dark_menu_win32.h"
@@ -104,19 +103,6 @@ namespace win32_host
     _client_widget_api = static_cast<neui_widget_client_t*>(
       _client->get_interface(token, NEUI_API_WIDGETS));
 
-    // Opt-in clipboard-change notifications.
-    _clipboard_client = static_cast<neui_clipboard_client_t*>(
-      _client->get_interface(token, NEUI_API_CLIPBOARD_CLIENT));
-    if (_clipboard_client && _clipboard_client->onchange) {
-      _clipboard_listener_handle = neui_detail::register_clipboard_listener(
-        [](void* tok) {
-          auto* self = static_cast<Session*>(tok);
-          if (self && self->_clipboard_client && self->_clipboard_client->onchange)
-            self->_clipboard_client->onchange(self->_token);
-        },
-        this);
-    }
-
     // Opt-in menu-item validation callback. Polled per item at popup-open.
     _menu_client = static_cast<neui_menu_client_t*>(
       _client->get_interface(token, NEUI_API_MENU_CLIENT));
@@ -159,10 +145,6 @@ namespace win32_host
     // GPU bitmap is freed before the manager destructs.
     _asset_manager.clear(neui_d2d_backend::get_backend());
 
-    if (_clipboard_listener_handle != 0) {
-      neui_detail::unregister_clipboard_listener(_clipboard_listener_handle);
-      _clipboard_listener_handle = 0;
-    }
     if (_theme_listener_handle != 0) {
       neui_detail::unregister_theme_listener(_theme_listener_handle);
       _theme_listener_handle = 0;
@@ -350,11 +332,12 @@ namespace win32_host
     return false;
   }
 
-  // Helper bundled with the Session-member dispatch_dnd_* below. Sends a
-  // single DnD event to the client via the cached widget_client.
+  // Helper used by send_dnd_event_internal: subtracts the matched
+  // widget's frame-local top-left to produce widget-local coords.
   void Session::send_dnd_event_internal(uint32_t widget_idx,
                                          uint32_t type_u32,
                                          int frame_x, int frame_y,
+                                         int abs_x, int abs_y,
                                          const char* const* formats,
                                          uint32_t formats_count,
                                          uint32_t suggested, uint32_t buttonmap,
@@ -367,10 +350,8 @@ namespace win32_host
     neui_event_t ev = {};
     ev.type = type;
     ev.data.dnd.widget        = { wd.widget_id };
-    // Frame widgets on win32 report client-relative coords; for non-frame
-    // widgets a future revision will subtract their HWND offset.
-    ev.data.dnd.x             = frame_x;
-    ev.data.dnd.y             = frame_y;
+    ev.data.dnd.x             = frame_x - abs_x;
+    ev.data.dnd.y             = frame_y - abs_y;
     ev.data.dnd.buttonmap     = buttonmap;
     ev.data.dnd.formats       = formats;
     ev.data.dnd.formats_count = formats_count;
@@ -382,6 +363,86 @@ namespace win32_host
     _in_dnd_dispatch = false;
   }
 
+  // Recursive descendant walker. Stack-passes parent abs coords so each
+  // widget's frame-local top-left is parent_abs + wd.x / wd.y. Updates
+  // out_idx / out_abs_x / out_abs_y as deeper matches are found.
+  static void find_drop_target_descendants_w32(neui_detail::Tree<WidgetData>& widgets,
+                                                 uint32_t parent_idx,
+                                                 int parent_abs_x, int parent_abs_y,
+                                                 int frame_x, int frame_y,
+                                                 const char* const* formats,
+                                                 uint32_t formats_count,
+                                                 uint32_t& out_idx,
+                                                 int& out_abs_x, int& out_abs_y)
+  {
+    uint32_t idx = widgets.child(parent_idx);
+    while (idx != 0) {
+      if (widgets.exists(idx)) {
+        auto& wd = widgets[idx];
+        if (wd.visible) {
+          int abs_x = parent_abs_x + wd.x;
+          int abs_y = parent_abs_y + wd.y;
+          if (frame_x >= abs_x && frame_x < abs_x + wd.width &&
+              frame_y >= abs_y && frame_y < abs_y + wd.height) {
+            if (wd.enabled && wd.drop_target &&
+                dnd_formats_match_win32(wd.accepted_mimes, formats,
+                                         formats_count)) {
+              out_idx   = idx;
+              out_abs_x = abs_x;
+              out_abs_y = abs_y;
+            }
+            find_drop_target_descendants_w32(widgets, idx,
+                                              abs_x, abs_y,
+                                              frame_x, frame_y,
+                                              formats, formats_count,
+                                              out_idx, out_abs_x, out_abs_y);
+          }
+        }
+      }
+      idx = widgets.next(idx);
+    }
+  }
+
+  uint32_t Session::find_drop_target_in_frame_w32(uint32_t frame_widget_idx,
+                                                    int frame_x, int frame_y,
+                                                    const char* const* formats,
+                                                    uint32_t formats_count,
+                                                    int& out_abs_x,
+                                                    int& out_abs_y)
+  {
+    out_abs_x = 0;
+    out_abs_y = 0;
+    if (frame_widget_idx == 0 || frame_widget_idx == UINT32_MAX) return 0;
+    if (!_widgets.exists(frame_widget_idx)) return 0;
+
+    // Walk descendants first (deepest match wins).
+    uint32_t deepest = 0;
+    int deepest_abs_x = 0;
+    int deepest_abs_y = 0;
+    find_drop_target_descendants_w32(_widgets, frame_widget_idx,
+                                      0, 0,
+                                      frame_x, frame_y,
+                                      formats, formats_count,
+                                      deepest, deepest_abs_x, deepest_abs_y);
+    if (deepest != 0) {
+      out_abs_x = deepest_abs_x;
+      out_abs_y = deepest_abs_y;
+      return deepest;
+    }
+
+    // Fallback: the frame itself.
+    auto& frame_wd = _widgets[frame_widget_idx];
+    if (frame_wd.drop_target &&
+        dnd_formats_match_win32(frame_wd.accepted_mimes, formats,
+                                 formats_count)) {
+      // Frame's client-area origin is (0, 0) in DnD-event coords.
+      out_abs_x = 0;
+      out_abs_y = 0;
+      return frame_widget_idx;
+    }
+    return 0;
+  }
+
   uint32_t Session::dispatch_dnd_enter(uint32_t frame_widget_idx,
                                         int x, int y,
                                         const char* const* formats,
@@ -389,17 +450,16 @@ namespace win32_host
                                         uint32_t suggested,
                                         uint32_t buttonmap)
   {
-    uint32_t idx = 0;
-    if (frame_widget_idx != 0 && _widgets.exists(frame_widget_idx)) {
-      auto& wd = _widgets[frame_widget_idx];
-      if (wd.drop_target &&
-          dnd_formats_match_win32(wd.accepted_mimes, formats, count))
-        idx = frame_widget_idx;
-    }
-    _current_drop_target = idx;
-    _last_accepted_action = 0;
+    int abs_x = 0, abs_y = 0;
+    uint32_t idx = find_drop_target_in_frame_w32(frame_widget_idx, x, y,
+                                                   formats, count,
+                                                   abs_x, abs_y);
+    _current_drop_target   = idx;
+    _current_drop_abs_x    = abs_x;
+    _current_drop_abs_y    = abs_y;
+    _last_accepted_action  = 0;
     if (idx == 0) return 0;
-    send_dnd_event_internal(idx, NEUI_EVENT_DND_ENTER, x, y,
+    send_dnd_event_internal(idx, NEUI_EVENT_DND_ENTER, x, y, abs_x, abs_y,
                              formats, count, suggested, buttonmap,
                              neui_data_item_none);
     return _last_accepted_action;
@@ -412,29 +472,30 @@ namespace win32_host
                                        uint32_t suggested,
                                        uint32_t buttonmap)
   {
-    uint32_t idx = 0;
-    if (frame_widget_idx != 0 && _widgets.exists(frame_widget_idx)) {
-      auto& wd = _widgets[frame_widget_idx];
-      if (wd.drop_target &&
-          dnd_formats_match_win32(wd.accepted_mimes, formats, count))
-        idx = frame_widget_idx;
-    }
+    int abs_x = 0, abs_y = 0;
+    uint32_t idx = find_drop_target_in_frame_w32(frame_widget_idx, x, y,
+                                                   formats, count,
+                                                   abs_x, abs_y);
     if (idx != _current_drop_target) {
       if (_current_drop_target != 0 && _current_drop_target != UINT32_MAX &&
           _widgets.exists(_current_drop_target)) {
         send_dnd_event_internal(_current_drop_target, NEUI_EVENT_DND_LEAVE,
-                                 x, y, nullptr, 0, 0, 0, neui_data_item_none);
+                                 x, y,
+                                 _current_drop_abs_x, _current_drop_abs_y,
+                                 nullptr, 0, 0, 0, neui_data_item_none);
       }
-      _current_drop_target = idx;
-      _last_accepted_action = 0;
+      _current_drop_target   = idx;
+      _current_drop_abs_x    = abs_x;
+      _current_drop_abs_y    = abs_y;
+      _last_accepted_action  = 0;
       if (idx == 0) return 0;
-      send_dnd_event_internal(idx, NEUI_EVENT_DND_ENTER, x, y,
+      send_dnd_event_internal(idx, NEUI_EVENT_DND_ENTER, x, y, abs_x, abs_y,
                                formats, count, suggested, buttonmap,
                                neui_data_item_none);
       return _last_accepted_action;
     }
     if (idx == 0) return 0;
-    send_dnd_event_internal(idx, NEUI_EVENT_DND_MOVE, x, y,
+    send_dnd_event_internal(idx, NEUI_EVENT_DND_MOVE, x, y, abs_x, abs_y,
                              formats, count, suggested, buttonmap,
                              neui_data_item_none);
     return _last_accepted_action;
@@ -445,9 +506,13 @@ namespace win32_host
     if (_current_drop_target != 0 && _current_drop_target != UINT32_MAX &&
         _widgets.exists(_current_drop_target)) {
       send_dnd_event_internal(_current_drop_target, NEUI_EVENT_DND_LEAVE,
-                               0, 0, nullptr, 0, 0, 0, neui_data_item_none);
+                               0, 0,
+                               _current_drop_abs_x, _current_drop_abs_y,
+                               nullptr, 0, 0, 0, neui_data_item_none);
     }
-    _current_drop_target = UINT32_MAX;
+    _current_drop_target  = UINT32_MAX;
+    _current_drop_abs_x   = 0;
+    _current_drop_abs_y   = 0;
     _last_accepted_action = 0;
   }
 
@@ -461,7 +526,9 @@ namespace win32_host
   {
     if (_current_drop_target == 0 || _current_drop_target == UINT32_MAX ||
         !_widgets.exists(_current_drop_target)) {
-      _current_drop_target = UINT32_MAX;
+      _current_drop_target  = UINT32_MAX;
+      _current_drop_abs_x   = 0;
+      _current_drop_abs_y   = 0;
       _last_accepted_action = 0;
       return 0;
     }
@@ -482,13 +549,17 @@ namespace win32_host
     }
 
     send_dnd_event_internal(_current_drop_target, NEUI_EVENT_DND_DROP,
-                             x, y, formats, count, suggested, buttonmap,
+                             x, y,
+                             _current_drop_abs_x, _current_drop_abs_y,
+                             formats, count, suggested, buttonmap,
                              neui_data_item_t{ item_id });
 
     if (item_id) _data_items.release(item_id);
 
     uint32_t action = _last_accepted_action;
-    _current_drop_target = UINT32_MAX;
+    _current_drop_target  = UINT32_MAX;
+    _current_drop_abs_x   = 0;
+    _current_drop_abs_y   = 0;
     _last_accepted_action = 0;
     return action;
   }

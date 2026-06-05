@@ -114,7 +114,10 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
     case NEUI_EVENT_DND_MOVE:
       a->drag_over = true;
       a->widgets->invalidate(a->session, { a->drop_id });
-      a->dnd->accept(a->session, NEUI_DND_ACTION_COPY);
+      // Mirror the framework's modifier-aware suggestion so the cursor
+      // reflects Ctrl (copy) / Shift (move) / Ctrl+Shift (link).
+      a->dnd->accept(a->session,
+                      static_cast<neui_dnd_action_t>(event->data.dnd.suggested_action));
       return true;
 
     case NEUI_EVENT_DND_LEAVE:
@@ -150,7 +153,8 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
       }
       dbglog("[dnd_example] dropped %zu items\n", a->dropped.size());
       a->widgets->invalidate(a->session, { a->drop_id });
-      a->dnd->accept(a->session, NEUI_DND_ACTION_COPY);
+      a->dnd->accept(a->session,
+                      static_cast<neui_dnd_action_t>(event->data.dnd.suggested_action));
       return true;
     }
 

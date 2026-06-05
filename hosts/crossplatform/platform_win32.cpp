@@ -19,8 +19,8 @@
 #include "../shared/win32/dark_menu_win32.h"
 #include "../shared/win32/dark_menubar_win32.h"
 #include "../shared/win32/clipboard_win32.h"
-#include "../shared/win32/clipboard_listener_win32.h"
 #include "../shared/win32/dnd_target_win32.h"
+#include "../shared/win32/dnd_source_win32.h"
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
 
@@ -1562,17 +1562,6 @@ namespace xpl_host
     return neui_detail::clipboard_read_item_win32(item);
   }
 
-  uint32_t platform_register_clipboard_listener(ClipboardChangeCallback cb,
-                                                 void* token)
-  {
-    return neui_detail::register_clipboard_listener(cb, token);
-  }
-
-  void platform_unregister_clipboard_listener(uint32_t handle)
-  {
-    neui_detail::unregister_clipboard_listener(handle);
-  }
-
   // -------------------------------------------------------------------------
   // Drag & drop. The seam callbacks below thunk into the xpl Session;
   // each Session::dispatch_dnd_* converts to a NEUI_EVENT_DND_* and walks
@@ -1660,6 +1649,14 @@ namespace xpl_host
   {
     if (!native_handle) return;
     RevokeDragDrop(static_cast<HWND>(native_handle));
+  }
+
+  uint32_t platform_dnd_begin_drag(void* native_handle,
+                                    neui_detail::DataItem* item,
+                                    uint32_t allowed_actions)
+  {
+    return neui_detail::platform_dnd_begin_drag_w32(native_handle, item,
+                                                     allowed_actions);
   }
 
   // -------------------------------------------------------------------------

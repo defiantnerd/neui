@@ -212,20 +212,6 @@ namespace xpl_host
       _client->get_interface(token, NEUI_API_WIDGETS));
     _backend = platform_get_backend();
 
-    // Opt-in clipboard-change notifications: the client implements
-    // neui_clipboard_client_t and exposes it via its get_interface.
-    _clipboard_client = static_cast<neui_clipboard_client_t*>(
-      _client->get_interface(token, NEUI_API_CLIPBOARD_CLIENT));
-    if (_clipboard_client && _clipboard_client->onchange) {
-      _clipboard_listener_handle = platform_register_clipboard_listener(
-        [](void* tok) {
-          auto* self = static_cast<Session*>(tok);
-          if (self && self->_clipboard_client && self->_clipboard_client->onchange)
-            self->_clipboard_client->onchange(self->_token);
-        },
-        this);
-    }
-
     // Opt-in menu-item validation callback. Polled per item at popup-open.
     _menu_client = static_cast<neui_menu_client_t*>(
       _client->get_interface(token, NEUI_API_MENU_CLIENT));
@@ -267,10 +253,6 @@ namespace xpl_host
 
   Session::~Session()
   {
-    if (_clipboard_listener_handle != 0) {
-      platform_unregister_clipboard_listener(_clipboard_listener_handle);
-      _clipboard_listener_handle = 0;
-    }
     if (_theme_listener_handle != 0) {
       neui_detail::unregister_theme_listener(_theme_listener_handle);
       _theme_listener_handle = 0;

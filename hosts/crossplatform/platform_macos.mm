@@ -25,6 +25,7 @@
 #include "platform.h"
 #include "../../backends/cg/cg_backend.h"
 #include "../shared/macos/clipboard_macos.h"
+#include "../shared/macos/dnd_source_macos.h"
 #include "../shared/macos/keys_macos.h"
 #include "../shared/macos/menubar_macos.h"
 #include "../shared/macos/theme_provider_macos.h"
@@ -1572,19 +1573,6 @@ namespace xpl_host
     return neui_detail::clipboard_read_item_macos(item);
   }
 
-  // NSPasteboard has no native change-notification API. Per plans/macos-port.md
-  // step 5 option (a), v1 returns 0 - opt-in NEUI_API_CLIPBOARD_CLIENT
-  // simply doesn't fire on macOS. If a client genuinely needs it, a 250ms
-  // NSTimer polling [NSPasteboard.generalPasteboard changeCount] is the
-  // documented workaround.
-  uint32_t platform_register_clipboard_listener(ClipboardChangeCallback /*cb*/,
-                                                  void* /*token*/)
-  {
-    return 0;
-  }
-
-  void platform_unregister_clipboard_listener(uint32_t /*handle*/) {}
-
   // -------------------------------------------------------------------------
   // Drag & drop. The content NEUIView for each frame is the
   // NSDraggingDestination; registerForDraggedTypes lets AppKit start
@@ -1614,6 +1602,17 @@ namespace xpl_host
     NSView* cv = [win contentView];
     if ([cv isKindOfClass:[NEUIView class]])
       [cv unregisterDraggedTypes];
+  }
+
+  uint32_t platform_dnd_begin_drag(void* native_handle,
+                                    neui_detail::DataItem* item,
+                                    uint32_t allowed_actions)
+  {
+    if (!native_handle || !item) return 0;
+    NSWindow* win = (__bridge NSWindow*)native_handle;
+    NSView* cv = [win contentView];
+    if (!cv) return 0;
+    return neui_detail::macos_run_drag_source(cv, *item, allowed_actions);
   }
 
   // -------------------------------------------------------------------------
