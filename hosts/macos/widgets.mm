@@ -2419,6 +2419,71 @@ namespace macos_host
     return neui_detail::grid_visual_to_logical(m, visual_row);
   }
 
+  // -------- Cell editing API (macOS) ------------------------------------
+  // Edit dispatch helpers live in window.mm (next to grid_painted_msg_macos).
+  // Forward declare them here so this TU can call into them.
+  bool grid_try_begin_edit_macos(WidgetData& wd, int row, int col);
+  bool grid_commit_edit_macos(WidgetData& wd);
+  void grid_cancel_edit_macos(WidgetData& wd);
+
+  static void NEUI_ABI gr_set_column_editable(neui_session_t session, neui_widget_t widget,
+                                                int col, bool editable)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_macos_api(*wd);
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns[(size_t)col].editable = editable;
+    if (!editable && m.edit.active && m.edit.col == col)
+      grid_cancel_edit_macos(*wd);
+  }
+
+  static bool NEUI_ABI gr_get_column_editable(neui_session_t session, neui_widget_t widget,
+                                                int col)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model) return false;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return false;
+    return m.columns[(size_t)col].editable;
+  }
+
+  static void NEUI_ABI gr_begin_cell_edit(neui_session_t session, neui_widget_t widget,
+                                           int row, int col)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd) return;
+    if (grid_try_begin_edit_macos(*wd, row, col) && wd->native_control) {
+      // Pull keyboard focus to the painted view so typing routes here.
+      NSView* v = (__bridge NSView*)wd->native_control;
+      [v.window makeFirstResponder:v];
+    }
+  }
+
+  static void NEUI_ABI gr_end_cell_edit(neui_session_t session, neui_widget_t widget,
+                                         bool commit)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model || !wd->grid_model->edit.active) return;
+    if (commit) (void)grid_commit_edit_macos(*wd);
+    else        grid_cancel_edit_macos(*wd);
+  }
+
+  static bool NEUI_ABI gr_is_editing_cell(neui_session_t session, neui_widget_t widget,
+                                            int* out_row, int* out_col)
+  {
+    auto* wd = resolve_grid_macos(session, widget);
+    if (!wd || !wd->grid_model || !wd->grid_model->edit.active) {
+      if (out_row) *out_row = -1;
+      if (out_col) *out_col = -1;
+      return false;
+    }
+    auto& m = *wd->grid_model;
+    if (out_row) *out_row = m.edit.row;
+    if (out_col) *out_col = m.edit.col;
+    return true;
+  }
+
   neui_grid_api_t grid_api = {
     NEUI_VERSION,
     gr_add_column,
@@ -2458,6 +2523,11 @@ namespace macos_host
     gr_get_sort_level,
     gr_logical_to_visual_row,
     gr_visual_to_logical_row,
+    gr_set_column_editable,
+    gr_get_column_editable,
+    gr_begin_cell_edit,
+    gr_end_cell_edit,
+    gr_is_editing_cell,
   };
 
 } // namespace macos_host

@@ -11,7 +11,9 @@
 #include <neui/d/grid.h>
 
 #include "attrs.h"
+#include "edit_history.h"
 #include "scrollbar.h"
+#include "text_edit.h"
 
 // Shared GRID widget state model. Header-only / inline so both the xpl
 // host and the native hosts can reuse the same data structures and
@@ -85,6 +87,9 @@ namespace neui_detail
     // the cell strings in this column are compared.
     bool                  sortable  = true;
     neui_grid_sort_kind_t sort_kind = NEUI_GRID_SORT_STRING;
+    // Cell editing. When true, ENTER opens an in-place editor over the
+    // selected cell in cell-focus mode. Default false. See d/grid.h.
+    bool                  editable  = false;
   };
 
   // One level in a multi-column sort stack. dir is always ASC or DESC inside
@@ -108,6 +113,22 @@ namespace neui_detail
   // strings on demand by ensure_row_cell_count.
   struct GridRow {
     std::vector<std::string> cells;
+  };
+
+  // In-place cell editor state. `active` gates everything else; when false
+  // the editor is closed and the rest of the fields are stale. Logical
+  // (row, col) so it survives sort changes. `te` is the reusable single-
+  // line text buffer + cursor + selection (shared with future KNOB value
+  // entry). `orig_text` is the cell's text at the moment editing began,
+  // restored on ESC / commit-rejected. `history` is a per-edit-session
+  // undo stack reset on grid_begin_edit.
+  struct GridEditState {
+    bool         active    = false;
+    int          row       = -1;
+    int          col       = -1;
+    TextEditState te;
+    std::string  orig_text;
+    EditHistory  history;
   };
 
   // Smooth-scroll kinetics for pixel-precise vertical scrolling with inertial
@@ -164,6 +185,9 @@ namespace neui_detail
     // Smooth-scroll / rubber-band kinetics (see GridScrollKinetics). Used by
     // the macOS hosts; inert elsewhere.
     GridScrollKinetics scroll_kin;
+
+    // In-place cell editor (see GridEditState).
+    GridEditState edit;
 
     // Multi-column sort. `sort_stack` is the active stack (level 0 = primary);
     // empty == unsorted (identity mapping). `display_order` maps visual row
@@ -1045,6 +1069,64 @@ namespace neui_detail
       }
     }
     m.sort_dirty = true;
+  }
+
+  // ---- Cell editor lifecycle ---------------------------------------------
+  // The text-buffer primitives (insert / backspace / delete / move /
+  // select_all / copy / cut / paste / undo / redo) live in text_edit.h and
+  // operate on `m.edit.te.text` + `m.edit.te.cursor` + `m.edit.te.sel_anchor`.
+  // These two helpers just frame the editing session.
+
+  // Open the editor at (logical row, col). Caller must have validated:
+  //   - column.editable is true
+  //   - row / col in range
+  //   - the cell is not disabled
+  //   - the grid is in cell-focus mode (so a specific column is identified)
+  // Resets the working buffer to the cell's current text and selects the
+  // entire content (anchor=0, cursor=end) so the first character typed
+  // replaces it (spreadsheet convention). Clears any prior undo history.
+  inline void grid_begin_edit(GridModel& m, int row, int col)
+  {
+    if (row < 0 || row >= (int)m.rows.size()) return;
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    const auto& rd = m.rows[(size_t)row];
+    const std::string& cur = (col < (int)rd.cells.size())
+                                ? rd.cells[(size_t)col]
+                                : std::string();
+    m.edit.active    = true;
+    m.edit.row       = row;
+    m.edit.col       = col;
+    m.edit.te        = TextEditState{};
+    m.edit.te.text   = cur;
+    m.edit.te.sel_anchor = 0;
+    m.edit.te.cursor     = (int)m.edit.te.text.size();
+    m.edit.orig_text = cur;
+    m.edit.history   = EditHistory{};
+  }
+
+  // Close the editor and return the working text. Caller passes it to the
+  // validate callback / set_cell_text on commit, or discards on cancel.
+  // Does NOT fire events.
+  inline std::string grid_end_edit(GridModel& m)
+  {
+    std::string out = std::move(m.edit.te.text);
+    m.edit = GridEditState{};
+    return out;
+  }
+
+  // Gate for opening the editor: column editable, in range, cell not
+  // disabled, cell_focus mode active. Used by hosts so the rules can't
+  // drift between platforms.
+  inline bool grid_cell_edit_allowed(const GridModel& m, int row, int col,
+                                       bool cell_focus)
+  {
+    if (!cell_focus) return false;
+    if (row < 0 || row >= (int)m.rows.size()) return false;
+    if (col < 0 || col >= (int)m.columns.size()) return false;
+    if (!m.columns[(size_t)col].editable) return false;
+    const auto* ov = grid_find_override(m, row, col);
+    if (ov && ov->has_enabled && !ov->enabled) return false;
+    return true;
   }
 
   // Read NEUI_ATTR_GRID_* into a GridPaintConfig in one pass. Defaults

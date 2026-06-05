@@ -4114,6 +4114,74 @@ namespace win32_host
     grid_fire_cell_clicked_w32(wd, row, col);
   }
 
+  // ---- Cell-edit dispatch helpers (win32) --------------------------------
+
+  // Forward declarations - both helpers and the painted_msg below live in
+  // the same TU but their definitions interleave.
+  static void grid_repaint_w32(WidgetData& wd);
+
+  static void grid_fire_cell_edit_event_w32(WidgetData& wd, neui_event_type_t t,
+                                              int row, int col)
+  {
+    if (!wd.session) return;
+    neui_event_t ev{};
+    ev.type = t;
+    ev.data.grid_cell.widget.id = wd.widget_id;
+    ev.data.grid_cell.row       = row;
+    ev.data.grid_cell.col       = col;
+    wd.session->dispatch_event(&ev);
+  }
+
+  static bool grid_try_begin_edit_w32(WidgetData& wd, int row, int col)
+  {
+    auto& m = ensure_grid_model_w32(wd);
+    if (m.edit.active) return false;
+    auto cfg = neui_detail::grid_read_config(wd.attrs.get());
+    if (!neui_detail::grid_cell_edit_allowed(m, row, col, cfg.cell_focus))
+      return false;
+    neui_detail::grid_begin_edit(m, row, col);
+    grid_repaint_w32(wd);
+    grid_fire_cell_edit_event_w32(wd, NEUI_EVENT_GRID_CELL_EDIT_BEGIN, row, col);
+    return true;
+  }
+
+  static bool grid_commit_edit_w32(WidgetData& wd)
+  {
+    auto& m = ensure_grid_model_w32(wd);
+    if (!m.edit.active) return false;
+    int row = m.edit.row;
+    int col = m.edit.col;
+    auto* client = wd.session ? wd.session->_grid_client : nullptr;
+    const std::string proposed = m.edit.te.text;
+    if (client && client->validate_cell) {
+      neui_widget_t w{}; w.id = wd.widget_id;
+      if (!client->validate_cell(wd.session->get_token(), w, row, col,
+                                   proposed.c_str())) {
+        return false;
+      }
+    }
+    (void)neui_detail::grid_end_edit(m);
+    auto& r = m.rows[(size_t)row];
+    if ((int)r.cells.size() <= col) r.cells.resize((size_t)col + 1);
+    r.cells[(size_t)col] = proposed;
+    m.sort_dirty = true;
+    grid_repaint_w32(wd);
+    grid_fire_cell_edit_event_w32(wd, NEUI_EVENT_GRID_CELL_CHANGED, row, col);
+    return true;
+  }
+
+  static void grid_cancel_edit_w32(WidgetData& wd)
+  {
+    auto& m = ensure_grid_model_w32(wd);
+    if (!m.edit.active) return;
+    int row = m.edit.row;
+    int col = m.edit.col;
+    (void)neui_detail::grid_end_edit(m);
+    grid_repaint_w32(wd);
+    grid_fire_cell_edit_event_w32(wd, NEUI_EVENT_GRID_CELL_EDIT_CANCEL, row, col);
+  }
+
+
   // -------- paint_fn ------------------------------------------------------
 
   static void paint_grid_w32(neui_render_backend_t* backend,
@@ -4163,6 +4231,16 @@ namespace win32_host
     // clean across slot reuse.
     if (msg == WM_DESTROY) {
       if (wd.hwnd) KillTimer(wd.hwnd, GRID_BOUNCE_TIMER_ID);
+      return;
+    }
+
+    // Focus loss (Tab-traversal, mouse click elsewhere, etc.) commits an
+    // open in-place editor as if the user had pressed Enter. If the client
+    // validate_cell rejects the value, we fall back to cancelling rather
+    // than fighting Win32's focus change.
+    if (msg == WM_KILLFOCUS && m.edit.active) {
+      if (!grid_commit_edit_w32(wd))
+        grid_cancel_edit_w32(wd);
       return;
     }
 
@@ -4220,6 +4298,36 @@ namespace win32_host
       return;
     }
 
+    // WM_CHAR - feed printable codepoints to the in-place cell editor.
+    if (msg == WM_CHAR) {
+      if (!m.edit.active) return;
+      auto& te = m.edit.te;
+      uint16_t unit = (uint16_t)wParam;
+      uint32_t cp   = 0;
+      if (unit >= 0xD800 && unit <= 0xDBFF) {
+        // High surrogate - stash and wait for the low half.
+        te.pending_high_surrogate = unit;
+        return;
+      }
+      if (unit >= 0xDC00 && unit <= 0xDFFF) {
+        if (te.pending_high_surrogate == 0) return;
+        cp = 0x10000 + (((uint32_t)te.pending_high_surrogate - 0xD800) << 10)
+                       + ((uint32_t)unit - 0xDC00);
+        te.pending_high_surrogate = 0;
+      } else {
+        te.pending_high_surrogate = 0;
+        cp = unit;
+      }
+      // Skip controls (Backspace / Tab / Enter / Esc arrive as WM_CHAR too).
+      if (cp < 0x20 || cp == 0x7F) return;
+      char buf[4];
+      int  n = neui_detail::te_encode_utf8(cp, buf);
+      neui_detail::te_insert_utf8(te.text, te.cursor, te.sel_anchor,
+                                    te.overwrite, buf, n, &m.edit.history);
+      grid_repaint_w32(wd);
+      return;
+    }
+
     if (msg == WM_KEYDOWN) {
       // Map VK_* to NEUI_KEY_* then call into the shared keydown logic.
       // We mirror the xpl host's GridWidget::on_keydown here directly to
@@ -4230,6 +4338,89 @@ namespace win32_host
       if (GetKeyState(VK_SHIFT)   & 0x8000) mods |= NEUI_KMOD_SHIFT;
       if (GetKeyState(VK_CONTROL) & 0x8000) mods |= NEUI_KMOD_CTRL;
       if (GetKeyState(VK_MENU)    & 0x8000) mods |= NEUI_KMOD_ALT;
+
+      // --- Edit-mode keys take priority over the nav switch ---
+      if (m.edit.active) {
+        auto& te    = m.edit.te;
+        auto& hist  = m.edit.history;
+        const bool shift = (mods & NEUI_KMOD_SHIFT) != 0;
+        const bool ctrl  = (mods & NEUI_KMOD_CTRL)  != 0;
+        switch (keycode) {
+        case VK_RETURN: grid_commit_edit_w32(wd); return;
+        case VK_ESCAPE: grid_cancel_edit_w32(wd); return;
+        case VK_LEFT:
+          neui_detail::te_move_left (te.text, te.cursor, te.sel_anchor, ctrl, shift, &hist);
+          grid_repaint_w32(wd); return;
+        case VK_RIGHT:
+          neui_detail::te_move_right(te.text, te.cursor, te.sel_anchor, ctrl, shift, &hist);
+          grid_repaint_w32(wd); return;
+        case VK_HOME:
+          neui_detail::te_move_home (te.text, te.cursor, te.sel_anchor, shift, &hist);
+          grid_repaint_w32(wd); return;
+        case VK_END:
+          neui_detail::te_move_end  (te.text, te.cursor, te.sel_anchor, shift, &hist);
+          grid_repaint_w32(wd); return;
+        case VK_BACK:
+          neui_detail::te_backspace     (te.text, te.cursor, te.sel_anchor, ctrl, &hist);
+          grid_repaint_w32(wd); return;
+        case VK_DELETE:
+          neui_detail::te_delete_forward(te.text, te.cursor, te.sel_anchor, ctrl, &hist);
+          grid_repaint_w32(wd); return;
+        case 'A':
+          if (ctrl) {
+            neui_detail::te_select_all(te.text, te.cursor, te.sel_anchor, &hist);
+            grid_repaint_w32(wd);
+          }
+          return;
+        case 'C':
+          if (ctrl) {
+            std::string sel = neui_detail::te_selected_text(te.text, te.cursor, te.sel_anchor);
+            if (!sel.empty())
+              neui_detail::clipboard_set_text_win32(sel.c_str(), (uint32_t)sel.size());
+          }
+          return;
+        case 'X':
+          if (ctrl) {
+            std::string sel = neui_detail::te_selected_text(te.text, te.cursor, te.sel_anchor);
+            if (!sel.empty()) {
+              neui_detail::clipboard_set_text_win32(sel.c_str(), (uint32_t)sel.size());
+              hist.mark(neui_detail::EditState{ te.text, te.cursor, te.sel_anchor },
+                        neui_detail::EditHistory::None, true);
+              neui_detail::te_erase_selection(te.text, te.cursor, te.sel_anchor);
+              grid_repaint_w32(wd);
+            }
+          }
+          return;
+        case 'V':
+          if (ctrl) {
+            int n = neui_detail::clipboard_get_text_win32(nullptr, 0);
+            if (n > 0) {
+              std::vector<char> buf((size_t)n);
+              neui_detail::clipboard_get_text_win32(buf.data(), n);
+              std::string paste(buf.data(), (size_t)(n > 0 ? n - 1 : 0));
+              neui_detail::te_paste(te.text, te.cursor, te.sel_anchor, paste,
+                                      /*strip_newlines=*/true, &hist);
+              grid_repaint_w32(wd);
+            }
+          }
+          return;
+        case 'Z':
+          if (ctrl) {
+            if (shift) neui_detail::te_redo(te.text, te.cursor, te.sel_anchor, hist);
+            else       neui_detail::te_undo(te.text, te.cursor, te.sel_anchor, hist);
+            grid_repaint_w32(wd);
+          }
+          return;
+        case 'Y':
+          if (ctrl) {
+            neui_detail::te_redo(te.text, te.cursor, te.sel_anchor, hist);
+            grid_repaint_w32(wd);
+          }
+          return;
+        default:
+          return;  // swallow other keys while editing
+        }
+      }
 
       int n_rows = (int)m.rows.size();
       int n_cols = (int)m.columns.size();
@@ -4313,6 +4504,12 @@ namespace win32_host
       case VK_RETURN: {
         int r = m.selected_row;
         if (r < 0) return;
+        // Cell-edit takes priority over ROW_ACTIVATED when the column is
+        // editable and we're in cell-focus mode.
+        if (cfg.cell_focus && m.selected_col >= 0 &&
+            grid_try_begin_edit_w32(wd, r, m.selected_col)) {
+          return;
+        }
         grid_fire_row_activated_w32(wd, r);
         return;
       }
@@ -4430,6 +4627,20 @@ namespace win32_host
       // Hit-test reads display_order, so rebuild it first if dirty.
       grid_ensure_sort_clean(m);
       GridHit hit = grid_hit_test(m, vp, cfg.row_h, widget_w, widget_h, lx, ly);
+
+      // --- Edit-mode click handling ---
+      // Click inside the editing cell: swallow (the editor stays open).
+      // Click anywhere else: commit. If the commit is rejected by the
+      // validate callback, swallow the click so the underlying grid
+      // doesn't also act on it (editor stays open with the proposed text).
+      if (m.edit.active) {
+        bool on_editing_cell = (hit.region == GridHitRegion::Cell &&
+                                hit.row == m.edit.row &&
+                                hit.col == m.edit.col);
+        if (on_editing_cell) return;
+        if (!grid_commit_edit_w32(wd)) return;
+        // Commit succeeded - editor closed. Fall through.
+      }
       switch (hit.region) {
       case GridHitRegion::HeaderDivider:
         if (msg == WM_LBUTTONDOWN) {
@@ -4491,7 +4702,10 @@ namespace win32_host
       }
       case GridHitRegion::Cell: {
         if (msg == WM_LBUTTONDBLCLK) {
-          grid_fire_row_activated_w32(wd, hit.row);
+          // Try opening the in-place editor first (mirrors ENTER); falls
+          // back to ROW_ACTIVATED for non-editable cells / row-focus mode.
+          if (!grid_try_begin_edit_w32(wd, hit.row, hit.col))
+            grid_fire_row_activated_w32(wd, hit.row);
         } else {
           const GridCellOverride* ov = grid_find_override(m, hit.row, hit.col);
           bool cell_dis = ov && ov->has_enabled && !ov->enabled;
@@ -5064,6 +5278,62 @@ namespace win32_host
     return neui_detail::grid_visual_to_logical(m, visual_row);
   }
 
+  // -------- Cell editing API (win32) ------------------------------------
+
+  static void NEUI_ABI gr_set_column_editable(neui_session_t session, neui_widget_t widget,
+                                                int col, bool editable)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd) return;
+    auto& m = ensure_grid_model_w32(*wd);
+    if (col < 0 || col >= (int)m.columns.size()) return;
+    m.columns[(size_t)col].editable = editable;
+    if (!editable && m.edit.active && m.edit.col == col)
+      grid_cancel_edit_w32(*wd);
+  }
+
+  static bool NEUI_ABI gr_get_column_editable(neui_session_t session, neui_widget_t widget,
+                                                int col)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model) return false;
+    auto& m = *wd->grid_model;
+    if (col < 0 || col >= (int)m.columns.size()) return false;
+    return m.columns[(size_t)col].editable;
+  }
+
+  static void NEUI_ABI gr_begin_cell_edit(neui_session_t session, neui_widget_t widget,
+                                           int row, int col)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd) return;
+    if (grid_try_begin_edit_w32(*wd, row, col) && wd->hwnd) SetFocus(wd->hwnd);
+  }
+
+  static void NEUI_ABI gr_end_cell_edit(neui_session_t session, neui_widget_t widget,
+                                         bool commit)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model || !wd->grid_model->edit.active) return;
+    if (commit) (void)grid_commit_edit_w32(*wd);
+    else        grid_cancel_edit_w32(*wd);
+  }
+
+  static bool NEUI_ABI gr_is_editing_cell(neui_session_t session, neui_widget_t widget,
+                                            int* out_row, int* out_col)
+  {
+    auto* wd = resolve_grid_w32(session, widget);
+    if (!wd || !wd->grid_model || !wd->grid_model->edit.active) {
+      if (out_row) *out_row = -1;
+      if (out_col) *out_col = -1;
+      return false;
+    }
+    auto& m = *wd->grid_model;
+    if (out_row) *out_row = m.edit.row;
+    if (out_col) *out_col = m.edit.col;
+    return true;
+  }
+
   neui_grid_api_t grid_api = {
     NEUI_VERSION,
     gr_add_column,
@@ -5103,5 +5373,10 @@ namespace win32_host
     gr_get_sort_level,
     gr_logical_to_visual_row,
     gr_visual_to_logical_row,
+    gr_set_column_editable,
+    gr_get_column_editable,
+    gr_begin_cell_edit,
+    gr_end_cell_edit,
+    gr_is_editing_cell,
   };
 }

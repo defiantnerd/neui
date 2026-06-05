@@ -12,6 +12,7 @@ add_executable(neui_tests
   test_behavior.cpp
   test_attrs.cpp
   test_edit_history.cpp
+  test_text_edit.cpp
   test_tree.cpp
   test_scrollbar.cpp
   test_shortcut_format.cpp)

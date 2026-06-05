@@ -350,17 +350,59 @@ namespace win32_host
       // to the client first; this runs after.
       if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
       return 0;
+    case WM_CHAR:
+      // Painted-widget character input (GRID cell editor today). Routed so
+      // the GRID can stuff typed codepoints into its edit buffer without
+      // needing a focus-bound native edit control.
+      if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
+      return 0;
+    case WM_KILLFOCUS:
+      // Forward focus loss so the GRID can commit / cancel an open in-place
+      // cell editor. Without this, Tab-traversal would leave the editor
+      // open over a widget that no longer has the keyboard.
+      if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
+      return 0;
     case WM_TIMER:
       // Grid uses this to drive the 60 Hz spring-back animation when smooth
       // scroll is active. Forward so the widget's painted_msg_fn can step
       // the animation and decide whether to kill the timer.
       if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
       return 0;
-    case WM_GETDLGCODE:
+    case WM_GETDLGCODE: {
       // Claim arrow keys so the dialog manager (IsDialogMessage in the
       // message pump) doesn't reinterpret them as focus navigation. Tab /
       // Shift+Tab stay with the dialog manager - we don't set DLGC_WANTTAB.
-      return DLGC_WANTARROWS;
+      //
+      // When IsDialogMessage is probing a specific key (wParam = the VK
+      // code, lParam = the MSG*), claim VK_RETURN and VK_ESCAPE for the
+      // GRID widget so the in-place cell editor can use Enter to commit /
+      // open and Escape to cancel. Without this, IsDialogMessage swallows
+      // Enter (looking for a default button) and the keypress never reaches
+      // the grid's WndProc.
+      if (wParam != 0 && wd && wd->type && !strcmp(wd->type, NEUI_W_GRID)) {
+        if (wParam == VK_RETURN || wParam == VK_ESCAPE)
+          return DLGC_WANTMESSAGE;
+      }
+      // CUSTOMDRAW clients dispatch keys via NEUI_EVENT_KEYDOWN, so they
+      // also want unmodified Enter / Escape to land in the client.
+      if (wParam != 0 && wd && wd->type && !strcmp(wd->type, NEUI_W_CUSTOMDRAW)) {
+        if (wParam == VK_RETURN || wParam == VK_ESCAPE)
+          return DLGC_WANTMESSAGE;
+      }
+      // GRID with an open in-place cell editor wants every character
+      // (DLGC_WANTCHARS keeps the dialog manager from interpreting them as
+      // mnemonics). CUSTOMDRAW gets the same treatment so client text
+      // input doesn't get filtered. Both already claim arrows above.
+      LRESULT code = DLGC_WANTARROWS;
+      if (wd && wd->type && wd->grid_model && wd->grid_model->edit.active &&
+          !strcmp(wd->type, NEUI_W_GRID)) {
+        code |= DLGC_WANTCHARS;
+      }
+      if (wd && wd->type && !strcmp(wd->type, NEUI_W_CUSTOMDRAW)) {
+        code |= DLGC_WANTCHARS;
+      }
+      return code;
+    }
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORBTN: {
       // STATIC controls (labels, checkbox/radio text) parented to a

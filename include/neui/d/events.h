@@ -62,6 +62,9 @@ extern "C" {
     NEUI_EVENT_GRID_CELL_CLICKED        = DEF_GRID_EVENT(4),  // grid: raw "click at (row, col)" fallback - only fires if the high-level events above weren't consumed by the client
     NEUI_EVENT_GRID_COLUMN_RESIZED      = DEF_GRID_EVENT(5),  // grid: user-driven column-divider drag released
     NEUI_EVENT_GRID_SORT_CHANGED        = DEF_GRID_EVENT(6),  // grid: user-driven header click changed the sort stack
+    NEUI_EVENT_GRID_CELL_EDIT_BEGIN     = DEF_GRID_EVENT(7),  // grid: in-place cell editor opened at (row, col)
+    NEUI_EVENT_GRID_CELL_CHANGED        = DEF_GRID_EVENT(8),  // grid: cell text committed (after validate_cell returned true)
+    NEUI_EVENT_GRID_CELL_EDIT_CANCEL    = DEF_GRID_EVENT(9),  // grid: in-place cell editor closed without committing
 
     NEUI_EVENT_CUSTOM                   = 0x1ffff,
   } neui_event_type_t;
@@ -206,7 +209,11 @@ extern "C" {
   // Grid cell event - cell-focus cursor moved (NEUI_EVENT_GRID_CELL_SELECTED)
   // or raw cell click fallback (NEUI_EVENT_GRID_CELL_CLICKED, fires only
   // when the higher-level row/cell selected events were not consumed by
-  // the client's onevent).
+  // the client's onevent). Also delivered for the cell-edit lifecycle
+  // events: NEUI_EVENT_GRID_CELL_EDIT_BEGIN (editor opened),
+  // NEUI_EVENT_GRID_CELL_CHANGED (committed; the new text is already
+  // written to the model and reachable via grid->get_cell_text), and
+  // NEUI_EVENT_GRID_CELL_EDIT_CANCEL (closed without committing).
   typedef struct neui_event_grid_cell
   {
     neui_widget_t widget;

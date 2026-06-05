@@ -116,6 +116,13 @@ namespace xpl_host
     // Override to release type-specific platform resources (menus, etc.).
     virtual void on_destroy(Session* s) {}
 
+    // Called when this widget's logical focus state changes, BEFORE the
+    // corresponding NEUI_EVENT_WIDGET_FOCUS reaches the client. Default
+    // no-op. Override to flush transient state that depends on focus -
+    // e.g. the GRID's in-place cell editor commits on focus loss so Tab
+    // doesn't leave a stale editor open over a non-focused widget.
+    virtual void on_focus_change(bool /*gained*/) {}
+
     // Type classification - avoids strcmp in hot paths.
     virtual bool is_frame()   const { return false; }
     virtual bool is_menubar() const { return false; }
@@ -469,7 +476,9 @@ namespace xpl_host
 
     void paint(neui_render_backend_t*, neui_render_ctx_t, bool is_focused) override;
     bool on_keydown(uint32_t keycode, uint32_t modifiers) override;
+    bool on_keychar(uint32_t codepoint, uint32_t modifiers) override;
     bool on_mouse_event(neui_event_t* event) override;
+    void on_focus_change(bool gained) override;
     neui_detail::GridModel* grid_model_ptr() override { return &model; }
   };
 
@@ -716,6 +725,10 @@ namespace xpl_host
 
     // Optional menu-item validation callback. Polled at WM_INITMENUPOPUP.
     neui_menu_client_t*             _menu_client               = nullptr;
+
+    // Optional grid-cell-edit validation callback. Called when the user
+    // commits an in-place cell edit (ENTER inside the editor).
+    neui_grid_client_t*             _grid_client               = nullptr;
 
     // System-theme listener handle. The xpl host always tracks the system
     // theme; on_theme_changed invalidates every frame so paint pulls the

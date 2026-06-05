@@ -343,6 +343,10 @@ namespace win32_host {
     // Optional menu-item validation callback. Polled at WM_INITMENUPOPUP.
     neui_menu_client_t*             _menu_client               = nullptr;
 
+    // Optional grid-cell-edit validation callback. Called when the user
+    // commits an in-place cell edit (ENTER inside the editor).
+    neui_grid_client_t*             _grid_client               = nullptr;
+
     // System-theme listener handle (singleton listener in
     // theme_provider_win32.h). Registered in ctor, unregistered in dtor.
     uint32_t                        _theme_listener_handle     = 0;

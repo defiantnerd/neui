@@ -167,6 +167,11 @@ namespace macos_host
     // NEUI_API_CLIPBOARD (read / create_item / write / item_*_format).
     // v1 round-trips text/plain only. Mirror of the win32 host.
     neui_detail::ClipboardItemStore _clipboard_items;
+
+    // Optional grid-cell-edit validation callback (NEUI_API_GRID_CLIENT).
+    // Fetched once at session create time; called when the user commits a
+    // grid in-place cell edit.
+    neui_grid_client_t* _grid_client = nullptr;
   };
 
   // Process-wide session registry (defined in host.mm). Slot index + 1 is

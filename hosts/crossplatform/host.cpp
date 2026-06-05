@@ -44,36 +44,10 @@ namespace xpl_host
     if (frame) platform_invalidate(frame);
   }
 
-  // ---------------------------------------------------------------------------
-  // UTF-8 helpers (byte-string cursor navigation)
-
-  // Byte length of the UTF-8 character that starts at text[pos].
-  // Returns 1 for invalid / continuation bytes so the cursor always advances.
-  static int utf8_char_len(const std::string& s, int pos)
-  {
-    if (pos < 0 || pos >= static_cast<int>(s.size())) return 0;
-    unsigned char c = static_cast<unsigned char>(s[pos]);
-    if (c < 0x80)           return 1;
-    if ((c & 0xE0) == 0xC0) return 2;
-    if ((c & 0xF0) == 0xE0) return 3;
-    if ((c & 0xF8) == 0xF0) return 4;
-    return 1;  // continuation byte or invalid
-  }
-
-  // Byte offset of the start of the UTF-8 character that precedes pos.
-  static int utf8_prev_start(const std::string& s, int pos)
-  {
-    if (pos <= 0) return 0;
-    --pos;
-    while (pos > 0 && (static_cast<unsigned char>(s[pos]) & 0xC0) == 0x80)
-      --pos;
-    return pos;
-  }
-
-  // Forward declarations for word-navigation helpers used by InputBoxWidget
-  // and MultilineWidget keydown handlers; bodies are below near find_word_bounds.
-  static int word_left (const std::string& s, int pos);
-  static int word_right(const std::string& s, int pos);
+  // UTF-8 walking, word boundaries, and codepoint -> UTF-8 helpers used by
+  // INPUTBOX / MULTILINE / GRID cell editor live in hosts/shared/text_edit.h
+  // (te_utf8_char_len, te_utf8_prev_start, te_word_left, te_word_right,
+  // te_word_bounds, te_encode_utf8). All call sites use those directly.
 
   // Render one or more underline segments below an IME composition string.
   // attrs (if non-empty) holds one CompAttr value per UTF-8 byte of comp_text;
@@ -253,6 +227,10 @@ namespace xpl_host
     // Opt-in menu-item validation callback. Polled per item at popup-open.
     _menu_client = static_cast<neui_menu_client_t*>(
       _client->get_interface(token, NEUI_API_MENU_CLIENT));
+
+    // Opt-in grid-cell-edit validation callback.
+    _grid_client = static_cast<neui_grid_client_t*>(
+      _client->get_interface(token, NEUI_API_GRID_CLIENT));
 
     // System-theme tracking. xpl host always follows the system theme;
     // the listener invalidates frames so paint pulls the current palette.
@@ -553,6 +531,7 @@ namespace xpl_host
 
     if (_focused_widget != 0 && _widgets.exists(_focused_widget)) {
       auto& wd = _widgets[_focused_widget];
+      wd.on_focus_change(false);
       if (wd.emit_events) {
         neui_event_t ev = {};
         ev.type = NEUI_EVENT_WIDGET_FOCUS;
@@ -566,6 +545,7 @@ namespace xpl_host
 
     if (new_idx != 0 && _widgets.exists(new_idx)) {
       auto& wd = _widgets[new_idx];
+      wd.on_focus_change(true);
       if (wd.emit_events) {
         neui_event_t ev = {};
         ev.type = NEUI_EVENT_WIDGET_FOCUS;
@@ -771,9 +751,9 @@ namespace xpl_host
     }
 
     // Selection highlight
-    if (sel_anchor != cursor_pos) {
-      int lo = std::min(cursor_pos, sel_anchor);
-      int hi = std::max(cursor_pos, sel_anchor);
+    if (neui_detail::te_has_selection(cursor_pos, sel_anchor)) {
+      int lo = neui_detail::te_sel_lo(cursor_pos, sel_anchor);
+      int hi = neui_detail::te_sel_hi(cursor_pos, sel_anchor);
       float sel_x0 = fx + pad + backend->measure_text(ctx, text.c_str(), lo, ef.size);
       float sel_x1 = fx + pad + backend->measure_text(ctx, text.c_str(), hi, ef.size);
       backend->fill_rect(ctx, sel_x0, cline, sel_x1 - sel_x0, cheight,
@@ -807,7 +787,7 @@ namespace xpl_host
     } else {
       float char_w = 8.0f;
       if (cursor_pos < static_cast<int>(text.size())) {
-        int char_end = cursor_pos + utf8_char_len(text, cursor_pos);
+        int char_end = cursor_pos + neui_detail::te_utf8_char_len(text, cursor_pos);
         float w_to_next = backend->measure_text(ctx, text.c_str(), char_end, ef.size);
         char_w = w_to_next - (cursor_x - fx - pad);
       }
@@ -876,17 +856,12 @@ namespace xpl_host
       // pushing one undo entry against the pre-composition snapshot. The
       // composition overlay is left visible until COMP_END so that an IME
       // which chains a fresh composition after a result keeps painting.
-      bool has_sel = (sel_anchor != cursor_pos);
+      bool has_sel = neui_detail::te_has_selection(cursor_pos, sel_anchor);
       // History entry uses the pre-composition snapshot so undo restores the
       // state from before the user even started composing.
       history.mark(composition_pre_state,
                    neui_detail::EditHistory::Typing, has_sel);
-      if (has_sel) {
-        int lo = std::min(cursor_pos, sel_anchor);
-        int hi = std::max(cursor_pos, sel_anchor);
-        text.erase(lo, hi - lo);
-        cursor_pos = sel_anchor = lo;
-      }
+      neui_detail::te_erase_selection(text, cursor_pos, sel_anchor);
       if (utf8 && byte_len > 0) {
         text.insert(cursor_pos, utf8, byte_len);
         cursor_pos += byte_len;
@@ -919,118 +894,58 @@ namespace xpl_host
 
   bool InputBoxWidget::on_keydown(uint32_t keycode, uint32_t modifiers)
   {
-    int text_len = static_cast<int>(text.size());
-    bool shift   = (modifiers & 1) != 0;
-    bool ctrl    = (modifiers & 2) != 0;
-
-    auto has_sel  = [&]{ return sel_anchor != cursor_pos; };
-    auto sel_lo   = [&]{ return std::min(cursor_pos, sel_anchor); };
-    auto sel_hi   = [&]{ return std::max(cursor_pos, sel_anchor); };
-    auto collapse = [&]{ sel_anchor = cursor_pos; };
-    auto del_sel  = [&]{
-      int lo = sel_lo(), hi = sel_hi();
-      text.erase(lo, hi - lo);
-      cursor_pos = sel_anchor = lo;
-    };
-    auto snapshot = [&]() -> neui_detail::EditState {
-      return { text, cursor_pos, sel_anchor };
-    };
+    using namespace neui_detail;
+    const bool shift = (modifiers & NEUI_KMOD_SHIFT) != 0;
+    const bool ctrl  = (modifiers & NEUI_KMOD_CTRL)  != 0;
 
     switch (keycode) {
     case NEUI_KEY_LEFT:
-      history.reset_action();
-      if (!shift && !ctrl && has_sel()) {
-        cursor_pos = sel_lo(); collapse();
-      } else if (ctrl) {
-        cursor_pos = word_left(text, cursor_pos);
-        if (!shift) collapse();
-      } else {
-        if (cursor_pos > 0)
-          cursor_pos = utf8_prev_start(text, cursor_pos);
-        if (!shift) collapse();
-      }
+      te_move_left (text, cursor_pos, sel_anchor, ctrl, shift, &history);
       repaint(); return true;
     case NEUI_KEY_RIGHT:
-      history.reset_action();
-      if (!shift && !ctrl && has_sel()) {
-        cursor_pos = sel_hi(); collapse();
-      } else if (ctrl) {
-        cursor_pos = word_right(text, cursor_pos);
-        if (!shift) collapse();
-      } else {
-        if (cursor_pos < text_len)
-          cursor_pos += utf8_char_len(text, cursor_pos);
-        if (!shift) collapse();
-      }
+      te_move_right(text, cursor_pos, sel_anchor, ctrl, shift, &history);
       repaint(); return true;
     case NEUI_KEY_HOME:
-      history.reset_action();
-      cursor_pos = 0;
-      if (!shift) collapse();
+      te_move_home (text, cursor_pos, sel_anchor, shift, &history);
       repaint(); return true;
     case NEUI_KEY_END:
-      history.reset_action();
-      cursor_pos = text_len;
-      if (!shift) collapse();
+      te_move_end  (text, cursor_pos, sel_anchor, shift, &history);
       repaint(); return true;
     case NEUI_KEY_INSERT:
       history.reset_action();
       overwrite_mode = !overwrite_mode;
       repaint(); return true;
     case NEUI_KEY_BACK:
-      if (has_sel() || cursor_pos > 0) {
-        history.mark(snapshot(), neui_detail::EditHistory::Deleting, has_sel());
-        if (has_sel()) {
-          del_sel();
-        } else {
-          int start = ctrl ? word_left(text, cursor_pos)
-                           : utf8_prev_start(text, cursor_pos);
-          text.erase(start, cursor_pos - start);
-          cursor_pos = sel_anchor = start;
-        }
-      }
+      te_backspace     (text, cursor_pos, sel_anchor, ctrl, &history);
       repaint(); return true;
     case NEUI_KEY_DELETE:
-      if (has_sel() || cursor_pos < text_len) {
-        history.mark(snapshot(), neui_detail::EditHistory::Deleting, has_sel());
-        if (has_sel()) {
-          del_sel();
-        } else {
-          int end = ctrl ? word_right(text, cursor_pos)
-                         : cursor_pos + utf8_char_len(text, cursor_pos);
-          text.erase(cursor_pos, end - cursor_pos);
-        }
-      }
+      te_delete_forward(text, cursor_pos, sel_anchor, ctrl, &history);
       repaint(); return true;
     case NEUI_KEY_A:
       if (ctrl) {
-        history.reset_action();
-        cursor_pos = text_len;
-        sel_anchor = 0;
+        te_select_all(text, cursor_pos, sel_anchor, &history);
         repaint();
         return true;
       }
       break;
     case NEUI_KEY_C:
       if (ctrl) {
-        if (has_sel()) {
-          int lo = sel_lo(), hi = sel_hi();
-          platform_clipboard_set_text(
-            text.c_str() + lo, static_cast<uint32_t>(hi - lo));
-        }
+        std::string sel = te_selected_text(text, cursor_pos, sel_anchor);
+        if (!sel.empty())
+          platform_clipboard_set_text(sel.c_str(), (uint32_t)sel.size());
         return true;
       }
       break;
     case NEUI_KEY_X:
       if (ctrl) {
         bool readonly = attrs && attrs->get_int(NEUI_ATTR_READONLY, 0) != 0;
-        if (has_sel()) {
-          int lo = sel_lo(), hi = sel_hi();
-          platform_clipboard_set_text(
-            text.c_str() + lo, static_cast<uint32_t>(hi - lo));
+        std::string sel = te_selected_text(text, cursor_pos, sel_anchor);
+        if (!sel.empty()) {
+          platform_clipboard_set_text(sel.c_str(), (uint32_t)sel.size());
           if (!readonly) {
-            history.mark(snapshot(), neui_detail::EditHistory::None, true);
-            del_sel();
+            history.mark(EditState{ text, cursor_pos, sel_anchor },
+                         EditHistory::None, true);
+            te_erase_selection(text, cursor_pos, sel_anchor);
             repaint();
           }
         }
@@ -1042,49 +957,29 @@ namespace xpl_host
         bool readonly = attrs && attrs->get_int(NEUI_ATTR_READONLY, 0) != 0;
         if (readonly) return true;
         int n = platform_clipboard_get_text(nullptr, 0);
-        if (n <= 0) return true;
-        std::vector<char> buf(static_cast<size_t>(n));
-        platform_clipboard_get_text(buf.data(), n);
-        // Drop trailing null and any embedded \r/\n (single-line input).
-        std::string paste;
-        paste.reserve(buf.size());
-        for (size_t i = 0; i + 1 < buf.size(); ++i) {
-          char c = buf[i];
-          if (c == '\r' || c == '\n') continue;
-          paste.push_back(c);
+        if (n > 0) {
+          std::vector<char> buf((size_t)n);
+          platform_clipboard_get_text(buf.data(), n);
+          std::string paste(buf.data(), (size_t)(n > 0 ? n - 1 : 0));
+          te_paste(text, cursor_pos, sel_anchor, paste,
+                   /*strip_newlines=*/true, &history);
+          repaint();
         }
-        history.mark(snapshot(), neui_detail::EditHistory::None, has_sel());
-        if (has_sel()) del_sel();
-        text.insert(cursor_pos, paste);
-        cursor_pos += static_cast<int>(paste.size());
-        sel_anchor = cursor_pos;
-        repaint();
         return true;
       }
       break;
     case NEUI_KEY_Z:
       if (ctrl) {
-        neui_detail::EditState restored;
-        bool ok = shift ? history.redo(snapshot(), restored)
-                        : history.undo(snapshot(), restored);
-        if (ok) {
-          text       = restored.text;
-          cursor_pos = restored.cursor;
-          sel_anchor = restored.anchor;
-          repaint();
-        }
+        if (shift) te_redo(text, cursor_pos, sel_anchor, history);
+        else       te_undo(text, cursor_pos, sel_anchor, history);
+        repaint();
         return true;
       }
       break;
     case NEUI_KEY_Y:
       if (ctrl) {
-        neui_detail::EditState restored;
-        if (history.redo(snapshot(), restored)) {
-          text       = restored.text;
-          cursor_pos = restored.cursor;
-          sel_anchor = restored.anchor;
-          repaint();
-        }
+        te_redo(text, cursor_pos, sel_anchor, history);
+        repaint();
         return true;
       }
       break;
@@ -1134,127 +1029,19 @@ namespace xpl_host
     return text_widget_handles_cmd(cmd);
   }
 
-  bool InputBoxWidget::on_keychar(uint32_t codepoint, uint32_t modifiers)
+  bool InputBoxWidget::on_keychar(uint32_t codepoint, uint32_t /*modifiers*/)
   {
+    using namespace neui_detail;
     if (codepoint < 0x20 || codepoint == 0x7F) return false;
-
-    int text_len = static_cast<int>(text.size());
-
-    // Encode the Unicode codepoint to UTF-8.
-    char utf8[5] = {};
-    int  byte_count = 0;
-    if (codepoint < 0x80) {
-      utf8[0] = static_cast<char>(codepoint);
-      byte_count = 1;
-    } else if (codepoint < 0x800) {
-      utf8[0] = static_cast<char>(0xC0 | (codepoint >> 6));
-      utf8[1] = static_cast<char>(0x80 | (codepoint & 0x3F));
-      byte_count = 2;
-    } else if (codepoint < 0x10000) {
-      utf8[0] = static_cast<char>(0xE0 | (codepoint >> 12));
-      utf8[1] = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-      utf8[2] = static_cast<char>(0x80 | (codepoint & 0x3F));
-      byte_count = 3;
-    } else {
-      utf8[0] = static_cast<char>(0xF0 | (codepoint >> 18));
-      utf8[1] = static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
-      utf8[2] = static_cast<char>(0x80 | ((codepoint >>  6) & 0x3F));
-      utf8[3] = static_cast<char>(0x80 | (codepoint & 0x3F));
-      byte_count = 4;
-    }
-
-    bool has_sel = (sel_anchor != cursor_pos);
-    history.mark(neui_detail::EditState{ text, cursor_pos, sel_anchor },
-                 neui_detail::EditHistory::Typing, has_sel);
-    if (has_sel) {
-      int lo = std::min(cursor_pos, sel_anchor);
-      int hi = std::max(cursor_pos, sel_anchor);
-      text.erase(lo, hi - lo);
-      cursor_pos = sel_anchor = lo;
-      text.insert(cursor_pos, utf8, byte_count);
-    } else if (overwrite_mode && cursor_pos < text_len) {
-      int existing_len = utf8_char_len(text, cursor_pos);
-      text.replace(cursor_pos, existing_len, utf8, byte_count);
-    } else {
-      text.insert(cursor_pos, utf8, byte_count);
-    }
-    cursor_pos += byte_count;
-    sel_anchor  = cursor_pos;
-
+    char buf[4];
+    int  n = te_encode_utf8(codepoint, buf);
+    te_insert_utf8(text, cursor_pos, sel_anchor, overwrite_mode, buf, n,
+                   &history);
     if (session) {
       void* frame = session->find_parent_native_handle(index);
       if (frame) platform_invalidate(frame);
     }
     return true;
-  }
-
-  // A "word character" is alphanumeric ASCII or any byte with the high bit set
-  // (lead/continuation bytes of a UTF-8 multi-byte sequence - treated as part
-  // of a word so simple Latin-extended/CJK selection works without locale data).
-  static bool is_word_byte(unsigned char c)
-  {
-    return (c >= '0' && c <= '9') ||
-           (c >= 'A' && c <= 'Z') ||
-           (c >= 'a' && c <= 'z') ||
-           c == '_' || c >= 0x80;
-  }
-
-  // Forward word navigation: returns the next word-start at or after pos.
-  // A "word-start" is a position where is_word_byte(s[pos]) is true and
-  // is_word_byte(s[pos-1]) is false (or pos == 0). Lands at end-of-text if
-  // there is no further word. Whitespace, punctuation, and '\n' all count as
-  // non-word, so this naturally crosses line boundaries in multiline text.
-  static int word_right(const std::string& s, int pos)
-  {
-    int len = static_cast<int>(s.size());
-    if (pos >= len) return len;
-    ++pos;  // step at least once so repeated invocations make progress
-    while (pos < len) {
-      bool here = is_word_byte(static_cast<unsigned char>(s[pos]));
-      bool prev = is_word_byte(static_cast<unsigned char>(s[pos - 1]));
-      if (here && !prev) break;
-      ++pos;
-    }
-    return pos;
-  }
-
-  // Backward word navigation: returns the previous word-start before pos.
-  // Lands at 0 if there is no earlier word.
-  static int word_left(const std::string& s, int pos)
-  {
-    if (pos <= 0) return 0;
-    --pos;  // step at least once
-    while (pos > 0) {
-      bool here = is_word_byte(static_cast<unsigned char>(s[pos]));
-      bool prev = is_word_byte(static_cast<unsigned char>(s[pos - 1]));
-      if (here && !prev) break;
-      --pos;
-    }
-    return pos;
-  }
-
-  // Returns [start, end) of the contiguous run of same-class bytes containing
-  // `pos`. If pos sits at the boundary at end-of-text, returns [pos, pos].
-  static void find_word_bounds(const std::string& s, int pos, int& start, int& end)
-  {
-    int len = static_cast<int>(s.size());
-    if (pos < 0) pos = 0;
-    if (pos > len) pos = len;
-    if (len == 0) { start = end = 0; return; }
-
-    // If pos is at the end of text, fall back to expanding from the previous byte.
-    int probe = (pos < len) ? pos : pos - 1;
-    bool word = is_word_byte(static_cast<unsigned char>(s[probe]));
-
-    start = pos;
-    while (start > 0 &&
-           is_word_byte(static_cast<unsigned char>(s[start - 1])) == word)
-      --start;
-
-    end = (pos < len) ? pos : len;
-    while (end < len &&
-           is_word_byte(static_cast<unsigned char>(s[end])) == word)
-      ++end;
   }
 
   bool InputBoxWidget::on_mouse_event(neui_event_t* event)
@@ -1301,7 +1088,7 @@ namespace xpl_host
       float prev_w = 0.0f;  // measure_text for 0 bytes is always 0
       int len = static_cast<int>(text.size());
       while (pos < len) {
-        int char_end = pos + utf8_char_len(text, pos);
+        int char_end = pos + neui_detail::te_utf8_char_len(text, pos);
         float end_w  = backend->measure_text(ctx, text.c_str(), char_end, ef.size);
         if (click_x < (prev_w + end_w) * 0.5f) {
           new_pos = pos;
@@ -1316,7 +1103,7 @@ namespace xpl_host
     // Double-click selects the word at the click position.
     if (is_dblclk) {
       int ws, we;
-      find_word_bounds(text, new_pos, ws, we);
+      neui_detail::te_word_bounds(text, new_pos, ws, we);
       sel_anchor = ws;
       cursor_pos = we;
       repaint();
@@ -3487,9 +3274,9 @@ namespace xpl_host
     neui_detail::push_widget_font(backend, ctx, ef);
 
     // Selection range (always normalized lo..hi).
-    int sel_lo = std::min(cursor_pos, sel_anchor);
-    int sel_hi = std::max(cursor_pos, sel_anchor);
-    bool has_sel = (sel_lo != sel_hi);
+    int sel_lo = neui_detail::te_sel_lo(cursor_pos, sel_anchor);
+    int sel_hi = neui_detail::te_sel_hi(cursor_pos, sel_anchor);
+    bool has_sel = neui_detail::te_has_selection(cursor_pos, sel_anchor);
 
     int max_visible = (static_cast<int>(fh) - 2 * ML_PAD_Y + ML_LINE_H - 1) / ML_LINE_H;
     if (max_visible < 1) max_visible = 1;
@@ -3648,7 +3435,7 @@ namespace xpl_host
     float prev_w = 0.0f;
     int result = le;
     while (pos < le) {
-      int char_end = pos + utf8_char_len(ml.text, pos);
+      int char_end = pos + neui_detail::te_utf8_char_len(ml.text, pos);
       float end_w  = ml.session->_backend->measure_text(
         ctx, ml.text.c_str() + ls, char_end - ls, ef.size);
       if (col_px < (prev_w + end_w) * 0.5f) { result = pos; break; }
@@ -3661,53 +3448,26 @@ namespace xpl_host
 
   bool MultilineWidget::on_keydown(uint32_t keycode, uint32_t modifiers)
   {
-    bool shift    = (modifiers & 1) != 0;
-    bool ctrl     = (modifiers & 2) != 0;
-    bool readonly = ml_readonly(*this);
+    using namespace neui_detail;
+    const bool shift    = (modifiers & NEUI_KMOD_SHIFT) != 0;
+    const bool ctrl     = (modifiers & NEUI_KMOD_CTRL)  != 0;
+    const bool readonly = ml_readonly(*this);
 
-    auto starts = ml_line_starts(text);
-    int  text_len = static_cast<int>(text.size());
-
-    auto has_sel  = [&]{ return sel_anchor != cursor_pos; };
-    auto sel_lo   = [&]{ return std::min(cursor_pos, sel_anchor); };
-    auto sel_hi   = [&]{ return std::max(cursor_pos, sel_anchor); };
-    auto collapse = [&]{ sel_anchor = cursor_pos; };
-    auto del_sel  = [&]{
-      int lo = sel_lo(), hi = sel_hi();
-      text.erase(lo, hi - lo);
-      cursor_pos = sel_anchor = lo;
-    };
-    auto snapshot = [&]() -> neui_detail::EditState {
-      return { text, cursor_pos, sel_anchor };
-    };
+    auto starts   = ml_line_starts(text);
+    int  text_len = (int)text.size();
+    auto scroll   = [&]{ ml_scroll_to_cursor(*this, ml_line_starts(text)); };
 
     switch (keycode) {
     case NEUI_KEY_LEFT:
-      history.reset_action();
-      if (!shift && !ctrl && has_sel()) { cursor_pos = sel_lo(); collapse(); }
-      else if (ctrl) {
-        cursor_pos = word_left(text, cursor_pos);
-        if (!shift) collapse();
-      } else {
-        if (cursor_pos > 0) cursor_pos = utf8_prev_start(text, cursor_pos);
-        if (!shift) collapse();
-      }
-      ml_scroll_to_cursor(*this, starts);
-      repaint(); return true;
+      te_move_left (text, cursor_pos, sel_anchor, ctrl, shift, &history);
+      ml_scroll_to_cursor(*this, starts); repaint(); return true;
 
     case NEUI_KEY_RIGHT:
-      history.reset_action();
-      if (!shift && !ctrl && has_sel()) { cursor_pos = sel_hi(); collapse(); }
-      else if (ctrl) {
-        cursor_pos = word_right(text, cursor_pos);
-        if (!shift) collapse();
-      } else {
-        if (cursor_pos < text_len) cursor_pos += utf8_char_len(text, cursor_pos);
-        if (!shift) collapse();
-      }
-      ml_scroll_to_cursor(*this, starts);
-      repaint(); return true;
+      te_move_right(text, cursor_pos, sel_anchor, ctrl, shift, &history);
+      ml_scroll_to_cursor(*this, starts); repaint(); return true;
 
+    // Vertical nav is layout-driven, so it stays local. The column-tracking
+    // up/down picks the nearest byte offset on the target visual line.
     case NEUI_KEY_UP: {
       history.reset_action();
       int line = ml_line_from_pos(starts, cursor_pos);
@@ -3717,94 +3477,64 @@ namespace xpl_host
       } else {
         cursor_pos = 0;
       }
-      if (!shift) collapse();
-      ml_scroll_to_cursor(*this, starts);
-      repaint(); return true;
+      if (!shift) sel_anchor = cursor_pos;
+      ml_scroll_to_cursor(*this, starts); repaint(); return true;
     }
-
     case NEUI_KEY_DOWN: {
       history.reset_action();
       int line = ml_line_from_pos(starts, cursor_pos);
-      if (line + 1 < static_cast<int>(starts.size())) {
+      if (line + 1 < (int)starts.size()) {
         float col = ml_col_px(*this, starts, cursor_pos);
         cursor_pos = ml_pos_from_col(*this, starts, line + 1, col);
       } else {
         cursor_pos = text_len;
       }
-      if (!shift) collapse();
-      ml_scroll_to_cursor(*this, starts);
-      repaint(); return true;
+      if (!shift) sel_anchor = cursor_pos;
+      ml_scroll_to_cursor(*this, starts); repaint(); return true;
     }
 
+    // Home / End: per-line by default; Ctrl jumps to whole-text start / end.
     case NEUI_KEY_HOME: {
       history.reset_action();
       if (ctrl) cursor_pos = 0;
-      else {
-        int line = ml_line_from_pos(starts, cursor_pos);
-        cursor_pos = starts[line];
-      }
-      if (!shift) collapse();
-      ml_scroll_to_cursor(*this, starts);
-      repaint(); return true;
+      else      cursor_pos = starts[ml_line_from_pos(starts, cursor_pos)];
+      if (!shift) sel_anchor = cursor_pos;
+      ml_scroll_to_cursor(*this, starts); repaint(); return true;
     }
-
     case NEUI_KEY_END: {
       history.reset_action();
       if (ctrl) cursor_pos = text_len;
-      else {
-        int line = ml_line_from_pos(starts, cursor_pos);
-        cursor_pos = ml_line_end(text, starts, line);
-      }
-      if (!shift) collapse();
-      ml_scroll_to_cursor(*this, starts);
-      repaint(); return true;
+      else      cursor_pos = ml_line_end(text, starts, ml_line_from_pos(starts, cursor_pos));
+      if (!shift) sel_anchor = cursor_pos;
+      ml_scroll_to_cursor(*this, starts); repaint(); return true;
     }
 
     case NEUI_KEY_BACK:
       if (readonly) return true;
-      if (has_sel() || cursor_pos > 0) {
-        history.mark(snapshot(), neui_detail::EditHistory::Deleting, has_sel());
-        if (has_sel()) del_sel();
-        else {
-          int start = ctrl ? word_left(text, cursor_pos)
-                           : utf8_prev_start(text, cursor_pos);
-          text.erase(start, cursor_pos - start);
-          cursor_pos = sel_anchor = start;
-        }
-      }
-      ml_scroll_to_cursor(*this, ml_line_starts(text));
-      repaint(); return true;
+      te_backspace     (text, cursor_pos, sel_anchor, ctrl, &history);
+      scroll(); repaint(); return true;
 
     case NEUI_KEY_DELETE:
       if (readonly) return true;
-      if (has_sel() || cursor_pos < text_len) {
-        history.mark(snapshot(), neui_detail::EditHistory::Deleting, has_sel());
-        if (has_sel()) del_sel();
-        else {
-          int end = ctrl ? word_right(text, cursor_pos)
-                         : cursor_pos + utf8_char_len(text, cursor_pos);
-          text.erase(cursor_pos, end - cursor_pos);
-        }
-      }
-      ml_scroll_to_cursor(*this, ml_line_starts(text));
-      repaint(); return true;
+      te_delete_forward(text, cursor_pos, sel_anchor, ctrl, &history);
+      scroll(); repaint(); return true;
 
-    case NEUI_KEY_RETURN:
+    case NEUI_KEY_RETURN: {
       if (readonly) return true;
       // Newline is its own undo group - never coalesces with surrounding typing.
-      history.mark(snapshot(), neui_detail::EditHistory::None, has_sel());
-      if (has_sel()) del_sel();
-      text.insert(cursor_pos, 1, '\n');
+      bool has_sel = te_has_selection(cursor_pos, sel_anchor);
+      history.mark(EditState{ text, cursor_pos, sel_anchor },
+                   EditHistory::None, has_sel);
+      te_erase_selection(text, cursor_pos, sel_anchor);
+      text.insert((size_t)cursor_pos, 1, '\n');
       cursor_pos += 1;
       sel_anchor  = cursor_pos;
-      ml_scroll_to_cursor(*this, ml_line_starts(text));
-      repaint(); return true;
+      scroll(); repaint(); return true;
+    }
 
     case NEUI_KEY_A:
       if (ctrl) {
-        history.reset_action();
-        sel_anchor = 0;
-        cursor_pos = text_len;
+        te_select_all(text, cursor_pos, sel_anchor, &history);
         repaint();
         return true;
       }
@@ -3812,26 +3542,23 @@ namespace xpl_host
 
     case NEUI_KEY_C:
       if (ctrl) {
-        if (has_sel()) {
-          int lo = sel_lo(), hi = sel_hi();
-          platform_clipboard_set_text(
-            text.c_str() + lo, static_cast<uint32_t>(hi - lo));
-        }
+        std::string sel = te_selected_text(text, cursor_pos, sel_anchor);
+        if (!sel.empty())
+          platform_clipboard_set_text(sel.c_str(), (uint32_t)sel.size());
         return true;
       }
       break;
 
     case NEUI_KEY_X:
       if (ctrl) {
-        if (has_sel()) {
-          int lo = sel_lo(), hi = sel_hi();
-          platform_clipboard_set_text(
-            text.c_str() + lo, static_cast<uint32_t>(hi - lo));
+        std::string sel = te_selected_text(text, cursor_pos, sel_anchor);
+        if (!sel.empty()) {
+          platform_clipboard_set_text(sel.c_str(), (uint32_t)sel.size());
           if (!readonly) {
-            history.mark(snapshot(), neui_detail::EditHistory::None, true);
-            del_sel();
-            ml_scroll_to_cursor(*this, ml_line_starts(text));
-            repaint();
+            history.mark(EditState{ text, cursor_pos, sel_anchor },
+                         EditHistory::None, true);
+            te_erase_selection(text, cursor_pos, sel_anchor);
+            scroll(); repaint();
           }
         }
         return true;
@@ -3842,54 +3569,38 @@ namespace xpl_host
       if (ctrl) {
         if (readonly) return true;
         int n = platform_clipboard_get_text(nullptr, 0);
-        if (n <= 0) return true;
-        std::vector<char> buf(static_cast<size_t>(n));
-        platform_clipboard_get_text(buf.data(), n);
-        // Drop trailing null; normalise CRLF to LF (multiline keeps newlines).
-        std::string paste;
-        paste.reserve(buf.size());
-        for (size_t i = 0; i + 1 < buf.size(); ++i) {
-          char c = buf[i];
-          if (c == '\r') continue;
-          paste.push_back(c);
+        if (n > 0) {
+          std::vector<char> buf((size_t)n);
+          platform_clipboard_get_text(buf.data(), n);
+          // Multiline keeps newlines but strips CR (normalise CRLF -> LF).
+          std::string paste;
+          paste.reserve((size_t)n);
+          for (int i = 0; i + 1 < n; ++i) {
+            char c = buf[(size_t)i];
+            if (c == '\r') continue;
+            paste.push_back(c);
+          }
+          te_paste(text, cursor_pos, sel_anchor, paste,
+                   /*strip_newlines=*/false, &history);
+          scroll(); repaint();
         }
-        history.mark(snapshot(), neui_detail::EditHistory::None, has_sel());
-        if (has_sel()) del_sel();
-        text.insert(cursor_pos, paste);
-        cursor_pos += static_cast<int>(paste.size());
-        sel_anchor = cursor_pos;
-        ml_scroll_to_cursor(*this, ml_line_starts(text));
-        repaint();
         return true;
       }
       break;
 
     case NEUI_KEY_Z:
       if (ctrl) {
-        neui_detail::EditState restored;
-        bool ok = shift ? history.redo(snapshot(), restored)
-                        : history.undo(snapshot(), restored);
-        if (ok) {
-          text       = restored.text;
-          cursor_pos = restored.cursor;
-          sel_anchor = restored.anchor;
-          ml_scroll_to_cursor(*this, ml_line_starts(text));
-          repaint();
-        }
+        if (shift) te_redo(text, cursor_pos, sel_anchor, history);
+        else       te_undo(text, cursor_pos, sel_anchor, history);
+        scroll(); repaint();
         return true;
       }
       break;
 
     case NEUI_KEY_Y:
       if (ctrl) {
-        neui_detail::EditState restored;
-        if (history.redo(snapshot(), restored)) {
-          text       = restored.text;
-          cursor_pos = restored.cursor;
-          sel_anchor = restored.anchor;
-          ml_scroll_to_cursor(*this, ml_line_starts(text));
-          repaint();
-        }
+        te_redo(text, cursor_pos, sel_anchor, history);
+        scroll(); repaint();
         return true;
       }
       break;
@@ -3920,51 +3631,16 @@ namespace xpl_host
     return text_widget_handles_cmd(cmd);
   }
 
-  // Encode a codepoint as UTF-8 into `out` (up to 4 bytes). Returns byte count.
-  static int ml_encode_utf8(uint32_t cp, char out[4])
-  {
-    if (cp < 0x80) { out[0] = static_cast<char>(cp); return 1; }
-    if (cp < 0x800) {
-      out[0] = static_cast<char>(0xC0 | (cp >> 6));
-      out[1] = static_cast<char>(0x80 | (cp & 0x3F));
-      return 2;
-    }
-    if (cp < 0x10000) {
-      out[0] = static_cast<char>(0xE0 | (cp >> 12));
-      out[1] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-      out[2] = static_cast<char>(0x80 | (cp & 0x3F));
-      return 3;
-    }
-    out[0] = static_cast<char>(0xF0 | (cp >> 18));
-    out[1] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-    out[2] = static_cast<char>(0x80 | ((cp >>  6) & 0x3F));
-    out[3] = static_cast<char>(0x80 | (cp & 0x3F));
-    return 4;
-  }
-
   bool MultilineWidget::on_keychar(uint32_t codepoint, uint32_t /*modifiers*/)
   {
+    using namespace neui_detail;
     if (ml_readonly(*this)) return false;
     if (codepoint < 0x20 || codepoint == 0x7F) return false;
-
     char buf[4];
-    int  n = ml_encode_utf8(codepoint, buf);
-
-    bool has_selection = (sel_anchor != cursor_pos);
-    history.mark(neui_detail::EditState{ text, cursor_pos, sel_anchor },
-                 neui_detail::EditHistory::Typing, has_selection);
-    if (has_selection) {
-      int lo = std::min(cursor_pos, sel_anchor);
-      int hi = std::max(cursor_pos, sel_anchor);
-      text.erase(lo, hi - lo);
-      cursor_pos = sel_anchor = lo;
-    }
-    text.insert(cursor_pos, buf, n);
-    cursor_pos += n;
-    sel_anchor  = cursor_pos;
-
-    auto starts = ml_line_starts(text);
-    ml_scroll_to_cursor(*this, starts);
+    int  n = te_encode_utf8(codepoint, buf);
+    te_insert_utf8(text, cursor_pos, sel_anchor, /*overwrite=*/false,
+                   buf, n, &history);
+    ml_scroll_to_cursor(*this, ml_line_starts(text));
     repaint();
     return true;
   }
@@ -4033,15 +3709,10 @@ namespace xpl_host
       return true;
 
     case COMP_RESULT: {
-      bool has_sel = (sel_anchor != cursor_pos);
+      bool has_sel = neui_detail::te_has_selection(cursor_pos, sel_anchor);
       history.mark(composition_pre_state,
                    neui_detail::EditHistory::Typing, has_sel);
-      if (has_sel) {
-        int lo = std::min(cursor_pos, sel_anchor);
-        int hi = std::max(cursor_pos, sel_anchor);
-        text.erase(lo, hi - lo);
-        cursor_pos = sel_anchor = lo;
-      }
+      neui_detail::te_erase_selection(text, cursor_pos, sel_anchor);
       if (utf8 && byte_len > 0) {
         text.insert(cursor_pos, utf8, byte_len);
         cursor_pos += byte_len;
@@ -4748,6 +4419,86 @@ namespace xpl_host
     xpl_grid_fire_cell_clicked(g, row, col);
   }
 
+  // ---- Cell-edit dispatch helpers ----------------------------------------
+
+  static void xpl_grid_fire_cell_edit_event(GridWidget& g, neui_event_type_t t,
+                                              int row, int col)
+  {
+    if (!g.session) return;
+    neui_event_t ev{};
+    ev.type = t;
+    ev.data.grid_cell.widget.id = g.widget_id;
+    ev.data.grid_cell.row       = row;
+    ev.data.grid_cell.col       = col;
+    g.session->dispatch_event(&ev);
+  }
+
+  // Try to open the in-place editor at the given logical (row, col). No-op
+  // when grid_cell_edit_allowed rejects, or when an editor is already open
+  // somewhere. Fires NEUI_EVENT_GRID_CELL_EDIT_BEGIN on success. The caller
+  // owns the repaint (repaint() is protected on WidgetData).
+  static bool xpl_grid_try_begin_edit(GridWidget& g, int row, int col)
+  {
+    if (g.model.edit.active) return false;
+    auto cfg = xpl_grid_config(g);
+    if (!neui_detail::grid_cell_edit_allowed(g.model, row, col, cfg.cell_focus))
+      return false;
+    neui_detail::grid_begin_edit(g.model, row, col);
+    xpl_grid_fire_cell_edit_event(g, NEUI_EVENT_GRID_CELL_EDIT_BEGIN, row, col);
+    return true;
+  }
+
+  // Validate + commit the pending edit. On success writes the new text into
+  // the cell, fires NEUI_EVENT_GRID_CELL_CHANGED, and closes the editor;
+  // returns true. On reject (client validate returned false) leaves the
+  // editor open with the proposed text and returns false. The caller owns
+  // the repaint.
+  static bool xpl_grid_commit_edit(GridWidget& g)
+  {
+    if (!g.model.edit.active) return false;
+    int  row = g.model.edit.row;
+    int  col = g.model.edit.col;
+    auto* client = g.session ? g.session->_grid_client : nullptr;
+    const std::string proposed = g.model.edit.te.text;
+    if (client && client->validate_cell) {
+      neui_widget_t w{}; w.id = g.widget_id;
+      if (!client->validate_cell(g.session->get_token(), w, row, col,
+                                   proposed.c_str())) {
+        // Reject: stay in edit mode so the user can fix the value.
+        return false;
+      }
+    }
+    // Accept: drop the editor state THEN write the cell so the next paint
+    // renders the new value (not the edit overlay).
+    (void)neui_detail::grid_end_edit(g.model);
+    auto& r = g.model.rows[(size_t)row];
+    if ((int)r.cells.size() <= col) r.cells.resize((size_t)col + 1);
+    r.cells[(size_t)col] = proposed;
+    g.model.sort_dirty = true;
+    xpl_grid_fire_cell_edit_event(g, NEUI_EVENT_GRID_CELL_CHANGED, row, col);
+    return true;
+  }
+
+  // Cancel the pending edit and fire NEUI_EVENT_GRID_CELL_EDIT_CANCEL. The
+  // caller owns the repaint.
+  static void xpl_grid_cancel_edit(GridWidget& g)
+  {
+    if (!g.model.edit.active) return;
+    int row = g.model.edit.row;
+    int col = g.model.edit.col;
+    (void)neui_detail::grid_end_edit(g.model);
+    xpl_grid_fire_cell_edit_event(g, NEUI_EVENT_GRID_CELL_EDIT_CANCEL, row, col);
+  }
+
+  // Public bridges - widgets.cpp lives in the same translation unit
+  // namespace but the static helpers above can't be referenced from a
+  // separately-compiled .cpp. These thin wrappers expose them under
+  // namespace-scope external linkage.
+  bool xpl_grid_try_begin_edit_pub(GridWidget& g, int row, int col)
+  { return xpl_grid_try_begin_edit(g, row, col); }
+  bool xpl_grid_commit_edit_pub(GridWidget& g) { return xpl_grid_commit_edit(g); }
+  void xpl_grid_cancel_edit_pub(GridWidget& g) { xpl_grid_cancel_edit(g); }
+
   void GridWidget::paint(neui_render_backend_t* backend,
                           neui_render_ctx_t ctx, bool is_focused)
   {
@@ -4765,6 +4516,100 @@ namespace xpl_host
                                               cfg.row_h, cfg.header_h);
     int n_rows = (int)model.rows.size();
     int n_cols = (int)model.columns.size();
+
+    // --- Edit-mode keys take priority over the nav switch ----------------
+    if (model.edit.active) {
+      auto& te   = model.edit.te;
+      auto& hist = model.edit.history;
+      const bool shift = (modifiers & NEUI_KMOD_SHIFT) != 0;
+      const bool ctrl  = (modifiers & NEUI_KMOD_CTRL)  != 0;
+      switch (keycode) {
+      case NEUI_KEY_RETURN:
+        xpl_grid_commit_edit(*this);
+        repaint();
+        return true;
+      case NEUI_KEY_ESCAPE:
+        xpl_grid_cancel_edit(*this);
+        repaint();
+        return true;
+      case NEUI_KEY_LEFT:
+        te_move_left (te.text, te.cursor, te.sel_anchor, ctrl, shift, &hist);
+        repaint(); return true;
+      case NEUI_KEY_RIGHT:
+        te_move_right(te.text, te.cursor, te.sel_anchor, ctrl, shift, &hist);
+        repaint(); return true;
+      case NEUI_KEY_HOME:
+        te_move_home (te.text, te.cursor, te.sel_anchor, shift, &hist);
+        repaint(); return true;
+      case NEUI_KEY_END:
+        te_move_end  (te.text, te.cursor, te.sel_anchor, shift, &hist);
+        repaint(); return true;
+      case NEUI_KEY_BACK:
+        te_backspace     (te.text, te.cursor, te.sel_anchor, ctrl, &hist);
+        repaint(); return true;
+      case NEUI_KEY_DELETE:
+        te_delete_forward(te.text, te.cursor, te.sel_anchor, ctrl, &hist);
+        repaint(); return true;
+      case NEUI_KEY_A:
+        if (ctrl) {
+          te_select_all(te.text, te.cursor, te.sel_anchor, &hist);
+          repaint();
+        }
+        return true;
+      case NEUI_KEY_C:
+        if (ctrl) {
+          std::string sel = te_selected_text(te.text, te.cursor, te.sel_anchor);
+          if (!sel.empty())
+            platform_clipboard_set_text(sel.c_str(), (uint32_t)sel.size());
+        }
+        return true;
+      case NEUI_KEY_X:
+        if (ctrl) {
+          std::string sel = te_selected_text(te.text, te.cursor, te.sel_anchor);
+          if (!sel.empty()) {
+            platform_clipboard_set_text(sel.c_str(), (uint32_t)sel.size());
+            hist.mark(EditState{ te.text, te.cursor, te.sel_anchor },
+                      EditHistory::None, true);
+            te_erase_selection(te.text, te.cursor, te.sel_anchor);
+            repaint();
+          }
+        }
+        return true;
+      case NEUI_KEY_V:
+        if (ctrl) {
+          int n = platform_clipboard_get_text(nullptr, 0);
+          if (n > 0) {
+            std::vector<char> buf((size_t)n);
+            platform_clipboard_get_text(buf.data(), n);
+            // Drop trailing null; the text might have embedded \r\n which
+            // te_paste strips.
+            std::string paste(buf.data(), (size_t)(n > 0 ? n - 1 : 0));
+            te_paste(te.text, te.cursor, te.sel_anchor, paste,
+                     /*strip_newlines=*/true, &hist);
+            repaint();
+          }
+        }
+        return true;
+      case NEUI_KEY_Z:
+        if (ctrl) {
+          if (shift) te_redo(te.text, te.cursor, te.sel_anchor, hist);
+          else       te_undo(te.text, te.cursor, te.sel_anchor, hist);
+          repaint();
+        }
+        return true;
+      case NEUI_KEY_Y:
+        if (ctrl) {
+          te_redo(te.text, te.cursor, te.sel_anchor, hist);
+          repaint();
+        }
+        return true;
+      default:
+        // Swallow keys we don't act on so they can't escape to the menubar
+        // accelerator path while the user is typing.
+        return true;
+      }
+    }
+
     if (n_rows == 0) return false;
 
     // Nav walks visual order so Up / Down etc. move the cursor through the
@@ -4848,6 +4693,14 @@ namespace xpl_host
     case NEUI_KEY_RETURN: {
       int r = model.selected_row;
       if (r < 0) return true;
+      // Try opening the in-place editor first; falls through to the
+      // legacy row-activated event when the column is not editable
+      // (or cell-focus is off).
+      if (cfg.cell_focus && model.selected_col >= 0 &&
+          xpl_grid_try_begin_edit(*this, r, model.selected_col)) {
+        repaint();
+        return true;
+      }
       xpl_grid_fire_row_activated(*this, r);
       return true;
     }
@@ -4880,6 +4733,35 @@ namespace xpl_host
     return true;
   }
 
+  // Focus loss commits an open in-place editor as if the user pressed
+  // Enter; on validate-reject we fall back to cancel so we don't leave a
+  // stale editor over a widget that no longer has the keyboard. Gaining
+  // focus is the common case (nothing to do here).
+  void GridWidget::on_focus_change(bool gained)
+  {
+    if (gained) return;
+    if (!model.edit.active) return;
+    if (!xpl_grid_commit_edit(*this))
+      xpl_grid_cancel_edit(*this);
+    repaint();
+  }
+
+  bool GridWidget::on_keychar(uint32_t codepoint, uint32_t /*modifiers*/)
+  {
+    if (!model.edit.active) return false;
+    // Filter control characters; ENTER / ESCAPE / BACK / TAB etc. arrive as
+    // both KEYDOWN (handled above) and KEYCHAR (suppressed here). Below 0x20
+    // and DEL are non-printable.
+    if (codepoint < 0x20 || codepoint == 0x7F) return true;
+    char buf[4];
+    int  n = neui_detail::te_encode_utf8(codepoint, buf);
+    auto& te = model.edit.te;
+    neui_detail::te_insert_utf8(te.text, te.cursor, te.sel_anchor,
+                                  te.overwrite, buf, n, &model.edit.history);
+    repaint();
+    return true;
+  }
+
   bool GridWidget::on_mouse_event(neui_event_t* event)
   {
     using namespace neui_detail;
@@ -4889,6 +4771,32 @@ namespace xpl_host
 
     int lx = event->data.mouse.x - abs_x;
     int ly = event->data.mouse.y - abs_y;
+
+    // --- Edit-mode mouse handling ---------------------------------------
+    // A click anywhere commits the edit; if the click lands on the editing
+    // cell itself the editor stays open afterwards so the user can continue
+    // typing. Move / wheel events fall through to the normal handlers.
+    if (model.edit.active &&
+        (event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN ||
+         event->type == NEUI_EVENT_MOUSE_BUTTON_DBLCLICK)) {
+      grid_ensure_sort_clean(model);
+      GridHit hit = grid_hit_test(model, vp, cfg.row_h,
+                                    width, height, lx, ly);
+      bool on_editing_cell = (hit.region == GridHitRegion::Cell &&
+                              hit.row == model.edit.row &&
+                              hit.col == model.edit.col);
+      if (on_editing_cell) {
+        // No-op (consume); keep typing. A future iteration could move the
+        // caret to the click point using measure_text.
+        return true;
+      }
+      // Commit (or reject). On reject the editor stays open and the click
+      // is swallowed so the underlying grid doesn't also act on it.
+      if (!xpl_grid_commit_edit(*this)) { repaint(); return true; }
+      repaint();
+      // Commit succeeded - editor closed. Fall through to normal click
+      // handling so the click also selects the newly clicked cell.
+    }
 
     // --- column-resize drag in progress ---
     if (model.column_resize_col >= 0) {
@@ -5063,8 +4971,14 @@ namespace xpl_host
       }
       case GridHitRegion::Cell: {
         if (event->type == NEUI_EVENT_MOUSE_BUTTON_DBLCLICK) {
-          // Selection already updated by the prior DOWN; just activate.
-          xpl_grid_fire_row_activated(*this, hit.row);
+          // Selection already updated by the prior DOWN. Try opening the
+          // in-place editor first (mirrors ENTER behaviour); if the cell
+          // isn't editable, fall back to the legacy ROW_ACTIVATED event.
+          if (xpl_grid_try_begin_edit(*this, hit.row, hit.col)) {
+            repaint();
+          } else {
+            xpl_grid_fire_row_activated(*this, hit.row);
+          }
         } else {
           // Skip the cell-click ladder for disabled cells - select the
           // row but suppress CELL_CLICKED (matches per-cell enabled

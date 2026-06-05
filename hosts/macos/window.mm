@@ -37,6 +37,11 @@
 namespace macos_host {
   WidgetData* widget_for_id(uint32_t widget_id, Session** out_session = nullptr);
 
+  // GRID in-place editor character input (defined further down inside the
+  // namespace). The keyDown: implementation references it before the
+  // definition appears.
+  void grid_painted_char_macos(WidgetData& wd, uint32_t cp);
+
   // Painter draw_asset thunk - mirror of
   // hosts/win32/widgets.cpp::w32_painter_draw_asset_thunk. Resolves the
   // neui_asset_t through the session's MacOSAssetManager, lazy-uploads a
@@ -312,6 +317,86 @@ namespace macos_host {
     grid_fire_cell_clicked_macos(wd, row, col);
   }
 
+  // ---- Cell-edit dispatch helpers (macOS) --------------------------------
+
+  static void grid_fire_cell_edit_event_macos(WidgetData& wd, neui_event_type_t t,
+                                                int row, int col)
+  {
+    if (!wd.session) return;
+    neui_event_t ev{};
+    ev.type = t;
+    ev.data.grid_cell.widget.id = wd.widget_id;
+    ev.data.grid_cell.row       = row;
+    ev.data.grid_cell.col       = col;
+    wd.session->dispatch_event(&ev);
+  }
+
+  bool grid_try_begin_edit_macos(WidgetData& wd, int row, int col)
+  {
+    auto& m = ensure_grid_model_macos(wd);
+    if (m.edit.active) return false;
+    auto cfg = neui_detail::grid_read_config(wd.attrs.get());
+    if (!neui_detail::grid_cell_edit_allowed(m, row, col, cfg.cell_focus))
+      return false;
+    neui_detail::grid_begin_edit(m, row, col);
+    grid_repaint_macos(wd);
+    grid_fire_cell_edit_event_macos(wd, NEUI_EVENT_GRID_CELL_EDIT_BEGIN,
+                                      row, col);
+    return true;
+  }
+
+  bool grid_commit_edit_macos(WidgetData& wd)
+  {
+    auto& m = ensure_grid_model_macos(wd);
+    if (!m.edit.active) return false;
+    int row = m.edit.row;
+    int col = m.edit.col;
+    auto* client = wd.session ? wd.session->_grid_client : nullptr;
+    const std::string proposed = m.edit.te.text;
+    if (client && client->validate_cell) {
+      neui_widget_t w{}; w.id = wd.widget_id;
+      if (!client->validate_cell(wd.session->get_token(), w, row, col,
+                                   proposed.c_str())) {
+        return false;
+      }
+    }
+    (void)neui_detail::grid_end_edit(m);
+    auto& r = m.rows[(size_t)row];
+    if ((int)r.cells.size() <= col) r.cells.resize((size_t)col + 1);
+    r.cells[(size_t)col] = proposed;
+    m.sort_dirty = true;
+    grid_repaint_macos(wd);
+    grid_fire_cell_edit_event_macos(wd, NEUI_EVENT_GRID_CELL_CHANGED, row, col);
+    return true;
+  }
+
+  void grid_cancel_edit_macos(WidgetData& wd)
+  {
+    auto& m = ensure_grid_model_macos(wd);
+    if (!m.edit.active) return;
+    int row = m.edit.row;
+    int col = m.edit.col;
+    (void)neui_detail::grid_end_edit(m);
+    grid_repaint_macos(wd);
+    grid_fire_cell_edit_event_macos(wd, NEUI_EVENT_GRID_CELL_EDIT_CANCEL,
+                                      row, col);
+  }
+
+  // Insert one codepoint into the live grid editor. Called from
+  // NEUINativePaintedView's keyDown: while m.edit.active. Skips controls.
+  void grid_painted_char_macos(WidgetData& wd, uint32_t cp)
+  {
+    auto& m = ensure_grid_model_macos(wd);
+    if (!m.edit.active) return;
+    if (cp < 0x20 || cp == 0x7F) return;
+    char buf[4];
+    int  n = neui_detail::te_encode_utf8(cp, buf);
+    auto& te = m.edit.te;
+    neui_detail::te_insert_utf8(te.text, te.cursor, te.sel_anchor,
+                                  te.overwrite, buf, n, &m.edit.history);
+    grid_repaint_macos(wd);
+  }
+
   // Funnelled input kind. AppKit hands us one of these per native event.
   enum class GridMsg { Down, DblClick, Drag, Up, Move, Wheel, Key };
 
@@ -343,6 +428,89 @@ namespace macos_host {
     }
 
     if (kind == GridMsg::Key) {
+      // --- Edit-mode keys take priority over the nav switch ---
+      if (m.edit.active) {
+        auto& te    = m.edit.te;
+        auto& hist  = m.edit.history;
+        const bool shift = (mods & NEUI_KMOD_SHIFT) != 0;
+        const bool ctrl  = (mods & NEUI_KMOD_CTRL)  != 0;
+        switch (keycode) {
+        case NEUI_KEY_RETURN: grid_commit_edit_macos(wd); return;
+        case NEUI_KEY_ESCAPE: grid_cancel_edit_macos(wd); return;
+        case NEUI_KEY_LEFT:
+          te_move_left (te.text, te.cursor, te.sel_anchor, ctrl, shift, &hist);
+          grid_repaint_macos(wd); return;
+        case NEUI_KEY_RIGHT:
+          te_move_right(te.text, te.cursor, te.sel_anchor, ctrl, shift, &hist);
+          grid_repaint_macos(wd); return;
+        case NEUI_KEY_HOME:
+          te_move_home (te.text, te.cursor, te.sel_anchor, shift, &hist);
+          grid_repaint_macos(wd); return;
+        case NEUI_KEY_END:
+          te_move_end  (te.text, te.cursor, te.sel_anchor, shift, &hist);
+          grid_repaint_macos(wd); return;
+        case NEUI_KEY_BACK:
+          te_backspace     (te.text, te.cursor, te.sel_anchor, ctrl, &hist);
+          grid_repaint_macos(wd); return;
+        case NEUI_KEY_DELETE:
+          te_delete_forward(te.text, te.cursor, te.sel_anchor, ctrl, &hist);
+          grid_repaint_macos(wd); return;
+        case NEUI_KEY_A:
+          if (ctrl) {
+            te_select_all(te.text, te.cursor, te.sel_anchor, &hist);
+            grid_repaint_macos(wd);
+          }
+          return;
+        case NEUI_KEY_C:
+          if (ctrl) {
+            std::string sel = te_selected_text(te.text, te.cursor, te.sel_anchor);
+            if (!sel.empty())
+              clipboard_set_text_macos(sel.c_str(), (uint32_t)sel.size());
+          }
+          return;
+        case NEUI_KEY_X:
+          if (ctrl) {
+            std::string sel = te_selected_text(te.text, te.cursor, te.sel_anchor);
+            if (!sel.empty()) {
+              clipboard_set_text_macos(sel.c_str(), (uint32_t)sel.size());
+              hist.mark(EditState{ te.text, te.cursor, te.sel_anchor },
+                        EditHistory::None, true);
+              te_erase_selection(te.text, te.cursor, te.sel_anchor);
+              grid_repaint_macos(wd);
+            }
+          }
+          return;
+        case NEUI_KEY_V:
+          if (ctrl) {
+            int n = clipboard_get_text_macos(nullptr, 0);
+            if (n > 0) {
+              std::vector<char> buf((size_t)n);
+              clipboard_get_text_macos(buf.data(), n);
+              std::string paste(buf.data(), (size_t)(n > 0 ? n - 1 : 0));
+              te_paste(te.text, te.cursor, te.sel_anchor, paste,
+                       /*strip_newlines=*/true, &hist);
+              grid_repaint_macos(wd);
+            }
+          }
+          return;
+        case NEUI_KEY_Z:
+          if (ctrl) {
+            if (shift) te_redo(te.text, te.cursor, te.sel_anchor, hist);
+            else       te_undo(te.text, te.cursor, te.sel_anchor, hist);
+            grid_repaint_macos(wd);
+          }
+          return;
+        case NEUI_KEY_Y:
+          if (ctrl) {
+            te_redo(te.text, te.cursor, te.sel_anchor, hist);
+            grid_repaint_macos(wd);
+          }
+          return;
+        default:
+          return;  // swallow other keys while editing
+        }
+      }
+
       int n_rows = (int)m.rows.size();
       int n_cols = (int)m.columns.size();
       if (n_rows == 0) return;
@@ -423,6 +591,12 @@ namespace macos_host {
       case NEUI_KEY_RETURN: {
         int r = m.selected_row;
         if (r < 0) return;
+        // Cell-edit takes priority over ROW_ACTIVATED when the column is
+        // editable and we're in cell-focus mode.
+        if (cfg.cell_focus && m.selected_col >= 0 &&
+            grid_try_begin_edit_macos(wd, r, m.selected_col)) {
+          return;
+        }
         grid_fire_row_activated_macos(wd, r);
         return;
       }
@@ -527,6 +701,21 @@ namespace macos_host {
       // Hit-test reads display_order; rebuild it first if dirty.
       grid_ensure_sort_clean(m);
       GridHit hit = grid_hit_test(m, vp, cfg.row_h, widget_w, widget_h, lx, ly);
+
+      // --- Edit-mode click handling ---
+      // Click inside the editing cell: swallow (editor stays open). Click
+      // anywhere else: commit. If commit was rejected by validate_cell the
+      // editor stays open and we swallow the click so the underlying grid
+      // doesn't also act on it.
+      if (m.edit.active) {
+        bool on_editing_cell = (hit.region == GridHitRegion::Cell &&
+                                hit.row == m.edit.row &&
+                                hit.col == m.edit.col);
+        if (on_editing_cell) return;
+        if (!grid_commit_edit_macos(wd)) return;
+        // Commit succeeded - fall through to normal click handling.
+      }
+
       switch (hit.region) {
       case GridHitRegion::HeaderDivider:
         if (kind == GridMsg::Down) {
@@ -589,7 +778,10 @@ namespace macos_host {
       }
       case GridHitRegion::Cell: {
         if (kind == GridMsg::DblClick) {
-          grid_fire_row_activated_macos(wd, hit.row);
+          // Try opening the in-place editor first (mirrors ENTER); falls
+          // back to ROW_ACTIVATED for non-editable cells / row-focus mode.
+          if (!grid_try_begin_edit_macos(wd, hit.row, hit.col))
+            grid_fire_row_activated_macos(wd, hit.row);
         } else {
           const GridCellOverride* ov = grid_find_override(m, hit.row, hit.col);
           bool cell_dis = ov && ov->has_enabled && !ov->enabled;
@@ -841,6 +1033,23 @@ static float neui_snap_to_steps(float v, int steps)
          !strcmp(wd->type, NEUI_W_GRID);
 }
 
+// GRID commits an open in-place cell editor on focus loss so Tab /
+// click-elsewhere don't leave a stale editor over a widget that no
+// longer has the keyboard. On validate-reject we fall back to cancel
+// rather than fighting AppKit's responder change.
+- (BOOL)resignFirstResponder
+{
+  auto* wd = macos_host::widget_for_id(widget_id);
+  if (wd && wd->type && !strcmp(wd->type, NEUI_W_GRID)) {
+    auto& m = macos_host::ensure_grid_model_macos(*wd);
+    if (m.edit.active) {
+      if (!macos_host::grid_commit_edit_macos(*wd))
+        macos_host::grid_cancel_edit_macos(*wd);
+    }
+  }
+  return [super resignFirstResponder];
+}
+
 - (void)keyDown:(NSEvent*)event
 {
   macos_host::Session* sess = nullptr;
@@ -848,11 +1057,34 @@ static float neui_snap_to_steps(float v, int steps)
   // GRID owns its keyboard navigation (arrows / page / home / end / return).
   if (wd && sess && wd->enabled && wd->type && !strcmp(wd->type, NEUI_W_GRID)) {
     [self gridStopBounce];   // user input cancels any spring-back animation
-    macos_host::ensure_grid_model_macos(*wd).scroll_kin.suppress_momentum = false;
+    auto& gm = macos_host::ensure_grid_model_macos(*wd);
+    gm.scroll_kin.suppress_momentum = false;
     uint32_t kc   = neui_detail::mac_keycode_to_neui(event.keyCode);
     uint32_t mods = neui_detail::mac_modifiers_to_neui(event.modifierFlags);
     macos_host::grid_painted_msg_macos(*wd, macos_host::GridMsg::Key,
                                         0, 0, kc, mods, 0);
+    // Feed printable text into the in-place cell editor when active. Skip
+    // when Command is held (those are shortcuts, not text input) and skip
+    // private-use function-key codepoints (arrows, F-keys); those came in
+    // via the GridMsg::Key path already.
+    if (gm.edit.active &&
+        !(event.modifierFlags & NSEventModifierFlagCommand)) {
+      NSString* chars = event.characters;
+      NSUInteger i = 0;
+      while (i < chars.length) {
+        unichar c = [chars characterAtIndex:i];
+        uint32_t cp;
+        if (c >= 0xD800 && c <= 0xDBFF && i + 1 < chars.length) {
+          unichar lo = [chars characterAtIndex:i + 1];
+          cp = 0x10000u + ((uint32_t)(c - 0xD800) << 10) + (uint32_t)(lo - 0xDC00);
+          i += 2;
+        } else {
+          cp = c; i += 1;
+        }
+        if (cp >= 0xF700 && cp <= 0xF8FF) continue;  // function-key range
+        macos_host::grid_painted_char_macos(*wd, cp);
+      }
+    }
     return;
   }
   bool cd = wd && sess && wd->emit_events && wd->type

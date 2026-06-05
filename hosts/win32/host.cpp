@@ -119,6 +119,10 @@ namespace win32_host
     _menu_client = static_cast<neui_menu_client_t*>(
       _client->get_interface(token, NEUI_API_MENU_CLIENT));
 
+    // Opt-in grid-cell-edit validation callback.
+    _grid_client = static_cast<neui_grid_client_t*>(
+      _client->get_interface(token, NEUI_API_GRID_CLIENT));
+
     // Bring up the system-theme provider (idempotent across sessions) and
     // subscribe so this session can re-apply DWM dark mode + invalidate
     // its frames when light/dark or accent changes.

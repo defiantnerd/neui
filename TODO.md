@@ -81,6 +81,22 @@ is a real initiative, not trivial; together they form one programme.
   `DialogBoxIndirect`). Current non-blocking modal matches the
   event-loop shape; revisit only if a real use case demands it.
 
+## Grid sort follow-ups
+
+Multi-column sort shipped (`plans/grid-sorting.md`); a handful of
+extensions are deferred:
+
+- **Locale-aware STRING compare.** v1 uses byte-level `strcmp`. Switch
+  to ICU `ucol_strcoll` or `std::collate` once a client needs
+  locale-correct sorting (accented characters, German Umlauts, etc.).
+- **Custom per-column comparator callback.** v1 covers STRING / INT /
+  FLOAT / NATURAL; a `set_column_sort_compare(col, fn, userdata)` hook
+  would let clients sort by an external date / version / opaque-tag
+  scheme. Slot lifetime + ABI shape needs thought before exposing.
+- **Built-in DATE / TIME kind.** Common enough that we'll regret asking
+  clients to NATURAL-sort ISO-8601 strings forever; defer until the
+  parser policy (epoch / locale / formats accepted) is decided.
+
 ## Clipboard
 
 - **Custom clipboard formats.** v1 only round-trips `text/plain`. API
@@ -130,5 +146,8 @@ is a real initiative, not trivial; together they form one programme.
 | File | Status |
 |---|---|
 | `plans/painter-and-asset-api.md` | Shipped; kept for the design-decision rationale. |
+| `plans/grid-macos-port.md` | Shipped (GRID macOS native port). |
+| `plans/grid-sorting.md` | Shipped (multi-column sort + per-column kind/sortable + visual nav). |
 | `plans/winui3-host.md` | Feasibility analysis; deferred indefinitely. |
+| `plans/wasm-host.md` | Feasibility analysis; deferred. |
 | `plans/how-to-port.md` | Reference playbook for new platform ports. |

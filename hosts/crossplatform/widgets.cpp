@@ -2619,6 +2619,81 @@ namespace xpl_host
     return neui_detail::grid_visual_to_logical(g->model, visual_row);
   }
 
+  // -------- Cell editing API --------------------------------------------
+  // Forward declarations of the static commit / cancel / begin helpers
+  // defined in host.cpp. We deliberately keep their definitions next to
+  // GridWidget there, then expose them through `extern` here, so the API
+  // wrappers don't duplicate the dispatch logic.
+
+} // namespace xpl_host
+
+namespace xpl_host {
+  class GridWidget;
+  bool xpl_grid_try_begin_edit_pub(GridWidget& g, int row, int col);
+  bool xpl_grid_commit_edit_pub(GridWidget& g);
+  void xpl_grid_cancel_edit_pub(GridWidget& g);
+}
+
+namespace xpl_host {
+
+  static void NEUI_ABI gr_set_column_editable(neui_session_t session, neui_widget_t widget,
+                                                int col, bool editable)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g || col < 0 || col >= (int)g->model.columns.size()) return;
+    g->model.columns[(size_t)col].editable = editable;
+    // If we just made the editing column non-editable while it's open,
+    // cancel the editor so we don't leave it dangling.
+    if (!editable && g->model.edit.active && g->model.edit.col == col) {
+      xpl_grid_cancel_edit_pub(*g);
+      grid_invalidate(s, g);
+    }
+  }
+
+  static bool NEUI_ABI gr_get_column_editable(neui_session_t session, neui_widget_t widget,
+                                                int col)
+  {
+    auto* g = resolve_grid(session, widget);
+    if (!g || col < 0 || col >= (int)g->model.columns.size()) return false;
+    return g->model.columns[(size_t)col].editable;
+  }
+
+  static void NEUI_ABI gr_begin_cell_edit(neui_session_t session, neui_widget_t widget,
+                                           int row, int col)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g) return;
+    if (xpl_grid_try_begin_edit_pub(*g, row, col))
+      grid_invalidate(s, g);
+  }
+
+  static void NEUI_ABI gr_end_cell_edit(neui_session_t session, neui_widget_t widget,
+                                         bool commit)
+  {
+    Session* s = nullptr;
+    auto* g = resolve_grid(session, widget, &s);
+    if (!g || !g->model.edit.active) return;
+    if (commit) (void)xpl_grid_commit_edit_pub(*g);
+    else        xpl_grid_cancel_edit_pub(*g);
+    grid_invalidate(s, g);
+  }
+
+  static bool NEUI_ABI gr_is_editing_cell(neui_session_t session, neui_widget_t widget,
+                                            int* out_row, int* out_col)
+  {
+    auto* g = resolve_grid(session, widget);
+    if (!g || !g->model.edit.active) {
+      if (out_row) *out_row = -1;
+      if (out_col) *out_col = -1;
+      return false;
+    }
+    if (out_row) *out_row = g->model.edit.row;
+    if (out_col) *out_col = g->model.edit.col;
+    return true;
+  }
+
   neui_grid_api_t grid_api = {
     NEUI_VERSION,
     gr_add_column,
@@ -2658,6 +2733,11 @@ namespace xpl_host
     gr_get_sort_level,
     gr_logical_to_visual_row,
     gr_visual_to_logical_row,
+    gr_set_column_editable,
+    gr_get_column_editable,
+    gr_begin_cell_edit,
+    gr_end_cell_edit,
+    gr_is_editing_cell,
   };
 
 } // namespace xpl_host

@@ -587,3 +587,56 @@ TEST_CASE("grid_read_config: attrs override defaults")
   CHECK(c.bg_explicit);
   CHECK_EQ((unsigned)c.bg_argb, 0xFF202020u);
 }
+
+// ---------------------------------------------------------------------------
+// Cell editor lifecycle
+// ---------------------------------------------------------------------------
+
+TEST_CASE("grid_cell_edit_allowed: requires editable column, cell-focus, enabled cell")
+{
+  GridModel m = make_grid(2, { 50, 50 });
+  // Defaults: editable=false.
+  CHECK_FALSE(grid_cell_edit_allowed(m, 0, 0, /*cell_focus=*/true));
+  m.columns[1].editable = true;
+  CHECK(grid_cell_edit_allowed(m, 0, 1, true));
+  // Out-of-range.
+  CHECK_FALSE(grid_cell_edit_allowed(m, -1, 1, true));
+  CHECK_FALSE(grid_cell_edit_allowed(m, 0,  2, true));
+  // Cell-focus off.
+  CHECK_FALSE(grid_cell_edit_allowed(m, 0, 1, false));
+  // Disabled cell override blocks edit.
+  auto& ov = grid_ensure_override(m, 0, 1);
+  ov.enabled = false; ov.has_enabled = true;
+  CHECK_FALSE(grid_cell_edit_allowed(m, 0, 1, true));
+}
+
+TEST_CASE("grid_begin_edit seeds buffer from the cell and selects all")
+{
+  GridModel m = make_grid(2, { 50, 50 });
+  m.rows[0].cells[1] = "abc";
+  m.columns[1].editable = true;
+  grid_begin_edit(m, 0, 1);
+  CHECK(m.edit.active);
+  CHECK_EQ(m.edit.row, 0);
+  CHECK_EQ(m.edit.col, 1);
+  CHECK_EQ(m.edit.te.text, std::string("abc"));
+  // Whole content selected: anchor=0, cursor=end.
+  CHECK_EQ(m.edit.te.sel_anchor, 0);
+  CHECK_EQ(m.edit.te.cursor, 3);
+  CHECK_EQ(m.edit.orig_text, std::string("abc"));
+}
+
+TEST_CASE("grid_end_edit clears the state and returns the working text")
+{
+  GridModel m = make_grid(1, { 50 });
+  m.columns[0].editable = true;
+  grid_begin_edit(m, 0, 0);
+  m.edit.te.text   = "hello";
+  m.edit.te.cursor = 5;
+  m.edit.te.sel_anchor = 5;
+  std::string out = grid_end_edit(m);
+  CHECK_EQ(out, std::string("hello"));
+  CHECK_FALSE(m.edit.active);
+  CHECK_EQ(m.edit.row, -1);
+  CHECK_EQ(m.edit.col, -1);
+}

@@ -178,6 +178,27 @@ static bool on_event(void* token, neui_event_t* ev)
     return true;
   }
 
+  case NEUI_EVENT_GRID_CELL_EDIT_BEGIN:
+    set_status(app, "EDIT_BEGIN row=%d col=%d (Enter to commit, Esc to cancel)",
+               ev->data.grid_cell.row, ev->data.grid_cell.col);
+    return true;
+
+  case NEUI_EVENT_GRID_CELL_CHANGED: {
+    char buf[256];
+    (void)app->grid->get_cell_text(app->session, { app->grid_id },
+                                     ev->data.grid_cell.row,
+                                     ev->data.grid_cell.col,
+                                     buf, (int)sizeof(buf));
+    set_status(app, "CELL_CHANGED row=%d col=%d -> \"%s\"",
+               ev->data.grid_cell.row, ev->data.grid_cell.col, buf);
+    return true;
+  }
+
+  case NEUI_EVENT_GRID_CELL_EDIT_CANCEL:
+    set_status(app, "EDIT_CANCEL row=%d col=%d",
+               ev->data.grid_cell.row, ev->data.grid_cell.col);
+    return true;
+
   case NEUI_EVENT_MOUSE_BUTTON_CLICK: {
     uint32_t w = ev->data.mouse.widget.id;
     if (w == app->add_row_btn) {
@@ -248,9 +269,27 @@ static neui_widget_client_t widget_client = {
   on_event,
 };
 
+// NEUI_API_GRID_CLIENT - validate-on-commit hook. Rejects empty strings as a
+// trivial demonstration; a real client would also do format / range / db
+// uniqueness checks. Returning false leaves the editor open so the user can
+// fix the value.
+static bool NEUI_ABI validate_cell(void* /*token*/, neui_widget_t /*grid*/,
+                                     int /*row*/, int /*col*/,
+                                     const char* new_text)
+{
+  if (!new_text || new_text[0] == '\0') return false;
+  return true;
+}
+
+static neui_grid_client_t grid_client = {
+  NEUI_VERSION,
+  validate_cell,
+};
+
 static void* host_get_iface(void* /*token*/, const char* iface)
 {
-  if (!strcmp(iface, NEUI_API_WIDGETS)) return &widget_client;
+  if (!strcmp(iface, NEUI_API_WIDGETS))     return &widget_client;
+  if (!strcmp(iface, NEUI_API_GRID_CLIENT)) return &grid_client;
   return nullptr;
 }
 
@@ -334,7 +373,9 @@ int main(int /*argc*/, char** /*argv*/)
   app.attrs->set_int(app.session, g, NEUI_ATTR_GRID_ROW_HEIGHT,      22);
   app.attrs->set_int(app.session, g, NEUI_ATTR_GRID_HEADER_HEIGHT,   24);
   app.attrs->set_int(app.session, g, NEUI_ATTR_GRID_SHOW_FOCUS_ROW,  1);
-  app.attrs->set_int(app.session, g, NEUI_ATTR_GRID_CELL_FOCUS,      0);
+  // Cell-focus on so the in-place editor demo is reachable via Enter.
+  app.attrs->set_int(app.session, g, NEUI_ATTR_GRID_CELL_FOCUS,      1);
+  app.cell_focus = true;
 
   // Columns.
   app.grid->add_column(app.session, g, "#",        50);
@@ -346,6 +387,12 @@ int main(int /*argc*/, char** /*argv*/)
   app.grid->set_column_align(app.session, g, 0, "right");
   app.grid->set_column_align(app.session, g, 3, "right");
   app.grid->set_column_align(app.session, g, 4, "right");
+
+  // Mark Name and Notes editable. In cell-focus mode (above), pressing
+  // Enter on a cell in an editable column opens the in-place editor; the
+  // grid_client.validate_cell callback rejects empty strings.
+  app.grid->set_column_editable(app.session, g, 1, true);
+  app.grid->set_column_editable(app.session, g, 5, true);
 
   // Sort kinds: numeric columns sort numerically so "9" < "10" (the default
   // STRING kind would give the lexicographic surprise). Click a header to
@@ -366,7 +413,8 @@ int main(int /*argc*/, char** /*argv*/)
   // example dead simple; v1 ships without auto layout).
   auto sl = app.widgets->create(app.session, win, NEUI_W_LABEL,
                                   10, 558, 880, 22, &app);
-  app.widgets->set_text(app.session, sl, "Ready - click rows, drag column dividers, scroll");
+  app.widgets->set_text(app.session, sl,
+    "Ready - click a Name/Notes cell + press Enter to edit (Esc cancels)");
   app.status_label = sl.id;
 
   app.widgets->show(app.session, win);

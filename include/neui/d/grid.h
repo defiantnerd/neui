@@ -124,8 +124,56 @@ typedef enum neui_grid_sort_kind {
 // Event payload structs (neui_event_grid_row_t, neui_event_grid_cell_t,
 // neui_event_grid_column_resize_t) and event type constants
 // (NEUI_EVENT_GRID_ROW_SELECTED, _CELL_SELECTED, _ROW_ACTIVATED,
-// _CELL_CLICKED, _COLUMN_RESIZED) live in <neui/d/events.h> alongside
+// _CELL_CLICKED, _COLUMN_RESIZED, _SORT_CHANGED, _CELL_EDIT_BEGIN,
+// _CELL_CHANGED, _CELL_EDIT_CANCEL) live in <neui/d/events.h> alongside
 // the rest of the event taxonomy.
+
+// ---- Cell editing --------------------------------------------------------
+//
+// Per-column `editable` flag (set_column_editable, default false) gates
+// in-place cell editing. When the column is editable, pressing ENTER /
+// RETURN on a selected cell opens a single-line text editor over the cell
+// rect; the user types / navigates with arrows / Home / End / Backspace /
+// Delete; ENTER commits the new text; ESC cancels and reverts; a click
+// outside the editing cell commits.
+//
+// Cell editing requires cell-focus mode (NEUI_ATTR_GRID_CELL_FOCUS=1) so a
+// specific column is identified. In row-focus mode, ENTER continues to fire
+// GRID_ROW_ACTIVATED.
+//
+// Commit flow:
+//   1. NEUI_EVENT_GRID_CELL_EDIT_BEGIN fires when the editor opens.
+//   2. On commit, the optional NEUI_API_GRID_CLIENT::validate_cell is
+//      called with (grid, row, col, new_text). If it returns false the
+//      editor stays open with the proposed text (so the user can fix it);
+//      if missing or it returns true, the framework writes the new text
+//      to the cell and fires NEUI_EVENT_GRID_CELL_CHANGED.
+//   3. On cancel, NEUI_EVENT_GRID_CELL_EDIT_CANCEL fires.
+
+// Optional client-side interface for validating a cell edit before the
+// framework commits the new text. Reached via
+//   client->get_interface(token, NEUI_API_GRID_CLIENT)
+// at session create time, just like NEUI_API_MENU_CLIENT.
+#define NEUI_API_GRID_CLIENT \
+  "com.defiantnerd.neui.extension.grid.client/0"
+
+typedef struct neui_grid_client {
+  uint32_t neui_version;
+
+  // Called when the user presses ENTER inside the in-place editor (or any
+  // other commit action - e.g. clicking outside the editing cell). Return
+  // true to accept new_text (the framework writes it to the cell with
+  // set_cell_text, fires NEUI_EVENT_GRID_CELL_CHANGED, and closes the
+  // editor). Return false to reject (the editor stays open with the
+  // proposed text so the user can fix it).
+  //
+  // new_text is UTF-8 and valid only for the duration of the call.
+  bool (NEUI_ABI *validate_cell)(void* token,
+                                  neui_widget_t grid,
+                                  int           row,
+                                  int           col,
+                                  const char*   new_text);
+} neui_grid_client_t;
 
 // ---- API surface ---------------------------------------------------------
 
@@ -309,6 +357,32 @@ typedef struct neui_grid_api {
                                           int logical_row);
   int (NEUI_ABI *visual_to_logical_row) (neui_session_t session, neui_widget_t grid,
                                           int visual_row);
+
+  // -------- Cell editing ------------------------------------------------
+  // Per-column editable flag. Default false. See "Cell editing" comment
+  // above for the lifecycle.
+  void (NEUI_ABI *set_column_editable) (neui_session_t session, neui_widget_t grid,
+                                          int col, bool editable);
+  bool (NEUI_ABI *get_column_editable) (neui_session_t session, neui_widget_t grid,
+                                          int col);
+
+  // Open the in-place editor at (row, col). No-op if the column is not
+  // editable, the cell is disabled, the grid is not in cell-focus mode,
+  // or the indices are out of range. Fires NEUI_EVENT_GRID_CELL_EDIT_BEGIN
+  // (mirroring user-driven ENTER) when it actually opens.
+  void (NEUI_ABI *begin_cell_edit)     (neui_session_t session, neui_widget_t grid,
+                                          int row, int col);
+
+  // Close the editor. commit=true runs the validate / write / CHANGED
+  // flow as if the user had pressed ENTER; commit=false discards and
+  // fires NEUI_EVENT_GRID_CELL_EDIT_CANCEL. No-op when no editor is open.
+  void (NEUI_ABI *end_cell_edit)       (neui_session_t session, neui_widget_t grid,
+                                          bool commit);
+
+  // Returns true if the in-place editor is currently open, and populates
+  // out_row / out_col with the editing cell. Either out pointer may be NULL.
+  bool (NEUI_ABI *is_editing_cell)     (neui_session_t session, neui_widget_t grid,
+                                          int* out_row, int* out_col);
 } neui_grid_api_t;
 
 #ifdef __cplusplus

@@ -34,6 +34,8 @@ namespace macos_host
     if (_client && _client->get_interface) {
       _client_widget_api = static_cast<neui_widget_client_t*>(
         _client->get_interface(token, NEUI_API_WIDGETS));
+      _grid_client = static_cast<neui_grid_client_t*>(
+        _client->get_interface(token, NEUI_API_GRID_CLIENT));
     }
   }
 

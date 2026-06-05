@@ -305,10 +305,15 @@ namespace neui_detail
 
       // --- Cell-focus outline (cell_focus mode only) -------------------
       // selected_row is logical; translate to its visual position so the
-      // outline tracks the row the user sees after sorting.
+      // outline tracks the row the user sees after sorting. Suppressed
+      // while the in-place editor is open over this cell - the editor
+      // draws its own (heavier) accent border below.
+      bool edit_over_selected = m.edit.active &&
+                                m.edit.row == m.selected_row &&
+                                m.edit.col == m.selected_col;
       if (cfg.cell_focus && is_focused &&
           m.selected_row >= 0 && m.selected_col >= 0 &&
-          m.selected_col < n_cols) {
+          m.selected_col < n_cols && !edit_over_selected) {
         int sel_v = selected_visual;
         if (sel_v >= first && sel_v < last) {
           float ry = fy + (float)vp.body_y - pxoff +
@@ -320,6 +325,101 @@ namespace neui_detail
           if (backend->draw_rect)
             backend->draw_rect(ctx, cx_scr, ry, (float)col_w,
                                 (float)cfg.row_h, 1.0f, accent);
+        }
+      }
+
+      // --- In-place cell editor overlay --------------------------------
+      // Paints over the underlying cell text: solid control_bg fill, 2 px
+      // accent border, optional selection rectangle, working text, caret.
+      // The model stores LOGICAL (row, col); translate to visual for the
+      // on-screen y.
+      if (m.edit.active && m.edit.col >= 0 && m.edit.col < n_cols) {
+        int edit_v = grid_logical_to_visual(m, m.edit.row);
+        if (edit_v >= first && edit_v < last) {
+          float ry = fy + (float)vp.body_y - pxoff +
+                      (float)((edit_v - first) * cfg.row_h);
+          int   col_left_content = grid_column_left(m, m.edit.col);
+          float cw               = (float)m.columns[(size_t)m.edit.col].width;
+          float cx_scr = fx + (float)vp.body_x +
+                          (float)(col_left_content - m.scroll_offset_x);
+          // Cell background (cover whatever was painted underneath - cell
+          // text, focus-row band, etc.).
+          if (backend->fill_rect)
+            backend->fill_rect(ctx, cx_scr, ry, cw,
+                                (float)cfg.row_h, body_bg);
+          // 2 px accent border (drawn as two stroked rects so a 1 px
+          // backend doesn't need a width param above 1).
+          if (backend->draw_rect) {
+            backend->draw_rect(ctx, cx_scr, ry, cw, (float)cfg.row_h,
+                                1.0f, accent);
+            backend->draw_rect(ctx, cx_scr + 1.0f, ry + 1.0f,
+                                cw - 2.0f, (float)cfg.row_h - 2.0f,
+                                1.0f, accent);
+          }
+          // Working text - always left-aligned regardless of column align;
+          // the editor is a flat text field, the alignment was a paint-time
+          // concern for the static value.
+          float text_x = cx_scr + (float)GRID_CELL_PAD_X;
+          float text_w = cw - 2.0f * (float)GRID_CELL_PAD_X;
+          if (text_w < 0.0f) text_w = 0.0f;
+          const std::string& et = m.edit.te.text;
+          int  cursor = m.edit.te.cursor;
+          int  anchor = m.edit.te.sel_anchor;
+          if (cursor < 0) cursor = 0;
+          if (cursor > (int)et.size()) cursor = (int)et.size();
+          if (anchor < 0) anchor = 0;
+          if (anchor > (int)et.size()) anchor = (int)et.size();
+
+          // Selection rectangle (behind the text). Measure the prefix +
+          // post-prefix to find the on-screen extents.
+          if (anchor != cursor && backend->measure_text && backend->fill_rect) {
+            int lo = te_sel_lo(cursor, anchor);
+            int hi = te_sel_hi(cursor, anchor);
+            std::string pre(et,  0,         (size_t)lo);
+            std::string mid(et,  (size_t)lo, (size_t)(hi - lo));
+            float pre_w = backend->measure_text(ctx, pre.c_str(), -1, ef.size);
+            float mid_w = backend->measure_text(ctx, mid.c_str(), -1, ef.size);
+            float sx = text_x + pre_w;
+            float sy = ry + 2.0f;
+            float sh = (float)cfg.row_h - 4.0f;
+            // Clip the selection rect against the cell interior so a long
+            // selection doesn't spill over the border.
+            float right = cx_scr + cw - 2.0f;
+            float sx_clamped  = (sx < cx_scr + 2.0f) ? cx_scr + 2.0f : sx;
+            float swid        = (sx + mid_w > right) ? (right - sx_clamped)
+                                                     : (mid_w - (sx_clamped - sx));
+            if (swid > 0.0f) {
+              // Same translucent accent as INPUTBOX / MULTILINE selection,
+              // so the grid editor matches the rest of the framework's
+              // text-selection look.
+              uint32_t sel_bg = color(ColorRole::accent_translucent);
+              backend->fill_rect(ctx, sx_clamped, sy, swid, sh, sel_bg);
+            }
+          }
+
+          if (!et.empty() && backend->draw_text) {
+            backend->draw_text(ctx, text_x, ry, text_w, (float)cfg.row_h,
+                                et.c_str(), ef.size, text_color);
+          }
+          // Caret. Measure the prefix up to the byte cursor; the backend
+          // owns the font metrics, so a measure-then-draw is the cleanest
+          // way to land the caret on a codepoint boundary.
+          float caret_dx = 0.0f;
+          if (cursor > 0 && backend->measure_text) {
+            std::string prefix(et, 0, (size_t)cursor);
+            caret_dx = backend->measure_text(ctx, prefix.c_str(), -1, ef.size);
+          }
+          float caret_x = text_x + caret_dx;
+          float right_clip = cx_scr + cw - 2.0f;
+          if (caret_x > right_clip) caret_x = right_clip;
+          if (caret_x < cx_scr + 2.0f) caret_x = cx_scr + 2.0f;
+          if (backend->fill_rect) {
+            float caret_top = ry + 3.0f;
+            float caret_h   = (float)cfg.row_h - 6.0f;
+            if (caret_h < 4.0f) caret_h = (float)cfg.row_h - 2.0f;
+            backend->fill_rect(ctx, caret_x, caret_top, 1.0f, caret_h,
+                                text_color);
+          }
         }
       }
 
