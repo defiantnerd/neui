@@ -2,6 +2,11 @@
 #include <cstdint>
 #include <neui/neui.h>
 
+// Forward-declarations for shared data-item types (defined in
+// hosts/shared/clipboard_item.h). Decoupled here to keep platform.h light;
+// implementation files include the full definition.
+namespace neui_detail { class DataItem; }
+
 // Platform abstraction for the crossplatform host.
 // platform_win32.cpp implements this on Windows; platform_null.cpp elsewhere.
 
@@ -95,15 +100,17 @@ namespace xpl_host
   bool platform_run_modal_until(bool* keep_running);
 
   // -------------------------------------------------------------------------
-  // System clipboard (text-only v1).
+  // System clipboard.
   //
-  // Win32: maps to CF_UNICODETEXT via hosts/shared/win32/clipboard_win32.h.
-  // macOS: maps to NSPasteboard generalPasteboard / NSPasteboardTypeString.
-  // Other: no-op.
+  // Text-only fast-path delegates to hosts/shared/win32/clipboard_win32.h
+  // and hosts/shared/macos/clipboard_macos.h. The item-based path handles
+  // any MIME on the DataItem - text/plain, text/html, text/uri-list, plus
+  // arbitrary custom MIMEs pass through as registered clipboard formats
+  // (Win32) or pasteboard UTI types (macOS).
   //
-  // The host's xpl widgets (InputBoxWidget, MultilineWidget) call these
-  // directly for Ctrl+C/X/V hot paths, bypassing the public clipboard API
-  // (which is already routed through these on the public-API side too).
+  // The host's xpl widgets (InputBoxWidget, MultilineWidget) call the
+  // text helpers directly for Ctrl+C/X/V hot paths, bypassing the public
+  // clipboard API (which is also routed through these helpers).
 
   // Replace clipboard with utf8/length bytes. Returns true on success.
   bool platform_clipboard_set_text(const char* utf8, uint32_t length);
@@ -116,6 +123,14 @@ namespace xpl_host
   // True if the clipboard currently advertises Unicode text.
   bool platform_clipboard_has_text();
 
+  // Place every format on the item onto the system clipboard.
+  // Returns true if at least one format was published.
+  bool platform_clipboard_write_item(const neui_detail::DataItem& item);
+
+  // Snapshot every representation on the system clipboard into the item.
+  // Returns true if at least one format was captured.
+  bool platform_clipboard_read_item(neui_detail::DataItem& item);
+
   // Register a callback fired whenever the clipboard contents change (any
   // app, including ours). Returns a non-zero handle on success, 0 if the
   // platform doesn't support change notifications.
@@ -123,6 +138,27 @@ namespace xpl_host
   uint32_t platform_register_clipboard_listener(ClipboardChangeCallback cb,
                                                  void* token);
   void     platform_unregister_clipboard_listener(uint32_t handle);
+
+  // -------------------------------------------------------------------------
+  // Drag & drop drop-target registration.
+  //
+  // Called by the host's widget_show on top-level frame windows. The
+  // platform layer wraps the native handle as a drop target (Win32:
+  // RegisterDragDrop with a synthesised IDropTarget COM object; macOS:
+  // [contentView registerForDraggedTypes:...] + NSDraggingDestination
+  // protocol methods on the content view). The platform layer holds
+  // (session_ptr, frame_widget_id) and calls back into the Session via
+  // Session::dispatch_dnd_* (one entry per OS callback) so the framework
+  // can hit-test, fire client events, and report the accepted action
+  // back to the OS.
+  //
+  // Returns true if registration succeeded. Returns false on platforms
+  // without DnD support (the framework will silently swallow drops).
+
+  bool platform_dnd_register_window(void* native_handle,
+                                     void* session_ptr,
+                                     uint32_t frame_widget_id);
+  void platform_dnd_unregister_window(void* native_handle);
 
   // -------------------------------------------------------------------------
   // Native menu bar support.

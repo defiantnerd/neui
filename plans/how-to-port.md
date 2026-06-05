@@ -310,7 +310,7 @@ If your platform has no system theme to read, do nothing in this step — the de
 
 ## 7. Clipboard
 
-The xpl host calls `platform_clipboard_*` for both the public `NEUI_API_CLIPBOARD` API and for `Ctrl-C/X/V` inside text widgets. v1 only round-trips `text/plain;charset=utf-8`. The shape is forward-compatible — future custom formats (HTML, image) will extend `ClipboardItem` (`hosts/shared/clipboard_item.h`).
+The xpl host calls `platform_clipboard_*` for both the public `NEUI_API_CLIPBOARD` API and for `Ctrl-C/X/V` inside text widgets. The text fast path uses `platform_clipboard_{set,get,has}_text`; the item-based path uses `platform_clipboard_{read,write}_item` over the shared `neui_detail::DataItem` (`hosts/shared/clipboard_item.h`). Built-in MIMEs: `text/plain;charset=utf-8`, `text/html`, `text/uri-list`. Arbitrary MIMEs pass through as registered clipboard formats (Win32) or pasteboard UTI types (macOS). The same `DataItem` primitive will back drag&drop drop payloads.
 
 Implement `set_text` / `get_text` / `has_text` for any platform that has a system clipboard. For platforms without one, the null-host stubs are fine.
 

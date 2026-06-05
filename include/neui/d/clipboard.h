@@ -10,18 +10,28 @@ extern "C" {
 
 // System clipboard API.
 //
-// The clipboard is modelled as an item object that holds zero or more
+// The clipboard is modelled as a data-item object that holds zero or more
 // named-format representations of the same content (e.g. text/plain and
-// text/html views of the same string). v1 only round-trips text/plain
-// through the OS, but the API shape locks in the object so future formats
-// can be added without breaking existing code.
+// text/html views of the same string). The same neui_data_item_t primitive
+// is also used by drag&drop (see d/dnd.h) - one storage shape for any
+// MIME-typed payload crossing the application boundary.
+//
+// Formats round-tripped to/from the OS clipboard today:
+//   - text/plain;charset=utf-8       (NEUI_MIME_TEXT)
+//   - text/html                      (NEUI_MIME_HTML)
+//   - text/uri-list                  (NEUI_MIME_URI_LIST) - file paths
+//   - any other MIME string is stored under that name as a custom
+//     pasteboard / registered-clipboard format (host-defined encoding).
 //
 // Most clients only need the convenience shortcuts (set_text / get_text /
 // has_text). The item-based API is for clients that need richer content
-// (build a multi-format item, then write it once).
+// (build a multi-format item, then write it once; or inspect every
+// representation a drop payload carries).
 //
 // External clipboard-change notifications are opt-in via a separate
-// client-side interface (NEUI_API_CLIPBOARD_CLIENT).
+// client-side interface (NEUI_API_CLIPBOARD_CLIENT). Implemented on Win32
+// today; macOS opt-in is deferred (NSPasteboard has no event, polling
+// changeCount is the workaround, not wired yet).
 
 // NEUI_API_CLIPBOARD is defined in d/api.h.
 
@@ -29,12 +39,20 @@ extern "C" {
   "com.defiantnerd.neui.extension.clipboard.client/0"
 
 // Standard mime types. Stable across versions.
-#define NEUI_CLIPBOARD_MIME_TEXT  "text/plain;charset=utf-8"
-// Reserved for future versions: "text/html", "image/png", etc.
+#define NEUI_MIME_TEXT      "text/plain;charset=utf-8"
+#define NEUI_MIME_HTML      "text/html"
+#define NEUI_MIME_URI_LIST  "text/uri-list"
 
-// Opaque item handle. Lives until release(). Per-session.
-typedef struct neui_clipboard_item { uint32_t id; } neui_clipboard_item_t;
-static const neui_clipboard_item_t neui_clipboard_item_none = { UINT32_MAX };
+// Backwards-compatible alias for the original text macro.
+#define NEUI_CLIPBOARD_MIME_TEXT  NEUI_MIME_TEXT
+
+// Opaque data-item handle. Lives until release(). Per-session. Backs both
+// clipboard items and (transient) drag&drop drop payloads.
+#ifndef NEUI_DATA_ITEM_T_DEFINED
+#define NEUI_DATA_ITEM_T_DEFINED
+typedef struct neui_data_item { uint32_t id; } neui_data_item_t;
+#endif
+static const neui_data_item_t neui_data_item_none = { UINT32_MAX };
 
 typedef struct neui_clipboard_api {
   uint32_t neui_version;
@@ -58,30 +76,29 @@ typedef struct neui_clipboard_api {
 
   /* ---- Item-based API (multi-format) ---- */
 
-  // Snapshot the current system clipboard into an item. Returns
-  // neui_clipboard_item_none if the clipboard is empty or contains no
+  // Snapshot the current system clipboard into a data item. Returns
+  // neui_data_item_none if the clipboard is empty or contains no
   // representation the host knows. Caller must release() the item.
-  neui_clipboard_item_t (NEUI_ABI *read)(neui_session_t session);
+  neui_data_item_t (NEUI_ABI *read)(neui_session_t session);
 
   // Allocate an empty item to populate before write(). Caller must
   // release() the item.
-  neui_clipboard_item_t (NEUI_ABI *create_item)(neui_session_t session);
+  neui_data_item_t (NEUI_ABI *create_item)(neui_session_t session);
 
   // Free the item handle and its associated storage. Items left unreleased
   // when the session is destroyed are cleaned up automatically.
-  void (NEUI_ABI *release)(neui_session_t session, neui_clipboard_item_t item);
+  void (NEUI_ABI *release)(neui_session_t session, neui_data_item_t item);
 
-  // Place the item's representations on the system clipboard. Returns 1 on
-  // success, 0 on failure.
-  // v1: only NEUI_CLIPBOARD_MIME_TEXT is propagated to the OS; unknown
-  // mimes set on the item are stored but silently dropped on write.
-  int (NEUI_ABI *write)(neui_session_t session, neui_clipboard_item_t item);
+  // Place every format on the item onto the system clipboard. Returns 1 on
+  // success, 0 on failure. Unknown MIMEs (anything beyond the documented
+  // built-ins) are placed under their MIME string as a custom format.
+  int (NEUI_ABI *write)(neui_session_t session, neui_data_item_t item);
 
-  // Add or replace a format on the item.
-  // v1: only NEUI_CLIPBOARD_MIME_TEXT is accepted; other mime strings
-  // return 0 so clients exercising future formats see a clear failure.
+  // Add or replace a format on the item. Any MIME string is accepted;
+  // built-in MIMEs round-trip through the OS, custom MIMEs pass through
+  // as opaque bytes (host-defined encoding on the OS clipboard).
   int  (NEUI_ABI *item_set_format)(neui_session_t session,
-                                    neui_clipboard_item_t item,
+                                    neui_data_item_t item,
                                     const char* mime,
                                     const void* data, uint32_t length);
 
@@ -91,13 +108,13 @@ typedef struct neui_clipboard_api {
   // copied into buf when copying).
   // Returns 0 if the format is absent on the item, -1 on error.
   int  (NEUI_ABI *item_get_format)(neui_session_t session,
-                                    neui_clipboard_item_t item,
+                                    neui_data_item_t item,
                                     const char* mime,
                                     void* buf, int buflen);
 
   // True if the item carries a representation for the given mime.
   bool (NEUI_ABI *item_has_format)(neui_session_t session,
-                                    neui_clipboard_item_t item,
+                                    neui_data_item_t item,
                                     const char* mime);
 } neui_clipboard_api_t;
 

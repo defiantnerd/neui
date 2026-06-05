@@ -12,8 +12,9 @@ extern "C" {
 #  define NEUI_ABI
 #endif
 
-#define NEUI_API_RENDERER "com.defiantnerd.neui.extension.renderer/0"
+#define NEUI_API_RENDERER  "com.defiantnerd.neui.extension.renderer/0"
 #define NEUI_API_CLIPBOARD "com.defiantnerd.neui.extension.clipboard/0"
+#define NEUI_API_DND       "com.defiantnerd.neui.extension.dnd/0"
 
 #if 0
 #define NEUI_API_INPUT    "com.defiantnerd.neui.extension.input/0"

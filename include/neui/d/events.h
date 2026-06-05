@@ -10,6 +10,14 @@ extern "C" {
     uint32_t id;
   } neui_widget_t;
 
+  // Defined here (and re-guarded in d/clipboard.h) so the DnD event
+  // payload below can carry it without depending on header order. Same
+  // primitive backs clipboard items and DnD drop payloads.
+#ifndef NEUI_DATA_ITEM_T_DEFINED
+#define NEUI_DATA_ITEM_T_DEFINED
+  typedef struct neui_data_item { uint32_t id; } neui_data_item_t;
+#endif
+
 // remove #define NEUI_API_EVENTS   "com.defiantnerd.neui.extension.events/0"
 
 // the upper 24 bits are being used for event ids, the lower 16 bits for event categories,
@@ -22,6 +30,7 @@ extern "C" {
 #define DEF_ITEM_EVENT(x)   (((x)<<16) | 0x0004)
 #define DEF_TREE_EVENT(x)   (((x)<<16) | 0x0005)
 #define DEF_GRID_EVENT(x)   (((x)<<16) | 0x0006)
+#define DEF_DND_EVENT(x)    (((x)<<16) | 0x0007)
 
   typedef enum neui_event_type
   {
@@ -66,9 +75,15 @@ extern "C" {
     NEUI_EVENT_GRID_CELL_CHANGED        = DEF_GRID_EVENT(8),  // grid: cell text committed (after validate_cell returned true)
     NEUI_EVENT_GRID_CELL_EDIT_CANCEL    = DEF_GRID_EVENT(9),  // grid: in-place cell editor closed without committing
 
+    NEUI_EVENT_DND_ENTER                = DEF_DND_EVENT(1),  // cursor entered a drop-target widget during drag
+    NEUI_EVENT_DND_MOVE                 = DEF_DND_EVENT(2),  // cursor moved while over a drop-target widget
+    NEUI_EVENT_DND_LEAVE                = DEF_DND_EVENT(3),  // cursor left a drop-target widget (or drag cancelled)
+    NEUI_EVENT_DND_DROP                 = DEF_DND_EVENT(4),  // payload released over a drop-target widget
+
     NEUI_EVENT_CUSTOM                   = 0x1ffff,
   } neui_event_type_t;
 
+#undef DEF_DND_EVENT
 #undef DEF_GRID_EVENT
 #undef DEF_TREE_EVENT
 #undef DEF_ITEM_EVENT
@@ -232,6 +247,34 @@ extern "C" {
     int           new_width;
   } neui_event_grid_column_resize_t;
 
+  // Drag&drop event payload. Carries the cursor position in widget-local
+  // logical pixels, the MIME format names advertised on the drag source,
+  // and (only on NEUI_EVENT_DND_DROP) the data item to read bytes from.
+  //
+  // `formats` is borrowed dispatch-scoped storage (same lifetime contract
+  // as `neui_event_attr_t::attr_key`); copy any string out before
+  // returning. The `data` item id is valid only inside the dispatch
+  // callback - the framework releases the underlying DataItem the moment
+  // the client returns, so clients that need the bytes past the call must
+  // pull them via clipboard_api->item_get_format(item, mime, ...) before
+  // returning.
+  //
+  // `suggested_action` carries the source's hint (NEUI_DND_ACTION_*).
+  // The client signals what it will accept by calling
+  // dnd_api->accept(session, action) inside the callback - the framework
+  // caches the value and reports it back to the OS pasteboard.
+  typedef struct neui_event_dnd
+  {
+    neui_widget_t      widget;          // hit widget (set_drop_target = true)
+    int                x;               // widget-local x (logical px)
+    int                y;               // widget-local y (logical px)
+    uint32_t           buttonmap;       // NEUI_MK_* mouse-modifier bits
+    const char* const* formats;         // borrowed list of MIME strings
+    uint32_t           formats_count;
+    neui_data_item_t   data;            // populated on DROP; none on ENTER/MOVE/LEAVE
+    uint32_t           suggested_action; // neui_dnd_action_t bitmask
+  } neui_event_dnd_t;
+
   // Grid sort-changed event - fires after a user-driven header click that
   // mutates the sort stack (or removes a level). Carries the column that
   // was clicked and its new direction in the stack; clients that need the
@@ -295,6 +338,7 @@ extern "C" {
       neui_event_grid_cell_t          grid_cell;
       neui_event_grid_column_resize_t grid_column_resize;
       neui_event_grid_sort_t          grid_sort;
+      neui_event_dnd_t                dnd;
     } data;
 
     // more event data can be added here

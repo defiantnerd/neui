@@ -77,7 +77,7 @@ void wake_app_event_pump()
 // pipeline; isFlipped=YES so the CTM matches the renderer.h convention
 // (origin top-left, Y down). Mouse / keyboard hooks land in step 3.
 
-@interface NEUIView : NSView<NSTextInputClient>
+@interface NEUIView : NSView<NSTextInputClient, NSDraggingDestination>
 {
 @public
   xpl_host::Session* session;
@@ -756,6 +756,95 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
 }
 
 - (NSArray<NSAttributedStringKey>*)validAttributesForMarkedText { return @[]; }
+
+// ---------------------------------------------------------------------------
+// NSDraggingDestination - external drag&drop routing. The NEUIView is the
+// only NSDraggingDestination per frame; the framework hit-tests via
+// Session::dispatch_dnd_* and the client receives NEUI_EVENT_DND_*.
+
+static uint32_t neui_dnd_suggested_from_op(NSDragOperation op)
+{
+  if (op & NSDragOperationCopy) return 1;  // NEUI_DND_ACTION_COPY
+  if (op & NSDragOperationMove) return 2;  // NEUI_DND_ACTION_MOVE
+  if (op & NSDragOperationLink) return 4;  // NEUI_DND_ACTION_LINK
+  return 0;
+}
+
+static NSDragOperation neui_dnd_op_from_action(uint32_t action)
+{
+  NSDragOperation op = NSDragOperationNone;
+  if (action & 1) op |= NSDragOperationCopy;
+  if (action & 2) op |= NSDragOperationMove;
+  if (action & 4) op |= NSDragOperationLink;
+  return op;
+}
+
+- (NSPoint)neuiLocalPointFromDragInfo:(id<NSDraggingInfo>)sender
+{
+  NSPoint loc = [sender draggingLocation];
+  // draggingLocation is in window coords (bottom-left origin); convert to
+  // view-local. NEUIView is isFlipped=YES so the Y is already top-down.
+  return [self convertPoint:loc fromView:nil];
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender
+{
+  if (!session) return NSDragOperationNone;
+  NSPasteboard* pb = [sender draggingPasteboard];
+  auto mimes = neui_detail::pb_collect_mimes_macos(pb);
+  std::vector<const char*> ptrs; ptrs.reserve(mimes.size());
+  for (auto& s : mimes) ptrs.push_back(s.c_str());
+  NSPoint p = [self neuiLocalPointFromDragInfo:sender];
+  uint32_t suggested = neui_dnd_suggested_from_op([sender draggingSourceOperationMask]);
+  uint32_t accepted = session->dispatch_dnd_enter(widget_index,
+                                                    (int)p.x, (int)p.y,
+                                                    ptrs.data(),
+                                                    (uint32_t)ptrs.size(),
+                                                    suggested, 0);
+  return neui_dnd_op_from_action(accepted);
+}
+
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender
+{
+  if (!session) return NSDragOperationNone;
+  NSPasteboard* pb = [sender draggingPasteboard];
+  auto mimes = neui_detail::pb_collect_mimes_macos(pb);
+  std::vector<const char*> ptrs; ptrs.reserve(mimes.size());
+  for (auto& s : mimes) ptrs.push_back(s.c_str());
+  NSPoint p = [self neuiLocalPointFromDragInfo:sender];
+  uint32_t suggested = neui_dnd_suggested_from_op([sender draggingSourceOperationMask]);
+  uint32_t accepted = session->dispatch_dnd_move(widget_index,
+                                                   (int)p.x, (int)p.y,
+                                                   ptrs.data(),
+                                                   (uint32_t)ptrs.size(),
+                                                   suggested, 0);
+  return neui_dnd_op_from_action(accepted);
+}
+
+- (void)draggingExited:(id<NSDraggingInfo>)sender
+{
+  (void)sender;
+  if (session) session->dispatch_dnd_leave();
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender
+{
+  if (!session) return NO;
+  NSPasteboard* pb = [sender draggingPasteboard];
+  neui_detail::DataItem item;
+  neui_detail::pb_read_item_macos(pb, item);
+  auto mimes = neui_detail::pb_collect_mimes_macos(pb);
+  std::vector<const char*> ptrs; ptrs.reserve(mimes.size());
+  for (auto& s : mimes) ptrs.push_back(s.c_str());
+  NSPoint p = [self neuiLocalPointFromDragInfo:sender];
+  uint32_t suggested = neui_dnd_suggested_from_op([sender draggingSourceOperationMask]);
+  uint32_t accepted = session->dispatch_dnd_drop(widget_index,
+                                                   (int)p.x, (int)p.y,
+                                                   ptrs.data(),
+                                                   (uint32_t)ptrs.size(),
+                                                   suggested, 0, &item);
+  return accepted ? YES : NO;
+}
 
 @end
 
@@ -1473,6 +1562,16 @@ namespace xpl_host
     return neui_detail::clipboard_has_text_macos();
   }
 
+  bool platform_clipboard_write_item(const neui_detail::DataItem& item)
+  {
+    return neui_detail::clipboard_write_item_macos(item);
+  }
+
+  bool platform_clipboard_read_item(neui_detail::DataItem& item)
+  {
+    return neui_detail::clipboard_read_item_macos(item);
+  }
+
   // NSPasteboard has no native change-notification API. Per plans/macos-port.md
   // step 5 option (a), v1 returns 0 - opt-in NEUI_API_CLIPBOARD_CLIENT
   // simply doesn't fire on macOS. If a client genuinely needs it, a 250ms
@@ -1485,6 +1584,37 @@ namespace xpl_host
   }
 
   void platform_unregister_clipboard_listener(uint32_t /*handle*/) {}
+
+  // -------------------------------------------------------------------------
+  // Drag & drop. The content NEUIView for each frame is the
+  // NSDraggingDestination; registerForDraggedTypes lets AppKit start
+  // routing drags to its protocol callbacks. We register a broad set
+  // of types; the framework hit-tests + format-matches against the
+  // drop_target widget's accepted_mimes list before firing events.
+
+  bool platform_dnd_register_window(void* native_handle, void* /*session_ptr*/,
+                                     uint32_t /*frame_widget_id*/)
+  {
+    if (!native_handle) return false;
+    NSWindow* win = (__bridge NSWindow*)native_handle;
+    NSView* cv = [win contentView];
+    if (![cv isKindOfClass:[NEUIView class]]) return false;
+    [cv registerForDraggedTypes:@[
+      NSPasteboardTypeString,
+      NSPasteboardTypeHTML,
+      NSPasteboardTypeFileURL,
+    ]];
+    return true;
+  }
+
+  void platform_dnd_unregister_window(void* native_handle)
+  {
+    if (!native_handle) return;
+    NSWindow* win = (__bridge NSWindow*)native_handle;
+    NSView* cv = [win contentView];
+    if ([cv isKindOfClass:[NEUIView class]])
+      [cv unregisterDraggedTypes];
+  }
 
   // -------------------------------------------------------------------------
   // Mouse cursor.

@@ -1308,10 +1308,9 @@ namespace macos_host
     a_set_session_int, a_get_session_int,
   };
 
-  // NEUI_API_CLIPBOARD: convenience text APIs delegate to the shared
-  // NSPasteboard helpers in hosts/shared/macos/clipboard_macos.h. v1 only
-  // round-trips text/plain; the item-based API stays a stub until a
-  // multi-format use case appears (matches the win32 / xpl shape).
+  // NEUI_API_CLIPBOARD. Convenience text APIs delegate to the text-only
+  // helpers in clipboard_macos.h; the item-based API rides on top of the
+  // multi-format read/write helpers in the same header.
   static int  NEUI_ABI c_set_text(neui_session_t /*sess*/, const char* utf8)
   {
     return neui_detail::clipboard_set_text_macos(utf8, utf8 ? (uint32_t)strlen(utf8) : 0)
@@ -1325,76 +1324,63 @@ namespace macos_host
   {
     return neui_detail::clipboard_has_text_macos();
   }
-  // Item-based clipboard API. v1 round-trips text/plain only, backed by the
-  // session's ClipboardItemStore. Mirror of the win32 host's cb_* family,
-  // using the NSPasteboard helpers in clipboard_macos.h for system I/O.
-  static neui_clipboard_item_t NEUI_ABI c_read(neui_session_t session)
+  static neui_data_item_t NEUI_ABI c_read(neui_session_t session)
   {
     auto* s = get_session(session);
-    if (!s) return neui_clipboard_item_none;
-    if (!neui_detail::clipboard_has_text_macos()) return neui_clipboard_item_none;
-    int n = neui_detail::clipboard_get_text_macos(nullptr, 0);
-    if (n <= 0) return neui_clipboard_item_none;
-    std::vector<char> buf(static_cast<size_t>(n));
-    if (neui_detail::clipboard_get_text_macos(buf.data(), n) <= 0)
-      return neui_clipboard_item_none;
-    uint32_t id = s->_clipboard_items.allocate();
-    auto* item = s->_clipboard_items.get(id);
-    if (!item) return neui_clipboard_item_none;
-    item->set_format(NEUI_CLIPBOARD_MIME_TEXT, buf.data(), static_cast<uint32_t>(n));
+    if (!s) return neui_data_item_none;
+    uint32_t id = s->_data_items.allocate();
+    auto* item = s->_data_items.get(id);
+    if (!item) return neui_data_item_none;
+    if (!neui_detail::clipboard_read_item_macos(*item)) {
+      s->_data_items.release(id);
+      return neui_data_item_none;
+    }
     return { id };
   }
-  static neui_clipboard_item_t NEUI_ABI c_create_item(neui_session_t session)
+  static neui_data_item_t NEUI_ABI c_create_item(neui_session_t session)
   {
     auto* s = get_session(session);
-    if (!s) return neui_clipboard_item_none;
-    return { s->_clipboard_items.allocate() };
+    if (!s) return neui_data_item_none;
+    return { s->_data_items.allocate() };
   }
-  static void NEUI_ABI c_release(neui_session_t session, neui_clipboard_item_t item)
+  static void NEUI_ABI c_release(neui_session_t session, neui_data_item_t item)
   {
     auto* s = get_session(session);
-    if (s) s->_clipboard_items.release(item.id);
+    if (s) s->_data_items.release(item.id);
   }
-  static int NEUI_ABI c_write(neui_session_t session, neui_clipboard_item_t item)
+  static int NEUI_ABI c_write(neui_session_t session, neui_data_item_t item)
   {
     auto* s = get_session(session);
     if (!s) return 0;
-    auto* it = s->_clipboard_items.get(item.id);
-    if (!it || !it->has_format(NEUI_CLIPBOARD_MIME_TEXT)) return 0;
-    int n = it->get_format(NEUI_CLIPBOARD_MIME_TEXT, nullptr, 0);
-    if (n <= 0) return 0;
-    std::vector<char> buf(static_cast<size_t>(n));
-    it->get_format(NEUI_CLIPBOARD_MIME_TEXT, buf.data(), n);
-    uint32_t length = static_cast<uint32_t>(n);
-    if (length > 0 && buf[length - 1] == '\0') length -= 1;  // drop terminator
-    return neui_detail::clipboard_set_text_macos(buf.data(), length) ? 1 : 0;
+    auto* it = s->_data_items.get(item.id);
+    if (!it) return 0;
+    return neui_detail::clipboard_write_item_macos(*it) ? 1 : 0;
   }
-  static int NEUI_ABI c_item_set_format(neui_session_t session, neui_clipboard_item_t item,
+  static int NEUI_ABI c_item_set_format(neui_session_t session, neui_data_item_t item,
                                          const char* mime, const void* data, uint32_t length)
   {
     auto* s = get_session(session);
     if (!s || !mime) return 0;
-    if (strcmp(mime, NEUI_CLIPBOARD_MIME_TEXT) != 0) return 0;  // v1: text only
-    auto* it = s->_clipboard_items.get(item.id);
+    auto* it = s->_data_items.get(item.id);
     if (!it) return 0;
     it->set_format(mime, data, length);
     return 1;
   }
-  static int NEUI_ABI c_item_get_format(neui_session_t session, neui_clipboard_item_t item,
+  static int NEUI_ABI c_item_get_format(neui_session_t session, neui_data_item_t item,
                                          const char* mime, void* buf, int buflen)
   {
     auto* s = get_session(session);
     if (!s || !mime) return -1;
-    auto* it = s->_clipboard_items.get(item.id);
+    auto* it = s->_data_items.get(item.id);
     if (!it) return -1;
     return it->get_format(mime, buf, buflen);
   }
-  static bool NEUI_ABI c_item_has_format(neui_session_t session, neui_clipboard_item_t item,
+  static bool NEUI_ABI c_item_has_format(neui_session_t session, neui_data_item_t item,
                                           const char* mime)
   {
     auto* s = get_session(session);
     if (!s || !mime) return false;
-    auto* it = s->_clipboard_items.get(item.id);
+    auto* it = s->_data_items.get(item.id);
     return it && it->has_format(mime);
   }
 
@@ -1404,6 +1390,67 @@ namespace macos_host
     c_read, c_create_item, c_release,
     c_write,
     c_item_set_format, c_item_get_format, c_item_has_format,
+  };
+
+  // -------------------------------------------------------------------------
+  // DnD API (NEUI_API_DND). Drop-target only in v1.
+
+  static uint32_t dnd_widget_to_index(neui_widget_t w) { return w.id & 0xffff; }
+
+  static void NEUI_ABI d_set_drop_target(neui_session_t session,
+                                          neui_widget_t widget, bool enable)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    uint32_t idx = dnd_widget_to_index(widget);
+    if (!s->_widgets.exists(idx)) return;
+    s->_widgets[idx].drop_target = enable;
+  }
+
+  static bool NEUI_ABI d_get_drop_target(neui_session_t session,
+                                          neui_widget_t widget)
+  {
+    auto* s = get_session(session);
+    if (!s) return false;
+    uint32_t idx = dnd_widget_to_index(widget);
+    if (!s->_widgets.exists(idx)) return false;
+    return s->_widgets[idx].drop_target;
+  }
+
+  static void NEUI_ABI d_set_accepted_formats(neui_session_t session,
+                                               neui_widget_t widget,
+                                               const char* const* mimes,
+                                               int count)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    uint32_t idx = dnd_widget_to_index(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& w = s->_widgets[idx];
+    w.accepted_mimes.clear();
+    if (mimes && count > 0) {
+      w.accepted_mimes.reserve(static_cast<size_t>(count));
+      for (int i = 0; i < count; ++i) {
+        if (mimes[i]) w.accepted_mimes.emplace_back(mimes[i]);
+      }
+    }
+  }
+
+  static void NEUI_ABI d_accept(neui_session_t session,
+                                 neui_dnd_action_t action)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    if (!s->_in_dnd_dispatch) return;
+    s->_last_accepted_action = static_cast<uint32_t>(action);
+  }
+
+  neui_dnd_api_t dnd_api = {
+    NEUI_VERSION,
+    d_set_drop_target,
+    d_get_drop_target,
+    d_set_accepted_formats,
+    d_accept,
   };
 
   // Route a built-in command (NEUI_CMD_*) to the key window's first

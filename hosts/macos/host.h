@@ -48,6 +48,11 @@ namespace macos_host
     // attaches to CUSTOMDRAW).
     bool hovered     = false;
     bool pressed     = false;
+    // True = this widget accepts drag&drop drops. Default false. Set via
+    // NEUI_API_DND set_drop_target. Independent of `enabled`.
+    bool drop_target = false;
+    // Optional MIME allow-list for drop hit-testing. Empty = "accept any".
+    std::vector<std::string> accepted_mimes;
     void*    userdata    = nullptr;
     uint32_t owner_index = 0;
 
@@ -163,10 +168,35 @@ namespace macos_host
     // Released on session destroy via clear().
     MacOSAssetManager     _asset_manager;
 
-    // Session-scoped clipboard item store backing the item-based half of
-    // NEUI_API_CLIPBOARD (read / create_item / write / item_*_format).
-    // v1 round-trips text/plain only. Mirror of the win32 host.
-    neui_detail::ClipboardItemStore _clipboard_items;
+    // Session-scoped data-item store. Backs the item-based half of
+    // NEUI_API_CLIPBOARD (read / create_item / write / item_*_format) and
+    // (later) transient DnD drop payloads.
+    neui_detail::DataItemStore _data_items;
+
+    // DnD dispatch state. See hosts/crossplatform/host.h. The
+    // NEUINativeContentView's NSDraggingDestination protocol methods
+    // call dispatch_dnd_* on this Session as the user drags.
+    uint32_t _current_drop_target  = UINT32_MAX;
+    uint32_t _last_accepted_action = 0;
+    bool     _in_dnd_dispatch      = false;
+
+    uint32_t dispatch_dnd_enter(uint32_t frame_widget_idx,
+                                 int frame_local_x, int frame_local_y,
+                                 const char* const* formats, uint32_t formats_count,
+                                 uint32_t suggested_action,
+                                 uint32_t buttonmap);
+    uint32_t dispatch_dnd_move (uint32_t frame_widget_idx,
+                                 int frame_local_x, int frame_local_y,
+                                 const char* const* formats, uint32_t formats_count,
+                                 uint32_t suggested_action,
+                                 uint32_t buttonmap);
+    void     dispatch_dnd_leave();
+    uint32_t dispatch_dnd_drop (uint32_t frame_widget_idx,
+                                 int frame_local_x, int frame_local_y,
+                                 const char* const* formats, uint32_t formats_count,
+                                 uint32_t suggested_action,
+                                 uint32_t buttonmap,
+                                 neui_detail::DataItem* drop_item);
 
     // Optional grid-cell-edit validation callback (NEUI_API_GRID_CLIENT).
     // Fetched once at session create time; called when the user commits a

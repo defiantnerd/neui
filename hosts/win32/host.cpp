@@ -31,6 +31,7 @@ namespace win32_host
   extern neui_compound_api_t  compound_api;
   extern neui_behavior_api_t  behavior_api;
   extern neui_grid_api_t      grid_api;
+  extern neui_dnd_api_t       dnd_api;
 
   neui_session_t create_session(neui_client_t* client, void* token)
   {
@@ -72,6 +73,7 @@ namespace win32_host
     if (!strcmp(iface, NEUI_API_COMPOUND))  return &win32_host::compound_api;
     if (!strcmp(iface, NEUI_API_BEHAVIOR))  return &win32_host::behavior_api;
     if (!strcmp(iface, NEUI_API_GRID))      return &win32_host::grid_api;
+    if (!strcmp(iface, NEUI_API_DND))       return &win32_host::dnd_api;
     return nullptr;
   }
 
@@ -325,6 +327,170 @@ namespace win32_host
       return _client_widget_api->onevent(_token, event);
     }
     return false;
+  }
+
+  // -------------------------------------------------------------------------
+  // DnD dispatch. v1 reports drops at the frame level: IDropTarget is
+  // registered on the frame HWND and the framework dispatches to that
+  // single widget if it has drop_target=true and accepted_mimes match.
+  // Child widgets opt-ing in are not yet OS-level drop targets, so they
+  // never receive a callback through this path.
+
+  static bool dnd_formats_match_win32(const std::vector<std::string>& accepted,
+                                       const char* const* formats,
+                                       uint32_t formats_count)
+  {
+    if (accepted.empty()) return true;
+    if (!formats || formats_count == 0) return false;
+    for (auto& want : accepted) {
+      for (uint32_t i = 0; i < formats_count; ++i) {
+        if (formats[i] && want == formats[i]) return true;
+      }
+    }
+    return false;
+  }
+
+  // Helper bundled with the Session-member dispatch_dnd_* below. Sends a
+  // single DnD event to the client via the cached widget_client.
+  void Session::send_dnd_event_internal(uint32_t widget_idx,
+                                         uint32_t type_u32,
+                                         int frame_x, int frame_y,
+                                         const char* const* formats,
+                                         uint32_t formats_count,
+                                         uint32_t suggested, uint32_t buttonmap,
+                                         neui_data_item_t data_item)
+  {
+    auto type = static_cast<neui_event_type_t>(type_u32);
+    if (!_client_widget_api || !_client_widget_api->onevent) return;
+    if (!_widgets.exists(widget_idx)) return;
+    auto& wd = _widgets[widget_idx];
+    neui_event_t ev = {};
+    ev.type = type;
+    ev.data.dnd.widget        = { wd.widget_id };
+    // Frame widgets on win32 report client-relative coords; for non-frame
+    // widgets a future revision will subtract their HWND offset.
+    ev.data.dnd.x             = frame_x;
+    ev.data.dnd.y             = frame_y;
+    ev.data.dnd.buttonmap     = buttonmap;
+    ev.data.dnd.formats       = formats;
+    ev.data.dnd.formats_count = formats_count;
+    ev.data.dnd.data          = data_item;
+    ev.data.dnd.suggested_action = suggested;
+
+    _in_dnd_dispatch = true;
+    _client_widget_api->onevent(_token, &ev);
+    _in_dnd_dispatch = false;
+  }
+
+  uint32_t Session::dispatch_dnd_enter(uint32_t frame_widget_idx,
+                                        int x, int y,
+                                        const char* const* formats,
+                                        uint32_t count,
+                                        uint32_t suggested,
+                                        uint32_t buttonmap)
+  {
+    uint32_t idx = 0;
+    if (frame_widget_idx != 0 && _widgets.exists(frame_widget_idx)) {
+      auto& wd = _widgets[frame_widget_idx];
+      if (wd.drop_target &&
+          dnd_formats_match_win32(wd.accepted_mimes, formats, count))
+        idx = frame_widget_idx;
+    }
+    _current_drop_target = idx;
+    _last_accepted_action = 0;
+    if (idx == 0) return 0;
+    send_dnd_event_internal(idx, NEUI_EVENT_DND_ENTER, x, y,
+                             formats, count, suggested, buttonmap,
+                             neui_data_item_none);
+    return _last_accepted_action;
+  }
+
+  uint32_t Session::dispatch_dnd_move(uint32_t frame_widget_idx,
+                                       int x, int y,
+                                       const char* const* formats,
+                                       uint32_t count,
+                                       uint32_t suggested,
+                                       uint32_t buttonmap)
+  {
+    uint32_t idx = 0;
+    if (frame_widget_idx != 0 && _widgets.exists(frame_widget_idx)) {
+      auto& wd = _widgets[frame_widget_idx];
+      if (wd.drop_target &&
+          dnd_formats_match_win32(wd.accepted_mimes, formats, count))
+        idx = frame_widget_idx;
+    }
+    if (idx != _current_drop_target) {
+      if (_current_drop_target != 0 && _current_drop_target != UINT32_MAX &&
+          _widgets.exists(_current_drop_target)) {
+        send_dnd_event_internal(_current_drop_target, NEUI_EVENT_DND_LEAVE,
+                                 x, y, nullptr, 0, 0, 0, neui_data_item_none);
+      }
+      _current_drop_target = idx;
+      _last_accepted_action = 0;
+      if (idx == 0) return 0;
+      send_dnd_event_internal(idx, NEUI_EVENT_DND_ENTER, x, y,
+                               formats, count, suggested, buttonmap,
+                               neui_data_item_none);
+      return _last_accepted_action;
+    }
+    if (idx == 0) return 0;
+    send_dnd_event_internal(idx, NEUI_EVENT_DND_MOVE, x, y,
+                             formats, count, suggested, buttonmap,
+                             neui_data_item_none);
+    return _last_accepted_action;
+  }
+
+  void Session::dispatch_dnd_leave()
+  {
+    if (_current_drop_target != 0 && _current_drop_target != UINT32_MAX &&
+        _widgets.exists(_current_drop_target)) {
+      send_dnd_event_internal(_current_drop_target, NEUI_EVENT_DND_LEAVE,
+                               0, 0, nullptr, 0, 0, 0, neui_data_item_none);
+    }
+    _current_drop_target = UINT32_MAX;
+    _last_accepted_action = 0;
+  }
+
+  uint32_t Session::dispatch_dnd_drop(uint32_t /*frame_widget_idx*/,
+                                       int x, int y,
+                                       const char* const* formats,
+                                       uint32_t count,
+                                       uint32_t suggested,
+                                       uint32_t buttonmap,
+                                       neui_detail::DataItem* drop_item)
+  {
+    if (_current_drop_target == 0 || _current_drop_target == UINT32_MAX ||
+        !_widgets.exists(_current_drop_target)) {
+      _current_drop_target = UINT32_MAX;
+      _last_accepted_action = 0;
+      return 0;
+    }
+
+    uint32_t item_id = 0;
+    if (drop_item) {
+      item_id = _data_items.allocate();
+      auto* slot = _data_items.get(item_id);
+      if (slot) {
+        drop_item->for_each_format([&](const std::string& mime,
+                                        const std::vector<uint8_t>& bytes) {
+          slot->set_format(mime, bytes.data(),
+                           static_cast<uint32_t>(bytes.size()));
+        });
+      } else {
+        item_id = 0;
+      }
+    }
+
+    send_dnd_event_internal(_current_drop_target, NEUI_EVENT_DND_DROP,
+                             x, y, formats, count, suggested, buttonmap,
+                             neui_data_item_t{ item_id });
+
+    if (item_id) _data_items.release(item_id);
+
+    uint32_t action = _last_accepted_action;
+    _current_drop_target = UINT32_MAX;
+    _last_accepted_action = 0;
+    return action;
   }
 
   void Session::endsession()

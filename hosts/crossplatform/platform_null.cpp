@@ -6,6 +6,9 @@
 #include "platform.h"
 #include <neui/neui.h>
 
+// Full DataItem definition for the item-based clipboard stubs below.
+#include "../shared/clipboard_item.h"
+
 // Include the null backend.
 #include "../../backends/null/null_backend.h"
 
@@ -83,9 +86,16 @@ namespace xpl_host
   bool platform_clipboard_set_text(const char* /*utf8*/, uint32_t /*length*/) { return false; }
   int  platform_clipboard_get_text(char* /*buf*/, int /*buflen*/)             { return 0;     }
   bool platform_clipboard_has_text()                                          { return false; }
+  bool platform_clipboard_write_item(const neui_detail::DataItem& /*item*/)   { return false; }
+  bool platform_clipboard_read_item(neui_detail::DataItem& /*item*/)          { return false; }
   uint32_t platform_register_clipboard_listener(ClipboardChangeCallback /*cb*/,
                                                  void* /*token*/)             { return 0;     }
   void     platform_unregister_clipboard_listener(uint32_t /*handle*/)        {}
+
+  // Drag & drop - no-op on platforms without window-system DnD support.
+  bool platform_dnd_register_window(void* /*native_handle*/, void* /*session_ptr*/,
+                                     uint32_t /*frame_widget_id*/)            { return false; }
+  void platform_dnd_unregister_window(void* /*native_handle*/)                {}
 
   void     platform_set_cursor(int /*kind*/)                                  {}
 

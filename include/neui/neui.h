@@ -19,6 +19,7 @@
 #include "d/renderer.h"
 #include "d/attrs.h"
 #include "d/clipboard.h"
+#include "d/dnd.h"
 #include "d/commands.h"
 #include "d/menu.h"
 #include "d/theme.h"

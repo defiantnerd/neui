@@ -109,6 +109,10 @@ namespace xpl_host
       wd->render_ctx = nullptr;
     }
     if (wd->native_handle) {
+      // Revoke the IDropTarget / NSDraggingDestination before destroying
+      // the OS handle. No-op for non-frame widgets and on platforms
+      // without DnD.
+      platform_dnd_unregister_window(wd->native_handle);
       platform_destroy_window(*wd);
       wd->native_handle = nullptr;
     }
@@ -302,6 +306,13 @@ namespace xpl_host
         }
         show_children_recursive(s, idx);
         platform_show_window(wd.native_handle);
+
+        // Register the frame as a drag&drop drop target so the OS knows
+        // to route drags into our IDropTarget. The widget's drop_target
+        // flag still gates whether any event reaches the client; this
+        // step only opens the OS-side path. No-op on platforms without
+        // DnD support.
+        platform_dnd_register_window(wd.native_handle, s, wd.widget_id);
 
         // Block input on the owner while the dialog is up - unless the
         // client opted into modeless via NEUI_ATTR_MODAL = 0.
@@ -1491,94 +1502,77 @@ namespace xpl_host
     return platform_clipboard_has_text();
   }
 
-  static neui_clipboard_item_t NEUI_ABI cb_read(neui_session_t session)
+  static neui_data_item_t NEUI_ABI cb_read(neui_session_t session)
   {
     auto* s = get_session(session);
-    if (!s) return neui_clipboard_item_none;
-    if (!platform_clipboard_has_text())
-      return neui_clipboard_item_none;
-    int n = platform_clipboard_get_text(nullptr, 0);
-    if (n <= 0) return neui_clipboard_item_none;
-    std::vector<char> buf(static_cast<size_t>(n));
-    if (platform_clipboard_get_text(buf.data(), n) <= 0)
-      return neui_clipboard_item_none;
-    uint32_t id = s->_clipboard_items.allocate();
-    auto* item = s->_clipboard_items.get(id);
-    // Store including the null terminator so item_get_format can return the
-    // same byte count as the system get_text shortcut.
-    item->set_format(NEUI_CLIPBOARD_MIME_TEXT, buf.data(),
-                     static_cast<uint32_t>(n));
+    if (!s) return neui_data_item_none;
+    uint32_t id = s->_data_items.allocate();
+    auto* item = s->_data_items.get(id);
+    if (!item) return neui_data_item_none;
+    if (!platform_clipboard_read_item(*item)) {
+      s->_data_items.release(id);
+      return neui_data_item_none;
+    }
     return { id };
   }
 
-  static neui_clipboard_item_t NEUI_ABI cb_create_item(neui_session_t session)
+  static neui_data_item_t NEUI_ABI cb_create_item(neui_session_t session)
   {
     auto* s = get_session(session);
-    if (!s) return neui_clipboard_item_none;
-    return { s->_clipboard_items.allocate() };
+    if (!s) return neui_data_item_none;
+    return { s->_data_items.allocate() };
   }
 
   static void NEUI_ABI cb_release(neui_session_t session,
-                                   neui_clipboard_item_t item)
+                                   neui_data_item_t item)
   {
     auto* s = get_session(session);
     if (!s) return;
-    s->_clipboard_items.release(item.id);
+    s->_data_items.release(item.id);
   }
 
   static int NEUI_ABI cb_write(neui_session_t session,
-                                neui_clipboard_item_t item)
+                                neui_data_item_t item)
   {
     auto* s = get_session(session);
     if (!s) return 0;
-    auto* it = s->_clipboard_items.get(item.id);
+    auto* it = s->_data_items.get(item.id);
     if (!it) return 0;
-    if (!it->has_format(NEUI_CLIPBOARD_MIME_TEXT)) return 0;
-    int n = it->get_format(NEUI_CLIPBOARD_MIME_TEXT, nullptr, 0);
-    if (n <= 0) return 0;
-    std::vector<char> buf(static_cast<size_t>(n));
-    it->get_format(NEUI_CLIPBOARD_MIME_TEXT, buf.data(), n);
-    // Stored bytes may or may not include a trailing null; pass the count
-    // without the trailing null if present.
-    uint32_t length = static_cast<uint32_t>(n);
-    if (length > 0 && buf[length - 1] == '\0') length -= 1;
-    return platform_clipboard_set_text(buf.data(), length) ? 1 : 0;
+    return platform_clipboard_write_item(*it) ? 1 : 0;
   }
 
   static int NEUI_ABI cb_item_set_format(neui_session_t session,
-                                          neui_clipboard_item_t item,
+                                          neui_data_item_t item,
                                           const char* mime,
                                           const void* data, uint32_t length)
   {
     auto* s = get_session(session);
     if (!s || !mime) return 0;
-    // v1: only NEUI_CLIPBOARD_MIME_TEXT is honoured.
-    if (strcmp(mime, NEUI_CLIPBOARD_MIME_TEXT) != 0) return 0;
-    auto* it = s->_clipboard_items.get(item.id);
+    auto* it = s->_data_items.get(item.id);
     if (!it) return 0;
     it->set_format(mime, data, length);
     return 1;
   }
 
   static int NEUI_ABI cb_item_get_format(neui_session_t session,
-                                          neui_clipboard_item_t item,
+                                          neui_data_item_t item,
                                           const char* mime,
                                           void* buf, int buflen)
   {
     auto* s = get_session(session);
     if (!s || !mime) return -1;
-    auto* it = s->_clipboard_items.get(item.id);
+    auto* it = s->_data_items.get(item.id);
     if (!it) return -1;
     return it->get_format(mime, buf, buflen);
   }
 
   static bool NEUI_ABI cb_item_has_format(neui_session_t session,
-                                           neui_clipboard_item_t item,
+                                           neui_data_item_t item,
                                            const char* mime)
   {
     auto* s = get_session(session);
     if (!s || !mime) return false;
-    auto* it = s->_clipboard_items.get(item.id);
+    auto* it = s->_data_items.get(item.id);
     return it && it->has_format(mime);
   }
 
@@ -2738,6 +2732,65 @@ namespace xpl_host {
     gr_begin_cell_edit,
     gr_end_cell_edit,
     gr_is_editing_cell,
+  };
+
+  // -------------------------------------------------------------------------
+  // DnD API (NEUI_API_DND). Drop-target only in v1.
+
+  static void NEUI_ABI dnd_set_drop_target(neui_session_t session,
+                                            neui_widget_t widget, bool enable)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    s->_widgets[idx].drop_target = enable;
+  }
+
+  static bool NEUI_ABI dnd_get_drop_target(neui_session_t session,
+                                            neui_widget_t widget)
+  {
+    auto* s = get_session(session);
+    if (!s) return false;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return false;
+    return s->_widgets[idx].drop_target;
+  }
+
+  static void NEUI_ABI dnd_set_accepted_formats(neui_session_t session,
+                                                 neui_widget_t widget,
+                                                 const char* const* mimes,
+                                                 int count)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& w = s->_widgets[idx];
+    w.accepted_mimes.clear();
+    if (mimes && count > 0) {
+      w.accepted_mimes.reserve(static_cast<size_t>(count));
+      for (int i = 0; i < count; ++i) {
+        if (mimes[i]) w.accepted_mimes.emplace_back(mimes[i]);
+      }
+    }
+  }
+
+  static void NEUI_ABI dnd_accept(neui_session_t session,
+                                   neui_dnd_action_t action)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    if (!s->_in_dnd_dispatch) return;  // only valid inside a DnD callback
+    s->_last_accepted_action = static_cast<uint32_t>(action);
+  }
+
+  neui_dnd_api_t dnd_api = {
+    NEUI_VERSION,
+    dnd_set_drop_target,
+    dnd_get_drop_target,
+    dnd_set_accepted_formats,
+    dnd_accept,
   };
 
 } // namespace xpl_host

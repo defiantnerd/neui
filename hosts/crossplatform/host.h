@@ -56,6 +56,14 @@ namespace xpl_host
     // (capture-style: stays true while cursor moves out, clears on UP).
     bool hovered     = false;
     bool pressed     = false;
+    // True = this widget accepts drag&drop drops. Default false. Set via
+    // NEUI_API_DND set_drop_target. Independent of `enabled` - a disabled
+    // widget is skipped during drag hit-testing the same way it is during
+    // mouse hit-testing.
+    bool drop_target = false;
+    // Optional MIME allow-list for drop hit-testing. Empty = "accept any".
+    // Strings owned per-widget (copied at set_accepted_formats time).
+    std::vector<std::string> accepted_mimes;
     void*    userdata  = nullptr;
     uint32_t widget_id = 0;
     std::string text;
@@ -718,10 +726,46 @@ namespace xpl_host
     // can't reach a consumer right now.
     bool can_focused_perform_command(uint32_t cmd);
 
-    // Per-session clipboard item store and (optional) listener registration.
-    neui_detail::ClipboardItemStore _clipboard_items;
-    neui_clipboard_client_t*        _clipboard_client          = nullptr;
-    uint32_t                        _clipboard_listener_handle = 0;
+    // Per-session data-item store (clipboard items + transient DnD drop
+    // payloads share storage) and optional clipboard listener registration.
+    neui_detail::DataItemStore _data_items;
+    neui_clipboard_client_t*   _clipboard_client          = nullptr;
+    uint32_t                   _clipboard_listener_handle = 0;
+
+    // DnD dispatch state. _current_drop_target is the widget currently
+    // receiving DND_ENTER/MOVE events (UINT32_MAX = none). _last_accepted_action
+    // is the value the client last passed to dnd_api->accept(); the platform
+    // layer reads this back when reporting the cursor effect to the OS.
+    // _in_dnd_dispatch is true only while we're inside a DnD dispatch
+    // callback so dnd_api->accept can recognise valid calls.
+    uint32_t _current_drop_target  = UINT32_MAX;
+    uint32_t _last_accepted_action = 0;  // neui_dnd_action_t
+    bool     _in_dnd_dispatch      = false;
+
+    // Drop hit-test + event dispatch. `frame_widget_idx` identifies the
+    // top-level frame whose IDropTarget / NSDraggingDestination fired the
+    // OS callback; the dispatcher walks descendants (and the frame itself)
+    // for the deepest drop_target whose accepted_mimes intersects
+    // `formats`, and fires the corresponding NEUI_EVENT_DND_*.
+    // frame_local_x / _y are logical pixels relative to the frame's
+    // client-area top-left. Returns the cached accepted action (0 = NONE).
+    uint32_t dispatch_dnd_enter(uint32_t frame_widget_idx,
+                                 int frame_local_x, int frame_local_y,
+                                 const char* const* formats, uint32_t formats_count,
+                                 uint32_t suggested_action,
+                                 uint32_t buttonmap);
+    uint32_t dispatch_dnd_move (uint32_t frame_widget_idx,
+                                 int frame_local_x, int frame_local_y,
+                                 const char* const* formats, uint32_t formats_count,
+                                 uint32_t suggested_action,
+                                 uint32_t buttonmap);
+    void     dispatch_dnd_leave();
+    uint32_t dispatch_dnd_drop (uint32_t frame_widget_idx,
+                                 int frame_local_x, int frame_local_y,
+                                 const char* const* formats, uint32_t formats_count,
+                                 uint32_t suggested_action,
+                                 uint32_t buttonmap,
+                                 neui_detail::DataItem* drop_item);
 
     // Optional menu-item validation callback. Polled at WM_INITMENUPOPUP.
     neui_menu_client_t*             _menu_client               = nullptr;

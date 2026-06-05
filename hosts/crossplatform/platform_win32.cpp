@@ -20,6 +20,7 @@
 #include "../shared/win32/dark_menubar_win32.h"
 #include "../shared/win32/clipboard_win32.h"
 #include "../shared/win32/clipboard_listener_win32.h"
+#include "../shared/win32/dnd_target_win32.h"
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
 
@@ -1551,6 +1552,16 @@ namespace xpl_host
     return neui_detail::clipboard_has_text_win32();
   }
 
+  bool platform_clipboard_write_item(const neui_detail::DataItem& item)
+  {
+    return neui_detail::clipboard_write_item_win32(item);
+  }
+
+  bool platform_clipboard_read_item(neui_detail::DataItem& item)
+  {
+    return neui_detail::clipboard_read_item_win32(item);
+  }
+
   uint32_t platform_register_clipboard_listener(ClipboardChangeCallback cb,
                                                  void* token)
   {
@@ -1560,6 +1571,95 @@ namespace xpl_host
   void platform_unregister_clipboard_listener(uint32_t handle)
   {
     neui_detail::unregister_clipboard_listener(handle);
+  }
+
+  // -------------------------------------------------------------------------
+  // Drag & drop. The seam callbacks below thunk into the xpl Session;
+  // each Session::dispatch_dnd_* converts to a NEUI_EVENT_DND_* and walks
+  // the widget tree for the deepest drop_target match.
+
+  static uint32_t xpl_dnd_on_enter(void* session_ptr, uint32_t frame_widget_id,
+                                    int x, int y,
+                                    const char* const* formats,
+                                    uint32_t formats_count,
+                                    uint32_t suggested,
+                                    uint32_t buttonmap)
+  {
+    auto* s = static_cast<Session*>(session_ptr);
+    if (!s) return 0;
+    return s->dispatch_dnd_enter(frame_widget_id & 0xFFFFu,
+                                  x, y, formats, formats_count,
+                                  suggested, buttonmap);
+  }
+
+  static uint32_t xpl_dnd_on_move(void* session_ptr, uint32_t frame_widget_id,
+                                   int x, int y,
+                                   const char* const* formats,
+                                   uint32_t formats_count,
+                                   uint32_t suggested,
+                                   uint32_t buttonmap)
+  {
+    auto* s = static_cast<Session*>(session_ptr);
+    if (!s) return 0;
+    return s->dispatch_dnd_move(frame_widget_id & 0xFFFFu,
+                                 x, y, formats, formats_count,
+                                 suggested, buttonmap);
+  }
+
+  static void xpl_dnd_on_leave(void* session_ptr)
+  {
+    auto* s = static_cast<Session*>(session_ptr);
+    if (!s) return;
+    s->dispatch_dnd_leave();
+  }
+
+  static uint32_t xpl_dnd_on_drop(void* session_ptr, uint32_t frame_widget_id,
+                                   int x, int y,
+                                   const char* const* formats,
+                                   uint32_t formats_count,
+                                   uint32_t suggested,
+                                   uint32_t buttonmap,
+                                   neui_detail::DataItem* drop_item)
+  {
+    auto* s = static_cast<Session*>(session_ptr);
+    if (!s) return 0;
+    return s->dispatch_dnd_drop(frame_widget_id & 0xFFFFu,
+                                 x, y, formats, formats_count,
+                                 suggested, buttonmap, drop_item);
+  }
+
+  bool platform_dnd_register_window(void* native_handle, void* session_ptr,
+                                     uint32_t frame_widget_id)
+  {
+    if (!native_handle) return false;
+    HWND hwnd = static_cast<HWND>(native_handle);
+
+    neui_detail::dnd_ensure_ole_initialized();
+
+    neui_detail::DndDispatchSeam seam = {};
+    seam.session_ptr     = session_ptr;
+    seam.frame_widget_id = frame_widget_id;
+    seam.on_enter        = &xpl_dnd_on_enter;
+    seam.on_move         = &xpl_dnd_on_move;
+    seam.on_leave        = &xpl_dnd_on_leave;
+    seam.on_drop         = &xpl_dnd_on_drop;
+
+    auto* target = new neui_detail::DropTargetImpl(hwnd, seam);
+    HRESULT hr = RegisterDragDrop(hwnd, target);
+    if (FAILED(hr)) {
+      target->Release();
+      return false;
+    }
+    // RegisterDragDrop AddRefs; release our local ref so the target is
+    // owned solely by the OS until RevokeDragDrop.
+    target->Release();
+    return true;
+  }
+
+  void platform_dnd_unregister_window(void* native_handle)
+  {
+    if (!native_handle) return;
+    RevokeDragDrop(static_cast<HWND>(native_handle));
   }
 
   // -------------------------------------------------------------------------

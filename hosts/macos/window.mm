@@ -13,6 +13,7 @@
 #include "../shared/macos/image_loader_macos.h"
 #include "../shared/macos/keys_macos.h"
 #include "../shared/macos/theme_provider_macos.h"
+#include "../shared/macos/clipboard_macos.h"
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_compound.h"
 #include "../shared/widget_paint_section.h"
@@ -908,7 +909,7 @@ NSWindowStyleMask styles_for_appwindow()
 // NEUINativeContentView - flipped container so child widgets' frames use
 // top-left logical coordinates (matches wd.x / wd.y / wd.width / wd.height).
 
-@interface NEUINativeContentView : NSView
+@interface NEUINativeContentView : NSView<NSDraggingDestination>
 @end
 
 @implementation NEUINativeContentView
@@ -941,6 +942,95 @@ NSWindowStyleMask styles_for_appwindow()
   }
   return [super performKeyEquivalent:event];
 }
+
+// ---------------------------------------------------------------------------
+// NSDraggingDestination - drag&drop drop-target routing for the native
+// macOS host. The window's delegate carries the (Session, widget_index)
+// the framework needs to dispatch DnD events.
+
+static uint32_t neui_native_dnd_suggested_from_op(NSDragOperation op)
+{
+  if (op & NSDragOperationCopy) return 1;
+  if (op & NSDragOperationMove) return 2;
+  if (op & NSDragOperationLink) return 4;
+  return 0;
+}
+
+static NSDragOperation neui_native_dnd_op_from_action(uint32_t action)
+{
+  NSDragOperation op = NSDragOperationNone;
+  if (action & 1) op |= NSDragOperationCopy;
+  if (action & 2) op |= NSDragOperationMove;
+  if (action & 4) op |= NSDragOperationLink;
+  return op;
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender
+{
+  NEUINativeWindowDelegate* d = (NEUINativeWindowDelegate*)self.window.delegate;
+  if (!d || !d->session) return NSDragOperationNone;
+  NSPasteboard* pb = [sender draggingPasteboard];
+  auto mimes = neui_detail::pb_collect_mimes_macos(pb);
+  std::vector<const char*> ptrs; ptrs.reserve(mimes.size());
+  for (auto& s : mimes) ptrs.push_back(s.c_str());
+  NSPoint p = [self convertPoint:[sender draggingLocation] fromView:nil];
+  uint32_t suggested = neui_native_dnd_suggested_from_op(
+    [sender draggingSourceOperationMask]);
+  uint32_t accepted = d->session->dispatch_dnd_enter(d->widget_index,
+                                                       (int)p.x, (int)p.y,
+                                                       ptrs.data(),
+                                                       (uint32_t)ptrs.size(),
+                                                       suggested, 0);
+  return neui_native_dnd_op_from_action(accepted);
+}
+
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender
+{
+  NEUINativeWindowDelegate* d = (NEUINativeWindowDelegate*)self.window.delegate;
+  if (!d || !d->session) return NSDragOperationNone;
+  NSPasteboard* pb = [sender draggingPasteboard];
+  auto mimes = neui_detail::pb_collect_mimes_macos(pb);
+  std::vector<const char*> ptrs; ptrs.reserve(mimes.size());
+  for (auto& s : mimes) ptrs.push_back(s.c_str());
+  NSPoint p = [self convertPoint:[sender draggingLocation] fromView:nil];
+  uint32_t suggested = neui_native_dnd_suggested_from_op(
+    [sender draggingSourceOperationMask]);
+  uint32_t accepted = d->session->dispatch_dnd_move(d->widget_index,
+                                                      (int)p.x, (int)p.y,
+                                                      ptrs.data(),
+                                                      (uint32_t)ptrs.size(),
+                                                      suggested, 0);
+  return neui_native_dnd_op_from_action(accepted);
+}
+
+- (void)draggingExited:(id<NSDraggingInfo>)sender
+{
+  (void)sender;
+  NEUINativeWindowDelegate* d = (NEUINativeWindowDelegate*)self.window.delegate;
+  if (d && d->session) d->session->dispatch_dnd_leave();
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender
+{
+  NEUINativeWindowDelegate* d = (NEUINativeWindowDelegate*)self.window.delegate;
+  if (!d || !d->session) return NO;
+  NSPasteboard* pb = [sender draggingPasteboard];
+  neui_detail::DataItem item;
+  neui_detail::pb_read_item_macos(pb, item);
+  auto mimes = neui_detail::pb_collect_mimes_macos(pb);
+  std::vector<const char*> ptrs; ptrs.reserve(mimes.size());
+  for (auto& s : mimes) ptrs.push_back(s.c_str());
+  NSPoint p = [self convertPoint:[sender draggingLocation] fromView:nil];
+  uint32_t suggested = neui_native_dnd_suggested_from_op(
+    [sender draggingSourceOperationMask]);
+  uint32_t accepted = d->session->dispatch_dnd_drop(d->widget_index,
+                                                      (int)p.x, (int)p.y,
+                                                      ptrs.data(),
+                                                      (uint32_t)ptrs.size(),
+                                                      suggested, 0, &item);
+  return accepted ? YES : NO;
+}
+
 @end
 
 // ---------------------------------------------------------------------------
@@ -2643,6 +2733,16 @@ namespace macos_host
     NEUINativeContentView* cv =
       [[NEUINativeContentView alloc] initWithFrame:NSMakeRect(0, 0, w.width, w.height)];
     [window setContentView:cv];
+
+    // Register the content view as a NSDraggingDestination so AppKit
+    // routes external drags into our NSDraggingDestination protocol
+    // methods on NEUINativeContentView. The framework gates whether
+    // any client event fires via the widget's drop_target flag.
+    [cv registerForDraggedTypes:@[
+      NSPasteboardTypeString,
+      NSPasteboardTypeHTML,
+      NSPasteboardTypeFileURL,
+    ]];
 
     // Tab / Shift-Tab focus traversal: the key-view loop is built manually in
     // widget-creation order (see rebuild_key_view_loop_macos, called after the

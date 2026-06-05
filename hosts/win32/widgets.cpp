@@ -11,6 +11,7 @@
 #include "window.h"  // provides get_hinstance(), ChildSubclassProc
 #include "../../backends/d2d/d2d_backend.h"
 #include "../shared/win32/clipboard_win32.h"
+#include "../shared/win32/dnd_target_win32.h"
 #include "../shared/win32/icon_win32.h"
 #include "../shared/win32/image_loader_win32.h"
 #include "../shared/win32/accel_table_win32.h"
@@ -41,6 +42,8 @@ namespace win32_host
   }
 
   // Forward declarations used by helpers higher up in this file.
+  void register_frame_as_drop_target_w32(HWND hwnd, Session* s,
+                                           uint32_t widget_id);
   static int NEUI_ABI popup_menu(neui_session_t session, neui_widget_t anchor,
                                   int x, int y, const char* const* items);
   // Pack (session_id, slot) into a neui_asset_t handle. Defined later in
@@ -1648,6 +1651,9 @@ namespace win32_host
       w.image_asset_owned = false;
     }
     if (w.hwnd) {
+      // Revoke any IDropTarget that widget_show registered. Safe to call
+      // on non-frame HWNDs (RevokeDragDrop returns DRAGDROP_E_NOTREGISTERED).
+      if (w.isroot) RevokeDragDrop(w.hwnd);
       DestroyWindow(w.hwnd);
       w.hwnd = nullptr;
     }
@@ -1760,6 +1766,11 @@ namespace win32_host
         }
         ShowWindow(w.hwnd, SW_SHOWNORMAL);
         UpdateWindow(w.hwnd);
+
+        // Register the frame as a drop target so the OS routes external
+        // drags to our IDropTarget. The widget's drop_target flag still
+        // gates whether the client actually sees events.
+        register_frame_as_drop_target_w32(w.hwnd, this, w.widget_id);
 
         // Dialog: block the owner's input while shown - unless the client
         // opted into modeless via NEUI_ATTR_MODAL = 0.
@@ -3479,89 +3490,77 @@ namespace win32_host
     return neui_detail::clipboard_has_text_win32();
   }
 
-  static neui_clipboard_item_t NEUI_ABI cb_read(neui_session_t session)
+  static neui_data_item_t NEUI_ABI cb_read(neui_session_t session)
   {
     auto* s = get_session(session);
-    if (!s) return neui_clipboard_item_none;
-    if (!neui_detail::clipboard_has_text_win32())
-      return neui_clipboard_item_none;
-    int n = neui_detail::clipboard_get_text_win32(nullptr, 0);
-    if (n <= 0) return neui_clipboard_item_none;
-    std::vector<char> buf(static_cast<size_t>(n));
-    if (neui_detail::clipboard_get_text_win32(buf.data(), n) <= 0)
-      return neui_clipboard_item_none;
-    uint32_t id = s->_clipboard_items.allocate();
-    auto* item = s->_clipboard_items.get(id);
-    item->set_format(NEUI_CLIPBOARD_MIME_TEXT, buf.data(),
-                     static_cast<uint32_t>(n));
+    if (!s) return neui_data_item_none;
+    uint32_t id = s->_data_items.allocate();
+    auto* item = s->_data_items.get(id);
+    if (!item) return neui_data_item_none;
+    if (!neui_detail::clipboard_read_item_win32(*item)) {
+      s->_data_items.release(id);
+      return neui_data_item_none;
+    }
     return { id };
   }
 
-  static neui_clipboard_item_t NEUI_ABI cb_create_item(neui_session_t session)
+  static neui_data_item_t NEUI_ABI cb_create_item(neui_session_t session)
   {
     auto* s = get_session(session);
-    if (!s) return neui_clipboard_item_none;
-    return { s->_clipboard_items.allocate() };
+    if (!s) return neui_data_item_none;
+    return { s->_data_items.allocate() };
   }
 
   static void NEUI_ABI cb_release(neui_session_t session,
-                                   neui_clipboard_item_t item)
+                                   neui_data_item_t item)
   {
     auto* s = get_session(session);
     if (!s) return;
-    s->_clipboard_items.release(item.id);
+    s->_data_items.release(item.id);
   }
 
   static int NEUI_ABI cb_write(neui_session_t session,
-                                neui_clipboard_item_t item)
+                                neui_data_item_t item)
   {
     auto* s = get_session(session);
     if (!s) return 0;
-    auto* it = s->_clipboard_items.get(item.id);
+    auto* it = s->_data_items.get(item.id);
     if (!it) return 0;
-    if (!it->has_format(NEUI_CLIPBOARD_MIME_TEXT)) return 0;
-    int n = it->get_format(NEUI_CLIPBOARD_MIME_TEXT, nullptr, 0);
-    if (n <= 0) return 0;
-    std::vector<char> buf(static_cast<size_t>(n));
-    it->get_format(NEUI_CLIPBOARD_MIME_TEXT, buf.data(), n);
-    uint32_t length = static_cast<uint32_t>(n);
-    if (length > 0 && buf[length - 1] == '\0') length -= 1;
-    return neui_detail::clipboard_set_text_win32(buf.data(), length) ? 1 : 0;
+    return neui_detail::clipboard_write_item_win32(*it) ? 1 : 0;
   }
 
   static int NEUI_ABI cb_item_set_format(neui_session_t session,
-                                          neui_clipboard_item_t item,
+                                          neui_data_item_t item,
                                           const char* mime,
                                           const void* data, uint32_t length)
   {
     auto* s = get_session(session);
     if (!s || !mime) return 0;
-    if (strcmp(mime, NEUI_CLIPBOARD_MIME_TEXT) != 0) return 0;
-    auto* it = s->_clipboard_items.get(item.id);
+    auto* it = s->_data_items.get(item.id);
     if (!it) return 0;
     it->set_format(mime, data, length);
     return 1;
   }
 
   static int NEUI_ABI cb_item_get_format(neui_session_t session,
-                                          neui_clipboard_item_t item,
+                                          neui_data_item_t item,
                                           const char* mime,
                                           void* buf, int buflen)
   {
     auto* s = get_session(session);
     if (!s || !mime) return -1;
-    auto* it = s->_clipboard_items.get(item.id);
+    auto* it = s->_data_items.get(item.id);
     if (!it) return -1;
     return it->get_format(mime, buf, buflen);
   }
 
   static bool NEUI_ABI cb_item_has_format(neui_session_t session,
-                                           neui_clipboard_item_t item,
+                                           neui_data_item_t item,
                                            const char* mime)
   {
     auto* s = get_session(session);
     if (!s || !mime) return false;
-    auto* it = s->_clipboard_items.get(item.id);
+    auto* it = s->_data_items.get(item.id);
     return it && it->has_format(mime);
   }
 
@@ -5379,4 +5378,132 @@ namespace win32_host
     gr_end_cell_edit,
     gr_is_editing_cell,
   };
+
+  // -------------------------------------------------------------------------
+  // DnD API (NEUI_API_DND). Drop-target only in v1. On the win32 native
+  // host descendants of a frame are HWND-backed; the framework only
+  // reports drops to widgets that have `drop_target=true`. v1 typically
+  // means the frame widget itself, since child HWNDs do not register as
+  // OLE drop targets.
+
+  static void NEUI_ABI dnd_set_drop_target(neui_session_t session,
+                                            neui_widget_t widget, bool enable)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    auto* wd = s->get_widget(WidgetToIndex(widget));
+    if (!wd) return;
+    wd->drop_target = enable;
+  }
+
+  static bool NEUI_ABI dnd_get_drop_target(neui_session_t session,
+                                            neui_widget_t widget)
+  {
+    auto* s = get_session(session);
+    if (!s) return false;
+    auto* wd = s->get_widget(WidgetToIndex(widget));
+    return wd && wd->drop_target;
+  }
+
+  static void NEUI_ABI dnd_set_accepted_formats(neui_session_t session,
+                                                 neui_widget_t widget,
+                                                 const char* const* mimes,
+                                                 int count)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    auto* wd = s->get_widget(WidgetToIndex(widget));
+    if (!wd) return;
+    wd->accepted_mimes.clear();
+    if (mimes && count > 0) {
+      wd->accepted_mimes.reserve(static_cast<size_t>(count));
+      for (int i = 0; i < count; ++i) {
+        if (mimes[i]) wd->accepted_mimes.emplace_back(mimes[i]);
+      }
+    }
+  }
+
+  static void NEUI_ABI dnd_accept(neui_session_t session,
+                                   neui_dnd_action_t action)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    if (!s->_in_dnd_dispatch) return;
+    s->_last_accepted_action = static_cast<uint32_t>(action);
+  }
+
+  neui_dnd_api_t dnd_api = {
+    NEUI_VERSION,
+    dnd_set_drop_target,
+    dnd_get_drop_target,
+    dnd_set_accepted_formats,
+    dnd_accept,
+  };
+
+  // -------------------------------------------------------------------------
+  // DnD platform glue: seam callbacks the IDropTarget impl invokes,
+  // thunking into the native win32 Session.
+
+  static uint32_t win32_dnd_on_enter(void* session_ptr, uint32_t frame_widget_id,
+                                      int x, int y,
+                                      const char* const* formats,
+                                      uint32_t formats_count,
+                                      uint32_t suggested, uint32_t buttonmap)
+  {
+    auto* s = static_cast<Session*>(session_ptr);
+    if (!s) return 0;
+    return s->dispatch_dnd_enter(frame_widget_id & 0xFFFFu, x, y,
+                                  formats, formats_count, suggested, buttonmap);
+  }
+  static uint32_t win32_dnd_on_move(void* session_ptr, uint32_t frame_widget_id,
+                                     int x, int y,
+                                     const char* const* formats,
+                                     uint32_t formats_count,
+                                     uint32_t suggested, uint32_t buttonmap)
+  {
+    auto* s = static_cast<Session*>(session_ptr);
+    if (!s) return 0;
+    return s->dispatch_dnd_move(frame_widget_id & 0xFFFFu, x, y,
+                                 formats, formats_count, suggested, buttonmap);
+  }
+  static void win32_dnd_on_leave(void* session_ptr)
+  {
+    auto* s = static_cast<Session*>(session_ptr);
+    if (s) s->dispatch_dnd_leave();
+  }
+  static uint32_t win32_dnd_on_drop(void* session_ptr, uint32_t frame_widget_id,
+                                     int x, int y,
+                                     const char* const* formats,
+                                     uint32_t formats_count,
+                                     uint32_t suggested, uint32_t buttonmap,
+                                     neui_detail::DataItem* drop_item)
+  {
+    auto* s = static_cast<Session*>(session_ptr);
+    if (!s) return 0;
+    return s->dispatch_dnd_drop(frame_widget_id & 0xFFFFu, x, y,
+                                 formats, formats_count, suggested, buttonmap,
+                                 drop_item);
+  }
+
+  // Register the frame HWND as a drop target. Called from widget_show
+  // for the root APPWINDOW / DIALOG. Idempotent across show/hide cycles.
+  void register_frame_as_drop_target_w32(HWND hwnd, Session* s,
+                                           uint32_t widget_id)
+  {
+    if (!hwnd || !s) return;
+    neui_detail::dnd_ensure_ole_initialized();
+    neui_detail::DndDispatchSeam seam = {};
+    seam.session_ptr     = s;
+    seam.frame_widget_id = widget_id;
+    seam.on_enter        = &win32_dnd_on_enter;
+    seam.on_move         = &win32_dnd_on_move;
+    seam.on_leave        = &win32_dnd_on_leave;
+    seam.on_drop         = &win32_dnd_on_drop;
+    auto* target = new neui_detail::DropTargetImpl(hwnd, seam);
+    if (FAILED(RegisterDragDrop(hwnd, target))) {
+      target->Release();
+      return;
+    }
+    target->Release();
+  }
 }

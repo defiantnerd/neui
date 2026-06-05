@@ -93,6 +93,11 @@ namespace win32_host {
     // to CUSTOMDRAW).
     bool hovered = false;
     bool pressed = false;
+    // True = this widget accepts drag&drop drops. Default false. Set via
+    // NEUI_API_DND set_drop_target. Independent of `enabled`.
+    bool drop_target = false;
+    // Optional MIME allow-list for drop hit-testing. Empty = "accept any".
+    std::vector<std::string> accepted_mimes;
     bool has_subclass = false;
     wchar_t pending_surrogate = 0;  // high surrogate waiting for its low pair in WM_CHAR
     uint32_t widget_id = 0;    // stored as uint32_t for packing math; wrap as neui_widget_t when returning to public API
@@ -335,10 +340,46 @@ namespace win32_host {
     void invalidate_widgets_with_compound(uint32_t asset_id);
 
   public:
-    // Per-session clipboard item store and (optional) listener registration.
-    neui_detail::ClipboardItemStore _clipboard_items;
-    neui_clipboard_client_t*        _clipboard_client          = nullptr;
-    uint32_t                        _clipboard_listener_handle = 0;
+    // Per-session data-item store (clipboard items + transient DnD drop
+    // payloads share storage) and optional clipboard listener registration.
+    neui_detail::DataItemStore _data_items;
+    neui_clipboard_client_t*   _clipboard_client          = nullptr;
+    uint32_t                   _clipboard_listener_handle = 0;
+
+    // DnD dispatch state. See hosts/crossplatform/host.h for the same
+    // fields' documentation. The IDropTarget COM object that the frame
+    // registers calls dispatch_dnd_* on this Session as the user drags.
+    uint32_t _current_drop_target  = UINT32_MAX;
+    uint32_t _last_accepted_action = 0;
+    bool     _in_dnd_dispatch      = false;
+
+    uint32_t dispatch_dnd_enter(uint32_t frame_widget_idx,
+                                 int frame_local_x, int frame_local_y,
+                                 const char* const* formats, uint32_t formats_count,
+                                 uint32_t suggested_action,
+                                 uint32_t buttonmap);
+    uint32_t dispatch_dnd_move (uint32_t frame_widget_idx,
+                                 int frame_local_x, int frame_local_y,
+                                 const char* const* formats, uint32_t formats_count,
+                                 uint32_t suggested_action,
+                                 uint32_t buttonmap);
+    void     dispatch_dnd_leave();
+    uint32_t dispatch_dnd_drop (uint32_t frame_widget_idx,
+                                 int frame_local_x, int frame_local_y,
+                                 const char* const* formats, uint32_t formats_count,
+                                 uint32_t suggested_action,
+                                 uint32_t buttonmap,
+                                 neui_detail::DataItem* drop_item);
+  private:
+    // Internal helper used by dispatch_dnd_*; lives inside Session so it can
+    // touch the protected _widgets / _client_widget_api / _token directly.
+    void send_dnd_event_internal(uint32_t widget_idx, uint32_t type_u32,
+                                  int frame_x, int frame_y,
+                                  const char* const* formats,
+                                  uint32_t formats_count,
+                                  uint32_t suggested, uint32_t buttonmap,
+                                  neui_data_item_t data_item);
+  public:
 
     // Optional menu-item validation callback. Polled at WM_INITMENUPOPUP.
     neui_menu_client_t*             _menu_client               = nullptr;
