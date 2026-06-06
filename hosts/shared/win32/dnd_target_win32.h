@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "../clipboard_item.h"
+#include "../dnd_modifier_suggest.h"
 #include "clipboard_format_html_win32.h"
 #include "clipboard_format_urilist_win32.h"
 
@@ -154,6 +155,13 @@ namespace neui_detail
                  item.set_format(m, p, static_cast<uint32_t>(sz));
                });
         }
+        // Per IEnumFORMATETC contract the caller frees each non-null ptd.
+        for (ULONG i = 0; i < fetched; ++i) {
+          if (fes[i].ptd) {
+            CoTaskMemFree(fes[i].ptd);
+            fes[i].ptd = nullptr;
+          }
+        }
         fetched = 0;
       }
       en->Release();
@@ -176,29 +184,20 @@ namespace neui_detail
 
   inline uint32_t dnd_dropeffect_suggested(DWORD effects, DWORD grfKeyState)
   {
-    // Modifier convention (matches Explorer / common Win32 apps):
-    //   Ctrl+Shift = Link
-    //   Ctrl       = Copy
-    //   Shift      = Move
-    //   (none)     = first available (Copy > Move > Link), matching the
-    //                pre-modifier default.
-    // The selected bit is masked against `effects` so we never suggest
-    // an action the source didn't advertise. Alt isn't checked here
+    // Modifier convention lives in the shared dnd_suggest_action helper
+    // (hosts/shared/dnd_modifier_suggest.h) so all hosts agree. The
+    // DROPEFFECT_COPY/MOVE/LINK values align 1:1 with NEUI_DND_ACTION_*,
+    // so the mask passes through unchanged. Alt isn't checked here
     // because IDropTarget's grfKeyState only carries MK_LBUTTON /
     // MK_RBUTTON / MK_SHIFT / MK_CONTROL / MK_MBUTTON / MK_XBUTTON*;
     // Alt comes through VK_MENU / GetKeyState, which a future revision
     // could probe if needed.
     const bool ctrl  = (grfKeyState & MK_CONTROL) != 0;
     const bool shift = (grfKeyState & MK_SHIFT)   != 0;
-
-    if (ctrl && shift && (effects & DROPEFFECT_LINK)) return DROPEFFECT_LINK;
-    if (ctrl         && (effects & DROPEFFECT_COPY)) return DROPEFFECT_COPY;
-    if (shift        && (effects & DROPEFFECT_MOVE)) return DROPEFFECT_MOVE;
-
-    if (effects & DROPEFFECT_COPY) return DROPEFFECT_COPY;
-    if (effects & DROPEFFECT_MOVE) return DROPEFFECT_MOVE;
-    if (effects & DROPEFFECT_LINK) return DROPEFFECT_LINK;
-    return 0;
+    return dnd_suggest_action(
+      static_cast<uint32_t>(effects & (DROPEFFECT_COPY | DROPEFFECT_MOVE |
+                                       DROPEFFECT_LINK)),
+      ctrl, shift);
   }
 
   class DropTargetImpl : public IDropTarget
@@ -359,6 +358,13 @@ namespace neui_detail
             std::string mime(name, name + len);
             if (mime.find('/') == std::string::npos) continue;
             note(mime);
+          }
+          // Per IEnumFORMATETC contract the caller frees each non-null ptd.
+          for (ULONG i = 0; i < fetched; ++i) {
+            if (fes[i].ptd) {
+              CoTaskMemFree(fes[i].ptd);
+              fes[i].ptd = nullptr;
+            }
           }
           fetched = 0;
         }

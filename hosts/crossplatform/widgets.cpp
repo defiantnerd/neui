@@ -2792,12 +2792,20 @@ namespace xpl_host {
   {
     auto* s = get_session_for_widget(session, source_widget);
     if (!s) return NEUI_DND_ACTION_NONE;
-    if (s->_in_dnd_dispatch) return NEUI_DND_ACTION_NONE;  // no re-entry
+    if (s->_in_dnd_dispatch) return NEUI_DND_ACTION_NONE;    // no re-entry
+    if (s->_drag_source_active) return NEUI_DND_ACTION_NONE; // one drag at a time
     auto* item = s->_data_items.get(payload.id);
     if (!item) return NEUI_DND_ACTION_NONE;
     void* native = s->find_parent_native_handle(WidgetToIndex(source_widget));
+    if (!native) {
+      // Source widget itself might be the frame.
+      auto* wd = s->get_widget(WidgetToIndex(source_widget));
+      if (wd) native = wd->native_handle;
+    }
     if (!native) return NEUI_DND_ACTION_NONE;
+    s->_drag_source_active = true;
     uint32_t r = platform_dnd_begin_drag(native, item, allowed_actions);
+    s->_drag_source_active = false;
     return static_cast<neui_dnd_action_t>(r);
   }
 

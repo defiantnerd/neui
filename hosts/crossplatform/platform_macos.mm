@@ -28,6 +28,7 @@
 // This TU owns the single out-of-line @implementation NEUIDragSource body
 // (the header is also included by the native host's widgets.mm, which co-links).
 #define NEUI_DND_SOURCE_MACOS_IMPLEMENTATION
+#include "../shared/dnd_modifier_suggest.h"
 #include "../shared/macos/dnd_source_macos.h"
 #include "../shared/macos/keys_macos.h"
 #include "../shared/macos/menubar_macos.h"
@@ -768,10 +769,19 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
 
 static uint32_t neui_dnd_suggested_from_op(NSDragOperation op)
 {
-  if (op & NSDragOperationCopy) return 1;  // NEUI_DND_ACTION_COPY
-  if (op & NSDragOperationMove) return 2;  // NEUI_DND_ACTION_MOVE
-  if (op & NSDragOperationLink) return 4;  // NEUI_DND_ACTION_LINK
-  return 0;
+  // Translate the source's operation mask to NEUI_DND_ACTION_* bits, then
+  // pick the suggestion via the shared modifier convention
+  // (hosts/shared/dnd_modifier_suggest.h) so suggested_action behaves the
+  // same as on Win32.
+  uint32_t available = 0;
+  if (op & NSDragOperationCopy) available |= 1;  // NEUI_DND_ACTION_COPY
+  if (op & NSDragOperationMove) available |= 2;  // NEUI_DND_ACTION_MOVE
+  if (op & NSDragOperationLink) available |= 4;  // NEUI_DND_ACTION_LINK
+  NSEventModifierFlags mods = [NSEvent modifierFlags];
+  return neui_detail::dnd_suggest_action(
+    available,
+    (mods & NSEventModifierFlagControl) != 0,
+    (mods & NSEventModifierFlagShift)   != 0);
 }
 
 static NSDragOperation neui_dnd_op_from_action(uint32_t action)

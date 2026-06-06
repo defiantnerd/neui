@@ -14,6 +14,7 @@
 #include "../shared/macos/keys_macos.h"
 #include "../shared/macos/theme_provider_macos.h"
 #include "../shared/macos/clipboard_macos.h"
+#include "../shared/dnd_modifier_suggest.h"
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_compound.h"
 #include "../shared/widget_paint_section.h"
@@ -965,10 +966,19 @@ NSWindowStyleMask styles_for_appwindow()
 
 static uint32_t neui_native_dnd_suggested_from_op(NSDragOperation op)
 {
-  if (op & NSDragOperationCopy) return 1;
-  if (op & NSDragOperationMove) return 2;
-  if (op & NSDragOperationLink) return 4;
-  return 0;
+  // Translate the source's operation mask to NEUI_DND_ACTION_* bits, then
+  // pick the suggestion via the shared modifier convention
+  // (hosts/shared/dnd_modifier_suggest.h) so suggested_action behaves the
+  // same as on Win32.
+  uint32_t available = 0;
+  if (op & NSDragOperationCopy) available |= 1;
+  if (op & NSDragOperationMove) available |= 2;
+  if (op & NSDragOperationLink) available |= 4;
+  NSEventModifierFlags mods = [NSEvent modifierFlags];
+  return neui_detail::dnd_suggest_action(
+    available,
+    (mods & NSEventModifierFlagControl) != 0,
+    (mods & NSEventModifierFlagShift)   != 0);
 }
 
 static NSDragOperation neui_native_dnd_op_from_action(uint32_t action)

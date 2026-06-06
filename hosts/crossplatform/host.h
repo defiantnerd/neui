@@ -736,9 +736,13 @@ namespace xpl_host
     // layer reads this back when reporting the cursor effect to the OS.
     // _in_dnd_dispatch is true only while we're inside a DnD dispatch
     // callback so dnd_api->accept can recognise valid calls.
+    // _drag_source_active is true while a begin_drag OS drag loop spins;
+    // it blocks recursive begin_drag from non-DnD callbacks (timers,
+    // animation ticks) firing in idle gaps during the active drag.
     uint32_t _current_drop_target  = UINT32_MAX;
     uint32_t _last_accepted_action = 0;  // neui_dnd_action_t
     bool     _in_dnd_dispatch      = false;
+    bool     _drag_source_active   = false;
 
     // Drop hit-test + event dispatch. `frame_widget_idx` identifies the
     // top-level frame whose IDropTarget / NSDraggingDestination fired the

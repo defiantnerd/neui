@@ -5438,15 +5438,23 @@ namespace win32_host
                                                     neui_data_item_t payload,
                                                     uint32_t allowed_actions)
   {
-    auto* s = get_session(session);
+    auto* s = get_session_for_widget(session, source_widget);
     if (!s) return NEUI_DND_ACTION_NONE;
-    if (s->_in_dnd_dispatch) return NEUI_DND_ACTION_NONE;
+    if (s->_in_dnd_dispatch) return NEUI_DND_ACTION_NONE;    // no re-entry
+    if (s->_drag_source_active) return NEUI_DND_ACTION_NONE; // one drag at a time
     auto* item = s->_data_items.get(payload.id);
     if (!item) return NEUI_DND_ACTION_NONE;
     HWND frame = s->find_parent_hwnd(WidgetToIndex(source_widget));
+    if (!frame) {
+      // Source widget itself might be the frame.
+      auto* wd = s->get_widget(WidgetToIndex(source_widget));
+      if (wd) frame = wd->hwnd;
+    }
     if (!frame) return NEUI_DND_ACTION_NONE;
+    s->_drag_source_active = true;
     uint32_t r = neui_detail::platform_dnd_begin_drag_w32(frame, item,
                                                            allowed_actions);
+    s->_drag_source_active = false;
     return static_cast<neui_dnd_action_t>(r);
   }
 

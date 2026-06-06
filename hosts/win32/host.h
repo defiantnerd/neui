@@ -350,6 +350,7 @@ namespace win32_host {
     uint32_t _current_drop_target  = UINT32_MAX;
     uint32_t _last_accepted_action = 0;
     bool     _in_dnd_dispatch      = false;
+    bool     _drag_source_active   = false;
 
     uint32_t dispatch_dnd_enter(uint32_t frame_widget_idx,
                                  int frame_local_x, int frame_local_y,

@@ -29,6 +29,7 @@ namespace neui_detail
 {
 @public
   bool             done;        // pump flag
+  bool             began;       // session observed entering (watchdog probe)
   NSDragOperation  finalOp;     // result reported by AppKit
   NSDragOperation  allowedOps;  // mask from the client
 }
@@ -46,6 +47,7 @@ namespace neui_detail
 {
   if ((self = [super init])) {
     done       = false;
+    began      = false;
     finalOp    = NSDragOperationNone;
     allowedOps = NSDragOperationNone;
   }
@@ -56,6 +58,12 @@ namespace neui_detail
 {
   (void)session; (void)context;
   return allowedOps;
+}
+- (void)draggingSession:(NSDraggingSession*)session
+        willBeginAtPoint:(NSPoint)screenPoint
+{
+  (void)session; (void)screenPoint;
+  began = true;
 }
 - (void)draggingSession:(NSDraggingSession*)session
             endedAtPoint:(NSPoint)screenPoint
@@ -93,16 +101,29 @@ namespace neui_detail
   // session ended. Self-contained here (rather than the xpl-only
   // platform_run_modal_until seam) so the native macOS host - which doesn't
   // implement that seam - links against the same shared header.
-  inline void dnd_pump_until(const bool* done)
+  //
+  // Safety: AppKit drives the drag in NSEventTrackingRunLoopMode, so pump
+  // in that mode. Never block on distantFuture - teardown paths that skip
+  // draggingSession:endedAtPoint:operation: (window destroyed mid-drag,
+  // exception in a pasteboard writer) would otherwise freeze the app.
+  // A short timeout keeps the loop responsive even when no events arrive,
+  // and a watchdog bails out if the session was never observed beginning.
+  inline void dnd_pump_until(NEUIDragSource* src)
   {
-    if (!done) return;
-    while (!*done) {
+    if (!src) return;
+    NSDate* watchdog = [NSDate dateWithTimeIntervalSinceNow:3.0];
+    while (!src->done) {
       NSEvent* ev = [NSApp nextEventMatchingMask:NSEventMaskAny
-                                       untilDate:[NSDate distantFuture]
-                                          inMode:NSDefaultRunLoopMode
+                                       untilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]
+                                          inMode:NSEventTrackingRunLoopMode
                                          dequeue:YES];
-      if (!ev) continue;
-      [NSApp sendEvent:ev];
+      if (ev) [NSApp sendEvent:ev];
+      // Watchdog: if AppKit never reported the session beginning within a
+      // few seconds, the drag was stillborn - exit rather than hang.
+      if (!src->began && [watchdog timeIntervalSinceNow] < 0) {
+        src->finalOp = NSDragOperationNone;
+        break;
+      }
     }
   }
 
@@ -133,9 +154,13 @@ namespace neui_detail
       return NSMakeRect(anchor_view_pt.x - 12, anchor_view_pt.y - 12, 24, 24);
     };
 
-    // Collect text/html/MIME formats on one shared NSPasteboardItem.
-    NSPasteboardItem* shared = [[NSPasteboardItem alloc] init];
-    bool shared_has_any = false;
+    // Collect text/html/MIME payloads once, keyed by NSPasteboard type.
+    // Win32's IDataObject serves every format from one composite object;
+    // mirror that by stamping these shared payloads onto *every*
+    // NSPasteboardItem we emit, so each NSDraggingItem carries the full
+    // context regardless of which one the receiver reads.
+    NSMutableDictionary<NSPasteboardType, id>* shared_payloads =
+      [NSMutableDictionary dictionary];
 
     // text/uri-list: emit one NSDraggingItem per URL.
     std::vector<NSURL*> uri_urls;
@@ -148,18 +173,12 @@ namespace neui_detail
         NSString* s = [[NSString alloc] initWithBytes:bytes.data()
                                                 length:n
                                               encoding:NSUTF8StringEncoding];
-        if (s) {
-          [shared setString:s forType:NSPasteboardTypeString];
-          shared_has_any = true;
-        }
+        if (s) shared_payloads[NSPasteboardTypeString] = s;
         return;
       }
       if (mime == "text/html") {
         NSData* d = [NSData dataWithBytes:bytes.data() length:bytes.size()];
-        if (d) {
-          [shared setData:d forType:NSPasteboardTypeHTML];
-          shared_has_any = true;
-        }
+        if (d) shared_payloads[NSPasteboardTypeHTML] = d;
         return;
       }
       if (mime == "text/uri-list") {
@@ -169,6 +188,8 @@ namespace neui_detail
         while (i < len) {
           size_t end = i;
           while (end < len && p[end] != '\r' && p[end] != '\n') ++end;
+          // Trim trailing whitespace, matching the Win32 urilist_parse.
+          while (end > i && (p[end - 1] == ' ' || p[end - 1] == '\t')) --end;
           if (end > i) {
             NSString* line = [[NSString alloc] initWithBytes:p + i
                                                       length:end - i
@@ -178,6 +199,7 @@ namespace neui_detail
               if (u) uri_urls.push_back(u);
             }
           }
+          while (end < len && (p[end] != '\r' && p[end] != '\n')) ++end;
           while (end < len && (p[end] == '\r' || p[end] == '\n')) ++end;
           i = end;
         }
@@ -187,20 +209,39 @@ namespace neui_detail
       NSString* t = [NSString stringWithUTF8String:mime.c_str()];
       if (t) {
         NSData* d = [NSData dataWithBytes:bytes.data() length:bytes.size()];
-        if (d) {
-          [shared setData:d forType:t];
-          shared_has_any = true;
-        }
+        if (d) shared_payloads[t] = d;
       }
     });
 
-    if (shared_has_any) {
-      NSDraggingItem* di = [[NSDraggingItem alloc] initWithPasteboardWriter:shared];
+    auto stamp_shared = [&](NSPasteboardItem* pbitem) {
+      for (NSPasteboardType type in shared_payloads) {
+        id val = shared_payloads[type];
+        if ([val isKindOfClass:[NSString class]])
+          [pbitem setString:(NSString*)val forType:type];
+        else
+          [pbitem setData:(NSData*)val forType:type];
+      }
+    };
+
+    // Per-URL items, each carrying the full shared payload alongside its
+    // own URL type. (If the absoluteString form doesn't survive Finder's
+    // round-trip we'd switch to setPropertyList:forType: instead.)
+    for (NSURL* u : uri_urls) {
+      NSPasteboardItem* pbitem = [[NSPasteboardItem alloc] init];
+      stamp_shared(pbitem);
+      [pbitem setString:[u absoluteString]
+                forType:[u isFileURL] ? NSPasteboardTypeFileURL
+                                      : NSPasteboardTypeURL];
+      NSDraggingItem* di = [[NSDraggingItem alloc] initWithPasteboardWriter:pbitem];
       [di setDraggingFrame:frame_for() contents:placeholder];
       [items addObject:di];
     }
-    for (NSURL* u : uri_urls) {
-      NSDraggingItem* di = [[NSDraggingItem alloc] initWithPasteboardWriter:u];
+
+    // No URLs: the shared payloads alone are the drag.
+    if (uri_urls.empty() && [shared_payloads count] > 0) {
+      NSPasteboardItem* pbitem = [[NSPasteboardItem alloc] init];
+      stamp_shared(pbitem);
+      NSDraggingItem* di = [[NSDraggingItem alloc] initWithPasteboardWriter:pbitem];
       [di setDraggingFrame:frame_for() contents:placeholder];
       [items addObject:di];
     }
@@ -209,7 +250,8 @@ namespace neui_detail
 
   // Synthesize an NSEvent fit for beginDraggingSessionWithItems:event:source:
   // when NSApp.currentEvent isn't a mouse event we can reuse.
-  inline NSEvent* synthesize_drag_trigger(NSView* anchor_view, NSPoint pt_in_view)
+  inline NSEvent* synthesize_drag_trigger(NSView* anchor_view, NSWindow* win,
+                                           NSPoint pt_in_view)
   {
     NSEvent* cur = [NSApp currentEvent];
     if (cur) {
@@ -220,7 +262,6 @@ namespace neui_detail
           t == NSEventTypeRightMouseDragged)
         return cur;
     }
-    NSWindow* win = [anchor_view window];
     NSPoint pt_in_win = [anchor_view convertPoint:pt_in_view toView:nil];
     return [NSEvent mouseEventWithType:NSEventTypeLeftMouseDragged
                                location:pt_in_win
@@ -241,11 +282,14 @@ namespace neui_detail
     if (!anchor_view) return 0;
     if (!allowed_actions) return 0;
 
-    // Anchor the drag at the current cursor (converted into view coords).
+    // A detached view can't host a drag session - AppKit would receive an
+    // NSEvent with windowNumber:0 and misbehave. Bail early.
     NSWindow* win = [anchor_view window];
+    if (!win) return 0;
+
+    // Anchor the drag at the current cursor (converted into view coords).
     NSPoint mouse_screen = [NSEvent mouseLocation];
-    NSPoint mouse_win    = win ? [win convertPointFromScreen:mouse_screen]
-                                : NSZeroPoint;
+    NSPoint mouse_win    = [win convertPointFromScreen:mouse_screen];
     NSPoint mouse_view   = [anchor_view convertPoint:mouse_win fromView:nil];
 
     NSArray<NSDraggingItem*>* items = build_dragging_items(item, mouse_view);
@@ -254,12 +298,12 @@ namespace neui_detail
     NEUIDragSource* src = [[NEUIDragSource alloc] init];
     src->allowedOps = dnd_action_to_nsop(allowed_actions);
 
-    NSEvent* evt = synthesize_drag_trigger(anchor_view, mouse_view);
+    NSEvent* evt = synthesize_drag_trigger(anchor_view, win, mouse_view);
     NSDraggingSession* session =
       [anchor_view beginDraggingSessionWithItems:items event:evt source:src];
-    (void)session;
+    if (!session) return 0;
 
-    dnd_pump_until(&src->done);
+    dnd_pump_until(src);
     return nsop_to_dnd_action(src->finalOp);
   }
 }

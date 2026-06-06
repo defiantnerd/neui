@@ -1470,16 +1470,19 @@ namespace macos_host
                                                   neui_data_item_t payload,
                                                   uint32_t allowed_actions)
   {
-    auto* s = get_session(session);
+    auto* s = get_session_for_widget(session, source_widget);
     if (!s) return NEUI_DND_ACTION_NONE;
-    if (s->_in_dnd_dispatch) return NEUI_DND_ACTION_NONE;
+    if (s->_in_dnd_dispatch) return NEUI_DND_ACTION_NONE;    // no re-entry
+    if (s->_drag_source_active) return NEUI_DND_ACTION_NONE; // one drag at a time
     auto* item = s->_data_items.get(payload.id);
     if (!item) return NEUI_DND_ACTION_NONE;
     NSWindow* win = find_owning_nswindow_macos(s, dnd_widget_to_index(source_widget));
     if (!win) return NEUI_DND_ACTION_NONE;
     NSView* cv = [win contentView];
     if (!cv) return NEUI_DND_ACTION_NONE;
+    s->_drag_source_active = true;
     uint32_t r = neui_detail::macos_run_drag_source(cv, *item, allowed_actions);
+    s->_drag_source_active = false;
     return static_cast<neui_dnd_action_t>(r);
   }
 

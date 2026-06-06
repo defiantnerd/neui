@@ -1,5 +1,7 @@
 # Drag-source code-review fixes
 
+**Status**: Batches 1-8 implemented. Batch 9 deferred as planned. macOS build clean + smoke-launch OK; Win32 compile + the manual verification matrix below still pending (no Windows toolchain on this machine; macOS drag-flow checks need interactive testing).
+
 ## Context
 
 A code review of the drag-source PR (`d6bc846..HEAD`) found 15 issues. This plan groups them into batches ordered by severity, so they can be landed incrementally. Batches 1-4 are high priority (hang risk, cross-host divergence, API safety); 5-7 are correctness/data-loss fixes; 8-9 are cleanup that can be deferred to a follow-up.

@@ -179,6 +179,7 @@ namespace macos_host
     uint32_t _current_drop_target  = UINT32_MAX;
     uint32_t _last_accepted_action = 0;
     bool     _in_dnd_dispatch      = false;
+    bool     _drag_source_active   = false;
     // Frame-local top-left of the current drop target, cached so MOVE / LEAVE
     // produce widget-local coords without re-walking the tree. Mirror of the
     // win32 native host.

@@ -47,27 +47,43 @@ namespace neui_detail
   drag_source_snapshot(const DataItem& item)
   {
     std::vector<DragSourceFormat> out;
+
+    // "First wins": a DataItem holding both text/plain and
+    // text/plain;charset=utf-8 must not emit two CF_UNICODETEXT entries.
+    auto has_cf = [&](CLIPFORMAT cf) {
+      for (auto& e : out) if (e.cf == cf) return true;
+      return false;
+    };
+
+    // UTF-8 -> UTF-16 CF_UNICODETEXT entry (one trailing wchar_t L'\0').
+    auto push_unicode_text = [&](const char* p, int char_len) {
+      int wlen = (char_len > 0)
+                   ? MultiByteToWideChar(CP_UTF8, 0, p, char_len, nullptr, 0)
+                   : 0;
+      DragSourceFormat f;
+      f.cf = CF_UNICODETEXT;
+      f.bytes.assign((static_cast<size_t>(wlen) + 1) * sizeof(wchar_t), 0);
+      if (wlen > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, p, char_len,
+                            reinterpret_cast<wchar_t*>(f.bytes.data()), wlen);
+      }
+      out.push_back(std::move(f));
+    };
+
+    // Non-file URIs found in text/uri-list. Published as a CF_UNICODETEXT
+    // fallback after the loop unless an explicit text payload claimed it.
+    std::vector<std::string> other_uris;
+
     item.for_each_format([&](const std::string& mime,
                               const std::vector<uint8_t>& bytes) {
       // text/plain;charset=utf-8 -> CF_UNICODETEXT
       if (mime == "text/plain;charset=utf-8" || mime == "text/plain") {
-        // bytes are UTF-8 (with or without trailing null). Convert to
-        // UTF-16. Ensure the wide buffer ends with one wchar_t L'\0'.
+        if (has_cf(CF_UNICODETEXT)) return;  // first wins
+        // bytes are UTF-8 (with or without trailing null).
         const char* p = reinterpret_cast<const char*>(bytes.data());
         int blen = static_cast<int>(bytes.size());
         bool has_null = (blen > 0 && p[blen - 1] == 0);
-        int char_len = has_null ? (blen - 1) : blen;
-        int wlen = (char_len > 0)
-                     ? MultiByteToWideChar(CP_UTF8, 0, p, char_len, nullptr, 0)
-                     : 0;
-        DragSourceFormat f;
-        f.cf = CF_UNICODETEXT;
-        f.bytes.assign((static_cast<size_t>(wlen) + 1) * sizeof(wchar_t), 0);
-        if (wlen > 0) {
-          MultiByteToWideChar(CP_UTF8, 0, p, char_len,
-                              reinterpret_cast<wchar_t*>(f.bytes.data()), wlen);
-        }
-        out.push_back(std::move(f));
+        push_unicode_text(p, has_null ? (blen - 1) : blen);
         return;
       }
 
@@ -96,8 +112,9 @@ namespace neui_detail
         for (auto& u : uris) {
           auto wp = urilist_uri_to_path(u);
           if (!wp.empty()) paths.push_back(std::move(wp));
+          else             other_uris.push_back(u);  // http://, mailto:, ...
         }
-        if (paths.empty()) return;
+        if (paths.empty()) return;  // non-file URIs handled after the loop
 
         size_t chars = 1;  // trailing extra null
         for (auto& w : paths) chars += w.size() + 1;
@@ -135,6 +152,19 @@ namespace neui_detail
       f.bytes = bytes;
       out.push_back(std::move(f));
     });
+
+    // Non-file URIs (http://, mailto:, ...) can't ride CF_HDROP. Publish
+    // them as CF_UNICODETEXT (joined with CRLF) so browsers / link bars /
+    // any text-aware receiver still get the payload - unless an explicit
+    // text/plain already claimed that format.
+    if (!other_uris.empty() && !has_cf(CF_UNICODETEXT)) {
+      std::string joined;
+      for (auto& u : other_uris) {
+        if (!joined.empty()) joined += "\r\n";
+        joined += u;
+      }
+      push_unicode_text(joined.data(), static_cast<int>(joined.size()));
+    }
     return out;
   }
 
