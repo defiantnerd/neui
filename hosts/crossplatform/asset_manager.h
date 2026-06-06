@@ -42,6 +42,11 @@ namespace neui_detail
     // Backend bitmap cache: one GPU resource per render context.
     std::unordered_map<neui_render_ctx_t, CtxBitmap> bitmaps;
 
+    // Tinted-variant cache for the asset-layer "tint" prop. Slot count
+    // is typically 1-3 (per distinct tint at draw time); linear scan.
+    // Parallel to `bitmaps` - the untinted draw path is unchanged.
+    std::vector<TintedCtxBitmap> tinted_bitmaps;
+
     // Populated for NEUI_ASSET_KIND_COMPOUND entries; null otherwise.
     std::unique_ptr<CompoundAsset> compound;
 

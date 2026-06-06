@@ -1720,7 +1720,8 @@ namespace macos_host
                                                  neui_render_ctx_t ctx,
                                                  neui_asset_t asset,
                                                  float x, float y,
-                                                 float w, float h);
+                                                 float w, float h,
+                                                 uint32_t tint);
 
   static neui_asset_t NEUI_ABI a_create_surface(neui_session_t session,
                                                   float width_logical,
@@ -1941,6 +1942,18 @@ namespace macos_host
     s->invalidate_widgets_with_compound(asset.id);
   }
 
+  static void NEUI_ABI co_set_path(neui_session_t session, neui_asset_t asset,
+                                     neui_compound_layer_t layer,
+                                     const neui_path_cmd_t* cmds,
+                                     uint32_t count)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer_macos(session, asset, layer, s);
+    if (!L) return;
+    neui_detail::apply_set_path(*L, cmds, count);
+    s->invalidate_widgets_with_compound(asset.id);
+  }
+
   neui_compound_api_t compound_api = {
     NEUI_VERSION,
     co_add_layer,
@@ -1955,6 +1968,7 @@ namespace macos_host
     co_bind,
     co_bind_asset,
     co_unbind,
+    co_set_path,
   };
 
   // Behavior API (NEUI_API_BEHAVIOR) - same shape as compound_api.

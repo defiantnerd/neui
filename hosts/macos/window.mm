@@ -69,7 +69,8 @@ namespace macos_host {
                                                  neui_render_ctx_t ctx,
                                                  neui_asset_t asset,
                                                  float x, float y,
-                                                 float w, float h);
+                                                 float w, float h,
+                                                 uint32_t tint);
 
   // Blocking popup menu. Builds an NSMenu from the NULL-terminated UTF-8
   // `items` ("-" = separator), presents it at `(x, y)` in `anchor`'s
@@ -1345,11 +1346,13 @@ static float neui_snap_to_steps(float v, int steps)
             backend->rotate(render_ctx, rot);
             backend->translate(render_ctx, -dw * 0.5f, -dh * 0.5f);
             macos_host::macos_painter_draw_asset_thunk(
-              sess, backend, render_ctx, wd->image_asset, 0, 0, dw, dh);
+              sess, backend, render_ctx, wd->image_asset, 0, 0, dw, dh,
+              0xFFFFFFFFu);
             backend->pop_transform(render_ctx);
           } else {
             macos_host::macos_painter_draw_asset_thunk(
-              sess, backend, render_ctx, wd->image_asset, dx, dy, dw, dh);
+              sess, backend, render_ctx, wd->image_asset, dx, dy, dw, dh,
+              0xFFFFFFFFu);
           }
         }
       }
@@ -2186,7 +2189,8 @@ namespace macos_host {
                                                  neui_render_ctx_t ctx,
                                                  neui_asset_t asset,
                                                  float x, float y,
-                                                 float w, float h)
+                                                 float w, float h,
+                                                 uint32_t tint)
   {
     auto* s = static_cast<Session*>(host_token);
     if (!s || !backend || !ctx) return;
@@ -2195,6 +2199,14 @@ namespace macos_host {
     uint32_t slot = asset.id & 0xffff;
     auto* entry = s->_asset_manager.get_slot(slot);
     if (!entry) return;
+    // Tinted draws bypass the untinted bitmap cache and use the
+    // per-(asset, ctx, tint) tinted_bitmaps cache; the untinted path
+    // below stays byte-for-byte identical to the pre-tint behaviour.
+    if (tint != 0xFFFFFFFFu) {
+      neui_detail::draw_tinted_bitmap_from_entry(backend, ctx, entry,
+                                                  x, y, w, h, tint);
+      return;
+    }
     const uint32_t gen = backend->get_context_generation
       ? backend->get_context_generation(ctx) : 0u;
     auto it = entry->bitmaps.find(ctx);

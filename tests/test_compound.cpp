@@ -1,6 +1,7 @@
 #include "neui_test.h"
 
 #include "compound.h"
+#include "painter.h"
 
 using namespace neui_detail;
 
@@ -157,6 +158,140 @@ TEST_CASE("effective_int/float: static value unless a binding overrides")
   CompoundBinding b; b.attr_key = "v"; b.scale = 100.0f; b.offset = 0.0f;
   L.bindings["offset_x"] = b;
   CHECK_EQ(effective_int(L, "offset_x", 17, &bag), 25);   // round(0.25*100)
+}
+
+// ---------------------------------------------------------------------------
+// Rect layer setters
+// ---------------------------------------------------------------------------
+
+TEST_CASE("apply_set_int routes rect colour props to rect fields only")
+{
+  CompoundLayer L; L.kind = NEUI_COMPOUND_LAYER_RECT;
+  CHECK(apply_set_int(L, "fill_color",   (int)0xFF112233));
+  CHECK(apply_set_int(L, "stroke_color", (int)0xFFAABBCC));
+  CHECK_EQ((unsigned)L.fill_color,   0xFF112233u);
+  CHECK_EQ((unsigned)L.stroke_color, 0xFFAABBCCu);
+
+  // On a non-rect layer the same prop names are unrecognised (and inert).
+  CompoundLayer T; T.kind = NEUI_COMPOUND_LAYER_TEXT;
+  CHECK_FALSE(apply_set_int(T, "fill_color", (int)0xFF000000));
+  CHECK_EQ((unsigned)T.fill_color, 0u);
+}
+
+TEST_CASE("apply_set_float: rect stroke_width / corner_radius clamp negatives to 0")
+{
+  CompoundLayer L; L.kind = NEUI_COMPOUND_LAYER_RECT;
+  CHECK(apply_set_float(L, "stroke_width",  2.0f));
+  CHECK(apply_set_float(L, "corner_radius", 6.0f));
+  CHECK_APPROX(L.stroke_width,  2.0);
+  CHECK_APPROX(L.corner_radius, 6.0);
+
+  // Negative inputs are clamped (the painter would draw nothing useful with
+  // them and we do not want to surprise the renderer).
+  CHECK(apply_set_float(L, "stroke_width",  -1.0f));
+  CHECK(apply_set_float(L, "corner_radius", -3.0f));
+  CHECK_APPROX(L.stroke_width,  0.0);
+  CHECK_APPROX(L.corner_radius, 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Asset-layer tint
+// ---------------------------------------------------------------------------
+
+TEST_CASE("apply_set_int: \"tint\" lands on asset layers only")
+{
+  CompoundLayer A; A.kind = NEUI_COMPOUND_LAYER_ASSET;
+  CHECK(apply_set_int(A, "tint", (int)0xFF40C0FF));
+  CHECK_EQ((unsigned)A.tint, 0xFF40C0FFu);
+
+  // Rect / text layers don't carry a tint slot - return false (inert).
+  CompoundLayer R; R.kind = NEUI_COMPOUND_LAYER_RECT;
+  CHECK_FALSE(apply_set_int(R, "tint", (int)0xFF000000));
+  CHECK_EQ((unsigned)A.tint, 0xFF40C0FFu);  // A is unchanged
+}
+
+TEST_CASE("premultiply_tint: 0xFFFFFFFF passthrough leaves pixels intact")
+{
+  uint8_t src[8] = { 10, 20, 30, 40,  50, 60, 70, 80 };
+  uint8_t dst[8] = { 0 };
+  premultiply_tint(src, dst, 2, 1, 0xFFFFFFFFu);
+  for (int i = 0; i < 8; ++i) CHECK_EQ((int)dst[i], (int)src[i]);
+}
+
+TEST_CASE("premultiply_tint: pure red tint clears green + blue, keeps alpha")
+{
+  // Premultiplied white-opaque -> after red tint should become red-opaque.
+  uint8_t src[4] = { 255, 255, 255, 255 };   // BGRA
+  uint8_t dst[4] = { 0 };
+  premultiply_tint(src, dst, 1, 1, 0xFFFF0000u);  // A=FF, R=FF, G=00, B=00
+  CHECK_EQ((int)dst[0],   0);   // B
+  CHECK_EQ((int)dst[1],   0);   // G
+  CHECK_EQ((int)dst[2], 255);   // R
+  CHECK_EQ((int)dst[3], 255);   // A
+}
+
+TEST_CASE("premultiply_tint: half-alpha tint scales the alpha channel")
+{
+  uint8_t src[4] = { 255, 255, 255, 255 };
+  uint8_t dst[4] = { 0 };
+  premultiply_tint(src, dst, 1, 1, 0x80FFFFFFu);  // A=80
+  CHECK_EQ((int)dst[3], (255 * 0x80) / 255);
+}
+
+// ---------------------------------------------------------------------------
+// Path layer
+// ---------------------------------------------------------------------------
+
+TEST_CASE("apply_set_path: replaces the layer's command list on PATH layers")
+{
+  CompoundLayer L; L.kind = NEUI_COMPOUND_LAYER_PATH;
+  neui_path_cmd_t cmds[3] = {
+    { NEUI_PATH_CMD_MOVE_TO, { 0, 0, 0, 0, 0 } },
+    { NEUI_PATH_CMD_LINE_TO, { 10, 10, 0, 0, 0 } },
+    { NEUI_PATH_CMD_CLOSE,   { 0, 0, 0, 0, 0 } },
+  };
+  apply_set_path(L, cmds, 3);
+  REQUIRE(L.path_cmds.size() == 3);
+  CHECK_EQ((int)L.path_cmds[0].kind, (int)NEUI_PATH_CMD_MOVE_TO);
+  CHECK_EQ((int)L.path_cmds[1].kind, (int)NEUI_PATH_CMD_LINE_TO);
+  CHECK_APPROX(L.path_cmds[1].args[0], 10.0);
+  CHECK_APPROX(L.path_cmds[1].args[1], 10.0);
+  CHECK_EQ((int)L.path_cmds[2].kind, (int)NEUI_PATH_CMD_CLOSE);
+
+  // Subsequent calls replace, not append.
+  neui_path_cmd_t replacement[1] = { { NEUI_PATH_CMD_MOVE_TO, { 5, 5, 0, 0, 0 } } };
+  apply_set_path(L, replacement, 1);
+  CHECK_EQ((int)L.path_cmds.size(), 1);
+
+  // NULL / zero count clears.
+  apply_set_path(L, nullptr, 0);
+  CHECK(L.path_cmds.empty());
+}
+
+TEST_CASE("apply_set_path: silently no-ops on non-PATH layers")
+{
+  CompoundLayer R; R.kind = NEUI_COMPOUND_LAYER_RECT;
+  neui_path_cmd_t cmds[1] = { { NEUI_PATH_CMD_MOVE_TO, { 1, 2, 0, 0, 0 } } };
+  apply_set_path(R, cmds, 1);
+  CHECK(R.path_cmds.empty());
+}
+
+TEST_CASE("apply_set_int: PATH layers accept fill_color / stroke_color")
+{
+  CompoundLayer P; P.kind = NEUI_COMPOUND_LAYER_PATH;
+  CHECK(apply_set_int(P, "fill_color",   (int)0xFF112233));
+  CHECK(apply_set_int(P, "stroke_color", (int)0xFFAABBCC));
+  CHECK_EQ((unsigned)P.fill_color,   0xFF112233u);
+  CHECK_EQ((unsigned)P.stroke_color, 0xFFAABBCCu);
+}
+
+TEST_CASE("apply_set_float: PATH layers accept stroke_width but not corner_radius")
+{
+  CompoundLayer P; P.kind = NEUI_COMPOUND_LAYER_PATH;
+  CHECK(apply_set_float(P, "stroke_width", 2.5f));
+  CHECK_APPROX(P.stroke_width, 2.5);
+  // corner_radius is rect-only - returns false (unrecognised) on PATH.
+  CHECK_FALSE(apply_set_float(P, "corner_radius", 4.0f));
 }
 
 TEST_CASE("eval_binding_asset: missing or zero id -> asset_none, else handle")

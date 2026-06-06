@@ -42,6 +42,11 @@ namespace win32_host
     std::vector<uint8_t> pixels;
     std::unordered_map<neui_render_ctx_t, W32CtxBitmap> bitmaps;
 
+    // Tinted-variant cache for the asset-layer "tint" prop. Slot count
+    // is typically 1-3 (per distinct tint at draw time); linear scan.
+    // Parallel to `bitmaps` - the untinted draw path is unchanged.
+    std::vector<neui_detail::TintedCtxBitmap> tinted_bitmaps;
+
     // Populated for NEUI_ASSET_KIND_COMPOUND entries; null otherwise.
     std::unique_ptr<neui_detail::CompoundAsset> compound;
 
@@ -266,6 +271,9 @@ namespace win32_host
           if (cached.bmp) backend->destroy_bitmap(other_ctx, cached.bmp);
       }
       entry->bitmaps.clear();
+      // Tinted variants reference the pre-repaint pixels and are stale;
+      // the next tinted draw uploads against the freshly read-back buffer.
+      neui_detail::release_all_tinted_bitmaps(entry.get(), backend);
     }
 
     void release_slot(uint32_t slot, neui_render_backend_t* backend)
@@ -277,6 +285,7 @@ namespace win32_host
         for (auto& [ctx, cached] : entry->bitmaps)
           if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
       }
+      neui_detail::release_all_tinted_bitmaps(entry.get(), backend);
       if (entry->surface_ctx && backend && backend->destroy_context) {
         backend->destroy_context(entry->surface_ctx);
         entry->surface_ctx = nullptr;
@@ -334,6 +343,7 @@ namespace win32_host
           if (it->second.bmp) backend->destroy_bitmap(ctx, it->second.bmp);
           entry->bitmaps.erase(it);
         }
+        neui_detail::release_tinted_bitmaps_for_ctx(entry.get(), ctx, backend);
       }
     }
 
@@ -344,6 +354,7 @@ namespace win32_host
           if (!entry) continue;
           for (auto& [ctx, cached] : entry->bitmaps)
             if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
+          neui_detail::release_all_tinted_bitmaps(entry.get(), backend);
         }
       }
       // Release any SURFACE entries' off-screen ctxs before dropping

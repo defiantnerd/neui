@@ -12,7 +12,7 @@
 // neui_asset_api_t::create_compound.
 //
 // A compound is a mutable layer stack:
-//   - each layer has a kind (text or asset for v1),
+//   - each layer has a kind (text, asset, or rect),
 //   - a signed-int z-order (relative to child widgets: z<0 paints below
 //     children, z>=0 paints above),
 //   - a 9-point anchor pair (parent + self) plus an integer pixel offset,
@@ -98,7 +98,35 @@ extern "C" {
     NEUI_COMPOUND_LAYER_NONE  = 0,
     NEUI_COMPOUND_LAYER_TEXT  = 1,
     NEUI_COMPOUND_LAYER_ASSET = 2,
+    NEUI_COMPOUND_LAYER_RECT  = 3,
+    NEUI_COMPOUND_LAYER_PATH  = 4,
   } neui_compound_layer_kind_t;
+
+  // Path-layer command kinds. The layer carries a sequence of these
+  // assigned via set_path; the painter replays them against the
+  // backend's path API (begin_path / move_to / line_to / arc / close_path
+  // / fill_path / stroke_path). Coordinates are in logical pixels, with
+  // (0, 0) at the layer rect's top-left - the painter translates to
+  // the resolved layer rect before replaying, so authoring a 24x24
+  // icon does not require knowing the widget's size.
+  //
+  // The five-float `args` slot interprets per kind:
+  //   MOVE_TO: args[0] = x, args[1] = y
+  //   LINE_TO: args[0] = x, args[1] = y
+  //   ARC:     args[0] = cx, args[1] = cy, args[2] = r,
+  //            args[3] = a_start (radians), args[4] = a_end (radians)
+  //   CLOSE:   args ignored
+  typedef enum neui_path_cmd_kind {
+    NEUI_PATH_CMD_MOVE_TO = 0,
+    NEUI_PATH_CMD_LINE_TO = 1,
+    NEUI_PATH_CMD_ARC     = 2,
+    NEUI_PATH_CMD_CLOSE   = 3,
+  } neui_path_cmd_kind_t;
+
+  typedef struct neui_path_cmd {
+    uint32_t kind;
+    float    args[5];
+  } neui_path_cmd_t;
 
   // 9-point anchor system. Layer geometry: a layer's `self_anchor` point
   // is aligned with its parent's (the widget's) `parent_anchor` point,
@@ -170,6 +198,26 @@ extern "C" {
     //   asset layer props:
     //     "asset"     asset   bitmap handle (v1)
     //     "rotation"  float   radians, clockwise
+    //     "tint"      int     ARGB multiplicative tint. Default 0xFFFFFFFF
+    //                         is the passthrough sentinel (no tint, hot
+    //                         path unchanged). Any other value runs a CPU
+    //                         pre-multiply and caches the result per
+    //                         (asset, ctx, tint). Set to a theme colour to
+    //                         track light / dark on monochrome icons; bind
+    //                         to a state-tracking attr to swap on hover /
+    //                         press without per-state asset uploads.
+    //   rect layer props:
+    //     "fill_color"    int   ARGB; 0 = no fill (alpha 0)
+    //     "stroke_color"  int   ARGB; 0 = no stroke (alpha 0)
+    //     "stroke_width"  float px; 0 (default) = no stroke
+    //     "corner_radius" float px; 0 (default) = sharp corners. Clamped to
+    //                              min(width, height) / 2 at paint time.
+    //   path layer props:
+    //     "fill_color"    int   ARGB; 0 = no fill. Same semantics as rect.
+    //     "stroke_color"  int   ARGB; 0 = no stroke. Same semantics as rect.
+    //     "stroke_width"  float px; 0 (default) = no stroke. Same as rect.
+    //     The path geometry itself is assigned via set_path (below); it
+    //     replaces any previous geometry on the layer.
     //   any layer:
     //     "offset_x"  int     px, relative to anchor
     //     "offset_y"  int     px, relative to anchor
@@ -221,6 +269,18 @@ extern "C" {
     void (NEUI_ABI *unbind)(neui_session_t session, neui_asset_t asset,
                               neui_compound_layer_t layer,
                               const char* prop);
+
+    // Assign the layer's path geometry from a flat command array. Only
+    // meaningful on NEUI_COMPOUND_LAYER_PATH layers - no-op on other
+    // kinds. Replaces any previously-assigned path. Passing NULL or
+    // count == 0 clears the path.
+    //
+    // The painter wraps replay in push_transform + translate(rect.x,
+    // rect.y), so command coordinates are layer-local (0, 0 = layer
+    // rect's top-left).
+    void (NEUI_ABI *set_path)(neui_session_t session, neui_asset_t asset,
+                                neui_compound_layer_t layer,
+                                const neui_path_cmd_t* cmds, uint32_t count);
   } neui_compound_api_t;
 
 #ifdef __cplusplus

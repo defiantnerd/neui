@@ -626,7 +626,8 @@ namespace win32_host
       neui_render_backend_t* backend,
       neui_render_ctx_t ctx,
       neui_asset_t asset,
-      float x, float y, float w, float h)
+      float x, float y, float w, float h,
+      uint32_t tint)
   {
     auto* s = static_cast<Session*>(host_token);
     if (!s || !backend || !ctx) return;
@@ -635,6 +636,14 @@ namespace win32_host
     uint32_t slot = asset.id & 0xffff;
     auto* entry = s->_asset_manager.get_slot(slot);
     if (!entry) return;
+    // Tinted draws bypass the untinted bitmap cache and use the
+    // per-(asset, ctx, tint) tinted_bitmaps cache; the untinted path
+    // below stays byte-for-byte identical to the pre-tint behaviour.
+    if (tint != 0xFFFFFFFFu) {
+      neui_detail::draw_tinted_bitmap_from_entry(backend, ctx, entry,
+                                                  x, y, w, h, tint);
+      return;
+    }
     // Lazy GPU upload per (asset, ctx) pair, with device-loss check. If
     // D2D had to recreate the target (D2DERR_RECREATE_TARGET), the
     // backend has bumped the per-ctx generation and the cached handle is
@@ -3952,6 +3961,18 @@ namespace win32_host
     s->invalidate_widgets_with_compound(asset.id);
   }
 
+  static void NEUI_ABI co_set_path(neui_session_t session, neui_asset_t asset,
+                                     neui_compound_layer_t layer,
+                                     const neui_path_cmd_t* cmds,
+                                     uint32_t count)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer_w32(session, asset, layer, s);
+    if (!L) return;
+    neui_detail::apply_set_path(*L, cmds, count);
+    s->invalidate_widgets_with_compound(asset.id);
+  }
+
   neui_compound_api_t compound_api = {
     NEUI_VERSION,
     co_add_layer,
@@ -3966,6 +3987,7 @@ namespace win32_host
     co_bind,
     co_bind_asset,
     co_unbind,
+    co_set_path,
   };
 
   // ---------------------------------------------------------------------------

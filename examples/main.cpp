@@ -126,6 +126,14 @@ struct AppState {
   neui_asset_t       img_knob_bg        = asset_none;
   neui_asset_t       img_knob_move      = asset_none;
   neui_asset_t       img_knob_behavior  = asset_none;
+  // Compound layer-kinds demo: a CUSTOMDRAW that exercises the three
+  // newer kinds together - a rounded RECT backplate (theme-accent fill,
+  // accent border), a TINTED asset overlay (myimage.png multiplied by
+  // the theme accent so a single source bitmap recolours with the
+  // session theme), and a PATH chevron drawn on top via the painter's
+  // path API (MOVE_TO / LINE_TO / CLOSE).
+  uint32_t           features_widget_id = 0;
+  neui_asset_t       features_compound  = asset_none;
 };
 
 // Open a modal "About" dialog owned by the main window. The dialog has a
@@ -1082,6 +1090,107 @@ int main(int argc, char** argv) {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Compound layer-kinds demo. A single CUSTOMDRAW whose compound bundles
+  // the three layer kinds added after the initial text + asset pair:
+  //
+  //   z=-1  RECT   - rounded backplate. Two-tone (fill + stroke) with a
+  //                  corner_radius > 0 so the painter takes the rounded
+  //                  4-arc path that fill+stroke'd in one go.
+  //   z= 0  ASSET  - the same myimage.png used elsewhere, drawn through
+  //                  the tinted-bitmap cache so the source pixels are
+  //                  multiplied by a tint at upload time (here a soft
+  //                  green - any single bitmap can be recoloured this
+  //                  way without a per-recolour source file).
+  //   z=+1  PATH   - a chevron icon built with MOVE_TO / LINE_TO /
+  //                  CLOSE in layer-local coordinates, fill + stroke.
+  //                  Coords are in logical pixels with (0, 0) at the
+  //                  layer rect's top-left.
+  //
+  // Static demo (no behavior / no rotation binding) - the focus is on
+  // showing what each layer kind looks like, not on interactivity.
+  if (app.assets && app.compound) {
+    app.features_compound = app.assets->create_compound(sess);
+    if (app.features_compound.id != asset_none.id) {
+      neui_asset_t cs = app.features_compound;
+
+      // Layer 1: rounded RECT backplate. fill_color = soft accent blue;
+      // stroke_color = brighter accent; corner_radius = 14 px. Static
+      // (no bindings); fills the widget via NEUI_COMPOUND_FILL.
+      auto rect_layer = app.compound->add_layer(sess, cs,
+                                                  NEUI_COMPOUND_LAYER_RECT, -1);
+      app.compound->set_anchor(sess, cs, rect_layer,
+                                 NEUI_ANCHOR_TOP_LEFT, NEUI_ANCHOR_TOP_LEFT);
+      app.compound->set_int  (sess, cs, rect_layer, "width",         NEUI_COMPOUND_FILL);
+      app.compound->set_int  (sess, cs, rect_layer, "height",        NEUI_COMPOUND_FILL);
+      app.compound->set_int  (sess, cs, rect_layer, "fill_color",   (int)0x33336699);
+      app.compound->set_int  (sess, cs, rect_layer, "stroke_color", (int)0xFF6699CC);
+      app.compound->set_float(sess, cs, rect_layer, "stroke_width",  1.5f);
+      app.compound->set_float(sess, cs, rect_layer, "corner_radius", 14.0f);
+
+      // Layer 2: TINTED bitmap. Same myimage.png handle the customdraw
+      // and the other compound use, but multiplied by a translucent
+      // green here so the source pixels look completely different. The
+      // tinted-bitmap cache uploads the multiplied buffer once per
+      // (asset, ctx, tint) tuple and reuses it on subsequent frames.
+      if (app.customdraw_bg.id != asset_none.id) {
+        auto img_layer = app.compound->add_layer(sess, cs,
+                                                   NEUI_COMPOUND_LAYER_ASSET, 0);
+        app.compound->set_anchor(sess, cs, img_layer,
+                                   NEUI_ANCHOR_CENTER, NEUI_ANCHOR_CENTER);
+        app.compound->set_int  (sess, cs, img_layer, "width",   60);
+        app.compound->set_int  (sess, cs, img_layer, "height",  60);
+        app.compound->set_int  (sess, cs, img_layer, "tint",   (int)0xC080FF80);
+        app.compound->set_asset(sess, cs, img_layer, "asset",  app.customdraw_bg);
+      }
+
+      // Layer 3: PATH chevron. A right-pointing chevron drawn in a
+      // 20x20 layer-local box anchored to the bottom-right of the
+      // widget. The painter pushes a transform to the layer rect
+      // before replaying the command list, so the coordinates below
+      // are in (0..20) units. fill_color = solid white at full alpha;
+      // stroke_color = darker outline for a 1-px crisp edge.
+      auto path_layer = app.compound->add_layer(sess, cs,
+                                                  NEUI_COMPOUND_LAYER_PATH, 1);
+      app.compound->set_anchor(sess, cs, path_layer,
+                                 NEUI_ANCHOR_BOTTOM_RIGHT, NEUI_ANCHOR_BOTTOM_RIGHT);
+      app.compound->set_int(sess, cs, path_layer, "width",  20);
+      app.compound->set_int(sess, cs, path_layer, "height", 20);
+      app.compound->set_int(sess, cs, path_layer, "offset_x", -6);
+      app.compound->set_int(sess, cs, path_layer, "offset_y", -6);
+      app.compound->set_int(sess, cs, path_layer, "fill_color",   (int)0xFFFFFFFF);
+      app.compound->set_int(sess, cs, path_layer, "stroke_color", (int)0xFF202830);
+      app.compound->set_float(sess, cs, path_layer, "stroke_width", 1.0f);
+      // Chevron: outer triangle (right-pointing >) with a notch carved
+      // out on the back-left edge for a flat-shouldered look.
+      //
+      //   (4, 3) -----+
+      //        \      \
+      //         \      \
+      //          \      +  (15, 10)
+      //          /      /
+      //         /      /
+      //   (4, 17) ----+
+      //
+      // Inner notch (clockwise so the even-odd or non-zero fill rule
+      // carves the interior) starts at (7, 8) -> (10, 10) -> (7, 12).
+      neui_path_cmd_t chev[] = {
+        { NEUI_PATH_CMD_MOVE_TO, {  4.0f,  3.0f, 0, 0, 0 } },
+        { NEUI_PATH_CMD_LINE_TO, { 15.0f, 10.0f, 0, 0, 0 } },
+        { NEUI_PATH_CMD_LINE_TO, {  4.0f, 17.0f, 0, 0, 0 } },
+        { NEUI_PATH_CMD_LINE_TO, {  9.0f, 10.0f, 0, 0, 0 } },
+        { NEUI_PATH_CMD_CLOSE,   {  0.0f,  0.0f, 0, 0, 0 } },
+      };
+      app.compound->set_path(sess, cs, path_layer, chev,
+                               (uint32_t)(sizeof(chev) / sizeof(chev[0])));
+
+      auto fw = app.widgets->create(sess, win, NEUI_W_CUSTOMDRAW,
+                                      790, 145, 85, 120, nullptr);
+      app.features_widget_id = fw.id;
+      app.widgets->set_asset(sess, fw, app.features_compound);
+    }
+  }
+
 #if 0
   // Enable event emission on interactive controls
   app.widgets->set_emit_events(sess, input,  true);
@@ -1104,6 +1213,10 @@ int main(int argc, char** argv) {
     app.widgets->destroy(sess, neui_widget_t{ app.compound_widget_b });
   if (app.img_knob_widget_id != 0)
     app.widgets->destroy(sess, neui_widget_t{ app.img_knob_widget_id });
+  if (app.features_widget_id != 0)
+    app.widgets->destroy(sess, neui_widget_t{ app.features_widget_id });
+  if (app.assets && app.features_compound.id != asset_none.id)
+    app.assets->destroy(sess, app.features_compound);
   if (app.assets && app.img_knob_compound.id != asset_none.id)
     app.assets->destroy(sess, app.img_knob_compound);
   if (app.assets && app.img_knob_behavior.id != asset_none.id)

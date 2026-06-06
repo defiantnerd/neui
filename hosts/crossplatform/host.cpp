@@ -2057,7 +2057,8 @@ namespace xpl_host
       neui_render_backend_t* backend,
       neui_render_ctx_t ctx,
       neui_asset_t asset,
-      float x, float y, float w, float h)
+      float x, float y, float w, float h,
+      uint32_t tint)
   {
     auto* s = static_cast<Session*>(host_token);
     if (!s || !backend || !ctx) return;
@@ -2067,6 +2068,14 @@ namespace xpl_host
     uint32_t slot = asset.id & 0xffff;
     auto* entry = s->_asset_manager.get_slot(slot);
     if (!entry) return;
+    // Tinted draws bypass the untinted bitmap cache and use the
+    // per-(asset, ctx, tint) tinted_bitmaps cache; the untinted path
+    // below stays byte-for-byte identical to the pre-tint behaviour.
+    if (tint != 0xFFFFFFFFu) {
+      neui_detail::draw_tinted_bitmap_from_entry(backend, ctx, entry,
+                                                  x, y, w, h, tint);
+      return;
+    }
     // Lazy GPU upload for this (asset, ctx) pair, with device-loss check.
     // If the backend has bumped its per-ctx generation (D2D after
     // D2DERR_RECREATE_TARGET) any cached handle is dangling - drop it

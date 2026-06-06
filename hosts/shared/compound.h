@@ -97,6 +97,31 @@ namespace neui_detail
     // Asset-layer fields.
     neui_asset_t             asset    = asset_none;
     float                    rotation = 0.0f;
+    // Multiplicative ARGB tint applied to the bitmap's pixels. The
+    // default 0xFFFFFFFFu is the passthrough sentinel - it short-circuits
+    // the tint pipeline and uses the standard untinted bitmap cache. Any
+    // other value goes through the per-(asset, ctx, tint) tinted cache
+    // (see hosts/shared/painter.h::draw_tinted_bitmap_from_entry).
+    uint32_t                 tint     = 0xFFFFFFFFu;
+
+    // Fill / stroke shared between RECT and PATH layers. Both colours
+    // default to 0 (fully transparent), so a freshly-added shape with
+    // no further setup is invisible - callers opt into a fill, a
+    // stroke, or both. corner_radius is rect-only.
+    uint32_t                 fill_color    = 0x00000000;
+    uint32_t                 stroke_color  = 0x00000000;
+    float                    stroke_width  = 0.0f;
+    float                    corner_radius = 0.0f;
+
+    // Path-layer geometry. Mirror of the public neui_path_cmd_t layout
+    // so set_path can memcpy. Empty vector = no path (layer paints
+    // nothing). Replayed in declaration order against the painter's
+    // begin_path / move_to / line_to / arc / close_path primitives.
+    struct PathCommand {
+      uint32_t kind;
+      float    args[5];
+    };
+    std::vector<PathCommand> path_cmds;
 
     // Bindings per property name.
     std::unordered_map<std::string, CompoundBinding> bindings;
@@ -387,6 +412,13 @@ namespace neui_detail
       if (prop == "align_y")  { L.text_align_y = v; return true; }
       if (prop == "weight")   { L.text_weight  = v; return true; }
     }
+    if (L.kind == NEUI_COMPOUND_LAYER_RECT || L.kind == NEUI_COMPOUND_LAYER_PATH) {
+      if (prop == "fill_color")   { L.fill_color   = static_cast<uint32_t>(v); return true; }
+      if (prop == "stroke_color") { L.stroke_color = static_cast<uint32_t>(v); return true; }
+    }
+    if (L.kind == NEUI_COMPOUND_LAYER_ASSET) {
+      if (prop == "tint") { L.tint = static_cast<uint32_t>(v); return true; }
+    }
     return false;
   }
 
@@ -403,6 +435,12 @@ namespace neui_detail
     }
     if (L.kind == NEUI_COMPOUND_LAYER_ASSET) {
       if (prop == "rotation") { L.rotation = v; return true; }
+    }
+    if (L.kind == NEUI_COMPOUND_LAYER_RECT || L.kind == NEUI_COMPOUND_LAYER_PATH) {
+      if (prop == "stroke_width")  { L.stroke_width  = (v < 0.0f) ? 0.0f : v; return true; }
+    }
+    if (L.kind == NEUI_COMPOUND_LAYER_RECT) {
+      if (prop == "corner_radius") { L.corner_radius = (v < 0.0f) ? 0.0f : v; return true; }
     }
     return false;
   }
@@ -458,6 +496,28 @@ namespace neui_detail
   inline void apply_unbind(CompoundLayer& L, const std::string& prop)
   {
     L.bindings.erase(prop);
+  }
+
+  // Replace the path-layer's command list. No-op on non-PATH layers
+  // (mirrors apply_set_string's "wrong kind = silently ignored").
+  // Passing NULL or count == 0 clears the path.
+  inline void apply_set_path(CompoundLayer& L,
+                              const neui_path_cmd_t* cmds, uint32_t count)
+  {
+    if (L.kind != NEUI_COMPOUND_LAYER_PATH) return;
+    L.path_cmds.clear();
+    if (!cmds || count == 0) return;
+    L.path_cmds.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+      CompoundLayer::PathCommand c;
+      c.kind    = cmds[i].kind;
+      c.args[0] = cmds[i].args[0];
+      c.args[1] = cmds[i].args[1];
+      c.args[2] = cmds[i].args[2];
+      c.args[3] = cmds[i].args[3];
+      c.args[4] = cmds[i].args[4];
+      L.path_cmds.push_back(c);
+    }
   }
 
   // ---- State filter introspection -----------------------------------------

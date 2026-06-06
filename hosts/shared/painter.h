@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <vector>
+
 #include <neui/neui.h>
 
 // Shared painter forwarder. Both static-lib hosts (xpl and win32 native)
@@ -22,12 +25,155 @@ namespace neui_detail {
   // Thunk that resolves a neui_asset_t against a host-specific manager
   // and draws it to (x, y, w, h) in the current logical coord space.
   // Hosts install one of these per paint via the painter struct below.
+  //
+  // `tint` is an ARGB multiplicative tint applied to the bitmap's pixels.
+  // 0xFFFFFFFFu (the public painter API's default) is the passthrough:
+  // it short-circuits the tinted-upload path and reuses the standard
+  // per-(asset, ctx) bitmap cache, so untinted draws stay byte-for-byte
+  // identical to the pre-tint shipping behaviour. Any other value forces
+  // a CPU pre-tint + a per-(asset, ctx, tint) cache lookup; see
+  // draw_tinted_bitmap_from_entry below.
   using draw_asset_thunk_t = void (NEUI_ABI *)(
       void* host_token,
       neui_render_backend_t* backend,
       neui_render_ctx_t ctx,
       neui_asset_t asset,
-      float x, float y, float w, float h);
+      float x, float y, float w, float h,
+      uint32_t tint);
+
+  // Tinted-bitmap cache slot stored on the host's AssetEntry. The three
+  // hosts each grow a `std::vector<TintedCtxBitmap> tinted_bitmaps;`
+  // alongside their host-local per-(asset, ctx) `bitmaps` map. Linear
+  // scan; expected size is 1-3 entries per tinted asset.
+  struct TintedCtxBitmap
+  {
+    neui_render_ctx_t ctx        = nullptr;
+    uint32_t          tint       = 0xFFFFFFFFu;
+    void*             bmp        = nullptr;
+    uint32_t          generation = 0;
+  };
+
+  // Multiply BGRA8 premultiplied pixels by an ARGB tint. The tint's A
+  // channel scales source alpha; R/G/B channels scale the matching
+  // pre-multiplied colour channels, so monochrome icons painted as
+  // (255, 255, 255, alpha) come out the tint's colour at the same
+  // alpha shape. Caller guarantees dst has the same size as src;
+  // dst may alias src.
+  inline void premultiply_tint(const uint8_t* src, uint8_t* dst,
+                                 uint32_t width_px, uint32_t height_px,
+                                 uint32_t tint)
+  {
+    uint32_t ta = (tint >> 24) & 0xffu;
+    uint32_t tr = (tint >> 16) & 0xffu;
+    uint32_t tg = (tint >>  8) & 0xffu;
+    uint32_t tb = (tint >>  0) & 0xffu;
+    size_t n = static_cast<size_t>(width_px) * height_px;
+    for (size_t i = 0; i < n; ++i) {
+      // BGRA byte order: 0 = B, 1 = G, 2 = R, 3 = A.
+      dst[i*4 + 0] = static_cast<uint8_t>((src[i*4 + 0] * tb) / 255u);
+      dst[i*4 + 1] = static_cast<uint8_t>((src[i*4 + 1] * tg) / 255u);
+      dst[i*4 + 2] = static_cast<uint8_t>((src[i*4 + 2] * tr) / 255u);
+      dst[i*4 + 3] = static_cast<uint8_t>((src[i*4 + 3] * ta) / 255u);
+    }
+  }
+
+  // Look up or upload a tinted GPU bitmap for (entry, ctx, tint) and
+  // draw it. Entry must expose `width_px`, `height_px`, `scale`,
+  // `pixels` (contiguous BGRA8 buffer) and a
+  // `std::vector<TintedCtxBitmap> tinted_bitmaps;` cache. Templatised
+  // over Entry to share the body across the three host AssetEntry
+  // types without forcing a unified type.
+  template <typename Entry>
+  inline void draw_tinted_bitmap_from_entry(
+      neui_render_backend_t* backend,
+      neui_render_ctx_t ctx,
+      Entry* entry,
+      float x, float y, float w, float h,
+      uint32_t tint)
+  {
+    if (!backend || !ctx || !entry) return;
+    if (!backend->create_bitmap || !backend->draw_bitmap) return;
+    if (entry->pixels.empty()) return;
+    if (entry->width_px == 0 || entry->height_px == 0) return;
+
+    const uint32_t gen = backend->get_context_generation
+      ? backend->get_context_generation(ctx) : 0u;
+
+    // Linear scan over tinted slots; expected count is small (1-3).
+    TintedCtxBitmap* found = nullptr;
+    for (auto& slot : entry->tinted_bitmaps) {
+      if (slot.ctx == ctx && slot.tint == tint) { found = &slot; break; }
+    }
+
+    if (found && found->bmp && found->generation != gen) {
+      // Device-loss on the owning ctx - drop the dangling handle, then
+      // fall into the re-upload branch below.
+      if (backend->destroy_bitmap) backend->destroy_bitmap(ctx, found->bmp);
+      found->bmp = nullptr;
+    }
+
+    if (!found || !found->bmp) {
+      std::vector<uint8_t> tinted(entry->pixels.size());
+      premultiply_tint(entry->pixels.data(), tinted.data(),
+                         entry->width_px, entry->height_px, tint);
+      void* new_bmp = backend->create_bitmap(ctx,
+                                              entry->width_px, entry->height_px,
+                                              tinted.data(),
+                                              entry->scale);
+      if (!new_bmp) return;
+      if (found) {
+        found->bmp        = new_bmp;
+        found->generation = gen;
+      } else {
+        entry->tinted_bitmaps.push_back(
+          TintedCtxBitmap{ ctx, tint, new_bmp, gen });
+        found = &entry->tinted_bitmaps.back();
+      }
+    }
+
+    backend->draw_bitmap(ctx, found->bmp,
+                           0.0f, 0.0f, 0.0f, 0.0f,   // full bitmap
+                           x, y, w, h);
+  }
+
+  // Release every tinted_bitmaps slot whose ctx matches. Used by the
+  // hosts' release_context paths alongside the untinted bitmaps cache.
+  template <typename Entry>
+  inline void release_tinted_bitmaps_for_ctx(
+      Entry* entry,
+      neui_render_ctx_t ctx,
+      neui_render_backend_t* backend)
+  {
+    if (!entry) return;
+    auto& v = entry->tinted_bitmaps;
+    auto new_end = v.begin();
+    for (auto it = v.begin(); it != v.end(); ++it) {
+      if (it->ctx == ctx) {
+        if (backend && backend->destroy_bitmap && it->bmp)
+          backend->destroy_bitmap(ctx, it->bmp);
+        continue;
+      }
+      if (new_end != it) *new_end = *it;
+      ++new_end;
+    }
+    v.erase(new_end, v.end());
+  }
+
+  // Release every tinted_bitmaps slot, calling destroy_bitmap on each
+  // slot's owning ctx. Used by entry teardown paths (release_slot,
+  // manager clear).
+  template <typename Entry>
+  inline void release_all_tinted_bitmaps(
+      Entry* entry,
+      neui_render_backend_t* backend)
+  {
+    if (!entry) return;
+    if (backend && backend->destroy_bitmap) {
+      for (auto& slot : entry->tinted_bitmaps)
+        if (slot.bmp) backend->destroy_bitmap(slot.ctx, slot.bmp);
+    }
+    entry->tinted_bitmaps.clear();
+  }
 
 } // namespace neui_detail
 
@@ -120,7 +266,21 @@ namespace neui_detail {
                                   float x, float y, float w, float h)
   {
     if (!p || !p->draw_asset_thunk) return;
-    p->draw_asset_thunk(p->host_token, p->backend, p->ctx, asset, x, y, w, h);
+    p->draw_asset_thunk(p->host_token, p->backend, p->ctx, asset,
+                          x, y, w, h, 0xFFFFFFFFu);
+  }
+
+  // Tinted variant - bypasses the public painter API (which does not
+  // expose `tint`) and reaches the thunk directly. Used by the compound
+  // asset-layer paint path; clients of NEUI_W_CUSTOMDRAW continue to use
+  // k_painter_api.draw_asset.
+  inline void painter_draw_asset_tinted(neui_painter_t* p, neui_asset_t asset,
+                                          float x, float y, float w, float h,
+                                          uint32_t tint)
+  {
+    if (!p || !p->draw_asset_thunk) return;
+    p->draw_asset_thunk(p->host_token, p->backend, p->ctx, asset,
+                          x, y, w, h, tint);
   }
 
   inline void painter_push_alpha(neui_painter_t* p, float factor)
