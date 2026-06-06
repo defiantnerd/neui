@@ -1633,14 +1633,14 @@ namespace xpl_host
                                     void* preview_native,
                                     int hot_x, int hot_y)
   {
+    // Take ownership of the bridged NSImage* immediately so every exit
+    // path releases it (the platform.h contract hands it off
+    // unconditionally). Pass nil if no preview.
+    NSImage* preview = (__bridge_transfer NSImage*)preview_native;
     if (!native_handle || !item) return 0;
     NSWindow* win = (__bridge NSWindow*)native_handle;
     NSView* cv = [win contentView];
     if (!cv) return 0;
-    // Take ownership of the bridged NSImage* (transfer matches the
-    // platform.h contract: caller hands off ownership for the duration of
-    // the call). Pass nil if no preview.
-    NSImage* preview = (__bridge_transfer NSImage*)preview_native;
     return neui_detail::macos_run_drag_source(cv, *item, allowed_actions,
                                                 preview, hot_x, hot_y);
   }
