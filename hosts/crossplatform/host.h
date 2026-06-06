@@ -198,6 +198,9 @@ namespace xpl_host
   class FrameWidget : public WidgetData {
   public:
     bool is_frame() const override { return true; }
+    // True while a modal DIALOG is blocking inside platform_run_modal_until.
+    // Set in widget_show; cleared by the destroy path so the pump exits.
+    bool modal_pump_active = false;
   };
 
   // Structural / display-only widgets - no extra fields, use base paint

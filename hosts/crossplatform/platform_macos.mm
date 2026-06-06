@@ -23,6 +23,7 @@
 
 #include "host.h"
 #include "platform.h"
+#include "../shared/macos/modal_pump_macos.h"
 #include "../../backends/cg/cg_backend.h"
 #include "../shared/macos/clipboard_macos.h"
 // This TU owns the single out-of-line @implementation NEUIDragSource body
@@ -912,6 +913,9 @@ static NSDragOperation neui_dnd_op_from_action(uint32_t action)
         backend->destroy_context(wd->render_ctx);
         wd->render_ctx = nullptr;
       }
+      // Drop the modal pump flag so widget_show unwinds and returns.
+      if (auto* fw = dynamic_cast<xpl_host::FrameWidget*>(wd))
+        fw->modal_pump_active = false;
     }
   }
 
@@ -1316,15 +1320,7 @@ namespace xpl_host
 
   bool platform_run_modal_until(bool* keep_running)
   {
-    if (!keep_running) return true;
-    while (*keep_running) {
-      NSEvent* ev = [NSApp nextEventMatchingMask:NSEventMaskAny
-                                       untilDate:[NSDate distantFuture]
-                                          inMode:NSDefaultRunLoopMode
-                                         dequeue:YES];
-      if (!ev) continue;
-      [NSApp sendEvent:ev];
-    }
+    neui_detail::run_modal_pump_macos(keep_running);
     return true;
   }
 

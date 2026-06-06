@@ -857,6 +857,8 @@ namespace win32_host
             EnableWindow(owner->hwnd, TRUE);
             SetForegroundWindow(owner->hwnd);
           }
+          // Drop the modal pump so widget_show unwinds and returns.
+          if (wd) wd->modal_pump_active = false;
         }
         return 0;
       }
@@ -1298,6 +1300,28 @@ namespace win32_host
       if (!dispatch_one_message(msg)) return false;
     }
     return true;
+  }
+
+  // Nested pump for blocking modal DIALOG show. Same dispatch rules as
+  // run() (accelerator + IsDialogMessage); exits when the dialog's
+  // WM_DESTROY clears *keep_running or when WM_QUIT arrives.
+  void run_modal_until(bool* keep_running)
+  {
+    if (!keep_running) return;
+    MSG msg;
+    while (*keep_running) {
+      BOOL bRet = ::GetMessage(&msg, NULL, 0, 0);
+      if (bRet == 0) {
+        // WM_QUIT - re-post so the outer pump still sees it.
+        ::PostQuitMessage(static_cast<int>(msg.wParam));
+        return;
+      }
+      if (bRet == -1) return;
+      if (!dispatch_one_message(msg)) {
+        ::PostQuitMessage(0);
+        return;
+      }
+    }
   }
 
 } // namespace win32_host

@@ -55,6 +55,10 @@ namespace macos_host
     std::vector<std::string> accepted_mimes;
     void*    userdata    = nullptr;
     uint32_t owner_index = 0;
+    // For modal DIALOG frames: true while widget_show is blocking in a
+    // nested NSEvent pump. Cleared by the NSWindow's windowWillClose:
+    // delegate so the pump exits and widget_show returns.
+    bool     modal_pump_active = false;
 
     // Native handles. Filled in step 3 onward.
     //   native_window  - NSWindow*  (frames only; +1 retained via __bridge_retained)

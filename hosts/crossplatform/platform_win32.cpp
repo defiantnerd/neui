@@ -390,6 +390,9 @@ namespace xpl_host
               EnableWindow(static_cast<HWND>(owner_native), TRUE);
               SetForegroundWindow(static_cast<HWND>(owner_native));
             }
+            // Drop the modal pump so widget_show unwinds and returns.
+            if (auto* fw = dynamic_cast<FrameWidget*>(wd))
+              fw->modal_pump_active = false;
           }
           wd->native_handle = nullptr;
         }

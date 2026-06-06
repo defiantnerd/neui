@@ -14,6 +14,7 @@
 #include "../shared/macos/keys_macos.h"
 #include "../shared/macos/theme_provider_macos.h"
 #include "../shared/macos/clipboard_macos.h"
+#include "../shared/macos/modal_pump_macos.h"
 #include "../shared/dnd_modifier_suggest.h"
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_compound.h"
@@ -1959,6 +1960,12 @@ static float neui_snap_to_steps(float v, int steps)
   (void)note;
   if (handled_close) return;
   handled_close = true;
+  // Drop the modal pump flag so the nested NSEvent loop in widget_show
+  // unwinds and returns to the caller. No-op for non-modal frames.
+  if (session && session->_widgets.exists(widget_index)) {
+    auto& wd = session->_widgets[widget_index];
+    if (wd.modal_pump_active) wd.modal_pump_active = false;
+  }
   if (is_appwindow) {
     if (--g_appwindow_count <= 0) {
       [NSApp stop:nil];
@@ -2835,6 +2842,11 @@ namespace macos_host
         NSWindow* w2 = weak_window;
         if (w2 && w2.visible) [w2 close];
       }];
+      // Native blocking modal: spin a nested NSEvent pump until the
+      // dialog's windowWillClose: clears modal_pump_active. The sheet
+      // animation runs concurrently with the pump.
+      w.modal_pump_active = true;
+      neui_detail::run_modal_pump_macos(&w.modal_pump_active);
     } else {
       [window makeKeyAndOrderFront:nil];
     }

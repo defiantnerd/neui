@@ -316,13 +316,25 @@ namespace xpl_host
 
         // Block input on the owner while the dialog is up - unless the
         // client opted into modeless via NEUI_ATTR_MODAL = 0.
+        bool is_modal_dialog = false;
         if (wd.is_dialog() && wd.owner_index != 0 &&
             s->_widgets.exists(wd.owner_index)) {
-          bool is_modal = !wd.attrs ||
-                          wd.attrs->get_int(NEUI_ATTR_MODAL, 1) != 0;
+          is_modal_dialog = !wd.attrs ||
+                            wd.attrs->get_int(NEUI_ATTR_MODAL, 1) != 0;
           void* owner_native = s->_widgets[wd.owner_index].native_handle;
-          if (owner_native && is_modal)
+          if (owner_native && is_modal_dialog)
             platform_set_window_enabled(owner_native, false);
+        }
+        // Native blocking modal: spin a nested OS pump until the dialog
+        // is destroyed. The destroy path (platform_win32.cpp WM_NCDESTROY /
+        // platform_macos.mm windowWillClose) clears modal_pump_active so
+        // the pump exits and widget_show returns to the caller.
+        if (is_modal_dialog) {
+          auto* fw = dynamic_cast<FrameWidget*>(&wd);
+          if (fw) {
+            fw->modal_pump_active = true;
+            platform_run_modal_until(&fw->modal_pump_active);
+          }
         }
       }
     } else {

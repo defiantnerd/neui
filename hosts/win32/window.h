@@ -12,6 +12,11 @@ namespace win32_host
 {
   bool run();
   bool pump_once();
+  // Nested message pump used by blocking modal DIALOG show. Loops until
+  // *keep_running flips to false (cleared in the dialog's WM_DESTROY)
+  // or WM_QUIT arrives. Re-posts WM_QUIT before returning so the outer
+  // pump still sees it.
+  void run_modal_until(bool* keep_running);
   void set_hinstance(HINSTANCE h);
   HINSTANCE get_hinstance();
   void register_classes();

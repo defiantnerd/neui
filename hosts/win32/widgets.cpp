@@ -1804,6 +1804,14 @@ namespace win32_host
                         w.attrs->get_int(NEUI_ATTR_MODAL, 1) != 0;
         if (is_dialog && owner_hwnd && is_modal)
           EnableWindow(owner_hwnd, FALSE);
+        // Native blocking modal: spin a nested OS pump until the dialog
+        // HWND is destroyed. AppWindowProc's WM_DESTROY for the dialog
+        // clears modal_pump_active, breaking the pump so widget_show
+        // returns to the caller.
+        if (is_dialog && is_modal) {
+          w.modal_pump_active = true;
+          run_modal_until(&w.modal_pump_active);
+        }
       }
     } else if (w.hwnd != nullptr) {
       ShowWindow(w.hwnd, SW_SHOW);

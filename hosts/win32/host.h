@@ -72,6 +72,10 @@ namespace win32_host {
     void* userdata = nullptr;
     // For DIALOG frames: tree index of the owner frame. 0 = no owner.
     uint32_t owner_index = 0;
+    // For modal DIALOG frames: true while widget_show is blocking in a
+    // nested GetMessageW pump. Cleared by the dialog HWND's WM_DESTROY so
+    // the pump exits and widget_show returns.
+    bool modal_pump_active = false;
     // Win32-specific
     HWND hwnd = nullptr;
     HFONT hfont = nullptr;   // DPI-scaled font; owned by frame windows (APPWINDOW/PLUGWINDOW)
