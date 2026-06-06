@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 #include <neui/neui.h>
@@ -39,6 +40,52 @@ namespace neui_detail {
       neui_asset_t asset,
       float x, float y, float w, float h,
       uint32_t tint);
+
+  // Shared body for the per-host draw_asset thunks: lazy GPU upload for
+  // the (entry, ctx) pair with device-loss check, then draw. If the
+  // backend has bumped its per-ctx generation (D2D after
+  // D2DERR_RECREATE_TARGET) any cached handle is dangling - drop it and
+  // re-upload against the new target. `tint` routes straight to the
+  // backend's draw_bitmap (0xFFFFFFFFu = untinted passthrough).
+  //
+  // EntryT is each host's asset-entry type; it needs `bitmaps` (an
+  // unordered_map<neui_render_ctx_t, {void* bmp; uint32_t generation;}>),
+  // `width_px`, `height_px`, `pixels`, `scale`. The host thunk keeps the
+  // host-specific part (session cast + cross-session validation + slot
+  // resolution) and forwards the entry here.
+  template <typename EntryT>
+  inline void painter_draw_entry_cached(neui_render_backend_t* backend,
+                                         neui_render_ctx_t ctx,
+                                         EntryT* entry,
+                                         float x, float y, float w, float h,
+                                         uint32_t tint)
+  {
+    using CtxBitmapT =
+      typename std::decay<decltype(entry->bitmaps)>::type::mapped_type;
+    if (!backend || !ctx || !entry) return;
+    const uint32_t gen = backend->get_context_generation
+      ? backend->get_context_generation(ctx) : 0u;
+    auto it = entry->bitmaps.find(ctx);
+    if (it != entry->bitmaps.end() && it->second.generation != gen) {
+      if (backend->destroy_bitmap && it->second.bmp)
+        backend->destroy_bitmap(ctx, it->second.bmp);
+      entry->bitmaps.erase(it);
+      it = entry->bitmaps.end();
+    }
+    if (it == entry->bitmaps.end()) {
+      if (!backend->create_bitmap) return;
+      void* bmp = backend->create_bitmap(ctx,
+                                          entry->width_px, entry->height_px,
+                                          entry->pixels.data(),
+                                          entry->scale);
+      if (!bmp) return;
+      it = entry->bitmaps.emplace(ctx, CtxBitmapT{ bmp, gen }).first;
+    }
+    if (backend->draw_bitmap)
+      backend->draw_bitmap(ctx, it->second.bmp,
+                            0.0f, 0.0f, 0.0f, 0.0f,    // full bitmap
+                            x, y, w, h, tint);
+  }
 
 } // namespace neui_detail
 

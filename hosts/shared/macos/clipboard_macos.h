@@ -253,6 +253,25 @@ namespace neui_detail
     return out;
   }
 
+  // MIME list + dispatch-ready const char* pointer view in one shot.
+  // `ptrs` points into `strings`, so keep the struct alive for the
+  // duration of the dispatch call. Shared by the NSDraggingDestination
+  // methods of both macOS hosts, which all need the (data(), size())
+  // shape for Session::dispatch_dnd_*.
+  struct PbMimeList {
+    std::vector<std::string>  strings;
+    std::vector<const char*>  ptrs;
+  };
+
+  inline PbMimeList pb_collect_mime_list_macos(NSPasteboard* pb)
+  {
+    PbMimeList ml;
+    ml.strings = pb_collect_mimes_macos(pb);
+    ml.ptrs.reserve(ml.strings.size());
+    for (auto& s : ml.strings) ml.ptrs.push_back(s.c_str());
+    return ml;
+  }
+
   inline bool clipboard_read_item_macos(DataItem& item)
   {
     return pb_read_item_macos([NSPasteboard generalPasteboard], item);

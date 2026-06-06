@@ -2069,33 +2069,10 @@ namespace xpl_host
     uint32_t slot = asset.id & 0xffff;
     auto* entry = s->_asset_manager.get_slot(slot);
     if (!entry) return;
-    // Lazy GPU upload for this (asset, ctx) pair, with device-loss check.
-    // If the backend has bumped its per-ctx generation (D2D after
-    // D2DERR_RECREATE_TARGET) any cached handle is dangling - drop it
-    // and re-upload against the new target.
-    const uint32_t gen = backend->get_context_generation
-      ? backend->get_context_generation(ctx) : 0u;
-    auto it = entry->bitmaps.find(ctx);
-    if (it != entry->bitmaps.end() && it->second.generation != gen) {
-      if (backend->destroy_bitmap && it->second.bmp)
-        backend->destroy_bitmap(ctx, it->second.bmp);
-      entry->bitmaps.erase(it);
-      it = entry->bitmaps.end();
-    }
-    if (it == entry->bitmaps.end()) {
-      if (!backend->create_bitmap) return;
-      void* bmp = backend->create_bitmap(ctx,
-                                          entry->width_px, entry->height_px,
-                                          entry->pixels.data(),
-                                          entry->scale);
-      if (!bmp) return;
-      it = entry->bitmaps.emplace(ctx,
-                                   neui_detail::CtxBitmap{ bmp, gen }).first;
-    }
-    if (backend->draw_bitmap)
-      backend->draw_bitmap(ctx, it->second.bmp,
-                            0.0f, 0.0f, 0.0f, 0.0f,    // full bitmap
-                            x, y, w, h, tint);
+    // Cache-walk + lazy GPU upload + draw shared with the native hosts
+    // (hosts/shared/painter.h).
+    neui_detail::painter_draw_entry_cached(backend, ctx, entry,
+                                            x, y, w, h, tint);
   }
 
   // CUSTOMDRAW - hands the curated painter API to the client and lets

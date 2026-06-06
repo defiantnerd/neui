@@ -1577,59 +1577,11 @@ namespace xpl_host
   }
 
   // -------------------------------------------------------------------------
-  // Drag & drop. The seam callbacks below thunk into the xpl Session;
-  // each Session::dispatch_dnd_* converts to a NEUI_EVENT_DND_* and walks
-  // the widget tree for the deepest drop_target match.
-
-  static uint32_t xpl_dnd_on_enter(void* session_ptr, uint32_t frame_widget_id,
-                                    int x, int y,
-                                    const char* const* formats,
-                                    uint32_t formats_count,
-                                    uint32_t suggested,
-                                    uint32_t buttonmap)
-  {
-    auto* s = static_cast<Session*>(session_ptr);
-    if (!s) return 0;
-    return s->dispatch_dnd_enter(frame_widget_id & 0xFFFFu,
-                                  x, y, formats, formats_count,
-                                  suggested, buttonmap);
-  }
-
-  static uint32_t xpl_dnd_on_move(void* session_ptr, uint32_t frame_widget_id,
-                                   int x, int y,
-                                   const char* const* formats,
-                                   uint32_t formats_count,
-                                   uint32_t suggested,
-                                   uint32_t buttonmap)
-  {
-    auto* s = static_cast<Session*>(session_ptr);
-    if (!s) return 0;
-    return s->dispatch_dnd_move(frame_widget_id & 0xFFFFu,
-                                 x, y, formats, formats_count,
-                                 suggested, buttonmap);
-  }
-
-  static void xpl_dnd_on_leave(void* session_ptr)
-  {
-    auto* s = static_cast<Session*>(session_ptr);
-    if (!s) return;
-    s->dispatch_dnd_leave();
-  }
-
-  static uint32_t xpl_dnd_on_drop(void* session_ptr, uint32_t frame_widget_id,
-                                   int x, int y,
-                                   const char* const* formats,
-                                   uint32_t formats_count,
-                                   uint32_t suggested,
-                                   uint32_t buttonmap,
-                                   neui_detail::DataItem* drop_item)
-  {
-    auto* s = static_cast<Session*>(session_ptr);
-    if (!s) return 0;
-    return s->dispatch_dnd_drop(frame_widget_id & 0xFFFFu,
-                                 x, y, formats, formats_count,
-                                 suggested, buttonmap, drop_item);
-  }
+  // Drag & drop. The dispatch seam is built by the shared
+  // make_dnd_dispatch_seam (hosts/shared/win32/dnd_target_win32.h), whose
+  // callbacks forward into Session::dispatch_dnd_* - each converts to a
+  // NEUI_EVENT_DND_* and walks the widget tree for the deepest
+  // drop_target match.
 
   bool platform_dnd_register_window(void* native_handle, void* session_ptr,
                                      uint32_t frame_widget_id)
@@ -1639,13 +1591,8 @@ namespace xpl_host
 
     neui_detail::dnd_ensure_ole_initialized();
 
-    neui_detail::DndDispatchSeam seam = {};
-    seam.session_ptr     = session_ptr;
-    seam.frame_widget_id = frame_widget_id;
-    seam.on_enter        = &xpl_dnd_on_enter;
-    seam.on_move         = &xpl_dnd_on_move;
-    seam.on_leave        = &xpl_dnd_on_leave;
-    seam.on_drop         = &xpl_dnd_on_drop;
+    neui_detail::DndDispatchSeam seam = neui_detail::make_dnd_dispatch_seam(
+      static_cast<Session*>(session_ptr), frame_widget_id);
 
     auto* target = new neui_detail::DropTargetImpl(hwnd, seam);
     HRESULT hr = RegisterDragDrop(hwnd, target);

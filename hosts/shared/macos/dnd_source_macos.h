@@ -9,6 +9,7 @@
 
 #include "../clipboard_item.h"
 #include "../../../include/neui/d/dnd.h"
+#include "dnd_helpers_macos.h"   // dnd_nsop_from_action
 
 // Drag-source side of NEUI_API_DND on macOS. Mirror of the
 // NSDraggingDestination plumbing in NEUIView / NEUINativeContentView.
@@ -78,14 +79,8 @@ namespace neui_detail
 
 namespace neui_detail
 {
-  inline NSDragOperation dnd_action_to_nsop(uint32_t action)
-  {
-    NSDragOperation mask = NSDragOperationNone;
-    if (action & NEUI_DND_ACTION_COPY) mask |= NSDragOperationCopy;
-    if (action & NEUI_DND_ACTION_MOVE) mask |= NSDragOperationMove;
-    if (action & NEUI_DND_ACTION_LINK) mask |= NSDragOperationLink;
-    return mask;
-  }
+  // action -> NSDragOperation mask lives in dnd_helpers_macos.h
+  // (dnd_nsop_from_action), shared with the drop-target side.
 
   inline uint32_t nsop_to_dnd_action(NSDragOperation op)
   {
@@ -354,7 +349,7 @@ namespace neui_detail
     if ([items count] == 0) return 0;
 
     NEUIDragSource* src = [[NEUIDragSource alloc] init];
-    src->allowedOps = dnd_action_to_nsop(allowed_actions);
+    src->allowedOps = dnd_nsop_from_action(allowed_actions);
 
     NSEvent* evt = synthesize_drag_trigger(anchor_view, win, mouse_view);
     NSDraggingSession* session =

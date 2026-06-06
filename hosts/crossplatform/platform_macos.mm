@@ -32,6 +32,7 @@
 #include "../shared/dnd_modifier_suggest.h"
 #include "../shared/macos/dnd_source_macos.h"
 #include "../shared/macos/image_loader_macos.h"
+#include "../shared/macos/window_helpers_macos.h"
 #include "../shared/macos/keys_macos.h"
 #include "../shared/macos/menubar_macos.h"
 #include "../shared/macos/theme_provider_macos.h"
@@ -769,31 +770,10 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
 // only NSDraggingDestination per frame; the framework hit-tests via
 // Session::dispatch_dnd_* and the client receives NEUI_EVENT_DND_*.
 
-static uint32_t neui_dnd_suggested_from_op(NSDragOperation op)
-{
-  // Translate the source's operation mask to NEUI_DND_ACTION_* bits, then
-  // pick the suggestion via the shared modifier convention
-  // (hosts/shared/dnd_modifier_suggest.h) so suggested_action behaves the
-  // same as on Win32.
-  uint32_t available = 0;
-  if (op & NSDragOperationCopy) available |= 1;  // NEUI_DND_ACTION_COPY
-  if (op & NSDragOperationMove) available |= 2;  // NEUI_DND_ACTION_MOVE
-  if (op & NSDragOperationLink) available |= 4;  // NEUI_DND_ACTION_LINK
-  NSEventModifierFlags mods = [NSEvent modifierFlags];
-  return neui_detail::dnd_suggest_action(
-    available,
-    (mods & NSEventModifierFlagControl) != 0,
-    (mods & NSEventModifierFlagShift)   != 0);
-}
-
-static NSDragOperation neui_dnd_op_from_action(uint32_t action)
-{
-  NSDragOperation op = NSDragOperationNone;
-  if (action & 1) op |= NSDragOperationCopy;
-  if (action & 2) op |= NSDragOperationMove;
-  if (action & 4) op |= NSDragOperationLink;
-  return op;
-}
+// NSDragOperation <-> NEUI_DND_ACTION_* translation + the modifier-aware
+// suggestion live in hosts/shared/macos/dnd_helpers_macos.h
+// (dnd_suggested_from_nsop / dnd_nsop_from_action), shared with the
+// native host's NEUINativeContentView.
 
 - (NSPoint)neuiLocalPointFromDragInfo:(id<NSDraggingInfo>)sender
 {
@@ -807,34 +787,30 @@ static NSDragOperation neui_dnd_op_from_action(uint32_t action)
 {
   if (!session) return NSDragOperationNone;
   NSPasteboard* pb = [sender draggingPasteboard];
-  auto mimes = neui_detail::pb_collect_mimes_macos(pb);
-  std::vector<const char*> ptrs; ptrs.reserve(mimes.size());
-  for (auto& s : mimes) ptrs.push_back(s.c_str());
+  auto ml = neui_detail::pb_collect_mime_list_macos(pb);
   NSPoint p = [self neuiLocalPointFromDragInfo:sender];
-  uint32_t suggested = neui_dnd_suggested_from_op([sender draggingSourceOperationMask]);
+  uint32_t suggested = neui_detail::dnd_suggested_from_nsop([sender draggingSourceOperationMask]);
   uint32_t accepted = session->dispatch_dnd_enter(widget_index,
                                                     (int)p.x, (int)p.y,
-                                                    ptrs.data(),
-                                                    (uint32_t)ptrs.size(),
+                                                    ml.ptrs.data(),
+                                                    (uint32_t)ml.ptrs.size(),
                                                     suggested, 0);
-  return neui_dnd_op_from_action(accepted);
+  return neui_detail::dnd_nsop_from_action(accepted);
 }
 
 - (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender
 {
   if (!session) return NSDragOperationNone;
   NSPasteboard* pb = [sender draggingPasteboard];
-  auto mimes = neui_detail::pb_collect_mimes_macos(pb);
-  std::vector<const char*> ptrs; ptrs.reserve(mimes.size());
-  for (auto& s : mimes) ptrs.push_back(s.c_str());
+  auto ml = neui_detail::pb_collect_mime_list_macos(pb);
   NSPoint p = [self neuiLocalPointFromDragInfo:sender];
-  uint32_t suggested = neui_dnd_suggested_from_op([sender draggingSourceOperationMask]);
+  uint32_t suggested = neui_detail::dnd_suggested_from_nsop([sender draggingSourceOperationMask]);
   uint32_t accepted = session->dispatch_dnd_move(widget_index,
                                                    (int)p.x, (int)p.y,
-                                                   ptrs.data(),
-                                                   (uint32_t)ptrs.size(),
+                                                   ml.ptrs.data(),
+                                                   (uint32_t)ml.ptrs.size(),
                                                    suggested, 0);
-  return neui_dnd_op_from_action(accepted);
+  return neui_detail::dnd_nsop_from_action(accepted);
 }
 
 - (void)draggingExited:(id<NSDraggingInfo>)sender
@@ -849,15 +825,13 @@ static NSDragOperation neui_dnd_op_from_action(uint32_t action)
   NSPasteboard* pb = [sender draggingPasteboard];
   neui_detail::DataItem item;
   neui_detail::pb_read_item_macos(pb, item);
-  auto mimes = neui_detail::pb_collect_mimes_macos(pb);
-  std::vector<const char*> ptrs; ptrs.reserve(mimes.size());
-  for (auto& s : mimes) ptrs.push_back(s.c_str());
+  auto ml = neui_detail::pb_collect_mime_list_macos(pb);
   NSPoint p = [self neuiLocalPointFromDragInfo:sender];
-  uint32_t suggested = neui_dnd_suggested_from_op([sender draggingSourceOperationMask]);
+  uint32_t suggested = neui_detail::dnd_suggested_from_nsop([sender draggingSourceOperationMask]);
   uint32_t accepted = session->dispatch_dnd_drop(widget_index,
                                                    (int)p.x, (int)p.y,
-                                                   ptrs.data(),
-                                                   (uint32_t)ptrs.size(),
+                                                   ml.ptrs.data(),
+                                                   (uint32_t)ml.ptrs.size(),
                                                    suggested, 0, &item);
   return accepted ? YES : NO;
 }
@@ -1008,15 +982,11 @@ using neui_detail::macos_install_app_menu;
 
 namespace {
 
+// Geometry + style-mask bodies shared with the native macOS host
+// (hosts/shared/macos/window_helpers_macos.h); thin local names kept so
+// call sites stay terse.
 NSRect logical_window_rect(int x, int y, int w, int h)
-{
-  // neui logical coordinates: top-left origin, Y down. NSWindow frame uses
-  // bottom-left screen origin, Y up. Convert against the main screen.
-  CGFloat screen_h = NSScreen.mainScreen.frame.size.height;
-  if (w <= 0) w = 1;
-  if (h <= 0) h = 1;
-  return NSMakeRect(x, screen_h - y - h, w, h);
-}
+{ return neui_detail::logical_window_rect_macos(x, y, w, h); }
 
 NSWindow* native_window(void* nh)
 {
@@ -1024,19 +994,10 @@ NSWindow* native_window(void* nh)
 }
 
 NSWindowStyleMask styles_for_appwindow()
-{
-  return NSWindowStyleMaskTitled
-       | NSWindowStyleMaskClosable
-       | NSWindowStyleMaskMiniaturizable
-       | NSWindowStyleMaskResizable;
-}
+{ return neui_detail::styles_for_appwindow_macos(); }
 
 NSWindowStyleMask styles_for_dialog()
-{
-  // Titlebar + close button, no resize / minimize - mirrors WS_OVERLAPPED |
-  // WS_CAPTION | WS_SYSMENU on win32.
-  return NSWindowStyleMaskTitled | NSWindowStyleMaskClosable;
-}
+{ return neui_detail::styles_for_dialog_macos(); }
 
 void install_view_and_context(xpl_host::Session* session,
                               uint32_t widget_index,

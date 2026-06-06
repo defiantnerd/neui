@@ -62,6 +62,54 @@ namespace neui_detail
     DropFn  on_drop  = nullptr;
   };
 
+  // Build a seam whose callbacks forward straight into the host Session's
+  // dispatch_dnd_* methods. Both win32 hosts (xpl platform_win32.cpp and
+  // the native hosts/win32/widgets.cpp) previously carried identical
+  // hand-written adapter sets; SessionT only needs the four
+  // dispatch_dnd_enter/move/leave/drop members with the shared signature.
+  // Captureless lambdas decay to the seam's plain function pointers.
+  template <typename SessionT>
+  inline DndDispatchSeam make_dnd_dispatch_seam(SessionT* session,
+                                                 uint32_t frame_widget_id)
+  {
+    DndDispatchSeam seam = {};
+    seam.session_ptr     = session;
+    seam.frame_widget_id = frame_widget_id;
+    seam.on_enter = [](void* sp, uint32_t fid, int x, int y,
+                       const char* const* formats, uint32_t formats_count,
+                       uint32_t suggested, uint32_t buttonmap) -> uint32_t {
+      auto* s = static_cast<SessionT*>(sp);
+      if (!s) return 0;
+      return s->dispatch_dnd_enter(fid & 0xFFFFu, x, y,
+                                    formats, formats_count,
+                                    suggested, buttonmap);
+    };
+    seam.on_move = [](void* sp, uint32_t fid, int x, int y,
+                      const char* const* formats, uint32_t formats_count,
+                      uint32_t suggested, uint32_t buttonmap) -> uint32_t {
+      auto* s = static_cast<SessionT*>(sp);
+      if (!s) return 0;
+      return s->dispatch_dnd_move(fid & 0xFFFFu, x, y,
+                                   formats, formats_count,
+                                   suggested, buttonmap);
+    };
+    seam.on_leave = [](void* sp) {
+      auto* s = static_cast<SessionT*>(sp);
+      if (s) s->dispatch_dnd_leave();
+    };
+    seam.on_drop = [](void* sp, uint32_t fid, int x, int y,
+                      const char* const* formats, uint32_t formats_count,
+                      uint32_t suggested, uint32_t buttonmap,
+                      DataItem* drop_item) -> uint32_t {
+      auto* s = static_cast<SessionT*>(sp);
+      if (!s) return 0;
+      return s->dispatch_dnd_drop(fid & 0xFFFFu, x, y,
+                                   formats, formats_count,
+                                   suggested, buttonmap, drop_item);
+    };
+    return seam;
+  }
+
   // Extract MIME names + raw byte payloads from an IDataObject. Probes
   // CF_UNICODETEXT, CF_HTML, CF_HDROP, then enumerates remaining
   // RegisterClipboardFormatA-style names (anything containing '/'). The
