@@ -213,6 +213,32 @@ if(APPLE)
   target_link_libraries(neui_dnd_source_example PRIVATE neui-macoshost)
 endif()
 
+# Render-to-surface example. Renders a procedural bar chart into an
+# off-screen SURFACE asset and displays it via a CUSTOMDRAW widget that
+# calls painter->draw_asset, exercising create_surface + paint_surface
+# (incl. the per-window upload-cache drop on re-render).
+if(MSVC)
+  add_executable(neui_surface_example WIN32
+    examples/surface_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_surface_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_surface_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_surface_example WIN32 examples/surface_example.cpp)
+elseif(APPLE)
+  add_executable(neui_surface_example MACOSX_BUNDLE examples/surface_example.cpp)
+else()
+  add_executable(neui_surface_example examples/surface_example.cpp)
+endif()
+target_link_libraries(neui_surface_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_surface_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_surface_example PRIVATE neui-macoshost)
+endif()
+
 # Minimal README example - input + button + label echo. Pure C; mirrors the
 # code block in README.md verbatim. Useful as a smoke test that the public
 # C API stays usable from a one-file client.

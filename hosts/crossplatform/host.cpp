@@ -2026,8 +2026,10 @@ namespace xpl_host
   // Thunk: resolves a neui_asset_t against the session's AssetManager and
   // draws it via backend->draw_bitmap. Wired into neui_painter::draw_asset
   // _thunk so the curated painter API can dispatch asset draws without
-  // exposing the raw bitmap pointer to clients.
-  static void NEUI_ABI xpl_painter_draw_asset_thunk(
+  // exposing the raw bitmap pointer to clients. Also called from
+  // widgets.cpp's as_paint_surface so nested draw_asset inside a surface
+  // paint walks the same resolution path - hence non-static.
+  void NEUI_ABI xpl_painter_draw_asset_thunk(
       void* host_token,
       neui_render_backend_t* backend,
       neui_render_ctx_t ctx,

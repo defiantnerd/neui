@@ -1712,6 +1712,49 @@ namespace macos_host
     return pack_asset_macos(s->session_id(), slot);
   }
 
+  // Defined in window.mm - same thunk WIDGET_PAINT installs into the
+  // painter, lifted here so nested draw_asset works from inside a
+  // surface paint.
+  void NEUI_ABI macos_painter_draw_asset_thunk(void* host_token,
+                                                 neui_render_backend_t* backend,
+                                                 neui_render_ctx_t ctx,
+                                                 neui_asset_t asset,
+                                                 float x, float y,
+                                                 float w, float h);
+
+  static neui_asset_t NEUI_ABI a_create_surface(neui_session_t session,
+                                                  float width_logical,
+                                                  float height_logical,
+                                                  float scale)
+  {
+    auto* s = get_session(session);
+    if (!s) return asset_none;
+    if (width_logical <= 0.0f || height_logical <= 0.0f) return asset_none;
+    if (scale <= 0.0f) scale = 1.0f;
+    uint32_t w_px = static_cast<uint32_t>(width_logical  * scale + 0.5f);
+    uint32_t h_px = static_cast<uint32_t>(height_logical * scale + 0.5f);
+    uint32_t slot = s->_asset_manager.allocate_surface(
+      w_px, h_px, scale, neui_cg_backend::get_backend());
+    if (slot == 0) return asset_none;
+    return pack_asset_macos(s->session_id(), slot);
+  }
+
+  static void NEUI_ABI a_paint_surface(neui_session_t        session,
+                                         neui_asset_t          surface,
+                                         uint32_t              clear_argb,
+                                         neui_surface_paint_fn fn,
+                                         void*                 user)
+  {
+    auto* s = get_session(session);
+    if (!s) return;
+    if (surface.id == asset_none.id) return;
+    if (((surface.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return;
+    s->_asset_manager.paint_surface(surface.id & 0xffff, clear_argb, fn, user,
+                                     neui_cg_backend::get_backend(),
+                                     /*host_token*/ s,
+                                     &macos_painter_draw_asset_thunk);
+  }
+
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
     a_create_bitmap,
@@ -1721,6 +1764,8 @@ namespace macos_host
     a_get_kind,
     a_create_compound,
     a_create_behavior,
+    a_create_surface,
+    a_paint_surface,
   };
 
   // Compound API. Mutators dispatch to the shared mutator helpers in

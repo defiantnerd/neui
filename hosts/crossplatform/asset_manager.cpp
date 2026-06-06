@@ -246,6 +246,99 @@ namespace neui_detail
     return slot;
   }
 
+  uint32_t AssetManager::allocate_surface(uint32_t width_px, uint32_t height_px,
+                                            float scale,
+                                            neui_render_backend_t* backend)
+  {
+    if (width_px == 0 || height_px == 0 || !backend
+     || !backend->create_offscreen_context)
+      return 0;
+    if (scale <= 0.0f) scale = 1.0f;
+
+    neui_render_ctx_t ctx = backend->create_offscreen_context(width_px, height_px, scale);
+    if (!ctx) return 0;  // null backend / allocation failure
+
+    auto entry = std::make_unique<AssetEntry>();
+    entry->kind        = NEUI_ASSET_KIND_SURFACE;
+    entry->width_px    = width_px;
+    entry->height_px   = height_px;
+    entry->scale       = scale;
+    entry->surface_ctx = ctx;
+    // Zero-fill the CPU buffer so the first draw_asset before any
+    // paint_surface sees transparent black rather than uninitialised memory.
+    entry->pixels.assign(static_cast<size_t>(width_px) * height_px * 4u, 0);
+
+    if (_handles.empty()) _handles.emplace_back(nullptr);
+
+    uint32_t slot;
+    if (!_free_slots.empty()) {
+      slot = _free_slots.back();
+      _free_slots.pop_back();
+      _handles[slot] = std::move(entry);
+    } else {
+      slot = static_cast<uint32_t>(_handles.size());
+      _handles.emplace_back(std::move(entry));
+    }
+    return slot;
+  }
+
+  void AssetManager::paint_surface(uint32_t slot,
+                                     uint32_t clear_argb,
+                                     neui_surface_paint_fn fn,
+                                     void* user,
+                                     neui_render_backend_t* backend,
+                                     void* host_token,
+                                     neui_detail::draw_asset_thunk_t draw_asset_thunk)
+  {
+    if (slot == 0 || slot >= _handles.size() || !backend) return;
+    auto& entry = _handles[slot];
+    if (!entry || entry->kind != NEUI_ASSET_KIND_SURFACE || !entry->surface_ctx)
+      return;
+    if (!fn) return;
+
+    neui_render_ctx_t ctx = entry->surface_ctx;
+
+    // Drive a complete frame on the off-screen ctx using the same calls
+    // the windowed paint path uses - the backend's begin_frame/end_frame
+    // already reset the path / transform / alpha / font stacks, so a
+    // missing pop in one paint_surface can't leak into the next.
+    if (backend->begin_frame) backend->begin_frame(ctx, clear_argb);
+    if (backend->push_clip)
+      backend->push_clip(ctx, 0.0f, 0.0f,
+                          static_cast<float>(entry->width_px)  / entry->scale,
+                          static_cast<float>(entry->height_px) / entry->scale);
+
+    // Stack-allocate the painter shim - same layout the WIDGET_PAINT
+    // dispatch site builds, so the client can call any painter_api
+    // method (including nested draw_asset on other handles).
+    neui_painter painter{};
+    painter.backend          = backend;
+    painter.ctx              = ctx;
+    painter.host_token       = host_token;
+    painter.draw_asset_thunk = draw_asset_thunk;
+    fn(&painter, &neui_detail::k_painter_api,
+       static_cast<float>(entry->width_px)  / entry->scale,
+       static_cast<float>(entry->height_px) / entry->scale,
+       user);
+
+    if (backend->pop_clip)  backend->pop_clip(ctx);
+    if (backend->end_frame) backend->end_frame(ctx);
+
+    // Pull the freshly rendered pixels into our CPU buffer.
+    if (backend->read_pixels_bgra)
+      backend->read_pixels_bgra(ctx, entry->pixels.data());
+
+    // Drop every cached per-window GPU upload of this surface so the next
+    // draw_asset re-uploads from the new pixel buffer. The cache key is
+    // (window-ctx), not surface_ctx - destroy_bitmap runs against the
+    // window ctx that owns each cached bitmap.
+    if (backend->destroy_bitmap) {
+      for (auto& [other_ctx, cached] : entry->bitmaps)
+        if (cached.bmp) backend->destroy_bitmap(other_ctx, cached.bmp);
+    }
+    entry->bitmaps.clear();
+  }
+
   void AssetManager::release_slot(uint32_t slot, neui_render_backend_t* backend)
   {
     if (slot == 0 || slot >= _handles.size()) return;
@@ -254,6 +347,10 @@ namespace neui_detail
     if (backend && backend->destroy_bitmap) {
       for (auto& [ctx, cached] : entry->bitmaps)
         if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
+    }
+    if (entry->surface_ctx && backend && backend->destroy_context) {
+      backend->destroy_context(entry->surface_ctx);
+      entry->surface_ctx = nullptr;
     }
     entry.reset();
     _free_slots.push_back(slot);
@@ -276,13 +373,13 @@ namespace neui_detail
     if (!entry) return false;
     switch (entry->kind) {
     case NEUI_ASSET_KIND_BITMAP:
+    case NEUI_ASSET_KIND_SURFACE:
       if (entry->pixels.empty()) return false;
       if (out_bgra)  *out_bgra  = entry->pixels.data();
       if (out_w_px)  *out_w_px  = entry->width_px;
       if (out_h_px)  *out_h_px  = entry->height_px;
       if (out_scale) *out_scale = entry->scale;
       return true;
-    // case NEUI_ASSET_KIND_SURFACE: identical body once that kind lands.
     default:
       return false;
     }
@@ -321,6 +418,16 @@ namespace neui_detail
         if (!entry) continue;
         for (auto& [ctx, cached] : entry->bitmaps)
           if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
+      }
+    }
+    // Release any SURFACE entries' off-screen ctxs before dropping the
+    // table; destroy_bitmap above only walks cached window-ctx uploads.
+    if (backend && backend->destroy_context) {
+      for (auto& entry : _handles) {
+        if (entry && entry->surface_ctx) {
+          backend->destroy_context(entry->surface_ctx);
+          entry->surface_ctx = nullptr;
+        }
       }
     }
     _cache.clear();

@@ -17,6 +17,13 @@
 // host. Handles are not generation-checked - reusing a slot after destroy
 // can collide silently (matches the existing widget id contract; deferred).
 
+// Forward-declarations for the surface paint callback below. The full
+// types live in <neui/d/painter.h>; we don't pull that header here to
+// keep the include graph tight (clients that use neui_asset_api_t
+// without ever calling paint_surface don't need painter.h to compile).
+struct neui_painter;
+struct neui_painter_api;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -44,12 +51,30 @@ extern "C" {
     // manipulate attrs in the widget's AttrBag in response to mouse /
     // keyboard / wheel events. Built via NEUI_API_BEHAVIOR.
     NEUI_ASSET_KIND_BEHAVIOR = 3,
+    // Client-owned off-screen render target. Created via
+    // neui_asset_api::create_surface and populated via paint_surface;
+    // backed by a CPU pixel buffer that's uploaded to per-window GPU
+    // caches on draw just like NEUI_ASSET_KIND_BITMAP. Lets clients
+    // bake visual diagnostic outputs / thumbnails / cached ornaments
+    // once and then draw the result via painter_api->draw_asset.
+    NEUI_ASSET_KIND_SURFACE  = 4,
     // Reserved for future kinds. Do NOT renumber; bind new values to the
     // next unused integer so old client builds stay forward-compatible.
-    // NEUI_ASSET_KIND_SVG    = 4,
-    // NEUI_ASSET_KIND_VECTOR = 5,
-    // NEUI_ASSET_KIND_FONT   = 6,
+    // NEUI_ASSET_KIND_SVG    = 5,
+    // NEUI_ASSET_KIND_VECTOR = 6,
+    // NEUI_ASSET_KIND_FONT   = 7,
   } neui_asset_kind_t;
+
+  // Client paint callback for neui_asset_api::paint_surface. Mirrors the
+  // NEUI_EVENT_WIDGET_PAINT payload shape so a client can reuse the same
+  // drawing code on a widget and on a surface. The painter / api pair is
+  // valid only for the duration of the call.
+  typedef void (NEUI_ABI *neui_surface_paint_fn)(
+      struct neui_painter*     painter,
+      struct neui_painter_api* api,
+      float                    width_logical,
+      float                    height_logical,
+      void*                    user);
 
   typedef struct neui_asset_api {
     uint32_t neui_version;
@@ -107,6 +132,40 @@ extern "C" {
     // Populate via NEUI_API_BEHAVIOR. Returns asset_none on allocation
     // failure. Attaches to CUSTOMDRAW via widgets->set_asset (kind-routed).
     neui_asset_t (NEUI_ABI *create_behavior)(neui_session_t session);
+
+    // Create an off-screen render surface (NEUI_ASSET_KIND_SURFACE).
+    //   width_logical / height_logical - logical (96-DPI) dimensions.
+    //   scale - HiDPI factor of the backing pixels (1.0 / 2.0 / 3.0).
+    //     The physical pixel buffer is round(width_logical * scale) by
+    //     round(height_logical * scale); a scale of 2.0 on a 100x100
+    //     logical surface backs 200x200 pixels so a 1:1 draw on a 2x
+    //     display stays crisp.
+    // Returns asset_none on allocation failure, or on backends that
+    // don't support off-screen targets (null backend). The surface is
+    // valid (and draw_asset draws transparent black) until the first
+    // paint_surface call populates it.
+    neui_asset_t (NEUI_ABI *create_surface)(neui_session_t session,
+                                              float width_logical,
+                                              float height_logical,
+                                              float scale);
+
+    // Drive a client paint callback against an off-screen surface:
+    //   1. begin_frame on the surface's off-screen ctx (clear to clear_argb).
+    //   2. push a clip to [0,0,width_logical,height_logical].
+    //   3. invoke fn(painter, api, width_logical, height_logical, user).
+    //   4. pop_clip, end_frame.
+    //   5. read pixels back into the asset's CPU buffer.
+    //   6. drop any cached per-window GPU uploads of this asset so the
+    //      next draw_asset call re-uploads the new pixels.
+    // Safe to call any time EXCEPT inside a WIDGET_PAINT callback (the
+    // backend's path / transform / alpha state is mid-frame). Safe to
+    // call repeatedly to re-render. No-op on non-SURFACE handles, on
+    // null fn, or on backends without off-screen support.
+    void (NEUI_ABI *paint_surface)(neui_session_t        session,
+                                    neui_asset_t          surface,
+                                    uint32_t              clear_argb,
+                                    neui_surface_paint_fn fn,
+                                    void*                 user);
   } neui_asset_api_t;
 
 #ifdef __cplusplus

@@ -7,9 +7,11 @@
 
 #include <neui/d/renderer.h>
 #include <neui/d/assets.h>
+#include <neui/d/painter.h>
 #include "../shared/macos/image_loader_macos.h"
 #include "../shared/compound.h"
 #include "../shared/behavior.h"
+#include "../shared/painter.h"  // draw_asset_thunk_t + neui_painter
 
 namespace macos_host
 {
@@ -42,6 +44,11 @@ namespace macos_host
 
     // Populated for NEUI_ASSET_KIND_BEHAVIOR entries; null otherwise.
     std::unique_ptr<neui_detail::BehaviorAsset> behavior;
+
+    // Populated for NEUI_ASSET_KIND_SURFACE entries; null otherwise.
+    // Owns the off-screen CG render context for the surface's lifetime;
+    // `pixels` (above) carries the most recently rendered frame.
+    neui_render_ctx_t surface_ctx = nullptr;
   };
 
   // Session-scoped asset table backing the public neui_asset_api_t.
@@ -124,6 +131,78 @@ namespace macos_host
       return alloc_slot(std::move(entry));
     }
 
+    // Allocate a SURFACE slot. Creates an off-screen CG render ctx via
+    // backend->create_offscreen_context and reserves the BGRA8 pixel
+    // buffer. Returns 0 on backends without off-screen support or on
+    // allocation failure.
+    uint32_t allocate_surface(uint32_t width_px, uint32_t height_px,
+                               float scale,
+                               neui_render_backend_t* backend)
+    {
+      if (width_px == 0 || height_px == 0 || !backend
+       || !backend->create_offscreen_context)
+        return 0;
+      if (scale <= 0.0f) scale = 1.0f;
+
+      neui_render_ctx_t ctx = backend->create_offscreen_context(width_px, height_px, scale);
+      if (!ctx) return 0;
+
+      auto entry = std::make_unique<MacOSAssetEntry>();
+      entry->kind        = NEUI_ASSET_KIND_SURFACE;
+      entry->width_px    = width_px;
+      entry->height_px   = height_px;
+      entry->scale       = scale;
+      entry->surface_ctx = ctx;
+      entry->pixels.assign(static_cast<size_t>(width_px) * height_px * 4u, 0);
+      return alloc_slot(std::move(entry));
+    }
+
+    // Drive a client paint callback against a SURFACE entry's off-screen
+    // ctx, then read back pixels and drop cached per-window uploads.
+    void paint_surface(uint32_t slot,
+                       uint32_t clear_argb,
+                       neui_surface_paint_fn fn,
+                       void* user,
+                       neui_render_backend_t* backend,
+                       void* host_token,
+                       neui_detail::draw_asset_thunk_t draw_asset_thunk)
+    {
+      if (slot == 0 || slot >= _handles.size() || !backend) return;
+      auto& entry = _handles[slot];
+      if (!entry || entry->kind != NEUI_ASSET_KIND_SURFACE || !entry->surface_ctx)
+        return;
+      if (!fn) return;
+
+      neui_render_ctx_t ctx = entry->surface_ctx;
+      if (backend->begin_frame) backend->begin_frame(ctx, clear_argb);
+      if (backend->push_clip)
+        backend->push_clip(ctx, 0.0f, 0.0f,
+                            static_cast<float>(entry->width_px)  / entry->scale,
+                            static_cast<float>(entry->height_px) / entry->scale);
+
+      neui_painter painter{};
+      painter.backend          = backend;
+      painter.ctx              = ctx;
+      painter.host_token       = host_token;
+      painter.draw_asset_thunk = draw_asset_thunk;
+      fn(&painter, &neui_detail::k_painter_api,
+         static_cast<float>(entry->width_px)  / entry->scale,
+         static_cast<float>(entry->height_px) / entry->scale,
+         user);
+
+      if (backend->pop_clip)  backend->pop_clip(ctx);
+      if (backend->end_frame) backend->end_frame(ctx);
+
+      if (backend->read_pixels_bgra)
+        backend->read_pixels_bgra(ctx, entry->pixels.data());
+
+      if (backend->destroy_bitmap) {
+        for (auto& [other_ctx, cached] : entry->bitmaps)
+          if (cached.bmp) backend->destroy_bitmap(other_ctx, cached.bmp);
+      }
+      entry->bitmaps.clear();
+    }
+
     void release_slot(uint32_t slot, neui_render_backend_t* backend)
     {
       if (slot == 0 || slot >= _handles.size()) return;
@@ -132,6 +211,10 @@ namespace macos_host
       if (backend && backend->destroy_bitmap) {
         for (auto& [ctx, cached] : entry->bitmaps)
           if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
+      }
+      if (entry->surface_ctx && backend && backend->destroy_context) {
+        backend->destroy_context(entry->surface_ctx);
+        entry->surface_ctx = nullptr;
       }
       entry.reset();
       _free_slots.push_back(slot);
@@ -160,14 +243,14 @@ namespace macos_host
       if (!entry) return false;
       switch (entry->kind) {
       case NEUI_ASSET_KIND_BITMAP:
+      case NEUI_ASSET_KIND_SURFACE:
+        // Both kinds back the pixel data the same way (BGRA8 premul).
         if (entry->pixels.empty()) return false;
         if (out_bgra)  *out_bgra  = entry->pixels.data();
         if (out_w_px)  *out_w_px  = entry->width_px;
         if (out_h_px)  *out_h_px  = entry->height_px;
         if (out_scale) *out_scale = entry->scale;
         return true;
-      // case NEUI_ASSET_KIND_SURFACE: identical body once that kind lands
-      //   (surface backing buffer is the same BGRA8 premul layout).
       default:
         return false;
       }
@@ -193,6 +276,16 @@ namespace macos_host
           if (!entry) continue;
           for (auto& [ctx, cached] : entry->bitmaps)
             if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
+        }
+      }
+      // Release any SURFACE entries' off-screen ctxs before dropping
+      // the table; the bitmap-cache loop above only walks window ctxs.
+      if (backend && backend->destroy_context) {
+        for (auto& entry : _handles) {
+          if (entry && entry->surface_ctx) {
+            backend->destroy_context(entry->surface_ctx);
+            entry->surface_ctx = nullptr;
+          }
         }
       }
       _handles.clear();

@@ -221,6 +221,38 @@ typedef struct neui_render_backend {
                               int          weight);
   void (NEUI_ABI *pop_font) (neui_render_ctx_t ctx);
 
+  // --- Off-screen contexts (backs NEUI_ASSET_KIND_SURFACE) ---------------
+  //
+  // create_offscreen_context returns a render context that draws into a
+  // CPU pixel buffer instead of a native window. Every other backend
+  // call (begin_frame / end_frame / fill_rect / draw_text / path /
+  // transform / clip / alpha / font) works on the returned ctx exactly
+  // as it does on a window ctx. Cleanup is via destroy_context (same
+  // path); resize / update_dpi are not supported on off-screen ctxs.
+  //
+  //   width_px / height_px - physical pixel dimensions of the surface.
+  //   scale                - HiDPI factor (1.0 / 2.0 / 3.0); the
+  //                          backend sets the ctx DPI so a logical-pixel
+  //                          draw call maps to (logical * scale) physical
+  //                          pixels, matching how an HWND ctx behaves on
+  //                          a (scale)x display.
+  //
+  // Returns nullptr if the backend does not support off-screen targets
+  // (null backend) or on allocation failure.
+  neui_render_ctx_t (NEUI_ABI *create_offscreen_context)(
+      uint32_t width_px,
+      uint32_t height_px,
+      float    scale);
+
+  // Read the surface pixels of an off-screen ctx back into out_bgra as
+  // BGRA8 premultiplied, top-down, tightly packed (no per-row padding,
+  // exactly width_px * 4 bytes per row). out_bgra must point to a
+  // buffer of at least width_px * height_px * 4 bytes. Call after
+  // end_frame. Returns false on window contexts, on null contexts, or
+  // on read failure.
+  bool (NEUI_ABI *read_pixels_bgra)(neui_render_ctx_t ctx,
+                                      uint8_t*         out_bgra);
+
 } neui_render_backend_t;
 
 #ifdef __cplusplus

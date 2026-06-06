@@ -3,7 +3,9 @@
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
+#include <wincodec.h>
 #include <cstdint>
+#include <cstring>
 #include <cmath>
 #include <string>
 #include <unordered_map>
@@ -13,6 +15,7 @@
 
 #pragma comment(lib, "d2d1")
 #pragma comment(lib, "dwrite")
+#pragma comment(lib, "windowscodecs")
 
 namespace neui_d2d_backend
 {
@@ -26,24 +29,43 @@ namespace neui_d2d_backend
     int          weight = 0;  // 0 = DWRITE_FONT_WEIGHT_NORMAL (400)
   };
 
-  // Per-window render context.
+  // Per-window or per-surface render context. The active render target
+  // (`target`) is either an ID2D1HwndRenderTarget (HWND ctxs, also
+  // mirrored in `hwnd_target` for the HWND-only Resize/device-loss
+  // paths) or an off-screen ID2D1RenderTarget bound to `wic_bitmap`
+  // (NEUI_ASSET_KIND_SURFACE ctxs). Every draw path only touches the
+  // abstract ID2D1RenderTarget interface and so is shared between the
+  // two; create / destroy / resize / read-pixels branch on which of
+  // hwnd_target / wic_bitmap is non-null.
   struct D2DContext
   {
-    ID2D1HwndRenderTarget* target      = nullptr;
+    // Active render target + brush. For HWND ctxs, `target` aliases
+    // `hwnd_target` (the ID2D1HwndRenderTarget is the only thing that
+    // owns the GPU resources). For off-screen ctxs `target` is the
+    // bitmap render target and hwnd_target stays null.
+    ID2D1RenderTarget*     target      = nullptr;
     ID2D1SolidColorBrush*  brush       = nullptr;
     uint32_t               dpi         = 96;
 
-    // Re-create state. The hwnd + size are stashed at create_context time
-    // and kept in sync by d2d_resize / d2d_update_dpi. If D2D returns
-    // D2DERR_RECREATE_TARGET from EndDraw the target is gone but the
-    // context pointer stays valid, so the next begin_frame can rebuild
-    // the target in place. `generation` is bumped whenever the target is
-    // recreated; clients that cache target-bound resources (ID2D1Bitmap
-    // handles) check this to discover that their caches are stale.
+    // HWND-specific. Re-create state: hwnd + size are stashed at
+    // create_context time and kept in sync by d2d_resize / d2d_update_dpi.
+    // If D2D returns D2DERR_RECREATE_TARGET from EndDraw the target is
+    // gone but the context pointer stays valid, so the next begin_frame
+    // can rebuild in place. `generation` is bumped whenever the target
+    // is recreated; clients that cache target-bound resources
+    // (ID2D1Bitmap handles) check this to discover their caches are stale.
+    ID2D1HwndRenderTarget* hwnd_target = nullptr;
     HWND                   hwnd        = nullptr;
     uint32_t               width       = 0;
     uint32_t               height      = 0;
     uint32_t               generation  = 1;
+
+    // Off-screen-specific. Owns the WIC bitmap that backs the bitmap
+    // render target; read_pixels_bgra walks IWICBitmap::Lock to extract
+    // the bytes after end_frame. Both fields stay null on HWND ctxs.
+    IWICBitmap*            wic_bitmap     = nullptr;
+    uint32_t               surface_w_px   = 0;
+    uint32_t               surface_h_px   = 0;
 
     // Path API state. The path is constructed via move_to/line_to/arc;
     // figure_open tracks whether BeginFigure has been called without a
@@ -76,8 +98,13 @@ namespace neui_d2d_backend
   };
 
   // Process-wide D2D factory - created once, never destroyed (lives for process lifetime).
-  static ID2D1Factory*   g_factory        = nullptr;
-  static IDWriteFactory* g_dwrite_factory = nullptr;
+  static ID2D1Factory*       g_factory        = nullptr;
+  static IDWriteFactory*     g_dwrite_factory = nullptr;
+  // WIC factory backs off-screen surface contexts (IWICBitmap +
+  // ID2D1RenderTarget::CreateWicBitmapRenderTarget). Created lazily
+  // when the first surface is requested; HWND-only apps never pay for
+  // COM init beyond what was already happening for D2D/DWrite.
+  static IWICImagingFactory* g_wic_factory    = nullptr;
 
   // Text format cache, keyed by (family, weight, size). Size is quantised
   // to 0.1 logical pixels so floating-point chatter (12.0 vs 12.00001)
@@ -118,6 +145,18 @@ namespace neui_d2d_backend
     hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
                              __uuidof(IDWriteFactory),
                              reinterpret_cast<IUnknown**>(&g_dwrite_factory));
+    return SUCCEEDED(hr);
+  }
+
+  // Lazy WIC factory init. Returns false if COM hasn't been initialised
+  // (the host calls OleInitialize for DnD; CoInitialize* covers the same
+  // need). On apps that never create a surface, this never fires.
+  static bool ensure_wic_factory()
+  {
+    if (g_wic_factory) return true;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                  CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&g_wic_factory));
     return SUCCEEDED(hr);
   }
 
@@ -227,8 +266,9 @@ namespace neui_d2d_backend
     hr = target->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &brush);
     if (FAILED(hr)) { target->Release(); return false; }
 
-    ctx->target = target;
-    ctx->brush  = brush;
+    ctx->hwnd_target = target;
+    ctx->target      = target;  // alias - HwndRenderTarget is-a RenderTarget
+    ctx->brush       = brush;
     return true;
   }
 
@@ -256,34 +296,51 @@ namespace neui_d2d_backend
     if (ctx->sink)   { ctx->sink->Release();   ctx->sink   = nullptr; }
     if (ctx->path)   { ctx->path->Release();   ctx->path   = nullptr; }
     if (ctx->brush)  { ctx->brush->Release();  ctx->brush  = nullptr; }
-    if (ctx->target) { ctx->target->Release(); ctx->target = nullptr; }
+    // `target` is either an alias of `hwnd_target` (HWND ctx) or a
+    // standalone off-screen target (surface ctx). For HWND ctxs let
+    // hwnd_target own the Release; for surface ctxs release `target`
+    // directly. wic_bitmap is owned only on surface ctxs.
+    if (ctx->hwnd_target) {
+      ctx->hwnd_target->Release();
+      ctx->hwnd_target = nullptr;
+      ctx->target      = nullptr;
+    } else if (ctx->target) {
+      ctx->target->Release();
+      ctx->target = nullptr;
+    }
+    if (ctx->wic_bitmap) { ctx->wic_bitmap->Release(); ctx->wic_bitmap = nullptr; }
     delete ctx;
   }
 
   static void d2d_resize(neui_render_ctx_t raw, uint32_t width, uint32_t height)
   {
     auto* ctx = static_cast<D2DContext*>(raw);
-    if (!ctx) return;
+    if (!ctx || !ctx->hwnd_target) return;  // resize is HWND-only
     ctx->width  = width;
     ctx->height = height;
-    if (ctx->target) ctx->target->Resize(D2D1::SizeU(width, height));
-    // If target is null we're in the lost-device window between EndDraw
-    // returning D2DERR_RECREATE_TARGET and the next begin_frame; the new
-    // size is already stashed and will be used when begin_frame rebuilds.
+    ctx->hwnd_target->Resize(D2D1::SizeU(width, height));
+    // If hwnd_target is null we're in the lost-device window between
+    // EndDraw returning D2DERR_RECREATE_TARGET and the next begin_frame;
+    // the new size is already stashed and will be used when begin_frame
+    // rebuilds.
   }
 
   static void d2d_begin_frame(neui_render_ctx_t raw, uint32_t clear_argb)
   {
     auto* ctx = static_cast<D2DContext*>(raw);
     if (!ctx) return;
-    if (!ctx->target) {
-      // Previous frame's EndDraw lost the device. Try to rebuild in place
-      // and bump generation so cached target-bound bitmaps get re-uploaded
-      // on first use. If rebuild fails (e.g. driver still in a bad state)
-      // we silently skip this frame; the next begin_frame will try again.
+    if (!ctx->target && ctx->hwnd) {
+      // Previous frame's EndDraw lost the device on an HWND ctx. Try to
+      // rebuild in place and bump generation so cached target-bound
+      // bitmaps get re-uploaded on first use. If rebuild fails (e.g.
+      // driver still in a bad state) we silently skip this frame; the
+      // next begin_frame will try again. Off-screen surface ctxs have
+      // no device-loss path; their target stays alive for the ctx
+      // lifetime.
       if (!d2d_build_target(ctx)) return;
       ctx->generation++;
     }
+    if (!ctx->target) return;
     ctx->target->BeginDraw();
     // Reset transform stack to identity each frame so a missing pop in
     // a previous frame can't bleed across frame boundaries.
@@ -300,15 +357,20 @@ namespace neui_d2d_backend
     auto* ctx = static_cast<D2DContext*>(raw);
     if (!ctx || !ctx->target) return;
     HRESULT hr = ctx->target->EndDraw();
-    if (hr == D2DERR_RECREATE_TARGET) {
-      // Device lost (mode change, GPU reset, driver crash, ...). Release
-      // target + brush; ID2D1Bitmap handles created against this target
-      // are now dangling for draw purposes but still safe to Release().
-      // We don't touch them here - the asset manager (one per session)
-      // owns the cache and will drop stale entries the next time it sees
-      // a different get_context_generation result. The next begin_frame
-      // rebuilds the target using the stored hwnd / size / dpi.
-      if (ctx->target) { ctx->target->Release(); ctx->target = nullptr; }
+    if (hr == D2DERR_RECREATE_TARGET && ctx->hwnd_target) {
+      // Device lost on an HWND ctx (mode change, GPU reset, driver
+      // crash, ...). Release target + brush; ID2D1Bitmap handles
+      // created against this target are now dangling for draw purposes
+      // but still safe to Release(). We don't touch them here - the
+      // asset manager (one per session) owns the cache and will drop
+      // stale entries the next time it sees a different
+      // get_context_generation result. The next begin_frame rebuilds
+      // the target using the stored hwnd / size / dpi. Off-screen
+      // surface ctxs don't take this path - their bitmap render target
+      // is not subject to device-loss.
+      ctx->hwnd_target->Release();
+      ctx->hwnd_target = nullptr;
+      ctx->target      = nullptr;
       if (ctx->brush)  { ctx->brush->Release();  ctx->brush  = nullptr; }
     }
   }
@@ -774,6 +836,86 @@ namespace neui_d2d_backend
   }
 
   // ---------------------------------------------------------------------------
+  // Off-screen contexts (NEUI_ASSET_KIND_SURFACE).
+
+  static neui_render_ctx_t d2d_create_offscreen_context(
+      uint32_t width_px, uint32_t height_px, float scale)
+  {
+    if (width_px == 0 || height_px == 0) return nullptr;
+    if (!ensure_factory() || !ensure_wic_factory()) return nullptr;
+    if (scale <= 0.0f) scale = 1.0f;
+
+    // 32bppPBGRA: byte order B,G,R,A in memory with premultiplied alpha.
+    // Matches the BGRA8 premul layout used everywhere else in this
+    // codebase (asset pixels, clipboard images, etc).
+    IWICBitmap* wic = nullptr;
+    HRESULT hr = g_wic_factory->CreateBitmap(
+      width_px, height_px,
+      GUID_WICPixelFormat32bppPBGRA,
+      WICBitmapCacheOnDemand,
+      &wic);
+    if (FAILED(hr) || !wic) return nullptr;
+
+    auto props = D2D1::RenderTargetProperties();
+    props.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                           D2D1_ALPHA_MODE_PREMULTIPLIED);
+    // Set DPI so logical-pixel draw calls hit (logical * scale) physical
+    // pixels - same convention as HWND ctxs on a (scale)x display.
+    props.dpiX = scale * 96.0f;
+    props.dpiY = scale * 96.0f;
+
+    ID2D1RenderTarget* target = nullptr;
+    hr = g_factory->CreateWicBitmapRenderTarget(wic, props, &target);
+    if (FAILED(hr) || !target) { wic->Release(); return nullptr; }
+
+    ID2D1SolidColorBrush* brush = nullptr;
+    hr = target->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &brush);
+    if (FAILED(hr)) { target->Release(); wic->Release(); return nullptr; }
+
+    auto* ctx = new D2DContext();
+    ctx->target       = target;
+    ctx->brush        = brush;
+    ctx->wic_bitmap   = wic;
+    ctx->surface_w_px = width_px;
+    ctx->surface_h_px = height_px;
+    ctx->dpi          = static_cast<uint32_t>(scale * 96.0f + 0.5f);
+    // hwnd_target stays null - this signals "off-screen" to the rest
+    // of the backend (resize / device-loss are no-ops).
+    return ctx;
+  }
+
+  static bool d2d_read_pixels_bgra(neui_render_ctx_t raw, uint8_t* out_bgra)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx || !ctx->wic_bitmap || !out_bgra) return false;
+
+    WICRect rect = {
+      0, 0,
+      static_cast<INT>(ctx->surface_w_px),
+      static_cast<INT>(ctx->surface_h_px),
+    };
+    IWICBitmapLock* lock = nullptr;
+    HRESULT hr = ctx->wic_bitmap->Lock(&rect, WICBitmapLockRead, &lock);
+    if (FAILED(hr) || !lock) return false;
+
+    UINT stride = 0, buf_size = 0;
+    BYTE* src = nullptr;
+    if (FAILED(lock->GetStride(&stride))
+     || FAILED(lock->GetDataPointer(&buf_size, &src))
+     || !src) {
+      lock->Release();
+      return false;
+    }
+
+    const UINT row_bytes = ctx->surface_w_px * 4u;
+    for (UINT y = 0; y < ctx->surface_h_px; ++y) {
+      std::memcpy(out_bgra + y * row_bytes, src + y * stride, row_bytes);
+    }
+    lock->Release();
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
 
   static neui_render_backend_t backend = {
     NEUI_VERSION,
@@ -810,6 +952,8 @@ namespace neui_d2d_backend
     d2d_pop_alpha,
     d2d_push_font,
     d2d_pop_font,
+    d2d_create_offscreen_context,
+    d2d_read_pixels_bgra,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

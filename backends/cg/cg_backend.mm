@@ -56,6 +56,15 @@ namespace neui_cg_backend
     // size stays a per-call parameter. Empty = system UI font / Regular.
     // Reset on every begin_frame (mirror of the d2d backend).
     std::vector<FontState> font_stack;
+
+    // Off-screen-specific. When `surface_pixels` is non-null this ctx
+    // owns its CGContextRef + the BGRA buffer behind it (created via
+    // cg_create_offscreen_context); cg_ctx stays bound for the ctx's
+    // lifetime instead of being rebound per drawRect: via
+    // set_current_frame. read_pixels_bgra walks `surface_pixels`.
+    uint8_t* surface_pixels = nullptr;
+    uint32_t surface_w_px   = 0;
+    uint32_t surface_h_px   = 0;
   };
 
   // ---------------------------------------------------------------------------
@@ -246,6 +255,14 @@ namespace neui_cg_backend
     auto* st = static_cast<CGContextState*>(raw);
     if (!st) return;
     if (st->path) { CGPathRelease(st->path); st->path = nullptr; }
+    // For off-screen ctxs we own cg_ctx + the pixel buffer; for window
+    // ctxs AppKit owns cg_ctx and it's already been cleared in cg_end_frame.
+    if (st->surface_pixels) {
+      if (st->cg_ctx) CGContextRelease(st->cg_ctx);
+      free(st->surface_pixels);
+      st->surface_pixels = nullptr;
+      st->cg_ctx         = nullptr;
+    }
     delete st;
   }
 
@@ -277,9 +294,13 @@ namespace neui_cg_backend
     auto* st = static_cast<CGContextState*>(raw);
     if (!st || !st->cg_ctx) return;
     CGContextRestoreGState(st->cg_ctx);
-    // The CGContextRef only lives for the duration of AppKit's drawRect:.
-    // Drop the pointer so no later call accidentally draws into a freed context.
-    st->cg_ctx = nullptr;
+    // For window ctxs the CGContextRef only lives for the duration of
+    // AppKit's drawRect:; drop the pointer so no later call draws into a
+    // freed context. Off-screen ctxs own their CGContextRef for life -
+    // keep it bound so a follow-up read_pixels_bgra (and a subsequent
+    // begin_frame for re-render) work.
+    if (!st->surface_pixels)
+      st->cg_ctx = nullptr;
   }
 
   static void cg_fill_rect(neui_render_ctx_t raw,
@@ -675,6 +696,67 @@ namespace neui_cg_backend
   }
 
   // ---------------------------------------------------------------------------
+  // Off-screen contexts (NEUI_ASSET_KIND_SURFACE).
+
+  static neui_render_ctx_t cg_create_offscreen_context(uint32_t width_px,
+                                                         uint32_t height_px,
+                                                         float    scale)
+  {
+    if (width_px == 0 || height_px == 0) return nullptr;
+    if (scale <= 0.0f) scale = 1.0f;
+
+    size_t row_bytes = static_cast<size_t>(width_px) * 4u;
+    size_t total     = row_bytes * height_px;
+    uint8_t* pixels = static_cast<uint8_t*>(calloc(1, total));
+    if (!pixels) return nullptr;
+
+    // kCGImageAlphaPremultipliedFirst + kCGBitmapByteOrder32Little =
+    // memory order B, G, R, A - matches the BGRA8 premul layout used
+    // everywhere else (asset pixels, clipboard images, the win32 WIC
+    // path).
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef cg = CGBitmapContextCreate(
+      pixels, width_px, height_px,
+      /*bpc*/8, row_bytes, cs,
+      kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+    CGColorSpaceRelease(cs);
+    if (!cg) {
+      free(pixels);
+      return nullptr;
+    }
+
+    auto* st = new CGContextState();
+    st->cg_ctx         = cg;
+    st->surface_pixels = pixels;
+    st->surface_w_px   = width_px;
+    st->surface_h_px   = height_px;
+    st->backing_scale  = scale;
+    st->dpi            = static_cast<uint32_t>(scale * 96.0f + 0.5f);
+    st->width          = static_cast<float>(width_px) / scale;   // logical
+    st->height         = static_cast<float>(height_px) / scale;
+
+    // Logical-pixel input + Y-down: scale by `scale` so a logical-pixel
+    // draw maps to (scale)x physical pixels, then translate + flip Y so
+    // the origin is top-left (matching isFlipped=YES on window views and
+    // the renderer.h Y-down convention). Apply once at create-time; the
+    // begin_frame Save/Restore bracket preserves this baseline CTM
+    // across every frame the surface is repainted.
+    CGContextScaleCTM(cg, scale, scale);
+    CGContextTranslateCTM(cg, 0.0, st->height);
+    CGContextScaleCTM(cg, 1.0, -1.0);
+    return st;
+  }
+
+  static bool cg_read_pixels_bgra(neui_render_ctx_t raw, uint8_t* out_bgra)
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    if (!st || !st->surface_pixels || !out_bgra) return false;
+    size_t total = static_cast<size_t>(st->surface_w_px) * st->surface_h_px * 4u;
+    memcpy(out_bgra, st->surface_pixels, total);
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
 
   static neui_render_backend_t backend = {
     NEUI_VERSION,
@@ -711,6 +793,8 @@ namespace neui_cg_backend
     cg_pop_alpha,
     cg_push_font,
     cg_pop_font,
+    cg_create_offscreen_context,
+    cg_read_pixels_bgra,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

@@ -5,9 +5,11 @@
 #include <vector>
 #include <neui/d/renderer.h>
 #include <neui/d/assets.h>
+#include <neui/d/painter.h>
 
 #include "compound.h"
 #include "behavior.h"
+#include "painter.h"  // shared/painter.h - draw_asset_thunk_t + neui_painter
 
 namespace neui_detail
 {
@@ -45,6 +47,12 @@ namespace neui_detail
 
     // Populated for NEUI_ASSET_KIND_BEHAVIOR entries; null otherwise.
     std::unique_ptr<BehaviorAsset> behavior;
+
+    // Populated for NEUI_ASSET_KIND_SURFACE entries; null otherwise.
+    // Owns the off-screen render context for the surface's lifetime.
+    // `pixels` (above) holds the most recently rendered frame, fed back
+    // into the standard BITMAP draw path via the per-ctx bitmap cache.
+    neui_render_ctx_t surface_ctx = nullptr;
   };
 
   // Internal asset manager - lifetime tied to a Session.
@@ -86,6 +94,32 @@ namespace neui_detail
     // Allocate a new asset slot holding an empty BehaviorAsset.
     // Mutated through NEUI_API_BEHAVIOR. Returns 0 on failure.
     uint32_t allocate_behavior();
+
+    // Allocate a new SURFACE asset slot. Creates an off-screen render
+    // context via backend->create_offscreen_context and reserves the
+    // matching BGRA8 pixel buffer (zero-filled until the first paint).
+    // Returns 0 on backends without off-screen support (null) or on
+    // allocation failure.
+    uint32_t allocate_surface(uint32_t width_px, uint32_t height_px,
+                               float scale,
+                               neui_render_backend_t* backend);
+
+    // Drive a client paint callback against a SURFACE entry's
+    // off-screen ctx. The painter handed to the callback uses the same
+    // host_token + draw_asset_thunk that the host installs in WIDGET_PAINT
+    // dispatch, so nested draw_asset calls work transparently. On return,
+    // the surface's CPU pixel buffer holds the freshly rendered frame
+    // and every cached per-window GPU upload of this asset has been
+    // dropped so subsequent draw_asset calls re-upload. No-op on
+    // non-SURFACE slots, on null fn, or on backends without off-screen
+    // support.
+    void paint_surface(uint32_t slot,
+                       uint32_t clear_argb,
+                       neui_surface_paint_fn fn,
+                       void* user,
+                       neui_render_backend_t* backend,
+                       void* host_token,
+                       neui_detail::draw_asset_thunk_t draw_asset_thunk);
 
     // Release the slot. CPU pixels freed immediately; GPU caches dropped.
     void release_slot(uint32_t slot, neui_render_backend_t* backend);
