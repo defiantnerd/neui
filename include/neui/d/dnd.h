@@ -5,6 +5,7 @@
 #include "api.h"
 #include "events.h"      // neui_event_dnd_t, neui_data_item_t fwd
 #include "clipboard.h"   // shared MIME constants (NEUI_MIME_*)
+#include "assets.h"      // neui_asset_t for drag preview images
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,6 +44,28 @@ typedef enum neui_dnd_action {
   NEUI_DND_ACTION_MOVE = 2,
   NEUI_DND_ACTION_LINK = 4,
 } neui_dnd_action_t;
+
+// Optional drag-preview image attached to a drag. The image follows the
+// cursor while the drag is in flight, indicating the content being moved.
+//
+// `image` may be any asset that resolves to displayable BGRA8 pixels -
+// NEUI_ASSET_KIND_BITMAP today, NEUI_ASSET_KIND_SURFACE once that lands
+// (mutable, paintable bitmap-compatible asset). The drag-source path
+// snapshots whatever bytes it needs synchronously inside the begin_drag
+// call, so the asset may be released the moment begin_drag returns.
+//
+// `hot_x` / `hot_y` are the point on the image (in logical px relative to
+// the image's top-left) that sticks to the cursor. Pass -1 on either axis
+// to default to the image centre on that axis (matches what most apps
+// want and lets the client skip arithmetic for the trivial case).
+//
+// `asset_none` for `image` means "use the OS default" - identical to
+// calling the older begin_drag without a preview.
+typedef struct neui_drag_preview {
+  neui_asset_t image;
+  int          hot_x;
+  int          hot_y;
+} neui_drag_preview_t;
 
 typedef struct neui_dnd_api {
   uint32_t neui_version;
@@ -102,6 +125,22 @@ typedef struct neui_dnd_api {
                                             neui_widget_t source_widget,
                                             neui_data_item_t payload,
                                             uint32_t allowed_actions);
+
+  // Variant of begin_drag that also attaches a drag-preview image. Same
+  // semantics + return value as begin_drag; `preview` may be NULL (in
+  // which case behaviour is identical to begin_drag). When non-null and
+  // `preview->image` is a valid asset, the OS drag loop shows that image
+  // under the cursor with `(hot_x, hot_y)` (or the image centre on axes
+  // set to -1) pinned to the pointer.
+  //
+  // Asset kinds supported v1: NEUI_ASSET_KIND_BITMAP. NEUI_ASSET_KIND_SURFACE
+  // will be supported the day that asset kind ships - no API change.
+  neui_dnd_action_t (NEUI_ABI *begin_drag_with_preview)(
+                                            neui_session_t session,
+                                            neui_widget_t source_widget,
+                                            neui_data_item_t payload,
+                                            uint32_t allowed_actions,
+                                            const neui_drag_preview_t* preview);
 } neui_dnd_api_t;
 
 #ifdef __cplusplus

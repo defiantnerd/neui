@@ -95,6 +95,19 @@ namespace neui_detail
     // mutating call.
     AssetEntry* get_slot(uint32_t slot);
 
+    // Kind-polymorphic pixel readback for export paths (drag preview,
+    // future file save, ...). Returns true and populates the out params
+    // for any asset that resolves to displayable BGRA8 pixels - BITMAP
+    // today; SURFACE will add one branch the day that kind lands.
+    // Returns false for COMPOUND, BEHAVIOR, invalid slot, or any kind
+    // with no presentable pixels. Pixels are width_px * height_px * 4
+    // bytes; pointer is borrowed (valid until the next mutating call).
+    bool get_pixels_for_export(uint32_t slot,
+                                const uint8_t** out_bgra,
+                                uint32_t* out_w_px,
+                                uint32_t* out_h_px,
+                                float*    out_scale) const;
+
     // --- Context lifecycle ------------------------------------------------
 
     void release_context(neui_render_ctx_t ctx, neui_render_backend_t* backend);

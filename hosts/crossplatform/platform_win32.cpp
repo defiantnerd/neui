@@ -1651,10 +1651,36 @@ namespace xpl_host
     RevokeDragDrop(static_cast<HWND>(native_handle));
   }
 
+  void* platform_make_drag_preview(const uint8_t* bgra_premul,
+                                     uint32_t w_px, uint32_t h_px,
+                                     float /*scale*/)
+  {
+    return neui_detail::w32_make_drag_hbitmap(bgra_premul, w_px, h_px);
+  }
+
   uint32_t platform_dnd_begin_drag(void* native_handle,
                                     neui_detail::DataItem* item,
-                                    uint32_t allowed_actions)
+                                    uint32_t allowed_actions,
+                                    void* preview_native,
+                                    int hot_x, int hot_y)
   {
+    if (preview_native) {
+      HBITMAP hbm = static_cast<HBITMAP>(preview_native);
+      BITMAP bm = {};
+      neui_detail::DragPreviewW32 preview;
+      if (GetObjectW(hbm, sizeof(bm), &bm)) {
+        preview.hbitmap = hbm;
+        preview.width   = bm.bmWidth;
+        preview.height  = (bm.bmHeight < 0) ? -bm.bmHeight : bm.bmHeight;
+        preview.hot_x   = (hot_x < 0) ? preview.width  / 2 : hot_x;
+        preview.hot_y   = (hot_y < 0) ? preview.height / 2 : hot_y;
+        return neui_detail::platform_dnd_begin_drag_w32(native_handle, item,
+                                                         allowed_actions,
+                                                         &preview);
+      }
+      // GetObject failure: drop the bitmap and fall through to no-preview.
+      DeleteObject(hbm);
+    }
     return neui_detail::platform_dnd_begin_drag_w32(native_handle, item,
                                                      allowed_actions);
   }

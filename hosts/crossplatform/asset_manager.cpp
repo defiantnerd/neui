@@ -265,6 +265,29 @@ namespace neui_detail
     return _handles[slot].get();
   }
 
+  bool AssetManager::get_pixels_for_export(uint32_t slot,
+                                             const uint8_t** out_bgra,
+                                             uint32_t* out_w_px,
+                                             uint32_t* out_h_px,
+                                             float*    out_scale) const
+  {
+    if (slot == 0 || slot >= _handles.size()) return false;
+    const auto& entry = _handles[slot];
+    if (!entry) return false;
+    switch (entry->kind) {
+    case NEUI_ASSET_KIND_BITMAP:
+      if (entry->pixels.empty()) return false;
+      if (out_bgra)  *out_bgra  = entry->pixels.data();
+      if (out_w_px)  *out_w_px  = entry->width_px;
+      if (out_h_px)  *out_h_px  = entry->height_px;
+      if (out_scale) *out_scale = entry->scale;
+      return true;
+    // case NEUI_ASSET_KIND_SURFACE: identical body once that kind lands.
+    default:
+      return false;
+    }
+  }
+
   // --- Context lifecycle --------------------------------------------------
 
   void AssetManager::release_context(neui_render_ctx_t ctx, neui_render_backend_t* backend)

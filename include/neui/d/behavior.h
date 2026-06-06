@@ -145,6 +145,14 @@ extern "C" {
     //                             data-item id (set by the client before
     //                             mouse-down via attrs->set_int). Empty /
     //                             unset = drag with neui_data_item_none.
+    //     "drag_preview_key" string attr key on the widget that holds the
+    //                             preview-image asset id (any asset that
+    //                             resolves to displayable pixels - BITMAP
+    //                             today, SURFACE tomorrow). Empty / unset
+    //                             = use OS default drag visual.
+    //     "drag_hot_x"     int    hot-spot X on the preview image, logical
+    //                             px from top-left. -1 = image centre.
+    //     "drag_hot_y"     int    hot-spot Y. -1 = image centre.
     //
     //   hit region (any kind):
     //     "anchor_parent" int     neui_anchor_t on widget rect (default

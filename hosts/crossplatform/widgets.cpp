@@ -2785,10 +2785,14 @@ namespace xpl_host {
     s->_last_accepted_action = static_cast<uint32_t>(action);
   }
 
-  static neui_dnd_action_t NEUI_ABI dnd_begin_drag(neui_session_t session,
-                                                    neui_widget_t source_widget,
-                                                    neui_data_item_t payload,
-                                                    uint32_t allowed_actions)
+  // Shared worker for both public entry points. asset_none + (-1, -1) =
+  // no preview.
+  static neui_dnd_action_t dnd_begin_drag_impl(neui_session_t session,
+                                                 neui_widget_t source_widget,
+                                                 neui_data_item_t payload,
+                                                 uint32_t allowed_actions,
+                                                 neui_asset_t preview_asset,
+                                                 int hot_x, int hot_y)
   {
     auto* s = get_session_for_widget(session, source_widget);
     if (!s) return NEUI_DND_ACTION_NONE;
@@ -2803,10 +2807,55 @@ namespace xpl_host {
       if (wd) native = wd->native_handle;
     }
     if (!native) return NEUI_DND_ACTION_NONE;
+
+    // Resolve preview asset to a per-platform native bitmap. Degrades to
+    // no-preview on any failure (wrong session, COMPOUND/BEHAVIOR kind,
+    // platform builder returns null).
+    void* preview_native = nullptr;
+    if (preview_asset.id != asset_none.id) {
+      uint32_t a_sess = (preview_asset.id >> 16) & 0xffff;
+      if (a_sess == (s->get_session_id() & 0xffff)) {
+        const uint8_t* bgra = nullptr;
+        uint32_t       w_px = 0, h_px = 0;
+        float          scale = 1.0f;
+        if (s->_asset_manager.get_pixels_for_export(preview_asset.id & 0xffff,
+                                                      &bgra, &w_px, &h_px,
+                                                      &scale)) {
+          preview_native = platform_make_drag_preview(bgra, w_px, h_px, scale);
+        }
+      }
+    }
+
     s->_drag_source_active = true;
-    uint32_t r = platform_dnd_begin_drag(native, item, allowed_actions);
+    uint32_t r = platform_dnd_begin_drag(native, item, allowed_actions,
+                                          preview_native, hot_x, hot_y);
     s->_drag_source_active = false;
     return static_cast<neui_dnd_action_t>(r);
+  }
+
+  static neui_dnd_action_t NEUI_ABI dnd_begin_drag(neui_session_t session,
+                                                    neui_widget_t source_widget,
+                                                    neui_data_item_t payload,
+                                                    uint32_t allowed_actions)
+  {
+    return dnd_begin_drag_impl(session, source_widget, payload,
+                                allowed_actions, asset_none, -1, -1);
+  }
+
+  static neui_dnd_action_t NEUI_ABI dnd_begin_drag_with_preview(
+                                                    neui_session_t session,
+                                                    neui_widget_t source_widget,
+                                                    neui_data_item_t payload,
+                                                    uint32_t allowed_actions,
+                                                    const neui_drag_preview_t* preview)
+  {
+    if (!preview) {
+      return dnd_begin_drag_impl(session, source_widget, payload,
+                                  allowed_actions, asset_none, -1, -1);
+    }
+    return dnd_begin_drag_impl(session, source_widget, payload,
+                                allowed_actions, preview->image,
+                                preview->hot_x, preview->hot_y);
   }
 
   neui_dnd_api_t dnd_api = {
@@ -2816,22 +2865,27 @@ namespace xpl_host {
     dnd_set_accepted_formats,
     dnd_accept,
     dnd_begin_drag,
+    dnd_begin_drag_with_preview,
   };
 
   // Non-static wrapper so host.cpp's BehaviorDispatchCtx::begin_drag can
-  // reach the file-static dnd_begin_drag from a sibling TU. Receives the
-  // CustomDrawWidget pointer the dispatch carries as host_data, unpacks
-  // it into the public API shape, and forwards.
+  // reach the file-static dnd_begin_drag_with_preview from a sibling TU.
+  // Receives the CustomDrawWidget pointer the dispatch carries as
+  // host_data, unpacks it into the public API shape, and forwards.
   uint32_t xpl_behavior_begin_drag(void* host_data,
                                      neui_data_item_t item,
-                                     uint32_t allowed_actions)
+                                     uint32_t allowed_actions,
+                                     uint32_t preview_image,
+                                     int hot_x, int hot_y)
   {
     auto* wd = static_cast<WidgetData*>(host_data);
     if (!wd) return NEUI_DND_ACTION_NONE;
     neui_session_t sess = { wd->session_id };
     neui_widget_t  wid  = { wd->widget_id };
+    neui_drag_preview_t preview = { { preview_image }, hot_x, hot_y };
     return static_cast<uint32_t>(
-      dnd_begin_drag(sess, wid, item, allowed_actions));
+      dnd_begin_drag_with_preview(sess, wid, item, allowed_actions,
+                                    preview_image ? &preview : nullptr));
   }
 
 } // namespace xpl_host

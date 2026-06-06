@@ -165,15 +165,23 @@ namespace {
     int call_count = 0;
     uint32_t last_item_id = 0;
     uint32_t last_allowed = 0;
+    uint32_t last_preview = 0;
+    int      last_hot_x   = 0;
+    int      last_hot_y   = 0;
     uint32_t result = NEUI_DND_ACTION_COPY;
   };
 
-  uint32_t probe_begin_drag(void* host_data, neui_data_item_t item, uint32_t allowed)
+  uint32_t probe_begin_drag(void* host_data, neui_data_item_t item,
+                             uint32_t allowed, uint32_t preview,
+                             int hot_x, int hot_y)
   {
     auto* p = static_cast<DragSourceProbe*>(host_data);
     p->call_count++;
     p->last_item_id = item.id;
     p->last_allowed = allowed;
+    p->last_preview = preview;
+    p->last_hot_x   = hot_x;
+    p->last_hot_y   = hot_y;
     return p->result;
   }
 }
@@ -305,4 +313,116 @@ TEST_CASE("DRAG_SOURCE: BUTTON_UP before threshold just cancels")
   CHECK(behavior_dispatch_mouse(ba, rt, ctx, &up, 15, 15));
   CHECK_FALSE(rt.dragging);
   CHECK_EQ(probe.call_count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// DRAG_SOURCE preview wiring: drag_preview_key resolves from AttrBag,
+// hot-spot props forward verbatim, defaults preserve "no preview".
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DRAG_SOURCE preview: defaults forward 0 preview, -1 hot-spot")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  H->threshold_px = 2.0f;
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  DragSourceProbe probe;
+  BehaviorDispatchCtx ctx;
+  ctx.bag = &bag;
+  ctx.widget_w = 100; ctx.widget_h = 100;
+  ctx.host_data = &probe;
+  ctx.begin_drag = &probe_begin_drag;
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 0, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &down, 0, 0);
+  neui_event_t move = { NEUI_EVENT_MOUSE_MOVE };
+  move.data.mouse = { wid, 5, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &move, 5, 0);
+  CHECK_EQ(probe.call_count, 1);
+  CHECK_EQ(probe.last_preview, 0u);
+  CHECK_EQ(probe.last_hot_x, -1);
+  CHECK_EQ(probe.last_hot_y, -1);
+}
+
+TEST_CASE("DRAG_SOURCE preview: drag_preview_key resolves from AttrBag")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  H->threshold_px       = 2.0f;
+  H->drag_preview_key   = "myapp.preview";
+  H->drag_hot_x         = 8;
+  H->drag_hot_y         = 12;
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  bag.set_int(H->drag_preview_key, 0xCAFE);
+  DragSourceProbe probe;
+  BehaviorDispatchCtx ctx;
+  ctx.bag = &bag;
+  ctx.widget_w = 100; ctx.widget_h = 100;
+  ctx.host_data = &probe;
+  ctx.begin_drag = &probe_begin_drag;
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 0, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &down, 0, 0);
+  neui_event_t move = { NEUI_EVENT_MOUSE_MOVE };
+  move.data.mouse = { wid, 5, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &move, 5, 0);
+  CHECK_EQ(probe.call_count, 1);
+  CHECK_EQ(probe.last_preview, 0xCAFEu);
+  CHECK_EQ(probe.last_hot_x, 8);
+  CHECK_EQ(probe.last_hot_y, 12);
+}
+
+TEST_CASE("DRAG_SOURCE preview: missing attr value forwards 0 preview")
+{
+  // drag_preview_key set, but the AttrBag doesn't actually hold that key -
+  // we treat it as "no preview" (id 0) and don't pass a stale value through.
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  H->threshold_px     = 2.0f;
+  H->drag_preview_key = "myapp.preview";   // attr absent below
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  DragSourceProbe probe;
+  BehaviorDispatchCtx ctx;
+  ctx.bag = &bag;
+  ctx.widget_w = 100; ctx.widget_h = 100;
+  ctx.host_data = &probe;
+  ctx.begin_drag = &probe_begin_drag;
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 0, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &down, 0, 0);
+  neui_event_t move = { NEUI_EVENT_MOUSE_MOVE };
+  move.data.mouse = { wid, 5, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &move, 5, 0);
+  CHECK_EQ(probe.call_count, 1);
+  CHECK_EQ(probe.last_preview, 0u);
+}
+
+TEST_CASE("DRAG_SOURCE preview: prop setters wire to handler fields")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+
+  apply_behavior_set_string(*H, "drag_preview_key", "myapp.thumb");
+  apply_behavior_set_int   (*H, "drag_hot_x", 5);
+  apply_behavior_set_int   (*H, "drag_hot_y", 7);
+
+  CHECK_EQ(H->drag_preview_key, std::string("myapp.thumb"));
+  CHECK_EQ(H->drag_hot_x, 5);
+  CHECK_EQ(H->drag_hot_y, 7);
 }

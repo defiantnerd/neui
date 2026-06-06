@@ -158,9 +158,31 @@ namespace xpl_host
   // for the duration (caller still owns it - the platform layer
   // snapshots formats before the loop). Returns the negotiated
   // neui_dnd_action_t value; 0 on cancel.
+  //
+  // `preview_native` is an OS-specific pre-built drag-preview object
+  // (HBITMAP on Win32, retained NSImage* on macOS, nullptr elsewhere or
+  // when no preview was supplied). Ownership transfers to the platform
+  // layer for the duration of the call (Win32 hands the HBITMAP to
+  // IDragSourceHelper which deletes it; macOS releases the NSImage on
+  // return from the call). Pass nullptr for "OS default visual".
+  // `hot_x`/`hot_y` are the hot-spot on the preview image; -1 = centre.
   uint32_t platform_dnd_begin_drag(void* native_handle,
                                     neui_detail::DataItem* item,
-                                    uint32_t allowed_actions);
+                                    uint32_t allowed_actions,
+                                    void* preview_native = nullptr,
+                                    int hot_x = -1,
+                                    int hot_y = -1);
+
+  // Materialise a per-platform drag-preview bitmap object from raw BGRA8
+  // (premultiplied) pixels. Returns nullptr on failure or on the null
+  // platform. The returned object is opaque to the xpl layer: Win32
+  // returns an HBITMAP (caller owns until handed to platform_dnd_begin_drag,
+  // which transfers ownership to IDragSourceHelper on success); macOS
+  // returns a retained NSImage* bridged to void*. Ownership is consumed
+  // by the matching platform_dnd_begin_drag call.
+  void* platform_make_drag_preview(const uint8_t* bgra_premul,
+                                     uint32_t w_px, uint32_t h_px,
+                                     float scale);
 
   // -------------------------------------------------------------------------
   // Native menu bar support.

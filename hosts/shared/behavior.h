@@ -76,9 +76,16 @@ namespace neui_detail
     // drag_data_key: attr key whose int value is interpreted as a
     //   neui_data_item_t.id at threshold-cross time. Empty = drag empty
     //   payload (data_item_none).
+    // drag_preview_key: attr key whose int value is interpreted as a
+    //   neui_asset_t.id for the drag-preview image. Empty = OS default.
+    // drag_hot_x / drag_hot_y: hot-spot on the preview image, logical px
+    //   from the image top-left. -1 = image centre on that axis.
     float       threshold_px    = 4.0f;
     uint32_t    allowed_actions = 3;  // NEUI_DND_ACTION_COPY | NEUI_DND_ACTION_MOVE
     std::string drag_data_key;
+    std::string drag_preview_key;
+    int         drag_hot_x      = -1;
+    int         drag_hot_y      = -1;
 
     // ---- Hit region (compound-style 9-pt anchor) --------------------------
     neui_anchor_t anchor_parent = NEUI_ANCHOR_TOP_LEFT;
@@ -168,6 +175,8 @@ namespace neui_detail
     if (prop == "height")        { H.height   = v; return; }
     if (prop == "wrap")          { H.wrap     = v; return; }
     if (prop == "allowed_actions") { H.allowed_actions = static_cast<uint32_t>(v); return; }
+    if (prop == "drag_hot_x")    { H.drag_hot_x = v; return; }
+    if (prop == "drag_hot_y")    { H.drag_hot_y = v; return; }
   }
 
   inline void apply_behavior_set_float(BehaviorHandler& H, const std::string& prop, float v)
@@ -193,6 +202,7 @@ namespace neui_detail
     if (prop == "cursor")         { H.cursor          = sv; return; }
     if (prop == "fine_modifier")  { H.fine_modifier   = parse_fine_modifier(sv); return; }
     if (prop == "drag_data_key")  { H.drag_data_key   = sv; return; }
+    if (prop == "drag_preview_key") { H.drag_preview_key = sv; return; }
   }
 
   // ---- Hit region resolution ----------------------------------------------

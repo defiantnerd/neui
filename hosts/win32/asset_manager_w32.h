@@ -192,6 +192,39 @@ namespace win32_host
       return _handles[slot].get();
     }
 
+    // Kind-polymorphic pixel readback for export paths (drag preview, future
+    // file save, ...). Returns true and populates the out params for any
+    // asset that resolves to displayable BGRA8 pixels - BITMAP today;
+    // SURFACE will add one branch the day that kind lands (the field
+    // layout is already identical). Returns false for COMPOUND, BEHAVIOR,
+    // invalid slot, or any kind with no presentable pixels.
+    //
+    // The returned pointer is borrowed - valid only until the next mutating
+    // call on this manager. Pixels are width_px * height_px * 4 bytes.
+    bool get_pixels_for_export(uint32_t slot,
+                                const uint8_t** out_bgra,
+                                uint32_t* out_w_px,
+                                uint32_t* out_h_px,
+                                float*    out_scale) const
+    {
+      if (slot == 0 || slot >= _handles.size()) return false;
+      const auto& entry = _handles[slot];
+      if (!entry) return false;
+      switch (entry->kind) {
+      case NEUI_ASSET_KIND_BITMAP:
+        if (entry->pixels.empty()) return false;
+        if (out_bgra)  *out_bgra  = entry->pixels.data();
+        if (out_w_px)  *out_w_px  = entry->width_px;
+        if (out_h_px)  *out_h_px  = entry->height_px;
+        if (out_scale) *out_scale = entry->scale;
+        return true;
+      // case NEUI_ASSET_KIND_SURFACE: identical body once that kind lands
+      //   (surface backing buffer is the same BGRA8 premul layout).
+      default:
+        return false;
+      }
+    }
+
     void release_context(neui_render_ctx_t ctx, neui_render_backend_t* backend)
     {
       if (!ctx || !backend || !backend->destroy_bitmap) return;

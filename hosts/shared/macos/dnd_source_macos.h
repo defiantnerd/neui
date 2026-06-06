@@ -133,26 +133,46 @@ namespace neui_detail
   // text/uri-list expands to one NSDraggingItem per URL (AppKit's
   // standard multi-file drag shape); every other MIME goes on one shared
   // pasteboard item.
+  //
+  // `preview` is the optional drag-preview image. When nil, the function
+  // synthesizes the historic 24x24 rounded-rect placeholder. `hot_x` /
+  // `hot_y` are the hot-spot on the preview image (logical px from the
+  // image top-left); -1 on either axis defaults to the image centre.
   inline NSArray<NSDraggingItem*>*
-  build_dragging_items(const DataItem& item, NSPoint anchor_view_pt)
+  build_dragging_items(const DataItem& item, NSPoint anchor_view_pt,
+                        NSImage* preview, int hot_x, int hot_y)
   {
     NSMutableArray<NSDraggingItem*>* items = [NSMutableArray array];
 
-    // Shared placeholder image: a small rounded rect drawn once.
-    NSImage* placeholder = [[NSImage alloc] initWithSize:NSMakeSize(24, 24)];
-    [placeholder lockFocus];
-    NSBezierPath* p = [NSBezierPath bezierPathWithRoundedRect:
-                          NSMakeRect(2, 2, 20, 20) xRadius:4 yRadius:4];
-    [[NSColor colorWithCalibratedWhite:0.8 alpha:0.8] setFill];
-    [p fill];
-    [[NSColor colorWithCalibratedWhite:0.2 alpha:0.9] setStroke];
-    [p setLineWidth:1.0];
-    [p stroke];
-    [placeholder unlockFocus];
+    NSImage* image = preview;
+    if (!image) {
+      // Synthesize the historic 24x24 rounded-rect placeholder so the no-
+      // preview path keeps its previous look.
+      image = [[NSImage alloc] initWithSize:NSMakeSize(24, 24)];
+      [image lockFocus];
+      NSBezierPath* p = [NSBezierPath bezierPathWithRoundedRect:
+                            NSMakeRect(2, 2, 20, 20) xRadius:4 yRadius:4];
+      [[NSColor colorWithCalibratedWhite:0.8 alpha:0.8] setFill];
+      [p fill];
+      [[NSColor colorWithCalibratedWhite:0.2 alpha:0.9] setStroke];
+      [p setLineWidth:1.0];
+      [p stroke];
+      [image unlockFocus];
+    }
+
+    NSSize image_size = [image size];
+    CGFloat eff_hot_x = (hot_x < 0) ? (image_size.width  * 0.5) : (CGFloat)hot_x;
+    CGFloat eff_hot_y = (hot_y < 0) ? (image_size.height * 0.5) : (CGFloat)hot_y;
 
     auto frame_for = [&](void) -> NSRect {
-      return NSMakeRect(anchor_view_pt.x - 12, anchor_view_pt.y - 12, 24, 24);
+      // NSView is isFlipped=YES in our hosts, so hot_y measured from the
+      // image top-left maps directly to subtraction in view space.
+      return NSMakeRect(anchor_view_pt.x - eff_hot_x,
+                         anchor_view_pt.y - eff_hot_y,
+                         image_size.width, image_size.height);
     };
+
+    NSImage* placeholder = image;  // alias kept so call sites below stay terse
 
     // Collect text/html/MIME payloads once, keyed by NSPasteboard type.
     // Win32's IDataObject serves every format from one composite object;
@@ -274,10 +294,47 @@ namespace neui_detail
                                pressure:1.0f];
   }
 
+  // Build an NSImage from a raw BGRA8 premultiplied pixel buffer (the
+  // layout used by every neui asset manager). `scale` lets the OS render
+  // an @2x asset at half its pixel dimensions (logical size = pixel size
+  // / scale). Returns nil on bad args.
+  inline NSImage* macos_make_drag_nsimage(const uint8_t* bgra_premul,
+                                            uint32_t w_px, uint32_t h_px,
+                                            float scale)
+  {
+    if (!bgra_premul || w_px == 0 || h_px == 0) return nil;
+    if (scale <= 0.0f) scale = 1.0f;
+
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    if (!cs) return nil;
+    // kCGImageAlphaPremultipliedFirst + Little32 = BGRA premultiplied
+    // (the byte order matches our asset_manager pixel layout).
+    CGBitmapInfo info = (CGBitmapInfo)kCGImageAlphaPremultipliedFirst
+                       | kCGBitmapByteOrder32Little;
+    CGContextRef ctx = CGBitmapContextCreate(nullptr, w_px, h_px,
+                                              8, w_px * 4, cs, info);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return nil;
+    std::memcpy(CGBitmapContextGetData(ctx), bgra_premul,
+                 static_cast<size_t>(w_px) * h_px * 4);
+    CGImageRef cg = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    if (!cg) return nil;
+    NSSize logical = NSMakeSize((CGFloat)w_px / scale,
+                                 (CGFloat)h_px / scale);
+    NSImage* img = [[NSImage alloc] initWithCGImage:cg size:logical];
+    CGImageRelease(cg);
+    return img;
+  }
+
   // Entry point used by platform_macos.mm and hosts/macos/widgets.mm.
+  // `preview` may be nil (no custom drag image, falls back to the historic
+  // placeholder). `hot_x`/`hot_y` -1 = image centre on that axis.
   inline uint32_t macos_run_drag_source(NSView* anchor_view,
                                          const DataItem& item,
-                                         uint32_t allowed_actions)
+                                         uint32_t allowed_actions,
+                                         NSImage* preview = nil,
+                                         int hot_x = -1, int hot_y = -1)
   {
     if (!anchor_view) return 0;
     if (!allowed_actions) return 0;
@@ -292,7 +349,8 @@ namespace neui_detail
     NSPoint mouse_win    = [win convertPointFromScreen:mouse_screen];
     NSPoint mouse_view   = [anchor_view convertPoint:mouse_win fromView:nil];
 
-    NSArray<NSDraggingItem*>* items = build_dragging_items(item, mouse_view);
+    NSArray<NSDraggingItem*>* items =
+      build_dragging_items(item, mouse_view, preview, hot_x, hot_y);
     if ([items count] == 0) return 0;
 
     NEUIDragSource* src = [[NEUIDragSource alloc] init];

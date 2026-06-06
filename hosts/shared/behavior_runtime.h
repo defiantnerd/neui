@@ -77,9 +77,20 @@ namespace neui_detail
     // drag-source impl (currently all three do). The runtime guards
     // re-entry on the Session side, but clears its own dragging state
     // before the call so the same widget can't fire two drags in flight.
+    //
+    // `preview_image` is a neui_asset_t.id (the public neui_asset_t is a
+    // struct wrapping a single uint32_t; we pass the raw id here so the
+    // shared runtime stays free of the public-API includes). 0 / asset
+    // sentinel = no preview, OS default visual. The host translates this
+    // into a platform bitmap inside its begin_drag impl.
+    // `hot_x` / `hot_y` are the preview hot-spot in logical px from the
+    // image top-left. -1 = image centre on that axis.
     uint32_t (*begin_drag)(void* host_data,
                             neui_data_item_t item,
-                            uint32_t allowed_actions)                   = nullptr;
+                            uint32_t allowed_actions,
+                            uint32_t preview_image,
+                            int hot_x,
+                            int hot_y)                                  = nullptr;
   };
 
   // ---- Math helpers (shared with KnobWidget) -----------------------------
@@ -400,7 +411,13 @@ namespace neui_detail
               int v = ctx.bag->get_int(H->drag_data_key, 0);
               if (v != 0) item.id = static_cast<uint32_t>(v);
             }
-            ctx.begin_drag(ctx.host_data, item, H->allowed_actions);
+            uint32_t preview_id = 0;
+            if (ctx.bag && !H->drag_preview_key.empty()) {
+              int v = ctx.bag->get_int(H->drag_preview_key, 0);
+              if (v != 0) preview_id = static_cast<uint32_t>(v);
+            }
+            ctx.begin_drag(ctx.host_data, item, H->allowed_actions,
+                            preview_id, H->drag_hot_x, H->drag_hot_y);
           }
           return true;
         }

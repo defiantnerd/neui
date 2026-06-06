@@ -273,30 +273,53 @@ namespace neui_detail
     {
       if (!pFormatEtcIn || !pMedium) return E_POINTER;
       std::memset(pMedium, 0, sizeof(*pMedium));
-      if (!(pFormatEtcIn->tymed & TYMED_HGLOBAL)) return DV_E_TYMED;
       if (pFormatEtcIn->dwAspect != DVASPECT_CONTENT) return DV_E_DVASPECT;
 
       const DragSourceFormat* f = find(pFormatEtcIn->cfFormat);
       if (!f) return DV_E_FORMATETC;
 
-      HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, f->bytes.size());
-      if (!hg) return E_OUTOFMEMORY;
-      void* dst = GlobalLock(hg);
-      if (!dst) { GlobalFree(hg); return E_OUTOFMEMORY; }
-      std::memcpy(dst, f->bytes.data(), f->bytes.size());
-      GlobalUnlock(hg);
-
-      pMedium->tymed          = TYMED_HGLOBAL;
-      pMedium->hGlobal        = hg;
-      pMedium->pUnkForRelease = nullptr;
-      return S_OK;
+      // The Shell's IDragSourceHelper writes some of its bookkeeping
+      // formats via TYMED_ISTREAM and reads them back the same way; the
+      // historic neui formats round-trip through TYMED_HGLOBAL. Honour
+      // whichever the caller's tymed bitmask allows, HGLOBAL first.
+      if (pFormatEtcIn->tymed & TYMED_HGLOBAL) {
+        HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, f->bytes.size());
+        if (!hg) return E_OUTOFMEMORY;
+        void* dst = GlobalLock(hg);
+        if (!dst) { GlobalFree(hg); return E_OUTOFMEMORY; }
+        std::memcpy(dst, f->bytes.data(), f->bytes.size());
+        GlobalUnlock(hg);
+        pMedium->tymed   = TYMED_HGLOBAL;
+        pMedium->hGlobal = hg;
+        return S_OK;
+      }
+      if (pFormatEtcIn->tymed & TYMED_ISTREAM) {
+        HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, f->bytes.size());
+        if (!hg) return E_OUTOFMEMORY;
+        void* dst = GlobalLock(hg);
+        if (!dst) { GlobalFree(hg); return E_OUTOFMEMORY; }
+        std::memcpy(dst, f->bytes.data(), f->bytes.size());
+        GlobalUnlock(hg);
+        IStream* stream = nullptr;
+        HRESULT hr = CreateStreamOnHGlobal(hg, /*fDeleteOnRelease=*/TRUE,
+                                            &stream);
+        if (FAILED(hr) || !stream) {
+          GlobalFree(hg);
+          return FAILED(hr) ? hr : E_OUTOFMEMORY;
+        }
+        pMedium->tymed = TYMED_ISTREAM;
+        pMedium->pstm  = stream;
+        return S_OK;
+      }
+      return DV_E_TYMED;
     }
     STDMETHODIMP GetDataHere(FORMATETC*, STGMEDIUM*) override
     { return DATA_E_FORMATETC; }
     STDMETHODIMP QueryGetData(FORMATETC* pFormatEtc) override
     {
       if (!pFormatEtc) return E_POINTER;
-      if (!(pFormatEtc->tymed & TYMED_HGLOBAL)) return DV_E_TYMED;
+      if (!(pFormatEtc->tymed & (TYMED_HGLOBAL | TYMED_ISTREAM)))
+        return DV_E_TYMED;
       if (pFormatEtc->dwAspect != DVASPECT_CONTENT) return DV_E_DVASPECT;
       return find(pFormatEtc->cfFormat) ? S_OK : DV_E_FORMATETC;
     }
@@ -307,8 +330,66 @@ namespace neui_detail
       pOut->ptd = nullptr;
       return DATA_S_SAMEFORMATETC;
     }
-    STDMETHODIMP SetData(FORMATETC*, STGMEDIUM*, BOOL) override
-    { return E_NOTIMPL; }
+    // IDragSourceHelper::InitializeFromBitmap writes the drag-image bits
+    // (CFSTR_DRAGIMAGEBITS) + drop description (CFSTR_DROPDESCRIPTION) +
+    // CFSTR_INDRAGLOOP into the IDataObject via SetData. Some of these
+    // formats arrive on TYMED_HGLOBAL, others on TYMED_ISTREAM; refusing
+    // either one makes InitializeFromBitmap fail (0x80040069) and the
+    // Shell silently drops the drag preview. We accept both, read the
+    // bytes out, and stash them as a DragSourceFormat. The newly-added
+    // formats automatically show up in EnumFormatEtc, which is how
+    // Shell-aware drop targets discover them.
+    STDMETHODIMP SetData(FORMATETC* pFormatEtc, STGMEDIUM* pMedium,
+                          BOOL fRelease) override
+    {
+      if (!pFormatEtc || !pMedium) return E_POINTER;
+
+      std::vector<uint8_t> bytes;
+      if (pMedium->tymed == TYMED_HGLOBAL && pMedium->hGlobal) {
+        SIZE_T sz  = GlobalSize(pMedium->hGlobal);
+        void*  src = GlobalLock(pMedium->hGlobal);
+        if (!src) return E_FAIL;
+        bytes.assign(reinterpret_cast<uint8_t*>(src),
+                      reinterpret_cast<uint8_t*>(src) + sz);
+        GlobalUnlock(pMedium->hGlobal);
+      } else if (pMedium->tymed == TYMED_ISTREAM && pMedium->pstm) {
+        // Slurp the whole stream into bytes. Reset position first - the
+        // Shell sometimes leaves the read cursor at the end after its
+        // own bookkeeping.
+        LARGE_INTEGER zero = {};
+        pMedium->pstm->Seek(zero, STREAM_SEEK_SET, nullptr);
+        uint8_t buf[64 * 1024];
+        ULONG read = 0;
+        do {
+          HRESULT hr = pMedium->pstm->Read(buf, sizeof(buf), &read);
+          if (FAILED(hr)) return hr;
+          bytes.insert(bytes.end(), buf, buf + read);
+        } while (read == sizeof(buf));
+      } else {
+        return DV_E_TYMED;
+      }
+
+      // Replace existing entry of the same format, else append.
+      bool replaced = false;
+      for (auto& f : _formats) {
+        if (f.cf == pFormatEtc->cfFormat) {
+          f.bytes    = std::move(bytes);
+          f.is_hdrop = false;
+          replaced   = true;
+          break;
+        }
+      }
+      if (!replaced) {
+        DragSourceFormat f;
+        f.cf       = pFormatEtc->cfFormat;
+        f.bytes    = std::move(bytes);
+        f.is_hdrop = false;
+        _formats.push_back(std::move(f));
+      }
+
+      if (fRelease) ReleaseStgMedium(pMedium);
+      return S_OK;
+    }
     STDMETHODIMP EnumFormatEtc(DWORD dwDirection, IEnumFORMATETC** ppEnum) override
     {
       if (!ppEnum) return E_POINTER;
@@ -382,11 +463,28 @@ namespace neui_detail
   };
 
   // -------------------------------------------------------------------------
+  // Optional drag-preview image. preview_hbitmap may be null (no preview,
+  // OS default cursor). When supplied it's a 32-bit BGRA pre-multiplied
+  // top-down DIB (whatever w32_make_drag_hbitmap built); IDragSourceHelper
+  // owns it after InitializeFromBitmap, so the caller does NOT delete it
+  // after a successful call. hot_x / hot_y in image pixel coords.
+
+  struct DragPreviewW32
+  {
+    HBITMAP hbitmap = nullptr;
+    int     width   = 0;
+    int     height  = 0;
+    int     hot_x   = 0;
+    int     hot_y   = 0;
+  };
+
+  // -------------------------------------------------------------------------
   // Entry point used by platform_win32.cpp and hosts/win32/widgets.cpp.
 
   inline uint32_t platform_dnd_begin_drag_w32(void* /*native_handle*/,
                                                DataItem* item,
-                                               uint32_t allowed_actions)
+                                               uint32_t allowed_actions,
+                                               const DragPreviewW32* preview = nullptr)
   {
     if (!item) return 0;
     if (!allowed_actions) return 0;
@@ -394,16 +492,84 @@ namespace neui_detail
 
     DataObjectImpl* obj    = new DataObjectImpl(*item);
     DropSourceImpl* source = new DropSourceImpl();
+
+    // Attach drag image BEFORE DoDragDrop. IDragSourceHelper stores the
+    // bitmap reference via the data object's stored IDataObject side
+    // channel (CFSTR_DRAGIMAGEBITS / CFSTR_DROPDESCRIPTION) and AppKit-
+    // style "follow the cursor" rendering is done by the shell.
+    //
+    // Ownership: per Shell docs, IDragSourceHelper takes ownership of
+    // hbmpDragImage on a successful InitializeFromBitmap call; we must
+    // not DeleteObject it afterwards. On failure ownership stays with
+    // the caller - we DeleteObject in that case.
+    bool helper_owns_bitmap = false;
+    if (preview && preview->hbitmap) {
+      IDragSourceHelper* helper = nullptr;
+      HRESULT hh = CoCreateInstance(CLSID_DragDropHelper, nullptr,
+                                     CLSCTX_INPROC_SERVER,
+                                     IID_IDragSourceHelper,
+                                     reinterpret_cast<void**>(&helper));
+      if (SUCCEEDED(hh) && helper) {
+        SHDRAGIMAGE sdi = {};
+        sdi.sizeDragImage.cx = preview->width;
+        sdi.sizeDragImage.cy = preview->height;
+        sdi.ptOffset.x       = preview->hot_x;
+        sdi.ptOffset.y       = preview->hot_y;
+        sdi.hbmpDragImage    = preview->hbitmap;
+        // CLR_NONE: rely on the bitmap's own alpha channel (it's premul
+        // BGRA); no per-pixel colour key masking.
+        sdi.crColorKey       = CLR_NONE;
+        HRESULT hr2 = helper->InitializeFromBitmap(&sdi, obj);
+        if (SUCCEEDED(hr2)) helper_owns_bitmap = true;
+        helper->Release();
+      }
+    }
+
     DWORD effects = dnd_action_to_dropeffect(allowed_actions);
     DWORD result  = 0;
     HRESULT hr = DoDragDrop(obj, source, effects, &result);
     obj->Release();
     source->Release();
+
+    if (preview && preview->hbitmap && !helper_owns_bitmap) {
+      DeleteObject(preview->hbitmap);
+    }
+
     if (hr != DRAGDROP_S_DROP) return 0;
     if (result & DROPEFFECT_COPY) return NEUI_DND_ACTION_COPY;
     if (result & DROPEFFECT_MOVE) return NEUI_DND_ACTION_MOVE;
     if (result & DROPEFFECT_LINK) return NEUI_DND_ACTION_LINK;
     return 0;
+  }
+
+  // -------------------------------------------------------------------------
+  // Build a 32-bit pre-multiplied BGRA top-down DIB section from a raw
+  // BGRA8 pixel buffer (same layout AssetEntry::pixels stores). Returns
+  // null on failure. Caller passes ownership to platform_dnd_begin_drag_w32
+  // via DragPreviewW32::hbitmap; if it isn't used in a successful
+  // InitializeFromBitmap, the caller must DeleteObject it.
+  inline HBITMAP w32_make_drag_hbitmap(const uint8_t* bgra_premul,
+                                         uint32_t w_px, uint32_t h_px)
+  {
+    if (!bgra_premul || w_px == 0 || h_px == 0) return nullptr;
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = static_cast<LONG>(w_px);
+    bmi.bmiHeader.biHeight      = -static_cast<LONG>(h_px); // top-down
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* dst = nullptr;
+    HDC screen = GetDC(nullptr);
+    HBITMAP hbm = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &dst,
+                                     nullptr, 0);
+    ReleaseDC(nullptr, screen);
+    if (!hbm || !dst) {
+      if (hbm) DeleteObject(hbm);
+      return nullptr;
+    }
+    std::memcpy(dst, bgra_premul, static_cast<size_t>(w_px) * h_px * 4);
+    return hbm;
   }
 
 } // namespace neui_detail

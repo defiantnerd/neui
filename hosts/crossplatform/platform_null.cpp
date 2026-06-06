@@ -95,7 +95,12 @@ namespace xpl_host
   void platform_dnd_unregister_window(void* /*native_handle*/)                {}
   uint32_t platform_dnd_begin_drag(void* /*native_handle*/,
                                      neui_detail::DataItem* /*item*/,
-                                     uint32_t /*allowed_actions*/)            { return 0;     }
+                                     uint32_t /*allowed_actions*/,
+                                     void* /*preview_native*/,
+                                     int /*hot_x*/, int /*hot_y*/)            { return 0;     }
+  void*    platform_make_drag_preview(const uint8_t* /*bgra_premul*/,
+                                       uint32_t /*w_px*/, uint32_t /*h_px*/,
+                                       float /*scale*/)                       { return nullptr; }
 
   void     platform_set_cursor(int /*kind*/)                                  {}
 

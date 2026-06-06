@@ -204,7 +204,25 @@ namespace neui_detail
   {
   public:
     DropTargetImpl(HWND hwnd, DndDispatchSeam seam)
-      : _hwnd(hwnd), _seam(seam), _ref(1) {}
+      : _hwnd(hwnd), _seam(seam), _ref(1)
+    {
+      // The Shell's drag preview is rendered by the *drop target's*
+      // IDropTargetHelper. Sources call IDragSourceHelper to attach the
+      // bitmap to the IDataObject; targets must echo each DragEnter /
+      // DragOver / DragLeave / Drop into IDropTargetHelper so it can
+      // composite the image over the target window. External apps like
+      // Explorer do this themselves; without it the OS hides the image
+      // when the cursor is over a neui window even though the source
+      // sent one.
+      CoCreateInstance(CLSID_DragDropHelper, nullptr, CLSCTX_INPROC_SERVER,
+                        IID_IDropTargetHelper,
+                        reinterpret_cast<void**>(&_helper));
+    }
+
+    ~DropTargetImpl()
+    {
+      if (_helper) { _helper->Release(); _helper = nullptr; }
+    }
 
     // IUnknown
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
@@ -248,6 +266,10 @@ namespace neui_detail
       }
       *pdwEffect = accepted ? dnd_action_to_dropeffect(accepted)
                             : DROPEFFECT_NONE;
+      if (_helper) {
+        POINT p = { pt.x, pt.y };
+        _helper->DragEnter(_hwnd, pDataObj, &p, *pdwEffect);
+      }
       return S_OK;
     }
 
@@ -268,6 +290,10 @@ namespace neui_detail
       }
       *pdwEffect = accepted ? dnd_action_to_dropeffect(accepted)
                             : DROPEFFECT_NONE;
+      if (_helper) {
+        POINT p = { pt.x, pt.y };
+        _helper->DragOver(&p, *pdwEffect);
+      }
       return S_OK;
     }
 
@@ -276,6 +302,7 @@ namespace neui_detail
       if (_seam.on_leave) _seam.on_leave(_seam.session_ptr);
       _format_strings.clear();
       _format_ptrs.clear();
+      if (_helper) _helper->DragLeave();
       return S_OK;
     }
 
@@ -304,6 +331,10 @@ namespace neui_detail
                             : DROPEFFECT_NONE;
       _format_strings.clear();
       _format_ptrs.clear();
+      if (_helper) {
+        POINT p = { pt.x, pt.y };
+        _helper->Drop(pDataObj, &p, *pdwEffect);
+      }
       return S_OK;
     }
 
@@ -380,6 +411,7 @@ namespace neui_detail
     LONG _ref;
     std::vector<std::string>  _format_strings;
     std::vector<const char*>  _format_ptrs;
+    IDropTargetHelper*        _helper = nullptr;
   };
 
   // Idempotent global OleInitialize, called once per process by the

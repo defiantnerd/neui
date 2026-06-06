@@ -50,7 +50,13 @@ struct AppState
   neui_widget_api_t*    widgets   = nullptr;
   neui_clipboard_api_t* clipboard = nullptr;
   neui_dnd_api_t*       dnd       = nullptr;
+  neui_asset_api_t*     assets    = nullptr;
   neui_session_t        session   = { 0 };
+
+  // Pre-built drag preview - a 64x64 BGRA checkerboard so it's instantly
+  // recognisable as "the neui example's drag image". Built once at startup
+  // and reused for every drag (assets are session-scoped, freed on exit).
+  neui_asset_t          preview   = { UINT32_MAX };
 
   uint32_t source_id = 0;
   uint32_t drop_id   = 0;
@@ -152,10 +158,12 @@ static void start_drag(AppState* a)
   uint32_t allowed = NEUI_DND_ACTION_COPY |
                      NEUI_DND_ACTION_MOVE |
                      NEUI_DND_ACTION_LINK;
-  neui_dnd_action_t res = a->dnd->begin_drag(a->session,
+  neui_drag_preview_t preview = { a->preview, /*hot_x=*/-1, /*hot_y=*/-1 };
+  neui_dnd_action_t res = a->dnd->begin_drag_with_preview(a->session,
                                               { a->source_id },
                                               item,
-                                              allowed);
+                                              allowed,
+                                              &preview);
   a->clipboard->release(a->session, item);
 
   const char* msg = "cancelled";
@@ -307,9 +315,29 @@ int main(int /*argc*/, char* /*argv*/[])
   app.widgets   = (neui_widget_api_t*)   host->get_interface(app.session, NEUI_API_WIDGETS);
   app.clipboard = (neui_clipboard_api_t*)host->get_interface(app.session, NEUI_API_CLIPBOARD);
   app.dnd       = (neui_dnd_api_t*)      host->get_interface(app.session, NEUI_API_DND);
-  if (!app.widgets || !app.clipboard || !app.dnd) {
+  app.assets    = (neui_asset_api_t*)    host->get_interface(app.session, NEUI_API_ASSETS);
+  if (!app.widgets || !app.clipboard || !app.dnd || !app.assets) {
     dbglog("[dnd_source_example] missing API\n");
     return 1;
+  }
+
+  // Build a 64x64 BGRA checkerboard so the drag preview is immediately
+  // recognisable on the cursor. 8x8 cells alternating dark/light blue with
+  // full alpha. BGRA premultiplied (since alpha is 0xFF, premul == plain).
+  {
+    const int W = 64, H = 64, CELL = 8;
+    std::vector<uint8_t> pixels(static_cast<size_t>(W) * H * 4);
+    for (int y = 0; y < H; ++y) {
+      for (int x = 0; x < W; ++x) {
+        bool dark = (((x / CELL) + (y / CELL)) & 1) == 0;
+        uint8_t* px = &pixels[(y * W + x) * 4];
+        // BGRA order. Dark = #20406A, light = #80B0E0.
+        if (dark) { px[0] = 0x6A; px[1] = 0x40; px[2] = 0x20; px[3] = 0xFF; }
+        else      { px[0] = 0xE0; px[1] = 0xB0; px[2] = 0x80; px[3] = 0xFF; }
+      }
+    }
+    app.preview = app.assets->create_bitmap(app.session, W, H,
+                                              pixels.data(), 1.0f);
   }
 
   neui_widget_t win = app.widgets->create(app.session,

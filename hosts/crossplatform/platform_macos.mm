@@ -1617,15 +1617,32 @@ namespace xpl_host
       [cv unregisterDraggedTypes];
   }
 
+  void* platform_make_drag_preview(const uint8_t* bgra_premul,
+                                     uint32_t w_px, uint32_t h_px,
+                                     float scale)
+  {
+    NSImage* img = neui_detail::macos_make_drag_nsimage(bgra_premul, w_px,
+                                                          h_px, scale);
+    // Retained transfer: caller owns until handed to platform_dnd_begin_drag.
+    return (__bridge_retained void*)img;
+  }
+
   uint32_t platform_dnd_begin_drag(void* native_handle,
                                     neui_detail::DataItem* item,
-                                    uint32_t allowed_actions)
+                                    uint32_t allowed_actions,
+                                    void* preview_native,
+                                    int hot_x, int hot_y)
   {
     if (!native_handle || !item) return 0;
     NSWindow* win = (__bridge NSWindow*)native_handle;
     NSView* cv = [win contentView];
     if (!cv) return 0;
-    return neui_detail::macos_run_drag_source(cv, *item, allowed_actions);
+    // Take ownership of the bridged NSImage* (transfer matches the
+    // platform.h contract: caller hands off ownership for the duration of
+    // the call). Pass nil if no preview.
+    NSImage* preview = (__bridge_transfer NSImage*)preview_native;
+    return neui_detail::macos_run_drag_source(cv, *item, allowed_actions,
+                                                preview, hot_x, hot_y);
   }
 
   // -------------------------------------------------------------------------
