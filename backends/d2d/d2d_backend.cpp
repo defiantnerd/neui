@@ -1,9 +1,12 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <d2d1.h>
+#include <d2d1_1.h>
+#include <d2d1effects.h>
+#include <d2d1effects_2.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
 #include <dwrite.h>
-#include <wincodec.h>
 #include <cstdint>
 #include <cstring>
 #include <cmath>
@@ -14,8 +17,10 @@
 #include "d2d_backend.h"
 
 #pragma comment(lib, "d2d1")
+#pragma comment(lib, "d3d11")
+#pragma comment(lib, "dxgi")
 #pragma comment(lib, "dwrite")
-#pragma comment(lib, "windowscodecs")
+#pragma comment(lib, "dxguid")  // provides CLSID_D2D1Tint and other effect CLSIDs
 
 namespace neui_d2d_backend
 {
@@ -30,40 +35,49 @@ namespace neui_d2d_backend
   };
 
   // Per-window or per-surface render context. The active render target
-  // (`target`) is either an ID2D1HwndRenderTarget (HWND ctxs, also
-  // mirrored in `hwnd_target` for the HWND-only Resize/device-loss
-  // paths) or an off-screen ID2D1RenderTarget bound to `wic_bitmap`
-  // (NEUI_ASSET_KIND_SURFACE ctxs). Every draw path only touches the
-  // abstract ID2D1RenderTarget interface and so is shared between the
-  // two; create / destroy / resize / read-pixels branch on which of
-  // hwnd_target / wic_bitmap is non-null.
+  // (`target`) is an ID2D1DeviceContext. For HWND contexts it draws into
+  // `back_buffer`, a D2D bitmap aliased to a DXGI swap-chain back buffer
+  // that we Present1 at end_frame. For NEUI_ASSET_KIND_SURFACE contexts
+  // it draws into a GPU target bitmap; read_pixels_bgra copies that into
+  // a staging bitmap (CANNOT_DRAW | CPU_READ) and Maps it to memcpy out.
+  //
+  // The HWND-vs-offscreen discriminator is `swap_chain != nullptr` (HWND
+  // path) vs `surface_w_px != 0` (offscreen path).
   struct D2DContext
   {
-    // Active render target + brush. For HWND ctxs, `target` aliases
-    // `hwnd_target` (the ID2D1HwndRenderTarget is the only thing that
-    // owns the GPU resources). For off-screen ctxs `target` is the
-    // bitmap render target and hwnd_target stays null.
-    ID2D1RenderTarget*     target      = nullptr;
+    // Active render target + brush. All draw paths use ID2D1RenderTarget's
+    // ABI subset that ID2D1DeviceContext inherits; effects use the device
+    // context directly.
+    ID2D1DeviceContext*    target      = nullptr;
     ID2D1SolidColorBrush*  brush       = nullptr;
     uint32_t               dpi         = 96;
 
-    // HWND-specific. Re-create state: hwnd + size are stashed at
-    // create_context time and kept in sync by d2d_resize / d2d_update_dpi.
-    // If D2D returns D2DERR_RECREATE_TARGET from EndDraw the target is
-    // gone but the context pointer stays valid, so the next begin_frame
-    // can rebuild in place. `generation` is bumped whenever the target
-    // is recreated; clients that cache target-bound resources
-    // (ID2D1Bitmap handles) check this to discover their caches are stale.
-    ID2D1HwndRenderTarget* hwnd_target = nullptr;
+    // HWND-specific. The DXGI swap chain owns the back-buffer texture;
+    // `back_buffer` is the D2D-side alias bound as the device context's
+    // current target. hwnd + size are stashed at create time and kept
+    // in sync by d2d_resize / d2d_update_dpi. If a draw operation
+    // returns D2DERR_RECREATE_TARGET (or DXGI_ERROR_DEVICE_REMOVED on
+    // Present1), the device is gone but the D2DContext pointer stays
+    // valid: the next begin_frame rebuilds the device + swap chain in
+    // place, bumps `generation`, and lets cached per-ctx bitmap handles
+    // discover their staleness via get_context_generation.
+    IDXGISwapChain1*       swap_chain  = nullptr;
+    ID2D1Bitmap1*          back_buffer = nullptr;
     HWND                   hwnd        = nullptr;
     uint32_t               width       = 0;
     uint32_t               height      = 0;
     uint32_t               generation  = 1;
 
-    // Off-screen-specific. Owns the WIC bitmap that backs the bitmap
-    // render target; read_pixels_bgra walks IWICBitmap::Lock to extract
-    // the bytes after end_frame. Both fields stay null on HWND ctxs.
-    IWICBitmap*            wic_bitmap     = nullptr;
+    // Off-screen-specific. With D2D 1.1, a target bitmap created via
+    // CreateBitmap[FromWicBitmap] with D2D1_BITMAP_OPTIONS_TARGET is a
+    // GPU texture - it cannot be CPU-mapped directly. read_pixels_bgra
+    // copies the target's pixels into a staging bitmap created with
+    // CANNOT_DRAW | CPU_READ, then Maps the staging bitmap to memcpy
+    // the bytes out. `back_buffer` (above) holds the render target;
+    // `staging_bitmap` is lazy-allocated on the first readback and
+    // reused for subsequent reads of the same surface size. Both
+    // fields stay null on HWND ctxs.
+    ID2D1Bitmap1*          staging_bitmap = nullptr;
     uint32_t               surface_w_px   = 0;
     uint32_t               surface_h_px   = 0;
 
@@ -95,16 +109,28 @@ namespace neui_d2d_backend
     // call's font_size". Reset on every begin_frame so a missing pop in
     // one frame can't bleed across.
     std::vector<FontState>      font_stack;
+
+    // Tint effect, lazily created the first time a tinted draw_bitmap is
+    // issued against this ctx. Released alongside `target` on device-loss
+    // / destroy. Reused across draws within a frame.
+    ID2D1Effect*                tint_effect = nullptr;
   };
 
-  // Process-wide D2D factory - created once, never destroyed (lives for process lifetime).
-  static ID2D1Factory*       g_factory        = nullptr;
+  // Process-wide D2D / DWrite / DXGI factories - created once, never
+  // destroyed (lives for process lifetime). g_factory is the 1.1 factory
+  // (ID2D1Factory1), required to reach CreateDevice + the effects framework.
+  static ID2D1Factory1*      g_factory        = nullptr;
   static IDWriteFactory*     g_dwrite_factory = nullptr;
-  // WIC factory backs off-screen surface contexts (IWICBitmap +
-  // ID2D1RenderTarget::CreateWicBitmapRenderTarget). Created lazily
-  // when the first surface is requested; HWND-only apps never pay for
-  // COM init beyond what was already happening for D2D/DWrite.
-  static IWICImagingFactory* g_wic_factory    = nullptr;
+  static IDXGIFactory2*      g_dxgi_factory   = nullptr;
+
+  // Process-wide D3D11 + D2D device. Both HWND ctxs and offscreen ctxs
+  // share these - the D2D device is the source of every ID2D1DeviceContext
+  // we hand back, and the DXGI device under it is used to make swap chains
+  // for HWND ctxs. We rebuild them on device-loss and bump every ctx's
+  // generation in begin_frame so cached resources re-upload.
+  static ID3D11Device*       g_d3d_device     = nullptr;
+  static IDXGIDevice*        g_dxgi_device    = nullptr;
+  static ID2D1Device*        g_d2d_device     = nullptr;
 
   // Text format cache, keyed by (family, weight, size). Size is quantised
   // to 0.1 logical pixels so floating-point chatter (12.0 vs 12.00001)
@@ -137,26 +163,65 @@ namespace neui_d2d_backend
   static std::unordered_map<TextFormatKey, IDWriteTextFormat*, TextFormatKeyHash>
     g_text_format_cache;
 
+  // Tear down the process-wide D3D / DXGI / D2D devices. Called when
+  // begin_frame discovers the device is gone, so the next ctx rebuild
+  // creates a fresh device chain. The DWrite factory is not device-bound
+  // and stays alive across rebuilds.
+  static void release_device_chain()
+  {
+    if (g_d2d_device)  { g_d2d_device->Release();  g_d2d_device  = nullptr; }
+    if (g_dxgi_device) { g_dxgi_device->Release(); g_dxgi_device = nullptr; }
+    if (g_d3d_device)  { g_d3d_device->Release();  g_d3d_device  = nullptr; }
+  }
+
+  // Build the D3D11 + DXGI + D2D device chain. Idempotent: if everything
+  // is already built, returns true immediately. Called from
+  // d2d_create_context and from d2d_begin_frame's device-loss recovery path.
+  static bool ensure_device_chain()
+  {
+    if (g_d2d_device && g_d3d_device && g_dxgi_device) return true;
+    release_device_chain();
+
+    // D3D11 device for the GPU surface. BGRA_SUPPORT is required for D2D
+    // interop. We pick the default hardware adapter; if hardware is
+    // unavailable (Remote Desktop with software fallback policy), fall
+    // back to the WARP rasteriser so we still get a working device.
+    D3D_FEATURE_LEVEL fl;
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    HRESULT hr = D3D11CreateDevice(nullptr,
+                                    D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                    flags, nullptr, 0,
+                                    D3D11_SDK_VERSION,
+                                    &g_d3d_device, &fl, nullptr);
+    if (FAILED(hr)) {
+      hr = D3D11CreateDevice(nullptr,
+                              D3D_DRIVER_TYPE_WARP, nullptr,
+                              flags, nullptr, 0,
+                              D3D11_SDK_VERSION,
+                              &g_d3d_device, &fl, nullptr);
+    }
+    if (FAILED(hr) || !g_d3d_device) { release_device_chain(); return false; }
+
+    hr = g_d3d_device->QueryInterface(IID_PPV_ARGS(&g_dxgi_device));
+    if (FAILED(hr)) { release_device_chain(); return false; }
+
+    hr = g_factory->CreateDevice(g_dxgi_device, &g_d2d_device);
+    if (FAILED(hr)) { release_device_chain(); return false; }
+    return true;
+  }
+
   static bool ensure_factory()
   {
     if (g_factory) return true;
-    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_factory);
+    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
+                                    __uuidof(ID2D1Factory1),
+                                    reinterpret_cast<void**>(&g_factory));
     if (FAILED(hr)) return false;
     hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
                              __uuidof(IDWriteFactory),
                              reinterpret_cast<IUnknown**>(&g_dwrite_factory));
-    return SUCCEEDED(hr);
-  }
-
-  // Lazy WIC factory init. Returns false if COM hasn't been initialised
-  // (the host calls OleInitialize for DnD; CoInitialize* covers the same
-  // need). On apps that never create a surface, this never fires.
-  static bool ensure_wic_factory()
-  {
-    if (g_wic_factory) return true;
-    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
-                                  CLSCTX_INPROC_SERVER,
-                                  IID_PPV_ARGS(&g_wic_factory));
+    if (FAILED(hr)) return false;
+    hr = CreateDXGIFactory1(IID_PPV_ARGS(&g_dxgi_factory));
     return SUCCEEDED(hr);
   }
 
@@ -214,12 +279,6 @@ namespace neui_d2d_backend
     return fmt;
   }
 
-  // Logical pixel (96 DPI base) to physical pixel conversion.
-  static float l2p(float logical, uint32_t dpi)
-  {
-    return logical * static_cast<float>(dpi) / 96.0f;
-  }
-
   static D2D1_COLOR_F argb_to_color(uint32_t argb, float alpha_mul = 1.0f)
   {
     return D2D1::ColorF(
@@ -237,37 +296,93 @@ namespace neui_d2d_backend
 
   // ---------------------------------------------------------------------------
 
-  // Build target + brush for the context's stored hwnd / size / dpi.
-  // Used by both d2d_create_context and the device-loss recovery path in
-  // d2d_begin_frame; populates ctx->target and ctx->brush on success and
-  // leaves them null on failure. Does not touch ctx->generation - callers
-  // bump that when they want the recreation to be visible to bitmap caches.
-  static bool d2d_build_target(D2DContext* ctx)
+  // Release the per-ctx D2D objects that depend on the live device chain
+  // (target, brush, back-buffer alias, swap chain, tint effect). Called
+  // from destroy_context and from begin_frame's device-loss rebuild path.
+  // hwnd / size / dpi / generation are intentionally preserved so begin_frame
+  // can rebuild against the same window.
+  static void release_target_objects(D2DContext* ctx)
+  {
+    if (!ctx) return;
+    if (ctx->tint_effect) { ctx->tint_effect->Release(); ctx->tint_effect = nullptr; }
+    if (ctx->brush)       { ctx->brush->Release();       ctx->brush       = nullptr; }
+    if (ctx->back_buffer) { ctx->back_buffer->Release(); ctx->back_buffer = nullptr; }
+    if (ctx->target)      { ctx->target->Release();      ctx->target      = nullptr; }
+    if (ctx->swap_chain)  { ctx->swap_chain->Release();  ctx->swap_chain  = nullptr; }
+  }
+
+  // Build target + swap chain + back-buffer bitmap + brush for an HWND ctx
+  // using the stored hwnd / size / dpi. Used by d2d_create_context and the
+  // device-loss recovery path in d2d_begin_frame; populates ctx->target /
+  // ctx->swap_chain / ctx->back_buffer / ctx->brush on success and leaves
+  // them null on failure. Does not touch ctx->generation - callers bump
+  // that when they want the recreation to be visible to bitmap caches.
+  static bool d2d_build_hwnd_target(D2DContext* ctx)
   {
     if (!ctx || !ctx->hwnd || ctx->width == 0 || ctx->height == 0) return false;
     if (!ensure_factory()) return false;
+    if (!ensure_device_chain()) return false;
 
-    auto props = D2D1::RenderTargetProperties();
-    props.dpiX = static_cast<float>(ctx->dpi);
-    props.dpiY = static_cast<float>(ctx->dpi);
+    // Per-window device context. Bound to the shared D2D device.
+    ID2D1DeviceContext* dc = nullptr;
+    HRESULT hr = g_d2d_device->CreateDeviceContext(
+      D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc);
+    if (FAILED(hr) || !dc) return false;
+    dc->SetDpi(static_cast<float>(ctx->dpi), static_cast<float>(ctx->dpi));
 
-    auto hwnd_props = D2D1::HwndRenderTargetProperties(
-      ctx->hwnd,
-      D2D1::SizeU(ctx->width, ctx->height)
-    );
+    // DXGI swap chain bound to the HWND. Width/Height = 0 lets DXGI track
+    // the window's current client size; we still cache the explicit size
+    // for resize bookkeeping.
+    DXGI_SWAP_CHAIN_DESC1 sc = {};
+    sc.Width            = ctx->width;
+    sc.Height           = ctx->height;
+    sc.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+    sc.BufferUsage      = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sc.BufferCount      = 2;
+    sc.SwapEffect       = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    sc.SampleDesc.Count = 1;
+    sc.Scaling          = DXGI_SCALING_NONE;
+    sc.AlphaMode        = DXGI_ALPHA_MODE_IGNORE;
+    IDXGISwapChain1* swap = nullptr;
+    hr = g_dxgi_factory->CreateSwapChainForHwnd(g_d3d_device, ctx->hwnd,
+                                                 &sc, nullptr, nullptr, &swap);
+    if (FAILED(hr) || !swap) {
+      // Some DXGI configurations (older drivers under Remote Desktop) don't
+      // support flip-sequential + SCALING_NONE - retry with stretch scaling.
+      sc.Scaling = DXGI_SCALING_STRETCH;
+      hr = g_dxgi_factory->CreateSwapChainForHwnd(g_d3d_device, ctx->hwnd,
+                                                   &sc, nullptr, nullptr, &swap);
+    }
+    if (FAILED(hr) || !swap) { dc->Release(); return false; }
 
-    ID2D1HwndRenderTarget* target = nullptr;
-    HRESULT hr = g_factory->CreateHwndRenderTarget(props, hwnd_props, &target);
-    if (FAILED(hr)) return false;
+    // D2D bitmap aliased to the swap chain's back buffer surface.
+    IDXGISurface* back = nullptr;
+    hr = swap->GetBuffer(0, IID_PPV_ARGS(&back));
+    if (FAILED(hr) || !back) { swap->Release(); dc->Release(); return false; }
 
-    target->SetDpi(static_cast<float>(ctx->dpi), static_cast<float>(ctx->dpi));
+    D2D1_BITMAP_PROPERTIES1 bp = {};
+    bp.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    bp.pixelFormat   = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                          D2D1_ALPHA_MODE_IGNORE);
+    bp.dpiX = static_cast<float>(ctx->dpi);
+    bp.dpiY = static_cast<float>(ctx->dpi);
+    ID2D1Bitmap1* bb = nullptr;
+    hr = dc->CreateBitmapFromDxgiSurface(back, &bp, &bb);
+    back->Release();
+    if (FAILED(hr) || !bb) { swap->Release(); dc->Release(); return false; }
+
+    dc->SetTarget(bb);
 
     ID2D1SolidColorBrush* brush = nullptr;
-    hr = target->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &brush);
-    if (FAILED(hr)) { target->Release(); return false; }
+    hr = dc->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &brush);
+    if (FAILED(hr)) {
+      bb->Release(); swap->Release(); dc->Release();
+      return false;
+    }
 
-    ctx->hwnd_target = target;
-    ctx->target      = target;  // alias - HwndRenderTarget is-a RenderTarget
+    ctx->target      = dc;
+    ctx->swap_chain  = swap;
+    ctx->back_buffer = bb;
     ctx->brush       = brush;
     return true;
   }
@@ -285,7 +400,7 @@ namespace neui_d2d_backend
     ctx->width  = width;
     ctx->height = height;
     ctx->dpi    = dpi;
-    if (!d2d_build_target(ctx)) { delete ctx; return nullptr; }
+    if (!d2d_build_hwnd_target(ctx)) { delete ctx; return nullptr; }
     return ctx;
   }
 
@@ -295,34 +410,53 @@ namespace neui_d2d_backend
     if (!ctx) return;
     if (ctx->sink)   { ctx->sink->Release();   ctx->sink   = nullptr; }
     if (ctx->path)   { ctx->path->Release();   ctx->path   = nullptr; }
-    if (ctx->brush)  { ctx->brush->Release();  ctx->brush  = nullptr; }
-    // `target` is either an alias of `hwnd_target` (HWND ctx) or a
-    // standalone off-screen target (surface ctx). For HWND ctxs let
-    // hwnd_target own the Release; for surface ctxs release `target`
-    // directly. wic_bitmap is owned only on surface ctxs.
-    if (ctx->hwnd_target) {
-      ctx->hwnd_target->Release();
-      ctx->hwnd_target = nullptr;
-      ctx->target      = nullptr;
-    } else if (ctx->target) {
-      ctx->target->Release();
-      ctx->target = nullptr;
+    if (ctx->staging_bitmap) {
+      ctx->staging_bitmap->Release();
+      ctx->staging_bitmap = nullptr;
     }
-    if (ctx->wic_bitmap) { ctx->wic_bitmap->Release(); ctx->wic_bitmap = nullptr; }
+    release_target_objects(ctx);
     delete ctx;
   }
 
   static void d2d_resize(neui_render_ctx_t raw, uint32_t width, uint32_t height)
   {
     auto* ctx = static_cast<D2DContext*>(raw);
-    if (!ctx || !ctx->hwnd_target) return;  // resize is HWND-only
+    if (!ctx || !ctx->swap_chain) return;  // resize is HWND-only
+    if (width == 0 || height == 0) return;
     ctx->width  = width;
     ctx->height = height;
-    ctx->hwnd_target->Resize(D2D1::SizeU(width, height));
-    // If hwnd_target is null we're in the lost-device window between
-    // EndDraw returning D2DERR_RECREATE_TARGET and the next begin_frame;
-    // the new size is already stashed and will be used when begin_frame
-    // rebuilds.
+
+    // Drop the D2D back-buffer alias before resizing the swap chain (DXGI
+    // requires every reference to the back-buffer surface to be released).
+    if (ctx->target) ctx->target->SetTarget(nullptr);
+    if (ctx->back_buffer) { ctx->back_buffer->Release(); ctx->back_buffer = nullptr; }
+
+    HRESULT hr = ctx->swap_chain->ResizeBuffers(0, width, height,
+                                                  DXGI_FORMAT_UNKNOWN, 0);
+    if (FAILED(hr)) {
+      // Treat resize failure as device-loss: drop the target objects so the
+      // next begin_frame rebuilds and bumps generation.
+      release_target_objects(ctx);
+      return;
+    }
+
+    // Re-acquire the back-buffer alias and reattach to the device context.
+    IDXGISurface* back = nullptr;
+    hr = ctx->swap_chain->GetBuffer(0, IID_PPV_ARGS(&back));
+    if (FAILED(hr) || !back) { release_target_objects(ctx); return; }
+
+    D2D1_BITMAP_PROPERTIES1 bp = {};
+    bp.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    bp.pixelFormat   = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                          D2D1_ALPHA_MODE_IGNORE);
+    bp.dpiX = static_cast<float>(ctx->dpi);
+    bp.dpiY = static_cast<float>(ctx->dpi);
+    ID2D1Bitmap1* bb = nullptr;
+    hr = ctx->target->CreateBitmapFromDxgiSurface(back, &bp, &bb);
+    back->Release();
+    if (FAILED(hr) || !bb) { release_target_objects(ctx); return; }
+    ctx->target->SetTarget(bb);
+    ctx->back_buffer = bb;
   }
 
   static void d2d_begin_frame(neui_render_ctx_t raw, uint32_t clear_argb)
@@ -330,14 +464,15 @@ namespace neui_d2d_backend
     auto* ctx = static_cast<D2DContext*>(raw);
     if (!ctx) return;
     if (!ctx->target && ctx->hwnd) {
-      // Previous frame's EndDraw lost the device on an HWND ctx. Try to
-      // rebuild in place and bump generation so cached target-bound
-      // bitmaps get re-uploaded on first use. If rebuild fails (e.g.
-      // driver still in a bad state) we silently skip this frame; the
-      // next begin_frame will try again. Off-screen surface ctxs have
-      // no device-loss path; their target stays alive for the ctx
-      // lifetime.
-      if (!d2d_build_target(ctx)) return;
+      // Previous frame lost the device on an HWND ctx (D2DERR_RECREATE_TARGET
+      // or DXGI_ERROR_DEVICE_REMOVED). Tear the process-wide device chain so
+      // ensure_device_chain rebuilds from scratch, then re-create our ctx's
+      // target objects. Bump generation so cached per-ctx bitmaps know to
+      // re-upload. If rebuild fails (driver still in a bad state) silently
+      // skip this frame; the next begin_frame retries. Off-screen surface
+      // ctxs do not take this path - their target stays alive for life.
+      release_device_chain();
+      if (!d2d_build_hwnd_target(ctx)) return;
       ctx->generation++;
     }
     if (!ctx->target) return;
@@ -357,21 +492,27 @@ namespace neui_d2d_backend
     auto* ctx = static_cast<D2DContext*>(raw);
     if (!ctx || !ctx->target) return;
     HRESULT hr = ctx->target->EndDraw();
-    if (hr == D2DERR_RECREATE_TARGET && ctx->hwnd_target) {
-      // Device lost on an HWND ctx (mode change, GPU reset, driver
-      // crash, ...). Release target + brush; ID2D1Bitmap handles
-      // created against this target are now dangling for draw purposes
-      // but still safe to Release(). We don't touch them here - the
-      // asset manager (one per session) owns the cache and will drop
-      // stale entries the next time it sees a different
-      // get_context_generation result. The next begin_frame rebuilds
-      // the target using the stored hwnd / size / dpi. Off-screen
-      // surface ctxs don't take this path - their bitmap render target
-      // is not subject to device-loss.
-      ctx->hwnd_target->Release();
-      ctx->hwnd_target = nullptr;
-      ctx->target      = nullptr;
-      if (ctx->brush)  { ctx->brush->Release();  ctx->brush  = nullptr; }
+    bool lost = (hr == D2DERR_RECREATE_TARGET);
+
+    // For HWND ctxs, Present1 ships the frame to the desktop compositor.
+    // DXGI_ERROR_DEVICE_REMOVED / DXGI_ERROR_DEVICE_RESET are the DXGI-side
+    // signal that the device chain is gone; treat them like D2DERR_RECREATE_TARGET.
+    if (SUCCEEDED(hr) && ctx->swap_chain) {
+      DXGI_PRESENT_PARAMETERS pp = {};
+      hr = ctx->swap_chain->Present1(1, 0, &pp);
+      if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
+        lost = true;
+    }
+
+    if (lost && ctx->swap_chain) {
+      // Device lost on an HWND ctx. Drop the live target objects and the
+      // shared device chain so begin_frame rebuilds. ID2D1Bitmap handles
+      // created against this target are now dangling for draw purposes but
+      // still safe to Release(); the asset manager (one per session) owns
+      // those caches and discovers their staleness via the next
+      // get_context_generation mismatch.
+      release_target_objects(ctx);
+      release_device_chain();
     }
   }
 
@@ -526,7 +667,8 @@ namespace neui_d2d_backend
 
   static void d2d_draw_bitmap(neui_render_ctx_t raw, void* bitmap,
                                float src_x, float src_y, float src_w, float src_h,
-                               float dst_x, float dst_y, float dst_w, float dst_h)
+                               float dst_x, float dst_y, float dst_w, float dst_h,
+                               uint32_t tint)
   {
     auto* ctx = static_cast<D2DContext*>(raw);
     if (!ctx || !ctx->target || !bitmap) return;
@@ -543,9 +685,77 @@ namespace neui_d2d_backend
 
     D2D1_RECT_F dst_rect = D2D1::RectF(dst_x, dst_y, dst_x + dst_w, dst_y + dst_h);
 
-    ctx->target->DrawBitmap(bmp, dst_rect, current_alpha(ctx),
-                             D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                             src_rect);
+    if (tint == 0xFFFFFFFFu) {
+      // Untinted fast path: byte-for-byte identical to the pre-effect
+      // shipping behaviour. Avoids any effect setup so the common case
+      // pays no extra cost.
+      ctx->target->DrawBitmap(bmp, dst_rect, current_alpha(ctx),
+                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                               src_rect);
+      return;
+    }
+
+    // Tinted path: route through the D2D1Tint effect (multiplicative).
+    // The effect is created lazily per ctx, cached, and reused across draws
+    // within a frame - SetInput/SetValue are cheap, no recreate needed.
+    if (!ctx->tint_effect) {
+      HRESULT hr = ctx->target->CreateEffect(CLSID_D2D1Tint, &ctx->tint_effect);
+      if (FAILED(hr) || !ctx->tint_effect) {
+        // Effects unavailable; fall back to the untinted draw rather than
+        // skipping the layer entirely.
+        ctx->target->DrawBitmap(bmp, dst_rect, current_alpha(ctx),
+                                 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                                 src_rect);
+        return;
+      }
+    }
+
+    ctx->tint_effect->SetInput(0, bmp);
+
+    // Compose the layer's alpha into the tint colour so the alpha stack
+    // still applies to tinted draws. The D2D1Tint effect multiplies its
+    // colour vector with the source bitmap's premultiplied pixels; folding
+    // current_alpha() into the alpha component yields the same composite
+    // factor the untinted path applies via DrawBitmap's opacity arg.
+    float tr = ((tint >> 16) & 0xff) / 255.0f;
+    float tg = ((tint >>  8) & 0xff) / 255.0f;
+    float tb = ((tint >>  0) & 0xff) / 255.0f;
+    float ta = ((tint >> 24) & 0xff) / 255.0f * current_alpha(ctx);
+    D2D1_VECTOR_4F v = { tr, tg, tb, ta };
+    ctx->tint_effect->SetValue(D2D1_TINT_PROP_COLOR, v);
+
+    // DrawImage takes a target offset + source crop but does NOT scale
+    // src to dst the way DrawBitmap does. To get the same visual sizing
+    // we apply a temporary world transform (current_world ∘ T(dst_x,
+    // dst_y) ∘ S(dst_w/src_w, dst_h/src_h)) so the source crop lands
+    // inside dst_rect. Pre-multiplying onto ctx->current preserves the
+    // outer transform stack (e.g. compound layer rotations).
+    float src_w_eff = src_rect.right  - src_rect.left;
+    float src_h_eff = src_rect.bottom - src_rect.top;
+    bool need_scale = (src_w_eff > 0.0f && src_h_eff > 0.0f
+                      && (std::fabs(src_w_eff - dst_w) > 1e-3f
+                       || std::fabs(src_h_eff - dst_h) > 1e-3f));
+
+    D2D1::Matrix3x2F saved = ctx->current;
+    if (need_scale) {
+      D2D1::Matrix3x2F m =
+        D2D1::Matrix3x2F::Scale(dst_w / src_w_eff, dst_h / src_h_eff,
+                                 D2D1::Point2F(0.0f, 0.0f));
+      m = D2D1::Matrix3x2F::Translation(dst_x, dst_y) * m;
+      ctx->target->SetTransform(m * saved);
+    } else {
+      ctx->target->SetTransform(
+        D2D1::Matrix3x2F::Translation(dst_x, dst_y) * saved);
+    }
+
+    D2D1_POINT_2F origin = D2D1::Point2F(0.0f, 0.0f);
+    ctx->target->DrawImage(ctx->tint_effect,
+                            &origin,
+                            &src_rect,
+                            D2D1_INTERPOLATION_MODE_LINEAR,
+                            D2D1_COMPOSITE_MODE_SOURCE_OVER);
+
+    ctx->target->SetTransform(saved);
   }
 
   static void d2d_push_clip(neui_render_ctx_t raw, float x, float y, float w, float h)
@@ -842,76 +1052,100 @@ namespace neui_d2d_backend
       uint32_t width_px, uint32_t height_px, float scale)
   {
     if (width_px == 0 || height_px == 0) return nullptr;
-    if (!ensure_factory() || !ensure_wic_factory()) return nullptr;
+    if (!ensure_factory()) return nullptr;
+    if (!ensure_device_chain()) return nullptr;
     if (scale <= 0.0f) scale = 1.0f;
 
-    // 32bppPBGRA: byte order B,G,R,A in memory with premultiplied alpha.
-    // Matches the BGRA8 premul layout used everywhere else in this
-    // codebase (asset pixels, clipboard images, etc).
-    IWICBitmap* wic = nullptr;
-    HRESULT hr = g_wic_factory->CreateBitmap(
-      width_px, height_px,
-      GUID_WICPixelFormat32bppPBGRA,
-      WICBitmapCacheOnDemand,
-      &wic);
-    if (FAILED(hr) || !wic) return nullptr;
+    // Build a fresh per-surface ID2D1DeviceContext. The off-screen target
+    // is a D2D 1.1 GPU bitmap (D2D1_BITMAP_OPTIONS_TARGET). Pixels are
+    // GPU-only - read_pixels_bgra copies them into a lazy staging bitmap
+    // (created in read_pixels_bgra below, with CANNOT_DRAW | CPU_READ)
+    // and Maps the staging bitmap to memcpy the bytes out. We no longer
+    // back the target with a WIC bitmap because TARGET bitmaps in 1.1
+    // are GPU textures - the WIC source would only ever hold the initial
+    // (zero) content.
+    ID2D1DeviceContext* dc = nullptr;
+    HRESULT hr = g_d2d_device->CreateDeviceContext(
+      D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc);
+    if (FAILED(hr) || !dc) return nullptr;
+    dc->SetDpi(scale * 96.0f, scale * 96.0f);
 
-    auto props = D2D1::RenderTargetProperties();
-    props.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                                           D2D1_ALPHA_MODE_PREMULTIPLIED);
-    // Set DPI so logical-pixel draw calls hit (logical * scale) physical
-    // pixels - same convention as HWND ctxs on a (scale)x display.
-    props.dpiX = scale * 96.0f;
-    props.dpiY = scale * 96.0f;
-
-    ID2D1RenderTarget* target = nullptr;
-    hr = g_factory->CreateWicBitmapRenderTarget(wic, props, &target);
-    if (FAILED(hr) || !target) { wic->Release(); return nullptr; }
+    D2D1_BITMAP_PROPERTIES1 bp = {};
+    bp.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+    bp.pixelFormat   = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                          D2D1_ALPHA_MODE_PREMULTIPLIED);
+    bp.dpiX = scale * 96.0f;
+    bp.dpiY = scale * 96.0f;
+    ID2D1Bitmap1* target_bmp = nullptr;
+    hr = dc->CreateBitmap(D2D1::SizeU(width_px, height_px),
+                           nullptr, 0u, &bp, &target_bmp);
+    if (FAILED(hr) || !target_bmp) { dc->Release(); return nullptr; }
+    dc->SetTarget(target_bmp);
 
     ID2D1SolidColorBrush* brush = nullptr;
-    hr = target->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &brush);
-    if (FAILED(hr)) { target->Release(); wic->Release(); return nullptr; }
+    hr = dc->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &brush);
+    if (FAILED(hr)) {
+      target_bmp->Release(); dc->Release();
+      return nullptr;
+    }
 
     auto* ctx = new D2DContext();
-    ctx->target       = target;
+    ctx->target       = dc;
+    ctx->back_buffer  = target_bmp;
     ctx->brush        = brush;
-    ctx->wic_bitmap   = wic;
     ctx->surface_w_px = width_px;
     ctx->surface_h_px = height_px;
     ctx->dpi          = static_cast<uint32_t>(scale * 96.0f + 0.5f);
-    // hwnd_target stays null - this signals "off-screen" to the rest
-    // of the backend (resize / device-loss are no-ops).
+    // swap_chain stays null - this signals "off-screen" to the rest of
+    // the backend (resize / Present / device-loss are no-ops).
     return ctx;
   }
 
   static bool d2d_read_pixels_bgra(neui_render_ctx_t raw, uint8_t* out_bgra)
   {
     auto* ctx = static_cast<D2DContext*>(raw);
-    if (!ctx || !ctx->wic_bitmap || !out_bgra) return false;
+    if (!ctx || !ctx->target || !ctx->back_buffer || !out_bgra) return false;
+    if (ctx->surface_w_px == 0 || ctx->surface_h_px == 0) return false;
 
-    WICRect rect = {
-      0, 0,
-      static_cast<INT>(ctx->surface_w_px),
-      static_cast<INT>(ctx->surface_h_px),
-    };
-    IWICBitmapLock* lock = nullptr;
-    HRESULT hr = ctx->wic_bitmap->Lock(&rect, WICBitmapLockRead, &lock);
-    if (FAILED(hr) || !lock) return false;
-
-    UINT stride = 0, buf_size = 0;
-    BYTE* src = nullptr;
-    if (FAILED(lock->GetStride(&stride))
-     || FAILED(lock->GetDataPointer(&buf_size, &src))
-     || !src) {
-      lock->Release();
-      return false;
+    // Lazy-allocate a staging bitmap the first time we read back this
+    // surface. CANNOT_DRAW | CPU_READ flags mean the bitmap can be
+    // Map()-ed to system memory but not used as a draw target - exactly
+    // what we want for readback. Reused across subsequent reads of the
+    // same surface size.
+    if (!ctx->staging_bitmap) {
+      D2D1_BITMAP_PROPERTIES1 sp = {};
+      sp.bitmapOptions = D2D1_BITMAP_OPTIONS_CANNOT_DRAW
+                       | D2D1_BITMAP_OPTIONS_CPU_READ;
+      sp.pixelFormat   = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                            D2D1_ALPHA_MODE_PREMULTIPLIED);
+      // Staging DPI doesn't affect the byte readback but we keep it
+      // consistent with the target so any future GetSize calls stay sane.
+      sp.dpiX = static_cast<float>(ctx->dpi);
+      sp.dpiY = static_cast<float>(ctx->dpi);
+      HRESULT hr = ctx->target->CreateBitmap(
+        D2D1::SizeU(ctx->surface_w_px, ctx->surface_h_px),
+        nullptr, 0u, &sp, &ctx->staging_bitmap);
+      if (FAILED(hr) || !ctx->staging_bitmap) return false;
     }
+
+    // GPU -> CPU copy. CopyFromBitmap on a CPU_READ staging bitmap is
+    // the D2D 1.1 idiom for offscreen readback.
+    D2D1_POINT_2U dst = D2D1::Point2U(0, 0);
+    D2D1_RECT_U   src = D2D1::RectU(0, 0, ctx->surface_w_px, ctx->surface_h_px);
+    HRESULT hr = ctx->staging_bitmap->CopyFromBitmap(&dst, ctx->back_buffer, &src);
+    if (FAILED(hr)) return false;
+
+    D2D1_MAPPED_RECT mapped = {};
+    hr = ctx->staging_bitmap->Map(D2D1_MAP_OPTIONS_READ, &mapped);
+    if (FAILED(hr) || !mapped.bits) return false;
 
     const UINT row_bytes = ctx->surface_w_px * 4u;
     for (UINT y = 0; y < ctx->surface_h_px; ++y) {
-      std::memcpy(out_bgra + y * row_bytes, src + y * stride, row_bytes);
+      std::memcpy(out_bgra + y * row_bytes,
+                   mapped.bits + y * mapped.pitch,
+                   row_bytes);
     }
-    lock->Release();
+    ctx->staging_bitmap->Unmap();
     return true;
   }
 

@@ -1438,7 +1438,8 @@ namespace xpl_host
 
     if (bmp) {
       backend->draw_bitmap(ctx, bmp, 0.0f, 0.0f, 0.0f, 0.0f,
-                           dst_x, dst_y, dst_w, dst_h);
+                           dst_x, dst_y, dst_w, dst_h,
+                           0xFFFFFFFFu);
     } else {
       backend->fill_rect(ctx, fx, fy, fw, fh,
                           neui_detail::color(ColorRole::control_bg_inactive));
@@ -2068,14 +2069,6 @@ namespace xpl_host
     uint32_t slot = asset.id & 0xffff;
     auto* entry = s->_asset_manager.get_slot(slot);
     if (!entry) return;
-    // Tinted draws bypass the untinted bitmap cache and use the
-    // per-(asset, ctx, tint) tinted_bitmaps cache; the untinted path
-    // below stays byte-for-byte identical to the pre-tint behaviour.
-    if (tint != 0xFFFFFFFFu) {
-      neui_detail::draw_tinted_bitmap_from_entry(backend, ctx, entry,
-                                                  x, y, w, h, tint);
-      return;
-    }
     // Lazy GPU upload for this (asset, ctx) pair, with device-loss check.
     // If the backend has bumped its per-ctx generation (D2D after
     // D2DERR_RECREATE_TARGET) any cached handle is dangling - drop it
@@ -2102,7 +2095,7 @@ namespace xpl_host
     if (backend->draw_bitmap)
       backend->draw_bitmap(ctx, it->second.bmp,
                             0.0f, 0.0f, 0.0f, 0.0f,    // full bitmap
-                            x, y, w, h);
+                            x, y, w, h, tint);
   }
 
   // CUSTOMDRAW - hands the curated painter API to the client and lets

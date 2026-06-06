@@ -486,13 +486,21 @@ namespace neui_cg_backend
   // is interpreted in the bitmap's logical-coordinate space and converted
   // to physical pixels (x scale) before sub-imaging.
   //
+  // `tint` is an ARGB multiplicative colour. 0xFFFFFFFFu = passthrough
+  // (untinted byte-for-byte draw); any other value first clips to the
+  // bitmap's alpha shape (CGContextClipToMask), then fills the masked area
+  // with the tint colour under kCGBlendModeMultiply so the source pixels
+  // come out multiplied by the tint. Matches the D2D1Tint effect's
+  // semantics for premultiplied BGRA bitmaps.
+  //
   // The view is isFlipped=YES, so the CTM has Y inverted. CGContextDrawImage
   // treats the image's natural origin as bottom-left in user space, which
   // would flip the bitmap visually under our CTM. Counter-flip locally
   // around the dst rect so images render right-side-up.
   static void cg_draw_bitmap(neui_render_ctx_t raw, void* bitmap,
                               float src_x, float src_y, float src_w, float src_h,
-                              float dst_x, float dst_y, float dst_w, float dst_h)
+                              float dst_x, float dst_y, float dst_w, float dst_h,
+                              uint32_t tint)
   {
     auto* st = static_cast<CGContextState*>(raw);
     if (!st || !st->cg_ctx || !bitmap) return;
@@ -514,7 +522,29 @@ namespace neui_cg_backend
     CGContextSetAlpha(st->cg_ctx, current_alpha(st));
     CGContextTranslateCTM(st->cg_ctx, dst_x, dst_y + dst_h);
     CGContextScaleCTM(st->cg_ctx, 1.0, -1.0);
-    CGContextDrawImage(st->cg_ctx, CGRectMake(0, 0, dst_w, dst_h), draw_img);
+
+    if (tint == 0xFFFFFFFFu) {
+      // Untinted fast path - byte-for-byte identical to pre-tint behaviour.
+      CGContextDrawImage(st->cg_ctx, CGRectMake(0, 0, dst_w, dst_h), draw_img);
+    } else {
+      // Tinted path: clip to the bitmap's alpha shape, then multiply-blend
+      // the tint colour. The mask clip preserves the image's alpha; the
+      // multiply blend mode handles the colour channels the same way
+      // D2D1Tint does for premultiplied BGRA.
+      CGRect rect = CGRectMake(0, 0, dst_w, dst_h);
+      // 1. Draw the source image so it lands inside the clip with its own
+      //    colour + alpha, then re-clip to its alpha and multiply the tint
+      //    on top under kCGBlendModeMultiply. Source-over of the image,
+      //    then multiply of the colour, produces the same composite as
+      //    D2D1Tint with premultiplied input.
+      CGContextDrawImage(st->cg_ctx, rect, draw_img);
+      CGContextClipToMask(st->cg_ctx, rect, draw_img);
+      CGContextSetBlendMode(st->cg_ctx, kCGBlendModeMultiply);
+      CGFloat rgba[4];
+      argb_to_rgba(tint, rgba);
+      CGContextSetRGBFillColor(st->cg_ctx, rgba[0], rgba[1], rgba[2], rgba[3]);
+      CGContextFillRect(st->cg_ctx, rect);
+    }
     CGContextRestoreGState(st->cg_ctx);
 
     if (owns_subimg) CGImageRelease(draw_img);

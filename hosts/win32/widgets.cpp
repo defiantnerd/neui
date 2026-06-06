@@ -636,14 +636,6 @@ namespace win32_host
     uint32_t slot = asset.id & 0xffff;
     auto* entry = s->_asset_manager.get_slot(slot);
     if (!entry) return;
-    // Tinted draws bypass the untinted bitmap cache and use the
-    // per-(asset, ctx, tint) tinted_bitmaps cache; the untinted path
-    // below stays byte-for-byte identical to the pre-tint behaviour.
-    if (tint != 0xFFFFFFFFu) {
-      neui_detail::draw_tinted_bitmap_from_entry(backend, ctx, entry,
-                                                  x, y, w, h, tint);
-      return;
-    }
     // Lazy GPU upload per (asset, ctx) pair, with device-loss check. If
     // D2D had to recreate the target (D2DERR_RECREATE_TARGET), the
     // backend has bumped the per-ctx generation and the cached handle is
@@ -669,7 +661,7 @@ namespace win32_host
     if (backend->draw_bitmap)
       backend->draw_bitmap(ctx, it->second.bmp,
                             0.0f, 0.0f, 0.0f, 0.0f, // full bitmap
-                            x, y, w, h);
+                            x, y, w, h, tint);
   }
 
   // Invalidate the widget's HWND if it hosts a CUSTOMDRAW compound whose
@@ -1018,7 +1010,8 @@ namespace win32_host
     if (backend->draw_bitmap)
       backend->draw_bitmap(ctx, it->second.bmp,
                             0.0f, 0.0f, 0.0f, 0.0f,
-                            dst_x, dst_y, dst_w, dst_h);
+                            dst_x, dst_y, dst_w, dst_h,
+                            0xFFFFFFFFu);
 
     if (rotated)                  backend->pop_transform(ctx);
     if (backend->pop_clip)        backend->pop_clip(ctx);

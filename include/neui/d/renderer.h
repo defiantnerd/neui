@@ -114,9 +114,17 @@ typedef struct neui_render_backend {
   // src_x/y/w/h: source region in the bitmap's logical coordinate space.
   // dst_x/y/w/h: destination rectangle in the render target.
   // Pass src_w == 0 or src_h == 0 to draw the full bitmap.
+  //
+  // `tint` is an ARGB multiplicative colour applied to the bitmap's pixels
+  // by the backend. `0xFFFFFFFFu` is the passthrough sentinel: the backend
+  // bypasses any effect setup and draws the bitmap byte-for-byte as on
+  // pre-tint code paths. Any other value runs the backend's native
+  // multiplicative-tint primitive (D2D effect on Windows, blend-mode
+  // multiply + alpha mask on macOS); the null backend ignores the tint.
   void (NEUI_ABI *draw_bitmap)(neui_render_ctx_t ctx, void* bitmap,
                                 float src_x, float src_y, float src_w, float src_h,
-                                float dst_x, float dst_y, float dst_w, float dst_h);
+                                float dst_x, float dst_y, float dst_w, float dst_h,
+                                uint32_t tint);
 
   // --- End internal-use block --------------------------------------------
 

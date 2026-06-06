@@ -22,7 +22,7 @@ namespace neui_null_backend
   static void  null_pop_clip       (neui_render_ctx_t) {}
   static void* null_create_bitmap  (neui_render_ctx_t, uint32_t, uint32_t, const uint8_t*, float) { return nullptr; }
   static void  null_destroy_bitmap (neui_render_ctx_t, void*) {}
-  static void  null_draw_bitmap    (neui_render_ctx_t, void*, float, float, float, float, float, float, float, float) {}
+  static void  null_draw_bitmap    (neui_render_ctx_t, void*, float, float, float, float, float, float, float, float, uint32_t) {}
   static void  null_begin_path     (neui_render_ctx_t) {}
   static void  null_move_to        (neui_render_ctx_t, float, float) {}
   static void  null_line_to        (neui_render_ctx_t, float, float) {}

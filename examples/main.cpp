@@ -1097,9 +1097,9 @@ int main(int argc, char** argv) {
   //   z=-1  RECT   - rounded backplate. Two-tone (fill + stroke) with a
   //                  corner_radius > 0 so the painter takes the rounded
   //                  4-arc path that fill+stroke'd in one go.
-  //   z= 0  ASSET  - the same myimage.png used elsewhere, drawn through
-  //                  the tinted-bitmap cache so the source pixels are
-  //                  multiplied by a tint at upload time (here a soft
+  //   z= 0  ASSET  - the same myimage.png used elsewhere, drawn with a
+  //                  backend-level multiplicative tint so the source
+  //                  pixels are recoloured at draw time (here a soft
   //                  green - any single bitmap can be recoloured this
   //                  way without a per-recolour source file).
   //   z=+1  PATH   - a chevron icon built with MOVE_TO / LINE_TO /
@@ -1131,8 +1131,10 @@ int main(int argc, char** argv) {
       // Layer 2: TINTED bitmap. Same myimage.png handle the customdraw
       // and the other compound use, but multiplied by a translucent
       // green here so the source pixels look completely different. The
-      // tinted-bitmap cache uploads the multiplied buffer once per
-      // (asset, ctx, tint) tuple and reuses it on subsequent frames.
+      // backend runs its native multiplicative-tint primitive at draw
+      // time (D2D1Tint effect on Windows, blend-mode multiply on macOS)
+      // against the single per-(asset, ctx) GPU upload - changing the
+      // tint colour costs nothing extra beyond the per-draw effect call.
       if (app.customdraw_bg.id != asset_none.id) {
         auto img_layer = app.compound->add_layer(sess, cs,
                                                    NEUI_COMPOUND_LAYER_ASSET, 0);

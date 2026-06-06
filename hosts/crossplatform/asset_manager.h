@@ -39,13 +39,11 @@ namespace neui_detail
     float                scale       = 1.0f; // HiDPI factor loaded (1, 2, or 3)
     std::vector<uint8_t> pixels;             // BGRA8 premultiplied, width_px*height_px*4
 
-    // Backend bitmap cache: one GPU resource per render context.
+    // Backend bitmap cache: one GPU resource per render context. Tinted
+    // draws of the same asset reuse the same upload - the backend's
+    // draw_bitmap tint param handles colourisation at draw time, so the
+    // per-(asset, ctx) entry stays single-source-of-truth.
     std::unordered_map<neui_render_ctx_t, CtxBitmap> bitmaps;
-
-    // Tinted-variant cache for the asset-layer "tint" prop. Slot count
-    // is typically 1-3 (per distinct tint at draw time); linear scan.
-    // Parallel to `bitmaps` - the untinted draw path is unchanged.
-    std::vector<TintedCtxBitmap> tinted_bitmaps;
 
     // Populated for NEUI_ASSET_KIND_COMPOUND entries; null otherwise.
     std::unique_ptr<CompoundAsset> compound;

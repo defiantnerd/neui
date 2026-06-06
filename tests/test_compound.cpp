@@ -210,34 +210,6 @@ TEST_CASE("apply_set_int: \"tint\" lands on asset layers only")
   CHECK_EQ((unsigned)A.tint, 0xFF40C0FFu);  // A is unchanged
 }
 
-TEST_CASE("premultiply_tint: 0xFFFFFFFF passthrough leaves pixels intact")
-{
-  uint8_t src[8] = { 10, 20, 30, 40,  50, 60, 70, 80 };
-  uint8_t dst[8] = { 0 };
-  premultiply_tint(src, dst, 2, 1, 0xFFFFFFFFu);
-  for (int i = 0; i < 8; ++i) CHECK_EQ((int)dst[i], (int)src[i]);
-}
-
-TEST_CASE("premultiply_tint: pure red tint clears green + blue, keeps alpha")
-{
-  // Premultiplied white-opaque -> after red tint should become red-opaque.
-  uint8_t src[4] = { 255, 255, 255, 255 };   // BGRA
-  uint8_t dst[4] = { 0 };
-  premultiply_tint(src, dst, 1, 1, 0xFFFF0000u);  // A=FF, R=FF, G=00, B=00
-  CHECK_EQ((int)dst[0],   0);   // B
-  CHECK_EQ((int)dst[1],   0);   // G
-  CHECK_EQ((int)dst[2], 255);   // R
-  CHECK_EQ((int)dst[3], 255);   // A
-}
-
-TEST_CASE("premultiply_tint: half-alpha tint scales the alpha channel")
-{
-  uint8_t src[4] = { 255, 255, 255, 255 };
-  uint8_t dst[4] = { 0 };
-  premultiply_tint(src, dst, 1, 1, 0x80FFFFFFu);  // A=80
-  CHECK_EQ((int)dst[3], (255 * 0x80) / 255);
-}
-
 // ---------------------------------------------------------------------------
 // Path layer
 // ---------------------------------------------------------------------------

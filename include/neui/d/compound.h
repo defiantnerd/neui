@@ -200,11 +200,16 @@ extern "C" {
     //     "rotation"  float   radians, clockwise
     //     "tint"      int     ARGB multiplicative tint. Default 0xFFFFFFFF
     //                         is the passthrough sentinel (no tint, hot
-    //                         path unchanged). Any other value runs a CPU
-    //                         pre-multiply and caches the result per
-    //                         (asset, ctx, tint). Set to a theme colour to
-    //                         track light / dark on monochrome icons; bind
-    //                         to a state-tracking attr to swap on hover /
+    //                         path unchanged). Any other value runs the
+    //                         backend's native multiplicative-tint
+    //                         primitive (D2D effect on Windows,
+    //                         blend-mode multiply + alpha mask on macOS);
+    //                         the source bitmap is cached once per
+    //                         (asset, ctx) regardless of how many tints
+    //                         reference it, so animating the tint is
+    //                         free. Set to a theme colour to track
+    //                         light / dark on monochrome icons; bind to
+    //                         a state-tracking attr to swap on hover /
     //                         press without per-state asset uploads.
     //   rect layer props:
     //     "fill_color"    int   ARGB; 0 = no fill (alpha 0)

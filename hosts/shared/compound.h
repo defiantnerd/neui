@@ -99,9 +99,11 @@ namespace neui_detail
     float                    rotation = 0.0f;
     // Multiplicative ARGB tint applied to the bitmap's pixels. The
     // default 0xFFFFFFFFu is the passthrough sentinel - it short-circuits
-    // the tint pipeline and uses the standard untinted bitmap cache. Any
-    // other value goes through the per-(asset, ctx, tint) tinted cache
-    // (see hosts/shared/painter.h::draw_tinted_bitmap_from_entry).
+    // the backend's tint primitive entirely so untinted draws cost
+    // nothing extra. Any other value runs the backend's native
+    // multiplicative-tint path (D2D effect on Windows, blend-mode
+    // multiply + alpha mask on macOS); the source bitmap is cached
+    // once per (asset, ctx) regardless of how many tints reference it.
     uint32_t                 tint     = 0xFFFFFFFFu;
 
     // Fill / stroke shared between RECT and PATH layers. Both colours

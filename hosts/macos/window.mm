@@ -2199,14 +2199,6 @@ namespace macos_host {
     uint32_t slot = asset.id & 0xffff;
     auto* entry = s->_asset_manager.get_slot(slot);
     if (!entry) return;
-    // Tinted draws bypass the untinted bitmap cache and use the
-    // per-(asset, ctx, tint) tinted_bitmaps cache; the untinted path
-    // below stays byte-for-byte identical to the pre-tint behaviour.
-    if (tint != 0xFFFFFFFFu) {
-      neui_detail::draw_tinted_bitmap_from_entry(backend, ctx, entry,
-                                                  x, y, w, h, tint);
-      return;
-    }
     const uint32_t gen = backend->get_context_generation
       ? backend->get_context_generation(ctx) : 0u;
     auto it = entry->bitmaps.find(ctx);
@@ -2228,7 +2220,7 @@ namespace macos_host {
     if (backend->draw_bitmap)
       backend->draw_bitmap(ctx, it->second.bmp,
                             0.0f, 0.0f, 0.0f, 0.0f, // full bitmap
-                            x, y, w, h);
+                            x, y, w, h, tint);
   }
 }
 

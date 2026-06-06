@@ -172,18 +172,12 @@ namespace neui_detail
         uint32_t tint = static_cast<uint32_t>(
           effective_int(L, "tint", static_cast<int>(L.tint), bag));
         // tint == 0 (alpha 0) would make the layer invisible; skip the
-        // upload/draw entirely rather than emitting a fully-transparent
-        // bitmap.
+        // upload/draw entirely rather than running the backend's tint
+        // primitive only to output fully-transparent pixels. The
+        // 0xFFFFFFFFu passthrough sentinel and any other tint value
+        // both route through the same painter_draw_asset_tinted helper;
+        // the backend short-circuits effect setup on the passthrough.
         if (tint == 0u) break;
-
-        auto draw = [&]() {
-          if (tint == 0xFFFFFFFFu) {
-            // Passthrough: keep the existing untinted cache hot.
-            k_painter_api.draw_asset(p, asset, r.x, r.y, r.w, r.h);
-          } else {
-            painter_draw_asset_tinted(p, asset, r.x, r.y, r.w, r.h, tint);
-          }
-        };
 
         if (rot != 0.0f) {
           float cx = r.x + r.w * 0.5f;
@@ -192,10 +186,10 @@ namespace neui_detail
           k_painter_api.translate(p, cx, cy);
           k_painter_api.rotate(p, rot);
           k_painter_api.translate(p, -cx, -cy);
-          draw();
+          painter_draw_asset_tinted(p, asset, r.x, r.y, r.w, r.h, tint);
           k_painter_api.pop_transform(p);
         } else {
-          draw();
+          painter_draw_asset_tinted(p, asset, r.x, r.y, r.w, r.h, tint);
         }
         break;
       }
