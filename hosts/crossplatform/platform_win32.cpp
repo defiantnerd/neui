@@ -668,6 +668,17 @@ namespace xpl_host
       float ly = phys_to_log(mouse_y(lParam), fwd->dpi);
 
       uint32_t hit = wud->session->widget_at(lx, ly, wud->widget_index);
+
+      // The OS replaces the second press of a rapid pair with DBLCLK (the
+      // window class carries CS_DBLCLKS for tree / inputbox / grid). Mirror
+      // the DOWN setup so the following UP still produces a CLICK on widgets
+      // that don't opt into DBLCLICK (BUTTON in particular) - this is what
+      // gives parity with the native win32 host, where the system "Button"
+      // class has no CS_DBLCLKS and every fast click is a plain click.
+      wud->session->set_focus(hit);
+      wud->session->set_pressed(hit);
+      SetCapture(hwnd);
+
       if (hit != 0) {
         auto* hw = wud->session->get_widget(hit);
         if (hw) {

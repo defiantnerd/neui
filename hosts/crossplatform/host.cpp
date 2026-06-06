@@ -27,23 +27,6 @@ namespace xpl_host
   static neui_detail::CompoundAsset* resolve_widget_compound(Session* s,
                                                               neui_asset_t a);
 
-  // Invalidate the widget's owning frame if the widget hosts a CUSTOMDRAW
-  // compound whose layers depend on state (NEUI_LAYER_STATE_* via show_when).
-  // Called from set_hovered / set_pressed on each side of a transition so
-  // the compound repaints to swap state-filtered layers in / out.
-  static void invalidate_if_state_filtered_compound(Session* s, uint32_t widget_idx)
-  {
-    if (!s || widget_idx == 0 || !s->_widgets.exists(widget_idx)) return;
-    auto& wd = s->_widgets[widget_idx];
-    auto* cd = dynamic_cast<CustomDrawWidget*>(&wd);
-    if (!cd) return;
-    auto* ca = resolve_widget_compound(s, cd->compound_asset);
-    if (!ca) return;
-    if (!neui_detail::compound_has_state_filters(*ca)) return;
-    void* frame = s->find_parent_native_handle(widget_idx);
-    if (frame) platform_invalidate(frame);
-  }
-
   // UTF-8 walking, word boundaries, and codepoint -> UTF-8 helpers used by
   // INPUTBOX / MULTILINE / GRID cell editor live in hosts/shared/text_edit.h
   // (te_utf8_char_len, te_utf8_prev_start, te_word_left, te_word_right,
@@ -778,8 +761,13 @@ namespace xpl_host
       }
     }
 
-    invalidate_if_state_filtered_compound(this, old_idx);
-    invalidate_if_state_filtered_compound(this, new_idx);
+    // Repaint the frame so widgets whose paint reacts to .hovered (BUTTON, ...)
+    // swap visuals. Hover transitions happen at human pointer speed - cheap.
+    uint32_t ref = (new_idx != 0) ? new_idx : old_idx;
+    if (ref != 0) {
+      if (void* frame = find_parent_native_handle(ref))
+        platform_invalidate(frame);
+    }
   }
 
   void Session::set_pressed(uint32_t new_idx)
@@ -795,8 +783,13 @@ namespace xpl_host
     if (new_idx != 0 && _widgets.exists(new_idx))
       _widgets[new_idx].pressed = true;
 
-    invalidate_if_state_filtered_compound(this, old_idx);
-    invalidate_if_state_filtered_compound(this, new_idx);
+    // Same rationale as set_hovered: frame repaint so .pressed-aware widgets
+    // (BUTTON) flip to their pressed visual immediately.
+    uint32_t ref = (new_idx != 0) ? new_idx : old_idx;
+    if (ref != 0) {
+      if (void* frame = find_parent_native_handle(ref))
+        platform_invalidate(frame);
+    }
   }
 
   void Session::on_dpi_changed(uint32_t widget_index, uint32_t new_dpi)
@@ -871,8 +864,13 @@ namespace xpl_host
     float fy = static_cast<float>(y);
     float fw = static_cast<float>(width);
     float fh = static_cast<float>(height);
-    backend->fill_rect(ctx, fx, fy, fw, fh,
-                       neui_detail::color(ColorRole::panel_bg));
+    // Match the native win32 BS_PUSHBUTTON visual ladder: hover lifts the
+    // panel a touch, press darkens it. pressed wins over hovered if both.
+    uint32_t base = neui_detail::color(ColorRole::panel_bg);
+    uint32_t fill = base;
+    if (pressed)      fill = neui_detail::shade(base, -16);
+    else if (hovered) fill = neui_detail::shade(base, +16);
+    backend->fill_rect(ctx, fx, fy, fw, fh, fill);
     if (backend->draw_rect)
       backend->draw_rect(ctx, fx, fy, fw, fh, 1.0f,
                          neui_detail::color(ColorRole::border));

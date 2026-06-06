@@ -22,7 +22,7 @@
 #include <windows.h>
 #endif
 
-#ifdef _WIN32
+#ifdef X_WIN32
 #define ACTIVE_HOST "neui.host.win32"
 #elif defined(__APPLE__)
 #define ACTIVE_HOST "neui.host.macos"
