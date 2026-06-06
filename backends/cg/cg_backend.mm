@@ -193,13 +193,18 @@ namespace neui_cg_backend
       return nullptr;
     }
 
-    CFStringRef keys[]   = { kCTFontAttributeName };
-    CFTypeRef   values[] = { font };
+    // kCTForegroundColorFromContextAttributeName = true makes CTLineDraw use
+    // the CGContext's fill colour (set by cg_draw_text from the argb arg).
+    // Without it Core Text defaults every glyph to black and ignores the
+    // requested colour.
+    CFStringRef keys[]   = { kCTFontAttributeName,
+                             kCTForegroundColorFromContextAttributeName };
+    CFTypeRef   values[] = { font, kCFBooleanTrue };
     CFDictionaryRef attrs = CFDictionaryCreate(
       kCFAllocatorDefault,
       reinterpret_cast<const void**>(keys),
       reinterpret_cast<const void**>(values),
-      1,
+      2,
       &kCFTypeDictionaryKeyCallBacks,
       &kCFTypeDictionaryValueCallBacks);
     if (!attrs) { CFRelease(cf_str); return nullptr; }

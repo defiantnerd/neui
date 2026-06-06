@@ -34,6 +34,13 @@ namespace neui_detail
 }
 @end
 
+// This header is included by both the native (hosts/macos) and xpl
+// (hosts/crossplatform) macOS hosts, which co-link in every example binary.
+// An Obj-C @implementation is not inline/weak, so it would clash. Exactly one
+// TU - the xpl platform_macos.mm - defines NEUI_DND_SOURCE_MACOS_IMPLEMENTATION
+// to emit the class body; the other TUs see only the @interface + inline
+// helpers below and resolve the class symbol at link.
+#ifdef NEUI_DND_SOURCE_MACOS_IMPLEMENTATION
 @implementation NEUIDragSource
 - (instancetype)init
 {
@@ -59,6 +66,7 @@ namespace neui_detail
   done    = true;
 }
 @end
+#endif // NEUI_DND_SOURCE_MACOS_IMPLEMENTATION
 
 namespace neui_detail
 {
@@ -81,8 +89,22 @@ namespace neui_detail
     return 0;
   }
 
-  // Forward-declared in platform.h; defined per-platform.
-  bool platform_run_modal_until(bool* keep_running);
+  // Synchronous drag requires spinning the runloop until AppKit reports the
+  // session ended. Self-contained here (rather than the xpl-only
+  // platform_run_modal_until seam) so the native macOS host - which doesn't
+  // implement that seam - links against the same shared header.
+  inline void dnd_pump_until(const bool* done)
+  {
+    if (!done) return;
+    while (!*done) {
+      NSEvent* ev = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                       untilDate:[NSDate distantFuture]
+                                          inMode:NSDefaultRunLoopMode
+                                         dequeue:YES];
+      if (!ev) continue;
+      [NSApp sendEvent:ev];
+    }
+  }
 
   // Build the array of NSDraggingItems from the DataItem's formats.
   // Format mapping mirrors clipboard_write_item_macos / pb_read_item_macos
@@ -113,7 +135,7 @@ namespace neui_detail
 
     // Collect text/html/MIME formats on one shared NSPasteboardItem.
     NSPasteboardItem* shared = [[NSPasteboardItem alloc] init];
-    __block bool shared_has_any = false;
+    bool shared_has_any = false;
 
     // text/uri-list: emit one NSDraggingItem per URL.
     std::vector<NSURL*> uri_urls;
@@ -237,7 +259,7 @@ namespace neui_detail
       [anchor_view beginDraggingSessionWithItems:items event:evt source:src];
     (void)session;
 
-    platform_run_modal_until(&src->done);
+    dnd_pump_until(&src->done);
     return nsop_to_dnd_action(src->finalOp);
   }
 }

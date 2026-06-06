@@ -25,6 +25,9 @@
 #include "platform.h"
 #include "../../backends/cg/cg_backend.h"
 #include "../shared/macos/clipboard_macos.h"
+// This TU owns the single out-of-line @implementation NEUIDragSource body
+// (the header is also included by the native host's widgets.mm, which co-links).
+#define NEUI_DND_SOURCE_MACOS_IMPLEMENTATION
 #include "../shared/macos/dnd_source_macos.h"
 #include "../shared/macos/keys_macos.h"
 #include "../shared/macos/menubar_macos.h"

@@ -23,7 +23,22 @@
 
 #include <cstring>
 
-@class NEUINativeWindowDelegate;
+// NEUINativeWindowDelegate carries the (Session, widget_index) pair for its
+// window. NEUINativeContentView's <NSDraggingDestination> methods reach
+// through window.delegate to dispatch DnD, so the full ivar layout must be
+// visible before that @implementation (further down).
+@interface NEUINativeWindowDelegate : NSObject<NSWindowDelegate>
+{
+@public
+  macos_host::Session* session;
+  uint32_t             widget_index;
+  bool                 is_appwindow;
+  bool                 handled_close;
+  __weak NSWindow*     sheet_owner;
+  bool                 sheet_active;
+}
+@end
+
 @class NEUINativeControlTarget;
 @class NEUINativeContentView;
 @class NEUINativeTextDelegate;
@@ -1890,18 +1905,8 @@ static float neui_snap_to_steps(float v, int steps)
 
 // ---------------------------------------------------------------------------
 // NEUINativeWindowDelegate - close button + quit-on-last-appwindow.
-
-@interface NEUINativeWindowDelegate : NSObject<NSWindowDelegate>
-{
-@public
-  macos_host::Session* session;
-  uint32_t             widget_index;
-  bool                 is_appwindow;
-  bool                 handled_close;
-  __weak NSWindow*     sheet_owner;
-  bool                 sheet_active;
-}
-@end
+// (Interface with ivars declared near the top of this file so the
+// content view's <NSDraggingDestination> methods can see the layout.)
 
 @implementation NEUINativeWindowDelegate
 

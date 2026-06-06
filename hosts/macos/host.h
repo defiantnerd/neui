@@ -179,6 +179,22 @@ namespace macos_host
     uint32_t _current_drop_target  = UINT32_MAX;
     uint32_t _last_accepted_action = 0;
     bool     _in_dnd_dispatch      = false;
+    // Frame-local top-left of the current drop target, cached so MOVE / LEAVE
+    // produce widget-local coords without re-walking the tree. Mirror of the
+    // win32 native host.
+    int      _current_drop_abs_x   = 0;
+    int      _current_drop_abs_y   = 0;
+
+    // Walk the frame's descendants for the deepest visible+enabled drop_target
+    // under (frame_x, frame_y) whose accepted_mimes intersect `formats`, else
+    // fall back to the frame itself. Returns the widget index (0 = none) and,
+    // via out params, that widget's frame-local top-left. Mirror of
+    // hosts/win32/host.cpp::find_drop_target_in_frame_w32.
+    uint32_t find_drop_target_in_frame_macos(uint32_t frame_widget_idx,
+                                             int frame_x, int frame_y,
+                                             const char* const* formats,
+                                             uint32_t formats_count,
+                                             int& out_abs_x, int& out_abs_y);
 
     uint32_t dispatch_dnd_enter(uint32_t frame_widget_idx,
                                  int frame_local_x, int frame_local_y,

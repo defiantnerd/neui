@@ -99,7 +99,7 @@ namespace neui_detail
     NSPasteboard* pb = [NSPasteboard generalPasteboard];
     [pb clearContents];
 
-    __block bool any = false;
+    bool any = false;
     item.for_each_format([&](const std::string& mime,
                               const std::vector<uint8_t>& bytes) {
       // ---- text/plain -> NSPasteboardTypeString ----

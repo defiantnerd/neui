@@ -206,23 +206,20 @@ int main(int /*argc*/, char* /*argv*/[])
                                             neui_widget_t{ UINT32_MAX },
                                             NEUI_W_APPWINDOW,
                                             100, 100, 1024, 720,
-                                            "neui DnD example");
+                                            nullptr);
+  app.widgets->set_text(app.session, win, "neui DnD example");
   app.win_id = win.id;
 
   neui_widget_t drop = app.widgets->create(app.session, win, NEUI_W_CUSTOMDRAW,
                                              20, 20, 964, 620, nullptr);
   app.drop_id = drop.id;
 
-  // Mark BOTH the CUSTOMDRAW (xpl widget-precise hit-test) and the
-  // window (win32 / macOS native, which target the frame) as drop
-  // targets so the same example runs on every host. The xpl walker
-  // picks the CUSTOMDRAW (deepest descendant); native hosts pick the
-  // window. The event handler treats either widget id the same.
+  // Only the CUSTOMDRAW is a drop target. All three hosts hit-test the
+  // widget tree and pick the deepest matching descendant, so DnD events fire
+  // on the drop pane only when the cursor is actually over it.
   const char* mimes[] = { NEUI_MIME_URI_LIST, NEUI_MIME_TEXT };
   app.dnd->set_drop_target(app.session, drop, true);
   app.dnd->set_accepted_formats(app.session, drop, mimes, 2);
-  app.dnd->set_drop_target(app.session, win, true);
-  app.dnd->set_accepted_formats(app.session, win, mimes, 2);
 
   app.widgets->show(app.session, win);
   host->run(app.session);

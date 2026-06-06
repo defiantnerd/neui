@@ -53,11 +53,12 @@ namespace macos_host
   }
 
   // -------------------------------------------------------------------------
-  // DnD dispatch. v1 reports drops at the frame level: NEUINativeContentView
-  // is the NSDraggingDestination; the framework dispatches to the frame
-  // widget if it has drop_target=true and accepted_mimes match. Child
-  // NSViews (painted views / native controls) do not yet opt-in as
-  // independent drop destinations.
+  // DnD dispatch. NEUINativeContentView is the single NSDraggingDestination
+  // for the frame (child painted views / native controls don't register their
+  // own destinations); the framework hit-tests the neui widget tree to find
+  // the deepest drop_target under the cursor, matching the win32 native + xpl
+  // hosts. Coordinates arriving here are frame-local (content view is
+  // isFlipped=YES, so already top-down).
 
   static bool dnd_formats_match_macos(const std::vector<std::string>& accepted,
                                        const char* const* formats,
@@ -73,9 +74,13 @@ namespace macos_host
     return false;
   }
 
+  // (x, y) are frame-local; (abs_x, abs_y) is the target widget's frame-local
+  // top-left, so the event carries widget-local coords. Mirror of the win32
+  // host's send_dnd_event_internal.
   static void send_dnd_event_macos(Session* s, uint32_t widget_idx,
                                     neui_event_type_t type,
                                     int x, int y,
+                                    int abs_x, int abs_y,
                                     const char* const* formats,
                                     uint32_t formats_count,
                                     uint32_t suggested, uint32_t buttonmap,
@@ -89,8 +94,8 @@ namespace macos_host
     neui_event_t ev = {};
     ev.type = type;
     ev.data.dnd.widget        = { wd.widget_id };
-    ev.data.dnd.x             = x;
-    ev.data.dnd.y             = y;
+    ev.data.dnd.x             = x - abs_x;
+    ev.data.dnd.y             = y - abs_y;
     ev.data.dnd.buttonmap     = buttonmap;
     ev.data.dnd.formats       = formats;
     ev.data.dnd.formats_count = formats_count;
@@ -101,6 +106,81 @@ namespace macos_host
     s->_in_dnd_dispatch = false;
   }
 
+  // Recursive descendant walker. Stack-passes parent abs coords so each
+  // widget's frame-local top-left is parent_abs + wd.x / wd.y. Updates
+  // out_idx / out_abs_x / out_abs_y as deeper matches are found. Mirror of
+  // hosts/win32/host.cpp::find_drop_target_descendants_w32.
+  static void find_drop_target_descendants_macos(
+      neui_detail::Tree<WidgetData>& widgets,
+      uint32_t parent_idx,
+      int parent_abs_x, int parent_abs_y,
+      int frame_x, int frame_y,
+      const char* const* formats, uint32_t formats_count,
+      uint32_t& out_idx, int& out_abs_x, int& out_abs_y)
+  {
+    uint32_t idx = widgets.child(parent_idx);
+    while (idx != 0) {
+      if (widgets.exists(idx)) {
+        auto& wd = widgets[idx];
+        if (wd.visible) {
+          int abs_x = parent_abs_x + wd.x;
+          int abs_y = parent_abs_y + wd.y;
+          if (frame_x >= abs_x && frame_x < abs_x + wd.width &&
+              frame_y >= abs_y && frame_y < abs_y + wd.height) {
+            if (wd.enabled && wd.drop_target &&
+                dnd_formats_match_macos(wd.accepted_mimes, formats,
+                                         formats_count)) {
+              out_idx   = idx;
+              out_abs_x = abs_x;
+              out_abs_y = abs_y;
+            }
+            find_drop_target_descendants_macos(widgets, idx,
+                                                abs_x, abs_y,
+                                                frame_x, frame_y,
+                                                formats, formats_count,
+                                                out_idx, out_abs_x, out_abs_y);
+          }
+        }
+      }
+      idx = widgets.next(idx);
+    }
+  }
+
+  uint32_t Session::find_drop_target_in_frame_macos(uint32_t frame_widget_idx,
+                                                     int frame_x, int frame_y,
+                                                     const char* const* formats,
+                                                     uint32_t formats_count,
+                                                     int& out_abs_x,
+                                                     int& out_abs_y)
+  {
+    out_abs_x = 0;
+    out_abs_y = 0;
+    if (frame_widget_idx == 0 || frame_widget_idx == UINT32_MAX) return 0;
+    if (!_widgets.exists(frame_widget_idx)) return 0;
+
+    // Walk descendants first (deepest match wins).
+    uint32_t deepest = 0;
+    int deepest_abs_x = 0, deepest_abs_y = 0;
+    find_drop_target_descendants_macos(_widgets, frame_widget_idx,
+                                        0, 0, frame_x, frame_y,
+                                        formats, formats_count,
+                                        deepest, deepest_abs_x, deepest_abs_y);
+    if (deepest != 0) {
+      out_abs_x = deepest_abs_x;
+      out_abs_y = deepest_abs_y;
+      return deepest;
+    }
+
+    // Fallback: the frame itself (its client-area origin is (0,0)).
+    auto& frame_wd = _widgets[frame_widget_idx];
+    if (frame_wd.drop_target &&
+        dnd_formats_match_macos(frame_wd.accepted_mimes, formats,
+                                 formats_count)) {
+      return frame_widget_idx;
+    }
+    return 0;
+  }
+
   uint32_t Session::dispatch_dnd_enter(uint32_t frame_widget_idx,
                                         int x, int y,
                                         const char* const* formats,
@@ -108,17 +188,16 @@ namespace macos_host
                                         uint32_t suggested,
                                         uint32_t buttonmap)
   {
-    uint32_t idx = 0;
-    if (frame_widget_idx != 0 && _widgets.exists(frame_widget_idx)) {
-      auto& wd = _widgets[frame_widget_idx];
-      if (wd.drop_target &&
-          dnd_formats_match_macos(wd.accepted_mimes, formats, count))
-        idx = frame_widget_idx;
-    }
-    _current_drop_target = idx;
+    int abs_x = 0, abs_y = 0;
+    uint32_t idx = find_drop_target_in_frame_macos(frame_widget_idx, x, y,
+                                                    formats, count,
+                                                    abs_x, abs_y);
+    _current_drop_target  = idx;
+    _current_drop_abs_x   = abs_x;
+    _current_drop_abs_y   = abs_y;
     _last_accepted_action = 0;
     if (idx == 0) return 0;
-    send_dnd_event_macos(this, idx, NEUI_EVENT_DND_ENTER, x, y,
+    send_dnd_event_macos(this, idx, NEUI_EVENT_DND_ENTER, x, y, abs_x, abs_y,
                          formats, count, suggested, buttonmap,
                          neui_data_item_none);
     return _last_accepted_action;
@@ -131,29 +210,29 @@ namespace macos_host
                                        uint32_t suggested,
                                        uint32_t buttonmap)
   {
-    uint32_t idx = 0;
-    if (frame_widget_idx != 0 && _widgets.exists(frame_widget_idx)) {
-      auto& wd = _widgets[frame_widget_idx];
-      if (wd.drop_target &&
-          dnd_formats_match_macos(wd.accepted_mimes, formats, count))
-        idx = frame_widget_idx;
-    }
+    int abs_x = 0, abs_y = 0;
+    uint32_t idx = find_drop_target_in_frame_macos(frame_widget_idx, x, y,
+                                                    formats, count,
+                                                    abs_x, abs_y);
     if (idx != _current_drop_target) {
       if (_current_drop_target != 0 && _current_drop_target != UINT32_MAX &&
           _widgets.exists(_current_drop_target)) {
         send_dnd_event_macos(this, _current_drop_target, NEUI_EVENT_DND_LEAVE,
-                             x, y, nullptr, 0, 0, 0, neui_data_item_none);
+                             x, y, _current_drop_abs_x, _current_drop_abs_y,
+                             nullptr, 0, 0, 0, neui_data_item_none);
       }
-      _current_drop_target = idx;
+      _current_drop_target  = idx;
+      _current_drop_abs_x   = abs_x;
+      _current_drop_abs_y   = abs_y;
       _last_accepted_action = 0;
       if (idx == 0) return 0;
-      send_dnd_event_macos(this, idx, NEUI_EVENT_DND_ENTER, x, y,
+      send_dnd_event_macos(this, idx, NEUI_EVENT_DND_ENTER, x, y, abs_x, abs_y,
                            formats, count, suggested, buttonmap,
                            neui_data_item_none);
       return _last_accepted_action;
     }
     if (idx == 0) return 0;
-    send_dnd_event_macos(this, idx, NEUI_EVENT_DND_MOVE, x, y,
+    send_dnd_event_macos(this, idx, NEUI_EVENT_DND_MOVE, x, y, abs_x, abs_y,
                          formats, count, suggested, buttonmap,
                          neui_data_item_none);
     return _last_accepted_action;
@@ -164,9 +243,12 @@ namespace macos_host
     if (_current_drop_target != 0 && _current_drop_target != UINT32_MAX &&
         _widgets.exists(_current_drop_target)) {
       send_dnd_event_macos(this, _current_drop_target, NEUI_EVENT_DND_LEAVE,
-                           0, 0, nullptr, 0, 0, 0, neui_data_item_none);
+                           0, 0, _current_drop_abs_x, _current_drop_abs_y,
+                           nullptr, 0, 0, 0, neui_data_item_none);
     }
-    _current_drop_target = UINT32_MAX;
+    _current_drop_target  = UINT32_MAX;
+    _current_drop_abs_x   = 0;
+    _current_drop_abs_y   = 0;
     _last_accepted_action = 0;
   }
 
@@ -180,7 +262,9 @@ namespace macos_host
   {
     if (_current_drop_target == 0 || _current_drop_target == UINT32_MAX ||
         !_widgets.exists(_current_drop_target)) {
-      _current_drop_target = UINT32_MAX;
+      _current_drop_target  = UINT32_MAX;
+      _current_drop_abs_x   = 0;
+      _current_drop_abs_y   = 0;
       _last_accepted_action = 0;
       return 0;
     }
@@ -201,13 +285,16 @@ namespace macos_host
     }
 
     send_dnd_event_macos(this, _current_drop_target, NEUI_EVENT_DND_DROP,
-                         x, y, formats, count, suggested, buttonmap,
+                         x, y, _current_drop_abs_x, _current_drop_abs_y,
+                         formats, count, suggested, buttonmap,
                          neui_data_item_t{ item_id });
 
     if (item_id) _data_items.release(item_id);
 
     uint32_t action = _last_accepted_action;
-    _current_drop_target = UINT32_MAX;
+    _current_drop_target  = UINT32_MAX;
+    _current_drop_abs_x   = 0;
+    _current_drop_abs_y   = 0;
     _last_accepted_action = 0;
     return action;
   }

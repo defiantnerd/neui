@@ -316,7 +316,8 @@ int main(int /*argc*/, char* /*argv*/[])
                                             neui_widget_t{ UINT32_MAX },
                                             NEUI_W_APPWINDOW,
                                             100, 100, 900, 600,
-                                            "neui drag source example");
+                                            nullptr);
+  app.widgets->set_text(app.session, win, "neui drag source example");
 
   neui_widget_t src  = app.widgets->create(app.session, win,
                                              NEUI_W_CUSTOMDRAW,
@@ -327,19 +328,18 @@ int main(int /*argc*/, char* /*argv*/[])
   neui_widget_t lbl  = app.widgets->create(app.session, win,
                                              NEUI_W_LABEL,
                                              20, 520, 840, 20,
-                                             "Drag result: -");
+                                             nullptr);
+  app.widgets->set_text(app.session, lbl, "Drag result: -");
   app.source_id = src.id;
   app.drop_id   = drop.id;
   app.status_id = lbl.id;
 
+  // Only the right pane is a drop target. All three hosts hit-test the
+  // widget tree, so DnD events fire on the drop pane only when the cursor is
+  // actually over it - the rest of the window receives nothing (no highlight).
   const char* mimes[] = { NEUI_MIME_URI_LIST, NEUI_MIME_TEXT };
   app.dnd->set_drop_target(app.session, drop, true);
   app.dnd->set_accepted_formats(app.session, drop, mimes, 2);
-  // Also mark the frame as a drop target so the native macOS host
-  // (frame-only DnD routing today) still receives drops on the right
-  // pane area.
-  app.dnd->set_drop_target(app.session, win, true);
-  app.dnd->set_accepted_formats(app.session, win, mimes, 2);
 
   app.widgets->show(app.session, win);
   host->run(app.session);
