@@ -205,6 +205,7 @@ namespace xpl_host
   class ButtonWidget    : public WidgetData {
   public:
     void paint(neui_render_backend_t* backend, neui_render_ctx_t ctx, bool is_focused) override;
+    bool on_keydown(uint32_t keycode, uint32_t modifiers) override;
   };
 
   // SECTION - non-interactive visual container. Paints a colored backdrop

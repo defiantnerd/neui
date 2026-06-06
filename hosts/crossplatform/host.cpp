@@ -893,6 +893,23 @@ namespace xpl_host
                          neui_detail::color(ColorRole::focus_ring));
   }
 
+  // Keyboard activation parity with native win32 BS_PUSHBUTTON: Space and
+  // Enter on a focused button fire MOUSE_BUTTON_CLICK, same shape as the
+  // mouse-driven CLICK in platform_win32.cpp. (0,0) coords match the
+  // synthetic CLICK emitted by hosts/win32/window.cpp:550-552 on BN_CLICKED.
+  bool ButtonWidget::on_keydown(uint32_t keycode, uint32_t /*modifiers*/)
+  {
+    if (keycode == NEUI_KEY_SPACE || keycode == NEUI_KEY_RETURN) {
+      if (session) {
+        neui_event_t ev = { NEUI_EVENT_MOUSE_BUTTON_CLICK };
+        ev.data.mouse = { { widget_id }, 0, 0, 0 };
+        session->dispatch_event(&ev);
+      }
+      return true;
+    }
+    return false;
+  }
+
   void WidgetData::repaint()
   {
     if (session) {
