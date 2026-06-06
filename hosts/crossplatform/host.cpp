@@ -1690,6 +1690,14 @@ namespace xpl_host
     float fh = static_cast<float>(height);
     uint32_t mark_col   = neui_detail::color(ColorRole::text_primary);
     uint32_t indet_col  = neui_detail::color(ColorRole::text_secondary);
+    // Hover/pressed background inside the checkbox glyph - same shade ladder
+    // as ButtonWidget. Pressed wins over hovered.
+    if (pressed || hovered) {
+      uint32_t base = neui_detail::color(ColorRole::panel_bg);
+      uint32_t fill = pressed ? neui_detail::shade(base, -16)
+                              : neui_detail::shade(base, +16);
+      backend->fill_rect(ctx, fx + 4.0f, fy + 4.0f, 14.0f, 14.0f, fill);
+    }
     if (backend->draw_rect)
       backend->draw_rect(ctx, fx + 4.0f, fy + 4.0f, 14.0f, 14.0f, 1.5f, mark_col);
     if (check_state == 1 && backend->draw_text)
@@ -2506,6 +2514,8 @@ namespace xpl_host
   // full_vis: floor-visible rows - used only for scrollbar sizing; pass
   //           (int_height / LIST_ITEM_H) for listbox, max_drop_visible() for overlay.
   // scroll_offset is read-only here; callers own the value.
+  // hover_row UINT32_MAX = no row hover; otherwise the unselected row gets a
+  // subtle shaded background to indicate the mouse position.
   // border_color 0 = no outer border drawn.
   static void paint_scrollable_list(
       neui_render_backend_t* backend, neui_render_ctx_t ctx,
@@ -2514,7 +2524,8 @@ namespace xpl_host
       uint32_t selected_item, uint32_t scroll_offset,
       int full_vis, int int_h,
       uint32_t bg_color, uint32_t border_color,
-      float    text_size = 12.0f)
+      float    text_size = 12.0f,
+      uint32_t hover_row = UINT32_MAX)
   {
     uint32_t n       = static_cast<uint32_t>(items.size());
     bool     show_sb = n > static_cast<uint32_t>(full_vis);
@@ -2528,6 +2539,7 @@ namespace xpl_host
 
     using neui_detail::ColorRole;
     uint32_t accent_col      = neui_detail::color(ColorRole::accent);
+    uint32_t hover_col       = neui_detail::shade(bg_color, +14);
     uint32_t selected_text   = neui_detail::color(ColorRole::accent_text);
     uint32_t normal_text     = neui_detail::color(ColorRole::text_primary);
 
@@ -2536,10 +2548,14 @@ namespace xpl_host
       uint32_t item_idx = scroll_offset + static_cast<uint32_t>(i);
       if (item_idx >= n) break;
       float row_y = fy + static_cast<float>(i * LIST_ITEM_H);
-      bool sel = (item_idx == selected_item);
+      bool sel  = (item_idx == selected_item);
+      bool hov  = (item_idx == hover_row) && !sel;
       if (sel)
         backend->fill_rect(ctx, fx + 1.0f, row_y, content_w - 2.0f,
                            static_cast<float>(LIST_ITEM_H), accent_col);
+      else if (hov)
+        backend->fill_rect(ctx, fx + 1.0f, row_y, content_w - 2.0f,
+                           static_cast<float>(LIST_ITEM_H), hover_col);
       if (backend->draw_text)
         backend->draw_text(ctx, fx + 4.0f, row_y, content_w - 8.0f,
                            static_cast<float>(LIST_ITEM_H),
@@ -2586,7 +2602,8 @@ namespace xpl_host
         items, selected_item, scroll_offset,
         height / LIST_ITEM_H, height,
         neui_detail::color(ColorRole::control_bg), border_color,
-        ef.size);
+        ef.size,
+        hovered ? hover_row : UINT32_MAX);
     neui_detail::pop_widget_font(backend, ctx, ef);
   }
 
@@ -2685,6 +2702,25 @@ namespace xpl_host
       return false;
     }
 
+    // ---- Hover tracking (MOUSE_MOVE outside any drag) ---------------------
+    if (event->type == NEUI_EVENT_MOUSE_MOVE) {
+      uint32_t new_hover = UINT32_MAX;
+      int rel_x = event->data.mouse.x - abs_x;
+      int rel_y = event->data.mouse.y - abs_y;
+      bool in_content = rel_y >= 0
+                     && rel_x >= 0
+                     && (!show_sb || rel_x < width - SCROLLBAR_W);
+      if (in_content && n > 0) {
+        uint32_t row = scroll_offset + static_cast<uint32_t>(rel_y / LIST_ITEM_H);
+        if (row < n) new_hover = row;
+      }
+      if (new_hover != hover_row) {
+        hover_row = new_hover;
+        repaint();
+      }
+      return true;
+    }
+
     // ---- Scrollbar click (button down, x in scrollbar column) ---------------
     if (show_sb && event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN) {
       int sb_left = abs_x + width - SCROLLBAR_W;   // separator x in frame coords
@@ -2699,6 +2735,7 @@ namespace xpl_host
           sb_dragging          = true;
           sb_drag_start_y      = event->data.mouse.y;
           sb_drag_start_offset = scroll_offset;
+          hover_row            = UINT32_MAX;  // clear hover during drag
         } else if (local_y < sb.thumb_top) {
           // Above thumb - page up.
           uint32_t step = static_cast<uint32_t>(full_vis);
@@ -2776,8 +2813,14 @@ namespace xpl_host
     float fh = static_cast<float>(COMBO_COLLAPSED_H);   // only the top bar
     const float arrow_w = 18.0f;
 
-    backend->fill_rect(ctx, fx, fy, fw, fh,
-                        neui_detail::color(ColorRole::control_bg));
+    // Hover/pressed background on the collapsed bar; pressed wins. Same
+    // shade ladder as ButtonWidget. The open overlay below has its own
+    // hover handling via hover_item, independent of widget-level hover.
+    uint32_t base_bg = neui_detail::color(ColorRole::control_bg);
+    uint32_t bar_bg  = base_bg;
+    if (pressed)      bar_bg = neui_detail::shade(base_bg, -16);
+    else if (hovered) bar_bg = neui_detail::shade(base_bg, +16);
+    backend->fill_rect(ctx, fx, fy, fw, fh, bar_bg);
 
     auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
     neui_detail::push_widget_font(backend, ctx, ef);
@@ -4173,12 +4216,17 @@ namespace xpl_host
       float indent_px = static_cast<float>(TREE_LEFT_PAD + vr.depth * TREE_INDENT);
 
       bool sel = (vr.id == selected_tree_item);
-      // Selection background.
+      bool hov = hovered && (row_idx == hover_row) && !sel;
+      // Selection background; otherwise unselected hover highlight.
       if (sel)
         backend->fill_rect(ctx, fx + 1.0f, row_y, content_w - 2.0f, rowh,
                            neui_detail::color(is_focused
                               ? ColorRole::accent
                               : ColorRole::control_bg_inactive));
+      else if (hov)
+        backend->fill_rect(ctx, fx + 1.0f, row_y, content_w - 2.0f, rowh,
+                           neui_detail::shade(
+                             neui_detail::color(ColorRole::control_bg), +14));
 
       // Disclosure chevron (only when this item has children). Keep the
       // chevron at the fixed 11px (default font) - it's a glyph indicator,
@@ -4445,6 +4493,25 @@ namespace xpl_host
       return false;
     }
 
+    // ---- hover tracking -------------------------------------------------
+    if (event->type == NEUI_EVENT_MOUSE_MOVE) {
+      uint32_t new_hover = UINT32_MAX;
+      int rel_x = event->data.mouse.x - abs_x;
+      int rel_y = event->data.mouse.y - abs_y;
+      bool in_content = rel_y >= 0
+                     && rel_x >= 0
+                     && (!show_sb || rel_x < width - SCROLLBAR_W);
+      if (in_content && n > 0) {
+        uint32_t row = scroll_offset + static_cast<uint32_t>(rel_y / TREE_ROW_H);
+        if (row < n) new_hover = row;
+      }
+      if (new_hover != hover_row) {
+        hover_row = new_hover;
+        repaint();
+      }
+      return true;
+    }
+
     // ---- scrollbar click ------------------------------------------------
     if (show_sb && event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN) {
       int sb_left = abs_x + width - SCROLLBAR_W;
@@ -4456,6 +4523,7 @@ namespace xpl_host
           sb_dragging = true;
           sb_drag_start_y = event->data.mouse.y;
           sb_drag_start_offset = scroll_offset;
+          hover_row = UINT32_MAX;  // clear hover during drag
         } else if (local_y < sb.thumb_top) {
           uint32_t step = static_cast<uint32_t>(full_vis);
           scroll_offset = (scroll_offset >= step) ? scroll_offset - step : 0;

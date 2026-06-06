@@ -346,6 +346,9 @@ namespace xpl_host
     struct Item { std::string text; void* userdata = nullptr; };
     std::vector<Item> items;
     uint32_t selected_item   = UINT32_MAX;
+    // Row under the cursor (for hover highlight in paint). UINT32_MAX = none.
+    // Distinct from ComboBoxWidget::hover_item, which has commit semantics.
+    uint32_t hover_row       = UINT32_MAX;
     uint32_t scroll_offset   = 0;
     bool     sb_dragging     = false;
     int      sb_drag_start_y = 0;
@@ -399,6 +402,9 @@ namespace xpl_host
     std::vector<uint32_t>                  tree_items_ordered;
     uint32_t next_tree_id       = 1;
     uint32_t selected_tree_item = UINT32_MAX;
+    // Visible-row index (into flatten_visible result) under the cursor for the
+    // hover highlight in paint. UINT32_MAX = none.
+    uint32_t hover_row          = UINT32_MAX;
 
     // Scroll / scrollbar state (parallels ListItemsWidget).
     uint32_t scroll_offset        = 0;
