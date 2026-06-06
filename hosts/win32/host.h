@@ -7,6 +7,7 @@
 #include "../shared/theme_palette.h"
 #include "../shared/behavior_runtime.h"
 #include "../shared/grid_model.h"
+#include "../shared/edit_history.h"
 #include "asset_manager_w32.h"
 #include <memory>
 #include <string>
@@ -220,6 +221,14 @@ namespace win32_host {
     // selection, column-resize / scrollbar drag state. Lazy-allocated;
     // every other widget pays a single pointer.
     std::unique_ptr<neui_detail::GridModel> grid_model;
+
+    // Multi-level undo / redo for native EDIT-backed widgets (INPUTBOX,
+    // MULTILINE). Lazy-allocated on first mutation by the subclass-proc
+    // hook in window.cpp; replaces single-level EM_UNDO so Ctrl+Z / Ctrl+Y
+    // step through 100 entries the way the xpl and macOS hosts do. Null
+    // for every other widget. Cursor / anchor are UTF-16 code unit indices
+    // (matching what EM_GETSEL / EM_SETSEL speak natively); text is UTF-8.
+    std::unique_ptr<neui_detail::EditHistory> edit_history;
   };
 
   class Session {

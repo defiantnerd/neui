@@ -118,7 +118,7 @@ namespace win32_host
     { NEUI_W_CHECKBOX3, L"Button",  WS_CHILD | WS_TABSTOP | BS_AUTO3STATE,                                       true  },
     { NEUI_W_LISTBOX,   L"ListBox", WS_CHILD | WS_TABSTOP | WS_BORDER | WS_VSCROLL | LBS_NOTIFY | LBS_HASSTRINGS, true },
     { NEUI_W_COMBOBOX,  L"ComboBox",WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,                  true  },
-    { NEUI_W_MULTILINE, L"Edit",    WS_CHILD | WS_TABSTOP | WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, false },
+    { NEUI_W_MULTILINE, L"Edit",    WS_CHILD | WS_TABSTOP | WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, true },
     { NEUI_W_TREEVIEW,  L"SysTreeView32",
       WS_CHILD | WS_TABSTOP | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS, true },
     { NEUI_W_SLIDER,    TRACKBAR_CLASSW,
@@ -777,6 +777,24 @@ namespace win32_host
     return popup_menu({ wd->session_id }, anchor, local_x, local_y, items);
   }
 
+  // Forward-decl: defined later alongside the rest of the DnD API thunks.
+  static neui_dnd_action_t NEUI_ABI dnd_begin_drag(neui_session_t,
+                                                    neui_widget_t,
+                                                    neui_data_item_t,
+                                                    uint32_t);
+
+  static uint32_t w32_behavior_begin_drag(void* host_data,
+                                            neui_data_item_t item,
+                                            uint32_t allowed_actions)
+  {
+    auto* wd = static_cast<WidgetData*>(host_data);
+    if (!wd) return NEUI_DND_ACTION_NONE;
+    neui_session_t sess = { wd->session_id };
+    neui_widget_t  wid  = { wd->widget_id };
+    return static_cast<uint32_t>(
+      dnd_begin_drag(sess, wid, item, allowed_actions));
+  }
+
   static neui_detail::BehaviorDispatchCtx make_behavior_ctx_w32(WidgetData& wd)
   {
     neui_detail::BehaviorDispatchCtx ctx{};
@@ -787,6 +805,7 @@ namespace win32_host
     ctx.invalidate        = &w32_behavior_invalidate;
     ctx.emit_attr_changed = &w32_behavior_emit_attr_changed;
     ctx.popup_menu        = &w32_behavior_popup_menu;
+    ctx.begin_drag        = &w32_behavior_begin_drag;
     return ctx;
   }
 
@@ -1874,6 +1893,10 @@ namespace win32_host
     } else {
       // Apply immediately if the HWND already exists; otherwise stored for deferred creation
       ApplyText(w.hwnd, w.text);
+      // Programmatic mutation - break the typing run so the next user key
+      // starts a fresh undo group. Don't push: API-driven changes shouldn't
+      // pollute the user-visible undo stack.
+      if (w.edit_history) w.edit_history->reset_action();
     }
   }
 
@@ -2125,12 +2148,9 @@ namespace win32_host
 
   // Returns true if hwnd is a native Edit control that knows how to handle
   // `cmd` - used both for the actual send and for the can-perform query.
-  // Native Edit's EM_UNDO is itself a toggle (per MSDN: "the undo
-  // operation can also be undone"), so REDO maps to EM_UNDO too: pressing
-  // Ctrl+Y immediately after Ctrl+Z replays the edit. Limitation: undo is
-  // single-level, so pressing Ctrl+Z twice toggles the same unit; clients
-  // that need multi-level redo should use the xpl host's text widgets,
-  // which have a full EditHistory.
+  // UNDO / REDO go through our own EditHistory (lazy-allocated per widget
+  // by the subclass-proc hook); the EDIT control's own EM_UNDO is a
+  // single-level toggle, so we bypass it and replay state ourselves.
   static bool edit_can_handle(HWND hwnd, uint32_t cmd)
   {
     if (!hwnd) return false;
@@ -2150,12 +2170,32 @@ namespace win32_host
     return false;
   }
 
-  static bool send_text_command(HWND hwnd, uint32_t cmd)
+  // Resolve a focused HWND back to its WidgetData, if it belongs to this
+  // session. Used so UNDO / REDO can reach the per-widget EditHistory.
+  static WidgetData* widget_for_hwnd_w32(Session* s, HWND hwnd)
+  {
+    if (!s || !hwnd) return nullptr;
+    UINT id = (UINT)GetDlgCtrlID(hwnd);
+    if (id == 0) return nullptr;
+    WidgetData* wd = s->get_widget(id);
+    if (wd && wd->hwnd == hwnd) return wd;
+    return nullptr;
+  }
+
+  static bool send_text_command(Session* s, HWND hwnd, uint32_t cmd)
   {
     if (!edit_can_handle(hwnd, cmd)) return false;
     switch (cmd) {
-    case NEUI_CMD_UNDO:       SendMessageW(hwnd, EM_UNDO,    0, 0);      return true;
-    case NEUI_CMD_REDO:       SendMessageW(hwnd, EM_UNDO,    0, 0);      return true;
+    case NEUI_CMD_UNDO:
+    case NEUI_CMD_REDO: {
+      WidgetData* wd = widget_for_hwnd_w32(s, hwnd);
+      if (wd && try_edit_undo_redo_w32(*wd, hwnd, cmd == NEUI_CMD_REDO))
+        return true;
+      // Fall back to the native single-level toggle for EDITs we don't
+      // own (shouldn't happen for INPUTBOX/MULTILINE, but harmless).
+      SendMessageW(hwnd, EM_UNDO, 0, 0);
+      return true;
+    }
     case NEUI_CMD_CUT:        SendMessageW(hwnd, WM_CUT,     0, 0);      return true;
     case NEUI_CMD_COPY:       SendMessageW(hwnd, WM_COPY,    0, 0);      return true;
     case NEUI_CMD_PASTE:      SendMessageW(hwnd, WM_PASTE,   0, 0);      return true;
@@ -2168,7 +2208,7 @@ namespace win32_host
   bool Session::invoke_focused_command(uint32_t cmd)
   {
     if (cmd == NEUI_CMD_NONE || cmd >= NEUI_CMD_USER_BASE) return false;
-    return send_text_command(GetFocus(), cmd);
+    return send_text_command(this, GetFocus(), cmd);
   }
 
   bool Session::invoke_command(neui_widget_t widget, uint32_t cmd)
@@ -2177,7 +2217,7 @@ namespace win32_host
     uint32_t idx = WidgetToIndex(widget);
     auto* w = get_widget(idx);
     if (!w) return false;
-    return send_text_command(w->hwnd, cmd);
+    return send_text_command(this, w->hwnd, cmd);
   }
 
   bool Session::can_focused_perform_command(uint32_t cmd)

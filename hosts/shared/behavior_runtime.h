@@ -72,6 +72,14 @@ namespace neui_detail
                                 const char* attr_key, float value)     = nullptr;
     int  (*popup_menu)(void* host_data, int local_x, int local_y,
                         const char* const* items)                       = nullptr;
+    // DRAG_SOURCE seam. Blocks until the OS drag loop ends; returns the
+    // negotiated NEUI_DND_ACTION_*. Null on hosts that don't have a
+    // drag-source impl (currently all three do). The runtime guards
+    // re-entry on the Session side, but clears its own dragging state
+    // before the call so the same widget can't fire two drags in flight.
+    uint32_t (*begin_drag)(void* host_data,
+                            neui_data_item_t item,
+                            uint32_t allowed_actions)                   = nullptr;
   };
 
   // ---- Math helpers (shared with KnobWidget) -----------------------------
@@ -208,6 +216,7 @@ namespace neui_detail
         case NEUI_BEHAVIOR_KIND_DRAG_BIAXIAL:
         case NEUI_BEHAVIOR_KIND_CLICK_TOGGLE:
         case NEUI_BEHAVIOR_KIND_CLICK_CYCLE:
+        case NEUI_BEHAVIOR_KIND_DRAG_SOURCE:
           break;
         default:
           continue;
@@ -372,6 +381,29 @@ namespace neui_detail
         return true;
       }
       if (event->type == NEUI_EVENT_MOUSE_MOVE) {
+        // DRAG_SOURCE arms on BUTTON_DOWN and fires begin_drag once the
+        // cursor crosses threshold_px. Until then we just consume MOVE so
+        // no other handler picks it up; after firing we clear our state
+        // (the OS owns the cursor for the rest of the drag).
+        if (H->kind == NEUI_BEHAVIOR_KIND_DRAG_SOURCE) {
+          float dx = local_x - static_cast<float>(rt.drag_prev_x);
+          float dy = local_y - static_cast<float>(rt.drag_prev_y);
+          float thr = (H->threshold_px > 0.0f) ? H->threshold_px : 4.0f;
+          if (dx*dx + dy*dy < thr*thr) return true;
+          // Clear BEFORE firing - begin_drag is blocking and re-enters the
+          // dispatcher via drop events on targets in the same session.
+          rt.dragging = false;
+          rt.active_handler = 0;
+          if (ctx.begin_drag) {
+            neui_data_item_t item = neui_data_item_none;
+            if (ctx.bag && !H->drag_data_key.empty()) {
+              int v = ctx.bag->get_int(H->drag_data_key, 0);
+              if (v != 0) item.id = static_cast<uint32_t>(v);
+            }
+            ctx.begin_drag(ctx.host_data, item, H->allowed_actions);
+          }
+          return true;
+        }
         behavior_apply_drag_move(*H, rt, ctx, local_x, local_y,
                                   event->data.mouse.buttonmap);
         return true;
@@ -461,6 +493,18 @@ namespace neui_detail
         float new_v = H->min + (H->max - H->min) *
                       (static_cast<float>(next) / static_cast<float>(steps - 1));
         behavior_write_value(*H, ctx, H->target, new_v);
+        return true;
+      }
+
+      if (H->kind == NEUI_BEHAVIOR_KIND_DRAG_SOURCE) {
+        // Just arm: store anchor + slot, set dragging so subsequent MOVE
+        // events steer through the in-progress branch above. We don't seed
+        // a continuous accumulator (there's no value to mutate); the next
+        // MOVE past threshold_px fires begin_drag.
+        rt.dragging       = true;
+        rt.active_handler = slot;
+        rt.drag_prev_x    = static_cast<int>(local_x);
+        rt.drag_prev_y    = static_cast<int>(local_y);
         return true;
       }
 

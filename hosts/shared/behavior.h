@@ -68,6 +68,18 @@ namespace neui_detail
     // ---- Cycle-specific ---------------------------------------------------
     int wrap = 0;
 
+    // ---- Drag-source-specific (DRAG_SOURCE) ------------------------------
+    // threshold_px: how far the cursor moves before begin_drag fires.
+    // allowed_actions: bitmask of NEUI_DND_ACTION_*. Default = COPY | MOVE
+    //   (3) - matches the most common "drag to copy or move" UX. LINK is
+    //   opt-in to avoid accidentally offering it.
+    // drag_data_key: attr key whose int value is interpreted as a
+    //   neui_data_item_t.id at threshold-cross time. Empty = drag empty
+    //   payload (data_item_none).
+    float       threshold_px    = 4.0f;
+    uint32_t    allowed_actions = 3;  // NEUI_DND_ACTION_COPY | NEUI_DND_ACTION_MOVE
+    std::string drag_data_key;
+
     // ---- Hit region (compound-style 9-pt anchor) --------------------------
     neui_anchor_t anchor_parent = NEUI_ANCHOR_TOP_LEFT;
     neui_anchor_t anchor_self   = NEUI_ANCHOR_TOP_LEFT;
@@ -155,18 +167,20 @@ namespace neui_detail
     if (prop == "width")         { H.width    = v; return; }
     if (prop == "height")        { H.height   = v; return; }
     if (prop == "wrap")          { H.wrap     = v; return; }
+    if (prop == "allowed_actions") { H.allowed_actions = static_cast<uint32_t>(v); return; }
   }
 
   inline void apply_behavior_set_float(BehaviorHandler& H, const std::string& prop, float v)
   {
-    if (prop == "min")        { H.min        = v; return; }
-    if (prop == "max")        { H.max        = v; return; }
-    if (prop == "step")       { H.step       = v; return; }
-    if (prop == "coarse")     { H.coarse     = v; return; }
-    if (prop == "fine_scale") { H.fine_scale = v; return; }
-    if (prop == "sweep")      { H.sweep      = v; return; }
-    if (prop == "sweep_y")    { H.sweep_y    = v; return; }
-    if (prop == "deadzone")   { H.deadzone   = v; return; }
+    if (prop == "min")          { H.min          = v; return; }
+    if (prop == "max")          { H.max          = v; return; }
+    if (prop == "step")         { H.step         = v; return; }
+    if (prop == "coarse")       { H.coarse       = v; return; }
+    if (prop == "fine_scale")   { H.fine_scale   = v; return; }
+    if (prop == "sweep")        { H.sweep        = v; return; }
+    if (prop == "sweep_y")      { H.sweep_y      = v; return; }
+    if (prop == "deadzone")     { H.deadzone     = v; return; }
+    if (prop == "threshold_px") { H.threshold_px = v; return; }
   }
 
   inline void apply_behavior_set_string(BehaviorHandler& H, const std::string& prop, const char* v)
@@ -178,6 +192,7 @@ namespace neui_detail
     if (prop == "snap_attr")      { H.snap_attr       = sv; return; }
     if (prop == "cursor")         { H.cursor          = sv; return; }
     if (prop == "fine_modifier")  { H.fine_modifier   = parse_fine_modifier(sv); return; }
+    if (prop == "drag_data_key")  { H.drag_data_key   = sv; return; }
   }
 
   // ---- Hit region resolution ----------------------------------------------

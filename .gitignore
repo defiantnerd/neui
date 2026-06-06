@@ -37,3 +37,12 @@ out
 
 # MAC Shit
 .DS_Store
+
+# VS local build settings
+CMakeSettings.json
+
+# Local backup archives
+*.zip
+
+# Claude Code project dir
+.claude/

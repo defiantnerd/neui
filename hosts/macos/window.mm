@@ -151,6 +151,13 @@ namespace macos_host {
     wd->session->dispatch_event(&ev);
   }
 
+  // Defined in widgets.mm where d_begin_drag is in scope. Forwarded here
+  // so DRAG_SOURCE handlers can fire begin_drag through the same path the
+  // public dnd_api uses.
+  uint32_t macos_behavior_begin_drag(void* host_data,
+                                       neui_data_item_t item,
+                                       uint32_t allowed_actions);
+
   static neui_detail::BehaviorDispatchCtx make_behavior_ctx_macos(WidgetData& wd)
   {
     neui_detail::BehaviorDispatchCtx ctx{};
@@ -161,6 +168,7 @@ namespace macos_host {
     ctx.invalidate        = &macos_behavior_invalidate;
     ctx.emit_attr_changed = &macos_behavior_emit_attr_changed;
     ctx.popup_menu        = &macos_behavior_popup_menu;
+    ctx.begin_drag        = &macos_behavior_begin_drag;
     return ctx;
   }
 

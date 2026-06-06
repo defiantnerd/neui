@@ -27,4 +27,11 @@ namespace win32_host
   // File Explorer / Notepad / Settings use. For TreeView additionally
   // sets bg / text / line colours from the palette.
   void apply_native_theme_w32(WidgetData& wd);
+
+  // Replay the previous (undo) or next (redo) entry from the widget's
+  // EditHistory and push it into the underlying native EDIT via
+  // SetWindowTextW + EM_SETSEL. Returns true if a step was performed.
+  // No-op (returns false) if wd has no history or the stack is empty in
+  // the requested direction.
+  bool try_edit_undo_redo_w32(WidgetData& wd, HWND hwnd, bool redo);
 }

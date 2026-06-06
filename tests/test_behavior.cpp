@@ -154,3 +154,155 @@ TEST_CASE("behavior_hit_test: explicit sub-rect via anchor + size")
   CHECK_FALSE(behavior_hit_test(H, 100, 100, 39, 50));
   CHECK_FALSE(behavior_hit_test(H, 100, 100, 60, 60));
 }
+
+// ---------------------------------------------------------------------------
+// DRAG_SOURCE dispatch: arm on BUTTON_DOWN, fire begin_drag past threshold,
+// stay quiet under threshold, re-entry safe.
+// ---------------------------------------------------------------------------
+
+namespace {
+  struct DragSourceProbe {
+    int call_count = 0;
+    uint32_t last_item_id = 0;
+    uint32_t last_allowed = 0;
+    uint32_t result = NEUI_DND_ACTION_COPY;
+  };
+
+  uint32_t probe_begin_drag(void* host_data, neui_data_item_t item, uint32_t allowed)
+  {
+    auto* p = static_cast<DragSourceProbe*>(host_data);
+    p->call_count++;
+    p->last_item_id = item.id;
+    p->last_allowed = allowed;
+    return p->result;
+  }
+}
+
+TEST_CASE("DRAG_SOURCE: arms on BUTTON_DOWN but waits under threshold")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  H->threshold_px = 5.0f;
+  H->allowed_actions = NEUI_DND_ACTION_COPY | NEUI_DND_ACTION_MOVE;
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  DragSourceProbe probe;
+  BehaviorDispatchCtx ctx;
+  ctx.bag = &bag;
+  ctx.widget_w = 100; ctx.widget_h = 100;
+  ctx.host_data = &probe;
+  ctx.begin_drag = &probe_begin_drag;
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 10, 10, NEUI_MK_LBUTTON };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 10));
+  CHECK(rt.dragging);
+
+  // Move 3px - below threshold, no fire.
+  neui_event_t move1 = { NEUI_EVENT_MOUSE_MOVE };
+  move1.data.mouse = { wid, 13, 10, NEUI_MK_LBUTTON };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &move1, 13, 10));
+  CHECK_EQ(probe.call_count, 0);
+  CHECK(rt.dragging);
+}
+
+TEST_CASE("DRAG_SOURCE: fires begin_drag once past threshold and clears state")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  H->threshold_px = 5.0f;
+  H->allowed_actions = NEUI_DND_ACTION_COPY;
+  H->drag_data_key  = "myapp.drag_item";
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  bag.set_int(H->drag_data_key, 0x1234);   // pre-staged item id
+  DragSourceProbe probe;
+  probe.result = NEUI_DND_ACTION_MOVE;
+  BehaviorDispatchCtx ctx;
+  ctx.bag = &bag;
+  ctx.widget_w = 100; ctx.widget_h = 100;
+  ctx.host_data = &probe;
+  ctx.begin_drag = &probe_begin_drag;
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 10, 10, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 10);
+
+  // Move 10px - past threshold, fires.
+  neui_event_t move = { NEUI_EVENT_MOUSE_MOVE };
+  move.data.mouse = { wid, 20, 10, NEUI_MK_LBUTTON };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &move, 20, 10));
+  CHECK_EQ(probe.call_count, 1);
+  CHECK_EQ(probe.last_item_id, 0x1234u);
+  CHECK_EQ(probe.last_allowed, (uint32_t)NEUI_DND_ACTION_COPY);
+  // Drag state cleared before the (blocking) begin_drag returned - any
+  // re-entrant MOVE arriving while the OS drag loop spun cannot fire
+  // a second begin_drag.
+  CHECK_FALSE(rt.dragging);
+
+  // Another MOVE after fire is ignored (no handler armed).
+  CHECK_FALSE(behavior_dispatch_mouse(ba, rt, ctx, &move, 25, 10));
+  CHECK_EQ(probe.call_count, 1);
+}
+
+TEST_CASE("DRAG_SOURCE: empty drag_data_key sends data_item_none")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  H->threshold_px = 2.0f;
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  DragSourceProbe probe;
+  BehaviorDispatchCtx ctx;
+  ctx.bag = &bag;
+  ctx.widget_w = 100; ctx.widget_h = 100;
+  ctx.host_data = &probe;
+  ctx.begin_drag = &probe_begin_drag;
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 0, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &down, 0, 0);
+  neui_event_t move = { NEUI_EVENT_MOUSE_MOVE };
+  move.data.mouse = { wid, 5, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &move, 5, 0);
+  CHECK_EQ(probe.call_count, 1);
+  CHECK_EQ(probe.last_item_id, neui_data_item_none.id);
+}
+
+TEST_CASE("DRAG_SOURCE: BUTTON_UP before threshold just cancels")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  H->threshold_px = 100.0f;   // never reached in this test
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  DragSourceProbe probe;
+  BehaviorDispatchCtx ctx;
+  ctx.bag = &bag;
+  ctx.widget_w = 200; ctx.widget_h = 200;
+  ctx.host_data = &probe;
+  ctx.begin_drag = &probe_begin_drag;
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 10, 10, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 10);
+  CHECK(rt.dragging);
+
+  neui_event_t up = { NEUI_EVENT_MOUSE_BUTTON_UP };
+  up.data.mouse = { wid, 15, 15, 0 };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &up, 15, 15));
+  CHECK_FALSE(rt.dragging);
+  CHECK_EQ(probe.call_count, 0);
+}

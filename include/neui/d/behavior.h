@@ -72,6 +72,17 @@ extern "C" {
     // and writes it to `target`. Useful as a one-handler-per-widget UX
     // standard.
     NEUI_BEHAVIOR_KIND_CONTEXT_RESET    = 9,
+    // Drag-source. Arms on MOUSE_BUTTON_DOWN inside the hit region; on the
+    // first MOUSE_MOVE that takes the cursor past `threshold_px` it calls
+    // dnd_api->begin_drag with the data-item id resolved from the widget's
+    // AttrBag at `drag_data_key` and the configured `allowed_actions`
+    // bitmask. begin_drag is blocking - the handler does not return until
+    // the OS drag loop ends. Independent of the visual compound asset, so
+    // a CUSTOMDRAW with a compound + DRAG_SOURCE behavior initiates drags
+    // with zero client-side mouse code. The client is responsible for
+    // building the data item (clipboard_api->create_item / item_set_format)
+    // and stashing its id in the widget's AttrBag before mouse-down.
+    NEUI_BEHAVIOR_KIND_DRAG_SOURCE      = 10,
   } neui_behavior_kind_t;
 
   typedef struct neui_behavior_api {
@@ -124,6 +135,16 @@ extern "C" {
     //   cycle-specific (CLICK_CYCLE):
     //     "wrap"          int     0 = clamp at max, 1 = wrap to min
     //                             (default 0).
+    //
+    //   drag-source-specific (DRAG_SOURCE):
+    //     "threshold_px"   float  pixels of cursor motion before begin_drag
+    //                             fires (default 4).
+    //     "allowed_actions" int   bitmask of NEUI_DND_ACTION_* (default
+    //                             NEUI_DND_ACTION_COPY | NEUI_DND_ACTION_MOVE).
+    //     "drag_data_key"  string attr key on the widget that holds the
+    //                             data-item id (set by the client before
+    //                             mouse-down via attrs->set_int). Empty /
+    //                             unset = drag with neui_data_item_none.
     //
     //   hit region (any kind):
     //     "anchor_parent" int     neui_anchor_t on widget rect (default

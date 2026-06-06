@@ -957,6 +957,92 @@ namespace win32_host
     }
   }
 
+  // True if this widget is a native EDIT-backed text widget eligible for
+  // multi-level undo tracking. Password fields opt out: storing plaintext
+  // pre-states in the EditHistory would leak the value to anyone who can
+  // walk the heap.
+  static bool is_history_text_widget_w32(WidgetData* wd)
+  {
+    if (!wd || !wd->type) return false;
+    if (strcmp(wd->type, NEUI_W_INPUTBOX) != 0 &&
+        strcmp(wd->type, NEUI_W_MULTILINE) != 0) return false;
+    if (wd->attrs && wd->attrs->get_int(NEUI_ATTR_PASSWORD, 0)) return false;
+    return true;
+  }
+
+  // Read EDIT text + selection into an EditState. Text is UTF-8 (consistent
+  // with the rest of the framework); cursor/anchor are UTF-16 code unit
+  // indices (what EM_GETSEL / EM_SETSEL speak natively). EditHistory treats
+  // them as opaque, so no conversion is needed to keep them in sync with
+  // the EDIT control.
+  static void capture_edit_state_w32(HWND hwnd, neui_detail::EditState& out)
+  {
+    int wlen = GetWindowTextLengthW(hwnd);
+    if (wlen > 0) {
+      std::wstring wtext(wlen, L'\0');
+      GetWindowTextW(hwnd, &wtext[0], wlen + 1);
+      int u8len = WideCharToMultiByte(CP_UTF8, 0, wtext.c_str(), wlen,
+                                       nullptr, 0, nullptr, nullptr);
+      out.text.assign((size_t)u8len, '\0');
+      if (u8len > 0)
+        WideCharToMultiByte(CP_UTF8, 0, wtext.c_str(), wlen,
+                            &out.text[0], u8len, nullptr, nullptr);
+    } else {
+      out.text.clear();
+    }
+    DWORD start = 0, end = 0;
+    SendMessageW(hwnd, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
+    out.anchor = (int)start;
+    out.cursor = (int)end;
+  }
+
+  // Push a state back into the EDIT control. Bracketed in WM_SETREDRAW so
+  // text + selection swap in a single repaint rather than flashing the
+  // intermediate "selection at end of new text" state.
+  static void apply_edit_state_w32(HWND hwnd, const neui_detail::EditState& s)
+  {
+    int u8len = (int)s.text.size();
+    int wlen = (u8len > 0)
+      ? MultiByteToWideChar(CP_UTF8, 0, s.text.c_str(), u8len, nullptr, 0)
+      : 0;
+    std::wstring wtext((size_t)wlen, L'\0');
+    if (wlen > 0)
+      MultiByteToWideChar(CP_UTF8, 0, s.text.c_str(), u8len, &wtext[0], wlen);
+    SendMessageW(hwnd, WM_SETREDRAW, FALSE, 0);
+    SetWindowTextW(hwnd, wtext.c_str());
+    SendMessageW(hwnd, EM_SETSEL, (WPARAM)s.anchor, (LPARAM)s.cursor);
+    SendMessageW(hwnd, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(hwnd, nullptr, TRUE);
+  }
+
+  // Record the current EDIT state as a pre-edit snapshot, BEFORE the
+  // mutating message reaches the EDIT control. EditHistory coalesces
+  // consecutive same-kind marks (typing / deleting) when no selection is
+  // involved, so this is cheap to call on every keystroke.
+  static void track_edit_mutation_w32(WidgetData& wd, HWND hwnd,
+                                       neui_detail::EditHistory::Action kind)
+  {
+    if (!is_history_text_widget_w32(&wd)) return;
+    if (!wd.edit_history) wd.edit_history.reset(new neui_detail::EditHistory());
+    neui_detail::EditState pre;
+    capture_edit_state_w32(hwnd, pre);
+    bool has_sel = pre.anchor != pre.cursor;
+    wd.edit_history->mark(pre, kind, has_sel);
+  }
+
+  bool try_edit_undo_redo_w32(WidgetData& wd, HWND hwnd, bool redo)
+  {
+    if (!wd.edit_history) return false;
+    neui_detail::EditState current, restored;
+    capture_edit_state_w32(hwnd, current);
+    bool ok = redo
+      ? wd.edit_history->redo(current, restored)
+      : wd.edit_history->undo(current, restored);
+    if (!ok) return false;
+    apply_edit_state_w32(hwnd, restored);
+    return true;
+  }
+
   LRESULT CALLBACK ChildSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
   {
     WidgetData* wd = reinterpret_cast<WidgetData*>(dwRefData);
@@ -1097,6 +1183,71 @@ namespace win32_host
         break;
       }
     }
+
+    // EditHistory tracking for native EDIT-backed widgets (INPUTBOX /
+    // MULTILINE). Runs AFTER the client has seen NEUI_EVENT_KEY* above and
+    // BEFORE the EDIT mutates, so the snapshot captures pre-edit state.
+    // Ctrl+Z / Ctrl+Y are intercepted here so the framework's multi-level
+    // history works regardless of whether the client wired a menu binding
+    // - matching xpl's InputBoxWidget::on_keydown behavior.
+    if (is_history_text_widget_w32(wd)) {
+      using neui_detail::EditHistory;
+      switch (msg) {
+      case WM_KEYDOWN: {
+        bool ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        bool shift = (GetKeyState(VK_SHIFT)   & 0x8000) != 0;
+        if (ctrl && (wParam == 'Z' || wParam == 'Y')) {
+          // Ctrl+Z = undo, Ctrl+Shift+Z / Ctrl+Y = redo. Returning 0
+          // suppresses DefSubclassProc so the native EDIT's own EM_UNDO
+          // single-level toggle never runs.
+          bool redo = (wParam == 'Y') || (wParam == 'Z' && shift);
+          if (try_edit_undo_redo_w32(*wd, hwnd, redo)) return 0;
+          // No history to replay - still consume so EM_UNDO doesn't fire.
+          return 0;
+        }
+        if (wParam == VK_DELETE) {
+          track_edit_mutation_w32(*wd, hwnd, EditHistory::Deleting);
+        } else if (wParam == VK_LEFT || wParam == VK_RIGHT ||
+                   wParam == VK_UP   || wParam == VK_DOWN  ||
+                   wParam == VK_HOME || wParam == VK_END   ||
+                   wParam == VK_PRIOR || wParam == VK_NEXT) {
+          if (wd->edit_history) wd->edit_history->reset_action();
+        }
+        break;
+      }
+      case WM_CHAR: {
+        wchar_t ch = (wchar_t)wParam;
+        if (ch == 0x08 || ch == 0x7F) {
+          // 0x08 = backspace, 0x7F = Ctrl+Backspace (word delete).
+          track_edit_mutation_w32(*wd, hwnd, EditHistory::Deleting);
+        } else if (ch >= 0x20 || ch == 0x0D) {
+          // Printable or CR (newline in multiline). High/low surrogate
+          // pairs both pass; EDIT assembles them on its own. Skips pure
+          // control chars (Tab navigates, Esc cancels, etc).
+          track_edit_mutation_w32(*wd, hwnd, EditHistory::Typing);
+        }
+        break;
+      }
+      case WM_PASTE:
+      case WM_CUT:
+      case WM_CLEAR:
+        // Single-step mutations. Action=None defeats coalescing so each
+        // paste / cut / delete becomes its own undo entry.
+        track_edit_mutation_w32(*wd, hwnd, EditHistory::None);
+        break;
+      case WM_LBUTTONDOWN:
+      case WM_RBUTTONDOWN:
+      case WM_SETFOCUS:
+      case WM_KILLFOCUS:
+        // Caret jump / focus change breaks the typing run so the next
+        // character starts a fresh undo group.
+        if (wd->edit_history) wd->edit_history->reset_action();
+        break;
+      default:
+        break;
+      }
+    }
+
     return DefSubclassProc(hwnd, msg, wParam, lParam);
   }
 

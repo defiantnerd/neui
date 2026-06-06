@@ -2818,4 +2818,20 @@ namespace xpl_host {
     dnd_begin_drag,
   };
 
+  // Non-static wrapper so host.cpp's BehaviorDispatchCtx::begin_drag can
+  // reach the file-static dnd_begin_drag from a sibling TU. Receives the
+  // CustomDrawWidget pointer the dispatch carries as host_data, unpacks
+  // it into the public API shape, and forwards.
+  uint32_t xpl_behavior_begin_drag(void* host_data,
+                                     neui_data_item_t item,
+                                     uint32_t allowed_actions)
+  {
+    auto* wd = static_cast<WidgetData*>(host_data);
+    if (!wd) return NEUI_DND_ACTION_NONE;
+    neui_session_t sess = { wd->session_id };
+    neui_widget_t  wid  = { wd->widget_id };
+    return static_cast<uint32_t>(
+      dnd_begin_drag(sess, wid, item, allowed_actions));
+  }
+
 } // namespace xpl_host

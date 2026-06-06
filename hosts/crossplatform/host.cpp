@@ -2213,6 +2213,11 @@ namespace xpl_host
     return wd->session->open_popup_menu(wd->index, local_x, local_y, v);
   }
 
+  // Defined in widgets.cpp where dnd_begin_drag is in scope.
+  uint32_t xpl_behavior_begin_drag(void* host_data,
+                                     neui_data_item_t item,
+                                     uint32_t allowed_actions);
+
   // Build a dispatch ctx for this widget, ensuring its AttrBag exists.
   static neui_detail::BehaviorDispatchCtx make_behavior_ctx(CustomDrawWidget& wd)
   {
@@ -2224,6 +2229,7 @@ namespace xpl_host
     ctx.invalidate        = &xpl_behavior_invalidate;
     ctx.emit_attr_changed = &xpl_behavior_emit_attr_changed;
     ctx.popup_menu        = &xpl_behavior_popup_menu;
+    ctx.begin_drag        = &xpl_behavior_begin_drag;
     return ctx;
   }
 
