@@ -1,6 +1,6 @@
 # Drag-source code-review fixes
 
-**Status**: Batches 1-8 implemented. Batch 9 deferred as planned. macOS build clean + smoke-launch OK; Win32 compile + the manual verification matrix below still pending (no Windows toolchain on this machine; macOS drag-flow checks need interactive testing).
+**Status**: Batches 1-8 implemented; Batch 9 deferred as planned. Win32 compile + behavior verified on the Windows machine (landed in `399b704` / `4ebc2e8`). macOS interactively verified 2026-06-06 on real hardware: drag flow under the tracking-mode pump, drag-preview image + centred hot-spot, modifier-aware cursor (Ctrl/Shift/Ctrl+Shift incl. no-drop on unsatisfiable intent), TextEdit/Finder external round-trips, internal re-targeting, Esc cancel, repeated-drag stability - all pass. This plan is fully shipped.
 
 ## Context
 
