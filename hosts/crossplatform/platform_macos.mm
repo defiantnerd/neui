@@ -31,6 +31,7 @@
 #define NEUI_DND_SOURCE_MACOS_IMPLEMENTATION
 #include "../shared/dnd_modifier_suggest.h"
 #include "../shared/macos/dnd_source_macos.h"
+#include "../shared/macos/image_loader_macos.h"
 #include "../shared/macos/keys_macos.h"
 #include "../shared/macos/menubar_macos.h"
 #include "../shared/macos/theme_provider_macos.h"
@@ -1499,56 +1500,19 @@ namespace xpl_host
   }
 
   // -------------------------------------------------------------------------
-  // Image loading. Decode via ImageIO (CGImageSource) and normalise into a
-  // BGRA8-premultiplied buffer matching the d2d backend's pixel format.
+  // Image loading. Delegates to the shared loader
+  // (hosts/shared/macos/image_loader_macos.h) - same ImageIO decode +
+  // BGRA8-premul normalisation, plus the bundle-Resources fallback for
+  // relative paths the native macOS host already gets. Without the
+  // fallback, app-bundle launches (cwd = / via Finder / `open`) fail to
+  // resolve the example's bundled images on the xpl host while the native
+  // host loads them fine. Allocation stays new[] (freed by
+  // platform_free_image's delete[], matching free_image_bgra8).
 
   uint8_t* platform_load_image(const char* path,
                                 uint32_t* width_out, uint32_t* height_out)
   {
-    if (!path || !*path) return nullptr;
-    NSString* ns_path = [NSString stringWithUTF8String:path];
-    if (!ns_path) return nullptr;
-    NSURL* url = [NSURL fileURLWithPath:ns_path];
-    if (!url) return nullptr;
-
-    CGImageSourceRef src = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
-    if (!src) return nullptr;
-    CGImageRef img = CGImageSourceCreateImageAtIndex(src, 0, NULL);
-    CFRelease(src);
-    if (!img) return nullptr;
-
-    size_t w = CGImageGetWidth(img);
-    size_t h = CGImageGetHeight(img);
-    if (w == 0 || h == 0) {
-      CGImageRelease(img);
-      return nullptr;
-    }
-
-    size_t row_bytes = w * 4;
-    size_t total     = row_bytes * h;
-    uint8_t* buf     = new uint8_t[total]();
-
-    // BGRA8 premultiplied - kCGBitmapByteOrder32Little gives byte order
-    // B,G,R,A on little-endian, matching the d2d backend's input format.
-    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    CGContextRef ctx = CGBitmapContextCreate(
-      buf, w, h, 8, row_bytes, cs,
-      kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
-    CGColorSpaceRelease(cs);
-
-    if (!ctx) {
-      delete[] buf;
-      CGImageRelease(img);
-      return nullptr;
-    }
-
-    CGContextDrawImage(ctx, CGRectMake(0, 0, (CGFloat)w, (CGFloat)h), img);
-    CGContextRelease(ctx);
-    CGImageRelease(img);
-
-    if (width_out)  *width_out  = (uint32_t)w;
-    if (height_out) *height_out = (uint32_t)h;
-    return buf;
+    return neui_detail::load_image_bgra8_macos(path, width_out, height_out);
   }
 
   void platform_free_image(uint8_t* pixels) { delete[] pixels; }

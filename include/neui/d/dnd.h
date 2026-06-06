@@ -49,10 +49,10 @@ typedef enum neui_dnd_action {
 // cursor while the drag is in flight, indicating the content being moved.
 //
 // `image` may be any asset that resolves to displayable BGRA8 pixels -
-// NEUI_ASSET_KIND_BITMAP today, NEUI_ASSET_KIND_SURFACE once that lands
-// (mutable, paintable bitmap-compatible asset). The drag-source path
-// snapshots whatever bytes it needs synchronously inside the begin_drag
-// call, so the asset may be released the moment begin_drag returns.
+// NEUI_ASSET_KIND_BITMAP or NEUI_ASSET_KIND_SURFACE (the mutable,
+// paintable bitmap-compatible asset). The drag-source path snapshots
+// whatever bytes it needs synchronously inside the begin_drag call, so
+// the asset may be released the moment begin_drag returns.
 //
 // `hot_x` / `hot_y` are the point on the image (in logical px relative to
 // the image's top-left) that sticks to the cursor. Pass -1 on either axis
@@ -133,8 +133,8 @@ typedef struct neui_dnd_api {
   // under the cursor with `(hot_x, hot_y)` (or the image centre on axes
   // set to -1) pinned to the pointer.
   //
-  // Asset kinds supported v1: NEUI_ASSET_KIND_BITMAP. NEUI_ASSET_KIND_SURFACE
-  // will be supported the day that asset kind ships - no API change.
+  // Asset kinds supported: NEUI_ASSET_KIND_BITMAP and
+  // NEUI_ASSET_KIND_SURFACE (anything get_pixels_for_export can read).
   neui_dnd_action_t (NEUI_ABI *begin_drag_with_preview)(
                                             neui_session_t session,
                                             neui_widget_t source_widget,

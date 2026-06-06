@@ -527,23 +527,33 @@ namespace neui_cg_backend
       // Untinted fast path - byte-for-byte identical to pre-tint behaviour.
       CGContextDrawImage(st->cg_ctx, CGRectMake(0, 0, dst_w, dst_h), draw_img);
     } else {
-      // Tinted path: clip to the bitmap's alpha shape, then multiply-blend
-      // the tint colour. The mask clip preserves the image's alpha; the
-      // multiply blend mode handles the colour channels the same way
-      // D2D1Tint does for premultiplied BGRA.
+      // Tinted path - replicate the D2D1Tint composite as closely as CG
+      // blend modes allow. Inside an isolated transparency layer: draw the
+      // image at full alpha, clip to its alpha shape, multiply-fill the
+      // tint RGB at FULL strength (alpha 1 - tinting strength must not be
+      // diluted by the tint's own alpha or the alpha stack). The layer
+      // then composites onto the destination at (tint alpha x alpha
+      // stack), which is how D2D1Tint scales the image's alpha channel -
+      // a translucent tint lets the background bleed through rather than
+      // mixing the original image colours back in.
+      //
+      // Residual divergence vs D2D (documented, accepted): D2D1Tint with
+      // ClampOutput=FALSE multiplies premultiplied channels, so for
+      // tint alpha < 1 its colour term stays at full premul strength
+      // (superluminous); CG clamps colours to the layer alpha, so deeply
+      // translucent tints render slightly darker here. Identical for
+      // opaque tints (0xFFrrggbb), which is the dominant use.
       CGRect rect = CGRectMake(0, 0, dst_w, dst_h);
-      // 1. Draw the source image so it lands inside the clip with its own
-      //    colour + alpha, then re-clip to its alpha and multiply the tint
-      //    on top under kCGBlendModeMultiply. Source-over of the image,
-      //    then multiply of the colour, produces the same composite as
-      //    D2D1Tint with premultiplied input.
+      CGFloat rgba[4];
+      argb_to_rgba(tint, rgba);
+      CGContextSetAlpha(st->cg_ctx, current_alpha(st) * rgba[3]);
+      CGContextBeginTransparencyLayerWithRect(st->cg_ctx, rect, NULL);
       CGContextDrawImage(st->cg_ctx, rect, draw_img);
       CGContextClipToMask(st->cg_ctx, rect, draw_img);
       CGContextSetBlendMode(st->cg_ctx, kCGBlendModeMultiply);
-      CGFloat rgba[4];
-      argb_to_rgba(tint, rgba);
-      CGContextSetRGBFillColor(st->cg_ctx, rgba[0], rgba[1], rgba[2], rgba[3]);
+      CGContextSetRGBFillColor(st->cg_ctx, rgba[0], rgba[1], rgba[2], 1.0);
       CGContextFillRect(st->cg_ctx, rect);
+      CGContextEndTransparencyLayer(st->cg_ctx);
     }
     CGContextRestoreGState(st->cg_ctx);
 
