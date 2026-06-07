@@ -413,7 +413,7 @@ namespace win32_host {
 
   private:
     // Internal helpers used by dispatch_dnd_*; live inside Session so they
-    // can touch the protected _widgets / _client_widget_api / _token directly.
+    // can touch the protected _client_widget_api / _token directly.
 
     // Walk the frame's subtree to find the deepest visible+enabled
     // drop_target widget under (frame_x, frame_y) whose accepted_mimes
@@ -486,9 +486,9 @@ namespace win32_host {
     // Read-only view of the owning session id. Used by widget-id packing /
     // validation in widgets.cpp.
     uint32_t session_id() const { return _session_id; }
+    Tree<WidgetData> _widgets;
 
   protected:
-    Tree<WidgetData> _widgets;
     neui_widget_client_t* _client_widget_api = nullptr;
     neui_client_t* _client = nullptr;
     void* _token = nullptr;
