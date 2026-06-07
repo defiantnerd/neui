@@ -898,8 +898,11 @@ namespace xpl_host
     if (scroll_state) {
       scroll_state->content_w = content_w;
       scroll_state->content_h = content_h;
-      neui_detail::clamp_section_scroll(*scroll_state, content_w, content_h,
-                                         last_layout.body_w, last_layout.body_h);
+      // Kinetics-aware clamp: an axis mid rubber-band stretch / spring-back
+      // keeps its intentional overshoot; everything else (content shrunk,
+      // body resized) snaps back into range.
+      neui_detail::clamp_section_scroll_idle(*scroll_state, content_w, content_h,
+                                              last_layout.body_w, last_layout.body_h);
     }
 
     // Scrollbars overlay the body's right + bottom edges (scrolling only).
@@ -942,9 +945,16 @@ namespace xpl_host
         axis_h = false;
       else
         axis_h = (st.axis == neui_detail::SectionScrollAxis::Horizontal);
-      bool changed = neui_detail::section_apply_wheel(st, last_layout,
-                                                       (double)(-delta),
-                                                       axis_h);
+      // Line-delta fallback path (null platform / hosts without kinetics
+      // plumbing): wheel lines scale to px via SECTION_WHEEL_LINE_PX so the
+      // scroll speed matches the kinetic path's classic-wheel feel. On
+      // macOS + Win32 the platform layer intercepts scrolling-SECTION
+      // wheels before dispatch and feeds the kinetics instead, so this
+      // only runs when no kinetics are wired.
+      bool changed = neui_detail::section_apply_wheel(
+                       st, last_layout,
+                       (double)(-delta) * neui_detail::SECTION_WHEEL_LINE_PX,
+                       axis_h);
       if (changed) repaint();
       return changed;
     }
@@ -1867,7 +1877,8 @@ namespace xpl_host
   // Wheel events bubble up the widget-tree parent chain so a scrolling
   // SECTION ancestor consumes the wheel when the inner widget under the
   // cursor (e.g. a LABEL inside the section) doesn't handle it.
-  bool Session::dispatch_wheel_event(uint32_t widget_idx, neui_event_t* ev)
+  bool Session::dispatch_wheel_event(uint32_t widget_idx, neui_event_t* ev,
+                                      uint32_t stop_before)
   {
     auto try_widget = [&](uint32_t i) -> bool {
       if (i == 0 || !_widgets.exists(i)) return false;
@@ -1879,9 +1890,11 @@ namespace xpl_host
       if (dispatch_event(ev)) return true;
       return w.on_mouse_event(ev);
     };
+    if (widget_idx == stop_before) return false;
     if (try_widget(widget_idx)) return true;
     auto parents = _widgets.get_all_parents(widget_idx);
     for (uint32_t p : parents) {
+      if (stop_before != 0 && p == stop_before) return false;
       if (try_widget(p)) return true;
     }
     return false;

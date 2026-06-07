@@ -65,17 +65,20 @@ namespace neui_detail
     ScrollbarDrag vert_drag;
     ScrollbarDrag horz_drag;
 
-    // Smooth-scroll kinetics. Inert when the platform-stepped mode is in
-    // effect; the host's wheel-handler decides whether to feed events
-    // through these or hard-clamp them.
+    // Smooth-scroll kinetics, one integrator per axis. The host's wheel
+    // plumbing feeds rich wheel input (NSEvent phases on macOS; synthetic
+    // precise deltas on Win32) through section_scroll_wheel_kinetic below;
+    // hosts without that detail fall back to section_apply_wheel.
     ScrollKinetics kin_v;
     ScrollKinetics kin_h;
 
-    // Per-section spring-back animation timer is host-owned. These flags
-    // mirror the GRID pattern so a host that has timer infrastructure
-    // knows when to start / stop it without re-computing.
-    bool bounce_v_active = false;
-    bool bounce_h_active = false;
+    // True while the committed scroll position on this axis is an
+    // intentional kinetic rubber-band overshoot (out of [0, max]).
+    // Set / cleared by section_scroll_commit; the paint-time clamp skips
+    // an axis while its flag is set so the stretch isn't snapped away
+    // mid-gesture / mid-bounce.
+    bool kinetic_over_v = false;
+    bool kinetic_over_h = false;
   };
 
   // Logical-px layout of the section's painted regions.
@@ -144,6 +147,32 @@ namespace neui_detail
     if (st.scroll_x > max_x) st.scroll_x = max_x;
     if (st.scroll_y < 0)     st.scroll_y = 0;
     if (st.scroll_y > max_y) st.scroll_y = max_y;
+    return st.scroll_x != old_x || st.scroll_y != old_y;
+  }
+
+  // Like clamp_section_scroll, but leaves an axis alone while its kinetics
+  // own the current position as an intentional rubber-band overshoot
+  // (kinetic_over_* set AND the committed value is exactly what the last
+  // kinetic commit wrote). Any externally-caused out-of-range position
+  // (content regenerated smaller, body resized) still clamps. Called from
+  // the paint path, which runs on every frame of a stretch / bounce.
+  inline bool clamp_section_scroll_idle(SectionScrollState& st,
+                                          int content_w, int content_h,
+                                          int body_w, int body_h)
+  {
+    int max_x = content_w - body_w; if (max_x < 0) max_x = 0;
+    int max_y = content_h - body_h; if (max_y < 0) max_y = 0;
+    bool skip_x = st.kinetic_over_h && st.scroll_x == st.kin_h.last_commit_px;
+    bool skip_y = st.kinetic_over_v && st.scroll_y == st.kin_v.last_commit_px;
+    int old_x = st.scroll_x, old_y = st.scroll_y;
+    if (!skip_x) {
+      if (st.scroll_x < 0)     st.scroll_x = 0;
+      if (st.scroll_x > max_x) st.scroll_x = max_x;
+    }
+    if (!skip_y) {
+      if (st.scroll_y < 0)     st.scroll_y = 0;
+      if (st.scroll_y > max_y) st.scroll_y = max_y;
+    }
     return st.scroll_x != old_x || st.scroll_y != old_y;
   }
 
@@ -269,6 +298,89 @@ namespace neui_detail
       return st.scroll_y != before;
     }
     return false;
+  }
+
+  // ---- Smooth-scroll kinetics (same curve + tuning as GRID) ----------------
+  //
+  // SECTION-side wrappers over the generic primitives in scroll_kinetics.h,
+  // mirroring grid_model.h's grid_scroll_wheel / _bounce_step / _commit
+  // shape. The SECTION commit is simpler than GRID's: the model position IS
+  // a flat px offset, no row decomposition. Per-axis: axis_h = false drives
+  // (kin_v, scroll_y), axis_h = true drives (kin_h, scroll_x).
+  //
+  // Host wiring is identical to GRID: rich wheel data (NSEvent phases /
+  // precise deltas on macOS; synthetic precise notches on Win32) feeds
+  // section_scroll_wheel_kinetic; a returned start_bounce starts the host's
+  // 60 Hz timer driving section_scroll_bounce_step until it returns false.
+
+  // Wheel speed for line-based wheel input (classic notch wheels + the
+  // line-delta fallback path in the SECTION's own on_mouse_event): logical
+  // px scrolled per wheel line.
+  inline constexpr double SECTION_WHEEL_LINE_PX = 40.0;
+
+  // Maximum legal scroll position on the axis (0 when the content fits).
+  inline double section_scroll_max_px(const SectionScrollState& st,
+                                        const SectionLayout& L, bool axis_h)
+  {
+    double v = axis_h ? (double)(st.content_w - L.body_w)
+                      : (double)(st.content_h - L.body_h);
+    return v < 0.0 ? 0.0 : v;
+  }
+
+  // Commit the (rubber-mapped) raw kinetics position into the model's flat
+  // px offset. Records last_commit_px + the kinetic-overshoot flag so the
+  // paint-time clamp and the next wheel event's external-mutation detection
+  // both work. Does NOT repaint - the host does that.
+  inline void section_scroll_commit(SectionScrollState& st,
+                                      const SectionLayout& L, bool axis_h)
+  {
+    ScrollKinetics& k = axis_h ? st.kin_h : st.kin_v;
+    double max_px = section_scroll_max_px(st, L, axis_h);
+    double dim    = axis_h ? (double)L.body_w : (double)L.body_h;
+    double pos    = scroll_rubber(k.raw_px, max_px, dim);
+    int p = (int)std::lround(pos);
+    bool over = pos < 0.0 || pos > max_px;
+    if (axis_h) { st.scroll_x = p; st.kinetic_over_h = over; }
+    else        { st.scroll_y = p; st.kinetic_over_v = over; }
+    k.last_commit_px = p;
+  }
+
+  // Apply a rich wheel event to one axis' kinetics + commit. Thin wrapper
+  // over scroll_wheel - behaviourally the SECTION twin of grid_scroll_wheel.
+  inline ScrollWheelAction section_scroll_wheel_kinetic(SectionScrollState& st,
+                                                          const SectionLayout& L,
+                                                          const ScrollWheelInput& in,
+                                                          bool axis_h)
+  {
+    ScrollKinetics& k = axis_h ? st.kin_h : st.kin_v;
+    double max_px = section_scroll_max_px(st, L, axis_h);
+    double dim    = axis_h ? (double)L.body_w : (double)L.body_h;
+    int committed = axis_h ? st.scroll_x : st.scroll_y;
+    ScrollWheelAction act = scroll_wheel(k, in, max_px, dim, committed);
+    if (act.changed) section_scroll_commit(st, L, axis_h);
+    return act;
+  }
+
+  // One spring-back animation step for one axis (call at ~60 Hz). Returns
+  // true while still animating. Yields without re-committing if something
+  // else moved the axis since the last commit (scrollbar drag, API) - the
+  // SECTION twin of grid_scroll_bounce_step.
+  inline bool section_scroll_bounce_step(SectionScrollState& st,
+                                           const SectionLayout& L, bool axis_h)
+  {
+    ScrollKinetics& k = axis_h ? st.kin_h : st.kin_v;
+    int committed = axis_h ? st.scroll_x : st.scroll_y;
+    if (committed != k.last_commit_px) {
+      // External mutation - drop the overshoot claim so the paint clamp
+      // regains authority over this axis.
+      if (axis_h) st.kinetic_over_h = false; else st.kinetic_over_v = false;
+      return false;
+    }
+    double max_px = section_scroll_max_px(st, L, axis_h);
+    double dim    = axis_h ? (double)L.body_w : (double)L.body_h;
+    bool animating = scroll_bounce_step(k, max_px, dim, committed);
+    section_scroll_commit(st, L, axis_h);
+    return animating;
   }
 
 } // namespace neui_detail

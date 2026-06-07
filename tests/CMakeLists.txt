@@ -15,6 +15,7 @@ add_executable(neui_tests
   test_text_edit.cpp
   test_tree.cpp
   test_scrollbar.cpp
+  test_section_scroll.cpp
   test_shortcut_format.cpp
   test_clipboard_item.cpp)
 

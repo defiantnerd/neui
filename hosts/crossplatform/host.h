@@ -662,7 +662,14 @@ namespace xpl_host
     // client's onevent fires once per ancestor tried; if any of them
     // consumes via the client, bubbling stops. Returns whether any widget
     // ended up consuming.
-    bool dispatch_wheel_event(uint32_t widget_idx, neui_event_t* ev);
+    //
+    // stop_before (optional): bubbling stops BEFORE reaching this widget -
+    // neither it nor its ancestors are tried. The platform layer uses this
+    // to give the widgets inside a scrolling SECTION first refusal on the
+    // wheel, then feeds the SECTION's kinetics itself when nothing below
+    // consumed.
+    bool dispatch_wheel_event(uint32_t widget_idx, neui_event_t* ev,
+                               uint32_t stop_before = 0);
 
     // Called by the platform layer when WM_PAINT / equivalent fires.
     void paint_frame(neui_render_ctx_t ctx, uint32_t parent_index);

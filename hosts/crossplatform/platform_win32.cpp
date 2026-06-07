@@ -50,10 +50,15 @@ namespace xpl_host
     // Only one grid per frame is allowed to bounce at a time; a second
     // overscrolling grid replaces the first (rare edge case).
     uint32_t bouncing_grid_index = 0;
+    // Same pattern for the scrolling SECTION's spring-back (kinetics live
+    // in the section's SectionScrollState.kin_v/_h).
+    uint32_t bouncing_section_index = 0;
   };
 
   // Timer ID for the grid spring-back animation on the frame's HWND.
   static constexpr UINT_PTR XPL_GRID_BOUNCE_TIMER_ID = 0x6E78676B;  // 'nxgk'
+  // Timer ID for the scrolling-SECTION spring-back animation.
+  static constexpr UINT_PTR XPL_SECTION_BOUNCE_TIMER_ID = 0x6E787363;  // 'nxsc'
 
   // UTF-8 -> UTF-16 helper used by menubar platform functions.
   static std::wstring to_wide(const char* utf8)
@@ -85,6 +90,68 @@ namespace xpl_host
 
   // Count of live APPWINDOW instances; PostQuitMessage when it reaches 0.
   static int g_appwindow_count = 0;
+
+  // -------------------------------------------------------------------------
+  // Scrolling-SECTION kinetics helpers
+
+  // Find the scrolling SECTION that owns the wheel at `hit`: the hit widget
+  // itself, or its nearest ancestor exposing a SectionScrollState. 0 = none.
+  static uint32_t find_scrolling_section(Session* s, uint32_t hit)
+  {
+    auto* hw = s->get_widget(hit);
+    if (hw && hw->scroll_state_ptr()) return hit;
+    auto parents = s->_widgets.get_all_parents(hit);
+    for (uint32_t pidx : parents) {
+      auto* pw = s->get_widget(pidx);
+      if (pw && pw->scroll_state_ptr()) return pidx;
+    }
+    return 0;
+  }
+
+  // Feed a synthetic precise wheel delta into a scrolling SECTION's per-axis
+  // kinetics - the SECTION twin of the GRID SMOOTH-mode branch, mirroring
+  // the macOS sectionKineticWheel: (same axis fallback, same curve +
+  // tuning). dv / dh are logical px with the kinetics' sign convention
+  // (raw_px -= delta; positive dv = scroll up, positive dh = scroll left).
+  // Starts the frame-HWND spring-back timer on overscroll release.
+  static void section_kinetic_wheel_w32(HWND hwnd, WindowUserData* wud,
+                                         uint32_t sec_idx,
+                                         double dv, double dh)
+  {
+    using namespace neui_detail;
+    auto* sw = wud->session->get_widget(sec_idx);
+    SectionScrollState* st = sw ? sw->scroll_state_ptr() : nullptr;
+    const SectionLayout* L = sw ? sw->section_layout_ptr() : nullptr;
+    if (!st || !L) return;
+
+    bool has_v = section_axis_has_v(st->axis);
+    bool has_h = section_axis_has_h(st->axis);
+    // Single-axis fallback, matching section_apply_wheel's routing: a
+    // vertical-only delta still scrolls a horizontal-only section (plain
+    // wheel mice have no horizontal axis) and vice versa.
+    if (!has_v && has_h && dh == 0.0 && dv != 0.0) { dh = dv; dv = 0.0; }
+    if (has_v && !has_h && dv == 0.0 && dh != 0.0) { dv = dh; dh = 0.0; }
+
+    ScrollWheelAction act_v{}, act_h{};
+    if (has_v && dv != 0.0) {
+      ScrollWheelInput in;
+      in.precise  = true;   // px-true synthetic input; enables rubber-band
+      in.delta_px = dv;
+      act_v = section_scroll_wheel_kinetic(*st, *L, in, false);
+    }
+    if (has_h && dh != 0.0) {
+      ScrollWheelInput in;
+      in.precise  = true;
+      in.delta_px = dh;
+      act_h = section_scroll_wheel_kinetic(*st, *L, in, true);
+    }
+    if (act_v.changed || act_h.changed)
+      InvalidateRect(hwnd, nullptr, FALSE);
+    if (act_v.start_bounce || act_h.start_bounce) {
+      wud->bouncing_section_index = sec_idx;
+      SetTimer(hwnd, XPL_SECTION_BOUNCE_TIMER_ID, 16, nullptr);
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Keyboard helpers
@@ -849,6 +916,29 @@ namespace xpl_host
       bool shift_held = (wParam & MK_SHIFT) != 0;
       ev.data.wheel.delta         = shift_held ? -delta : delta;
       ev.data.wheel.is_horizontal = shift_held ? 1 : 0;
+
+      // Scrolling SECTION (the hit itself or its nearest ancestor): widgets
+      // below the section get first refusal via a bounded bubble; when
+      // nothing below consumes, the section eats the wheel through its
+      // kinetics (pixel-precise + elastic rubber-band - identical dynamics
+      // to the GRID SMOOTH mode).
+      uint32_t sec_idx = find_scrolling_section(wud->session, hit);
+      if (sec_idx != 0) {
+        if (hit != sec_idx &&
+            wud->session->dispatch_wheel_event(hit, &ev, sec_idx))
+          return 0;
+        double notches = (double)raw_delta / (double)WHEEL_DELTA;
+        double px = notches * (double)scroll_lines
+                            * neui_detail::SECTION_WHEEL_LINE_PX;
+        // Shift routes the delta to the horizontal axis; sign flipped to
+        // match the line path's "wheel-up = scroll-right" convention.
+        if (shift_held)
+          section_kinetic_wheel_w32(hwnd, wud, sec_idx, 0.0, -px);
+        else
+          section_kinetic_wheel_w32(hwnd, wud, sec_idx, px, 0.0);
+        return 0;
+      }
+
       // Wheel bubbles up to ancestors so a scrolling SECTION consumes the
       // wheel when the inner widget under the cursor doesn't.
       wud->session->dispatch_wheel_event(hit, &ev);
@@ -887,11 +977,55 @@ namespace xpl_host
       ev.data.wheel.y             = static_cast<int>(ly);
       ev.data.wheel.delta         = delta;
       ev.data.wheel.is_horizontal = 1;
+
+      // Scrolling SECTION: bounded bubble below, kinetics on the section -
+      // same shape as the WM_MOUSEWHEEL branch above.
+      uint32_t sec_idx = find_scrolling_section(wud->session, hit);
+      if (sec_idx != 0) {
+        if (hit != sec_idx &&
+            wud->session->dispatch_wheel_event(hit, &ev, sec_idx))
+          return 0;
+        double notches = (double)raw_delta / (double)WHEEL_DELTA;
+        // Tilt-right (positive raw) = scroll right; the kinetics sign
+        // convention (raw_px -= delta) wants negative for scroll-right.
+        double px = -notches * (double)scroll_chars
+                             * neui_detail::SECTION_WHEEL_LINE_PX;
+        section_kinetic_wheel_w32(hwnd, wud, sec_idx, 0.0, px);
+        return 0;
+      }
+
       wud->session->dispatch_wheel_event(hit, &ev);
       return 0;
     }
 
     case WM_TIMER: {
+      // Scrolling-SECTION spring-back tick - same shape as the grid timer
+      // below; both axes step in one tick (a "both" section can overscroll
+      // vertically and horizontally in the same gesture).
+      if (wParam == XPL_SECTION_BOUNCE_TIMER_ID) {
+        auto* swud = get_wud(hwnd);
+        if (!swud) { KillTimer(hwnd, XPL_SECTION_BOUNCE_TIMER_ID); return 0; }
+        auto* shw = (swud->bouncing_section_index != 0)
+                      ? swud->session->get_widget(swud->bouncing_section_index)
+                      : nullptr;
+        neui_detail::SectionScrollState* st =
+          shw ? shw->scroll_state_ptr() : nullptr;
+        const neui_detail::SectionLayout* L =
+          shw ? shw->section_layout_ptr() : nullptr;
+        if (!st || !L) {
+          swud->bouncing_section_index = 0;
+          KillTimer(hwnd, XPL_SECTION_BOUNCE_TIMER_ID);
+          return 0;
+        }
+        bool more_v = neui_detail::section_scroll_bounce_step(*st, *L, false);
+        bool more_h = neui_detail::section_scroll_bounce_step(*st, *L, true);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        if (!more_v && !more_h) {
+          swud->bouncing_section_index = 0;
+          KillTimer(hwnd, XPL_SECTION_BOUNCE_TIMER_ID);
+        }
+        return 0;
+      }
       if (wParam != XPL_GRID_BOUNCE_TIMER_ID) break;
       auto* wud = get_wud(hwnd);
       if (!wud) { KillTimer(hwnd, XPL_GRID_BOUNCE_TIMER_ID); return 0; }

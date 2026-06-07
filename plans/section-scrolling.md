@@ -204,6 +204,25 @@ Defaults match GRID: macOS = smooth, Win32 = stepped, null = stepped. The kineti
 - New example: `examples/section_scroll_example.cpp`. A SECTION sized 400x200 with 20+ buttons stacked vertically so the content extends past the visible body. Verify wheel + drag + edge clamping on Win32 + macOS (xpl + native). Bonus: a section with `align_text="none"` and `scroll_mode="both"` showing the no-band path.
 - `plans/section-scrolling.md` flagged "shipped" once landed; entry added to the `Plans` section of CLAUDE.md alongside the other shipped plans.
 
+## Follow-up shipped: smooth kinetics (2026-06)
+
+The v1 landing scrolled in hard-clamped line steps; the kinetics planned
+above shipped in a follow-up. `SectionScrollState` carries per-axis
+`ScrollKinetics` (`kin_v` / `kin_h`) + `kinetic_over_v/h` overshoot flags;
+`widget_section_scroll.h` adds `section_scroll_max_px` / `_commit` /
+`section_scroll_wheel_kinetic` / `section_scroll_bounce_step` (flat-px twins
+of the GRID wrappers in `grid_model.h`) plus `clamp_section_scroll_idle`
+(the paint-time clamp that leaves a kinetics-owned rubber-band overshoot
+alone). Host wiring mirrors GRID: macOS feeds NSEvent phases / precise
+deltas per axis + an `NSTimer` spring-back (`sectionBounceTick`); Win32
+feeds synthetic precise notches (`SECTION_WHEEL_LINE_PX` = 40 px/line) +
+a `SetTimer` spring-back (`XPL_SECTION_BOUNCE_TIMER_ID`). The platform
+layer intercepts the wheel for the nearest scrolling-section ancestor and
+bubbles the line event only through the widgets below it
+(`dispatch_wheel_event(hit, ev, stop_before)`), so children like MULTILINE
+keep consuming their own wheel. Tier-1 tests in
+`tests/test_section_scroll.cpp`.
+
 ## Deferred follow-ups
 
 - `NEUI_EVENT_SCROLL_CHANGED` event for clients that want to react to scroll position (e.g. lazy-loading content).

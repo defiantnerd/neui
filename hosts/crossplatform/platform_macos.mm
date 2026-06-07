@@ -102,6 +102,10 @@ void wake_app_event_pump()
   // that grid's GridModel.scroll_kin (shared with the elastic math).
   NSTimer*           _grid_bounce_timer;
   uint32_t           _grid_bounce_widget;
+  // Scrolling-SECTION spring-back animation - same shape as the GRID pair
+  // above; the kinetics live in the section's SectionScrollState.kin_v/_h.
+  NSTimer*           _section_bounce_timer;
+  uint32_t           _section_bounce_widget;
 }
 @end
 
@@ -386,6 +390,104 @@ void wake_app_event_pump()
   if (!more) [self gridStopBounce];
 }
 
+// --- Scrolling-SECTION smooth-scroll spring-back animation ------------------
+// Same shape as the GRID timer above; both axes step in one tick (a "both"
+// section can overscroll vertically and horizontally in the same gesture).
+
+- (void)sectionStopBounce
+{
+  if (_section_bounce_timer) {
+    [_section_bounce_timer invalidate];
+    _section_bounce_timer = nil;
+  }
+}
+
+- (void)sectionStartBounce:(uint32_t)widgetIdx
+{
+  [self sectionStopBounce];
+  _section_bounce_widget = widgetIdx;
+  _section_bounce_timer = [NSTimer timerWithTimeInterval:1.0 / 60.0
+                                                  target:self
+                                                selector:@selector(sectionBounceTick:)
+                                                userInfo:nil
+                                                 repeats:YES];
+  [[NSRunLoop currentRunLoop] addTimer:_section_bounce_timer
+                               forMode:NSRunLoopCommonModes];
+}
+
+- (void)sectionBounceTick:(NSTimer*)timer
+{
+  (void)timer;
+  if (!session) { [self sectionStopBounce]; return; }
+  auto* hw = session->get_widget(_section_bounce_widget);
+  neui_detail::SectionScrollState* st = hw ? hw->scroll_state_ptr() : nullptr;
+  const neui_detail::SectionLayout* L = hw ? hw->section_layout_ptr() : nullptr;
+  if (!st || !L) { [self sectionStopBounce]; return; }
+  bool more_v = neui_detail::section_scroll_bounce_step(*st, *L, false);
+  bool more_h = neui_detail::section_scroll_bounce_step(*st, *L, true);
+  [self setNeedsDisplay:YES];
+  if (!more_v && !more_h) [self sectionStopBounce];
+}
+
+// Feed a wheel NSEvent into a scrolling SECTION's per-axis kinetics. The
+// widgets BELOW the section already had first refusal (bounded bubble in
+// scrollWheel:); this is the SECTION-consumes path - the pixel-precise
+// twin of the GRID smooth-scroll branch, same curve + tuning.
+- (void)sectionKineticWheel:(NSEvent*)event section:(uint32_t)secIdx
+{
+  using namespace neui_detail;
+  auto* sw = session->get_widget(secIdx);
+  SectionScrollState* st = sw ? sw->scroll_state_ptr() : nullptr;
+  const SectionLayout* L = sw ? sw->section_layout_ptr() : nullptr;
+  if (!st || !L) return;
+
+  bool prec = event.hasPreciseScrollingDeltas;
+  ScrollWheelInput base;
+  base.precise        = prec;
+  base.phase_began    = (event.phase == NSEventPhaseBegan);
+  base.phase_changed  = (event.phase == NSEventPhaseChanged);
+  base.phase_ended    = (event.phase == NSEventPhaseEnded) ||
+                        (event.phase == NSEventPhaseCancelled);
+  base.momentum       = (event.momentumPhase != NSEventPhaseNone);
+  base.momentum_ended = (event.momentumPhase == NSEventPhaseEnded);
+
+  // Precise deltas are already px; classic wheel lines scale through the
+  // shared per-line step so notch speed matches the win32 host.
+  double dv = (double)event.scrollingDeltaY;
+  double dh = (double)event.scrollingDeltaX;
+  if (!prec) { dv *= SECTION_WHEEL_LINE_PX; dh *= SECTION_WHEEL_LINE_PX; }
+
+  bool has_v = section_axis_has_v(st->axis);
+  bool has_h = section_axis_has_h(st->axis);
+  // Single-axis fallback, matching section_apply_wheel's routing: a
+  // vertical-only delta still scrolls a horizontal-only section (plain
+  // wheel mice have no horizontal axis) and vice versa.
+  if (!has_v && has_h && dh == 0.0 && dv != 0.0) { dh = dv; dv = 0.0; }
+  if (has_v && !has_h && dv == 0.0 && dh != 0.0) { dv = dh; dh = 0.0; }
+
+  // Zero-delta events still matter when they carry gesture-phase edges
+  // (phase_began cancels a bounce; phase_ended / momentum_ended drive the
+  // spring-back + momentum-suppression bookkeeping).
+  bool phase_signal = base.phase_began || base.phase_ended ||
+                      base.momentum || base.momentum_ended;
+
+  ScrollWheelAction act_v{}, act_h{};
+  if (has_v && (dv != 0.0 || phase_signal)) {
+    ScrollWheelInput in = base;
+    in.delta_px = dv;
+    act_v = section_scroll_wheel_kinetic(*st, *L, in, false);
+  }
+  if (has_h && (dh != 0.0 || phase_signal)) {
+    ScrollWheelInput in = base;
+    in.delta_px = dh;
+    act_h = section_scroll_wheel_kinetic(*st, *L, in, true);
+  }
+
+  if (act_v.stop_bounce  || act_h.stop_bounce)  [self sectionStopBounce];
+  if (act_v.changed      || act_h.changed)      [self setNeedsDisplay:YES];
+  if (act_v.start_bounce || act_h.start_bounce) [self sectionStartBounce:secIdx];
+}
+
 - (void)scrollWheel:(NSEvent*)event
 {
   if (!session) return;
@@ -465,6 +567,22 @@ void wake_app_event_pump()
     return;
   }
 
+  // Scrolling SECTION (the hit itself or its nearest ancestor): widgets
+  // below the section get first refusal via a bounded bubble of the
+  // classic line-delta event; when nothing below consumes, the section
+  // eats the raw NSEvent through its per-axis kinetics (pixel-precise +
+  // inertial momentum + elastic rubber-band - identical dynamics to GRID).
+  uint32_t sec_idx = 0;
+  if (hw->scroll_state_ptr()) {
+    sec_idx = hit;
+  } else {
+    auto parents = session->_widgets.get_all_parents(hit);
+    for (uint32_t pidx : parents) {
+      auto* pw = session->get_widget(pidx);
+      if (pw && pw->scroll_state_ptr()) { sec_idx = pidx; break; }
+    }
+  }
+
   // Win32 normalises wheel delta to lines (positive = scroll up). macOS:
   // event.scrollingDelta{X,Y} in lines if hasPreciseScrollingDeltas == NO,
   // otherwise pixels - convert to lines using ~16 pixels/line and clamp.
@@ -495,7 +613,12 @@ void wake_app_event_pump()
     delta = (int)raw;
     if (delta == 0 && raw != 0.0) delta = (raw > 0) ? 1 : -1;
   }
-  if (delta == 0) return;
+  if (delta == 0) {
+    // Zero-delta events still carry gesture-phase edges the SECTION
+    // kinetics need (phase begin/end, momentum end).
+    if (sec_idx != 0) [self sectionKineticWheel:event section:sec_idx];
+    return;
+  }
 
   neui_event_t ev = {};
   ev.type                     = NEUI_EVENT_MOUSE_WHEEL;
@@ -504,6 +627,18 @@ void wake_app_event_pump()
   ev.data.wheel.y             = (int)ly;
   ev.data.wheel.delta         = delta;
   ev.data.wheel.is_horizontal = horizontal ? 1 : 0;
+
+  if (sec_idx != 0) {
+    // Bounded bubble: only the widgets strictly below the section get the
+    // line event (a MULTILINE / LISTBOX child keeps consuming its own
+    // wheel); the section itself scrolls through its kinetics instead of
+    // its line-delta on_mouse_event fallback.
+    if (hit != sec_idx && session->dispatch_wheel_event(hit, &ev, sec_idx))
+      return;
+    [self sectionKineticWheel:event section:sec_idx];
+    return;
+  }
+
   // Wheel bubbles up to ancestors so a scrolling SECTION consumes the
   // wheel when the inner widget under the cursor doesn't.
   session->dispatch_wheel_event(hit, &ev);
