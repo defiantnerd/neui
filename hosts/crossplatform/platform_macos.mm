@@ -219,7 +219,36 @@ void wake_app_event_pump()
     [self dispatchMouseEventForType:NEUI_EVENT_MOUSE_BUTTON_DBLCLICK event:event];
     return;
   }
+  NSPoint p = [self localPointForEvent:event];
+  // Popup menu overlay absorbs the click - picks an item or dismisses.
+  // Mirrors the win32 WM_LBUTTONDOWN wiring.
+  if (session->_popup_active) {
+    session->handle_popup_click((float)p.x, (float)p.y);
+    return;
+  }
+  // When a combo overlay is open, all clicks go to combo handling only -
+  // consumed regardless of where they land (inside or outside the overlay).
+  // No explicit capture needed: AppKit keeps sending mouseDragged: to this
+  // view while the button is held, so an overlay scrollbar drag just works.
+  if (session->handle_combo_click((float)p.x, (float)p.y)) return;
   [self dispatchMouseEventForType:NEUI_EVENT_MOUSE_BUTTON_DOWN event:event];
+}
+
+// Shared overlay pre-checks for the MOUSE_MOVE paths (mouseMoved: +
+// mouseDragged:). Returns YES when an overlay consumed the move - mirrors
+// the win32 WM_MOUSEMOVE wiring order: popup hover, combo scrollbar drag,
+// combo row hover.
+- (BOOL)overlayHandledMove:(NSEvent*)event
+{
+  if (!session) return NO;
+  NSPoint p = [self localPointForEvent:event];
+  if (session->_popup_active) {
+    session->handle_popup_hover((float)p.x, (float)p.y);
+    return YES;
+  }
+  if (session->handle_combo_scroll_drag((float)p.y)) return YES;
+  if (session->handle_combo_hover((float)p.x, (float)p.y)) return YES;
+  return NO;
 }
 
 - (void)mouseDragged:(NSEvent*)event
@@ -227,12 +256,18 @@ void wake_app_event_pump()
   // On macOS, a dragged event is just a mouseMoved with primary button down.
   // The dispatch_mouse_event helper already routes to _pressed_widget when a
   // button is held - same shape as Win32's capture-driven path.
+  if ([self overlayHandledMove:event]) return;
   [self dispatchMouseEventForType:NEUI_EVENT_MOUSE_MOVE event:event];
 }
 
 - (void)mouseUp:(NSEvent*)event
 {
   if (!session) return;
+  // End a combo overlay scrollbar drag if one was active (win32 parity).
+  if (session->_combo_sb_dragging) {
+    session->_combo_sb_dragging = false;
+    return;
+  }
   NSPoint p = [self localPointForEvent:event];
   float lx = (float)p.x;
   float ly = (float)p.y;
@@ -262,6 +297,13 @@ void wake_app_event_pump()
 
 - (void)rightMouseDown:(NSEvent*)event
 {
+  if (!session) return;
+  // If a popup is up, a right-click outside dismisses it (win32 parity).
+  if (session->_popup_active) {
+    NSPoint p = [self localPointForEvent:event];
+    session->handle_popup_click((float)p.x, (float)p.y);
+    return;
+  }
   [self dispatchMouseEventForType:NEUI_EVENT_MOUSE_RBUTTON_DOWN event:event];
 }
 
@@ -286,6 +328,7 @@ void wake_app_event_pump()
 
 - (void)mouseMoved:(NSEvent*)event
 {
+  if ([self overlayHandledMove:event]) return;
   [self dispatchMouseEventForType:NEUI_EVENT_MOUSE_MOVE event:event];
 }
 
@@ -350,6 +393,22 @@ void wake_app_event_pump()
   float lx = (float)p.x;
   float ly = (float)p.y;
 
+  // An open combo overlay consumes the wheel to scroll its list (win32
+  // parity: checked before any widget dispatch). Line-delta conversion
+  // matches the generic wheel path below.
+  if (session->_open_combo) {
+    CGFloat craw = event.scrollingDeltaY;
+    int cd;
+    if (event.hasPreciseScrollingDeltas) {
+      cd = (int)(craw / 16.0);
+      if (cd == 0 && craw != 0.0) cd = (craw > 0) ? 1 : -1;
+    } else {
+      cd = (int)craw;
+      if (cd == 0 && craw != 0.0) cd = (craw > 0) ? 1 : -1;
+    }
+    if (cd != 0 && session->handle_combo_wheel(lx, ly, cd)) return;
+  }
+
   uint32_t hit = session->widget_at(lx, ly, widget_index);
   if (hit == 0) return;
   auto* hw = session->get_widget(hit);
@@ -407,9 +466,27 @@ void wake_app_event_pump()
   }
 
   // Win32 normalises wheel delta to lines (positive = scroll up). macOS:
-  // event.scrollingDeltaY in lines if hasPreciseScrollingDeltas == NO,
+  // event.scrollingDelta{X,Y} in lines if hasPreciseScrollingDeltas == NO,
   // otherwise pixels - convert to lines using ~16 pixels/line and clamp.
-  CGFloat raw = event.scrollingDeltaY;
+  //
+  // Horizontal parity with the win32 host's WM_MOUSEHWHEEL path: when the
+  // gesture is horizontally dominant (trackpad two-finger horizontal, or a
+  // wheel mouse whose Shift+scroll AppKit already swapped onto deltaX) the
+  // event dispatches with is_horizontal = 1. AppKit's sign convention
+  // (positive = scroll-left, mirroring deltaY's positive = scroll-up)
+  // already matches the win32 path's flipped delta - no sign adjustment.
+  CGFloat raw_y = event.scrollingDeltaY;
+  CGFloat raw_x = event.scrollingDeltaX;
+  bool horizontal = fabs(raw_x) > fabs(raw_y);
+  CGFloat raw = horizontal ? raw_x : raw_y;
+  // Shift + vertical wheel = conventional horizontal-scroll fallback for
+  // devices AppKit doesn't swap. Flip the sign so positive = scroll-left,
+  // matching the win32 Shift+WM_MOUSEWHEEL branch.
+  if (!horizontal && raw_x == 0.0 &&
+      (event.modifierFlags & NSEventModifierFlagShift)) {
+    horizontal = true;
+    raw = -raw;
+  }
   int delta;
   if (event.hasPreciseScrollingDeltas) {
     delta = (int)(raw / 16.0);
@@ -421,11 +498,12 @@ void wake_app_event_pump()
   if (delta == 0) return;
 
   neui_event_t ev = {};
-  ev.type              = NEUI_EVENT_MOUSE_WHEEL;
-  ev.data.wheel.widget = { hw->widget_id };
-  ev.data.wheel.x      = (int)lx;
-  ev.data.wheel.y      = (int)ly;
-  ev.data.wheel.delta  = delta;
+  ev.type                     = NEUI_EVENT_MOUSE_WHEEL;
+  ev.data.wheel.widget        = { hw->widget_id };
+  ev.data.wheel.x             = (int)lx;
+  ev.data.wheel.y             = (int)ly;
+  ev.data.wheel.delta         = delta;
+  ev.data.wheel.is_horizontal = horizontal ? 1 : 0;
   // Wheel bubbles up to ancestors so a scrolling SECTION consumes the
   // wheel when the inner widget under the cursor doesn't.
   session->dispatch_wheel_event(hit, &ev);
