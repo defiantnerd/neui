@@ -752,14 +752,17 @@ int main(int argc, char** argv) {
   // app.attrs->set_int   (sess, section, NEUI_ATTR_BACKGROUND, 0xFF2A3340);
 
   // Children of the section. Coordinates are relative to the section's
-  // top-left (the section is at frame-coords 215, 350, so (10, 28) below
-  // lands at frame-coords (225, 378)). Same semantics on both hosts.
+  // BODY top-left - i.e. just below the chip band when `align_text` is
+  // "left" / "center" / "right", and the section's top edge when it's
+  // "none" or there is no text. So (10, 6) is 6 px below the band's
+  // bottom edge when the band is present, or 6 px below the section's
+  // top when "none" hides the band.
   auto sec_label = app.widgets->create(sess, section, NEUI_W_LABEL,
-                                        10, 28, 180, 20, nullptr);
+                                        10, 6, 180, 20, nullptr);
   app.widgets->set_text(sess, sec_label, "Children paint on top:");
 
   auto sec_btn = app.widgets->create(sess, section, NEUI_W_BUTTON,
-                                      10, 56, 180, 28, nullptr);
+                                      10, 34, 180, 28, nullptr);
   app.widgets->set_text(sess, sec_btn, "Click me");
   app.section_btn_id = sec_btn.id;
 

@@ -843,8 +843,51 @@ namespace xpl_host
       ev.data.wheel.widget = { hw->widget_id };
       ev.data.wheel.x      = static_cast<int>(lx);
       ev.data.wheel.y      = static_cast<int>(ly);
-      ev.data.wheel.delta  = delta;
-      wud->session->dispatch_mouse_event(hit, &ev);
+      // Shift + vertical wheel = conventional horizontal-scroll mouse
+      // fallback. Flip the sign so positive delta = scroll-left, matching
+      // the WM_MOUSEHWHEEL convention.
+      bool shift_held = (wParam & MK_SHIFT) != 0;
+      ev.data.wheel.delta         = shift_held ? -delta : delta;
+      ev.data.wheel.is_horizontal = shift_held ? 1 : 0;
+      // Wheel bubbles up to ancestors so a scrolling SECTION consumes the
+      // wheel when the inner widget under the cursor doesn't.
+      wud->session->dispatch_wheel_event(hit, &ev);
+      return 0;
+    }
+
+    case WM_MOUSEHWHEEL: {
+      // Trackpad two-finger horizontal scroll. Same payload shape as
+      // WM_MOUSEWHEEL except wParam's delta is the horizontal axis and
+      // positive = right. Sign-flip so positive delta = scroll-left,
+      // matching the vertical wheel's "positive = scroll-up" convention.
+      auto* wud = get_wud(hwnd);
+      if (!wud) break;
+      auto* fwd = wud->session->get_widget(wud->widget_index);
+      if (!fwd) break;
+
+      POINT pt = { mouse_x(lParam), mouse_y(lParam) };
+      ScreenToClient(hwnd, &pt);
+      float lx = phys_to_log(pt.x, fwd->dpi);
+      float ly = phys_to_log(pt.y, fwd->dpi);
+
+      int raw_delta = GET_WHEEL_DELTA_WPARAM(wParam);
+      UINT scroll_chars = 3;
+      SystemParametersInfoW(SPI_GETWHEELSCROLLCHARS, 0, &scroll_chars, 0);
+      int delta = -(raw_delta * static_cast<int>(scroll_chars)) / WHEEL_DELTA;
+
+      uint32_t hit = wud->session->widget_at(lx, ly, wud->widget_index);
+      if (hit == 0) break;
+      auto* hw = wud->session->get_widget(hit);
+      if (!hw) break;
+
+      neui_event_t ev = {};
+      ev.type                     = NEUI_EVENT_MOUSE_WHEEL;
+      ev.data.wheel.widget        = { hw->widget_id };
+      ev.data.wheel.x             = static_cast<int>(lx);
+      ev.data.wheel.y             = static_cast<int>(ly);
+      ev.data.wheel.delta         = delta;
+      ev.data.wheel.is_horizontal = 1;
+      wud->session->dispatch_wheel_event(hit, &ev);
       return 0;
     }
 

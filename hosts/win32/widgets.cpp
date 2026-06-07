@@ -1041,7 +1041,8 @@ namespace win32_host
       return;
     }
 
-    if (wd.text.empty()) {
+    const char* align = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
+    if (wd.text.empty() || neui_detail::section_align_is_none(align)) {
       // No band reserved - full rect.
       SetWindowRgn(wd.hwnd, CreateRectRgn(0, 0, phys_w, phys_h), FALSE);
       return;
@@ -1052,7 +1053,6 @@ namespace win32_host
                  ? backend->measure_text(nullptr, wd.text.c_str(), -1,
                                           neui_detail::SECTION_LABEL_FONT)
                  : 0.0f;
-    const char* align = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
     auto chip = neui_detail::section_chip_rect(
                   0.0f,
                   static_cast<float>(wd.width),

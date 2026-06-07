@@ -190,7 +190,13 @@ namespace xpl_host
     obj->width     = width;
     obj->height    = height;
     obj->userdata  = userdata;
-    obj->visible   = false;
+    // Default visible=true so widgets created post-show appear without
+    // requiring an explicit show() call. Pre-show creation is still fine:
+    // the frame's widget_show runs show_children_recursive which sets
+    // visible=true unconditionally, so this default doesn't change the
+    // pre-show path. Clients that want a hidden widget call widgets->hide
+    // after create.
+    obj->visible   = true;
     obj->session   = s;
     obj->session_id = session.session;
     obj->isroot    = obj->is_frame() || obj->is_menubar();

@@ -9,6 +9,13 @@
 // win32 host's painted-widget seam so the visual is identical regardless of
 // which host instantiated the widget.
 //
+// Coordinate convention: SECTION children's (x, y) is relative to the
+// BODY's top-left, not the section's top-left. When the chip is hidden
+// (align="none" or empty text), the body fills the whole rect, so
+// children appear at the section's top edge. When the chip is present,
+// the body starts at y == band_h (22 logical px), so children with y=0
+// land just below the band.
+//
 // Layout (when `text` is non-null/non-empty):
 //   +-------------------------------------------------+
 //   |               [ title chip ]                    |  <- header band
@@ -21,13 +28,14 @@
 //   |                                                 |
 //   +-------------------------------------------------+
 //
-// Chip horizontal position selected by `align` ("left"|"center"|"right";
-// nullptr or unrecognised = "center"). The body always fills full width
-// below the band.
+// Chip horizontal position selected by `align` ("none"|"left"|"center"|
+// "right"; nullptr or unrecognised = "center"). "none" suppresses the
+// chip + the header band entirely - the body fills the whole rect (same
+// path as an empty text). The body always fills full width below the band.
 //
-// If `text` is null / empty (or the backend is missing draw_text /
-// measure_text), the whole rect is filled with `bg_argb` and no header
-// band is reserved.
+// If `text` is null / empty / `align="none"` (or the backend is missing
+// draw_text / measure_text), the whole rect is filled with `bg_argb` and
+// no header band is reserved.
 //
 // All coordinates are logical pixels at 96 DPI. Colours are 0xAARRGGBB.
 
@@ -76,6 +84,14 @@ namespace neui_detail
   // responsible for any clipping / window region that makes those pixels
   // transparent (e.g. via SetWindowRgn on the win32 host, or by simply
   // not overwriting the frame's earlier paint in the xpl host).
+  // True when `align` requests the no-band path: "none" hides chip + band
+  // entirely (body fills the whole rect). Used both by the paint helper
+  // and by the win32 window-region builder.
+  inline bool section_align_is_none(const char* align)
+  {
+    return align && !std::strcmp(align, "none");
+  }
+
   inline void paint_section(neui_render_backend_t* backend,
                             neui_render_ctx_t      ctx,
                             float fx, float fy, float fw, float fh,
@@ -87,8 +103,10 @@ namespace neui_detail
   {
     if (!backend || !ctx) return;
 
-    // Untitled section: one flat fill, no band reserved.
-    if (!text || !*text || !backend->draw_text || !backend->measure_text) {
+    // Untitled section / chip explicitly suppressed: one flat fill, no
+    // band reserved.
+    if (!text || !*text || section_align_is_none(align)
+        || !backend->draw_text || !backend->measure_text) {
       if (backend->fill_rect)
         backend->fill_rect(ctx, fx, fy, fw, fh, bg_argb);
       return;

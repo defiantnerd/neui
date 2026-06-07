@@ -8,6 +8,7 @@
 #include "../shared/theme_palette.h"
 #include "../shared/behavior_runtime.h"
 #include "../shared/grid_model.h"
+#include "../shared/widget_section_scroll.h"
 #include "asset_manager.h"
 
 #include <string>
@@ -137,6 +138,17 @@ namespace xpl_host
     // GRID widgets expose their scroll model so the platform layer can drive
     // pixel-precise smooth scrolling / rubber-band (macOS). nullptr otherwise.
     virtual neui_detail::GridModel* grid_model_ptr() { return nullptr; }
+    // Scrolling SECTION exposes its scroll state so the paint walk +
+    // hit-tester can offset + clip child positioning. nullptr otherwise
+    // (non-scrolling SECTION, or any non-SECTION widget).
+    virtual neui_detail::SectionScrollState* scroll_state_ptr() { return nullptr; }
+    // Cached layout from the last SECTION paint - widget-local body rect +
+    // scrollbar visibility. Returns non-null for ANY SECTION (scrolling
+    // or not) so the paint walk can apply the body_y offset uniformly
+    // (children's coords are body-relative, so chip "none" auto-expands
+    // the visible area into the former chip band). Reads as zeros until
+    // the first paint.
+    virtual const neui_detail::SectionLayout* section_layout_ptr() const { return nullptr; }
     bool is_dialog() const { return type && !strcmp(type, NEUI_W_DIALOG); }
 
     // Try to perform a built-in command (neui_command_t) on this widget.
@@ -211,13 +223,35 @@ namespace xpl_host
     bool on_keydown(uint32_t keycode, uint32_t modifiers) override;
   };
 
-  // SECTION - non-interactive visual container. Paints a colored backdrop
-  // behind its children; optionally draws `text` as a header label at the
-  // top (alignment via NEUI_ATTR_ALIGN_TEXT). Background color from
-  // NEUI_ATTR_BACKGROUND, falling back to ColorRole::panel_bg.
+  // SECTION - visual container. Paints a colored backdrop behind its
+  // children; optionally draws `text` as a header label at the top
+  // (alignment via NEUI_ATTR_ALIGN_TEXT). Background color from
+  // NEUI_ATTR_BACKGROUND, falling back to ColorRole::panel_bg. When
+  // NEUI_ATTR_SCROLL_MODE != "none", lazy-allocates a scroll state and
+  // becomes a scrolling container: children are clipped to the body and
+  // translated by the current scroll offset.
   class SectionWidget   : public WidgetData {
   public:
+    std::unique_ptr<neui_detail::SectionScrollState> scroll_state;
+    // Layout from the last paint - cached every paint regardless of
+    // scroll state. Used by paint_widgets_recursive to translate
+    // descendants by body_y (children's coords are body-relative, so
+    // "none" alignment expands the visible area into the chip band) and
+    // by widget_at_recursive to clip child hits to the body rect.
+    neui_detail::SectionLayout last_layout{};
+
     void paint(neui_render_backend_t* backend, neui_render_ctx_t ctx, bool is_focused) override;
+    bool on_mouse_event(neui_event_t* event) override;
+    neui_detail::SectionScrollState* scroll_state_ptr() override {
+      return scroll_state.get();
+    }
+    const neui_detail::SectionLayout* section_layout_ptr() const override {
+      return &last_layout;
+    }
+    // Refresh scroll_state allocation from NEUI_ATTR_SCROLL_MODE. Call from
+    // widget_show + attr_changed. Allocates on first scrolling mode; cheap
+    // no-op otherwise.
+    void refresh_scroll_state();
   };
 
   // MULTILINE - multi-line text editor with caret + selection + vertical scroll.
@@ -621,6 +655,14 @@ namespace xpl_host
     // client returns false (did not consume), forwards to widget->on_mouse_event().
     // Respects emit_events - does nothing if the widget has emit_events=false.
     void dispatch_mouse_event(uint32_t widget_idx, neui_event_t* ev);
+
+    // Dispatch a wheel event with ancestor bubbling: tries widget_idx first,
+    // then walks up the parent chain until a widget consumes the event
+    // (on_mouse_event returns true) or there are no more ancestors. The
+    // client's onevent fires once per ancestor tried; if any of them
+    // consumes via the client, bubbling stops. Returns whether any widget
+    // ended up consuming.
+    bool dispatch_wheel_event(uint32_t widget_idx, neui_event_t* ev);
 
     // Called by the platform layer when WM_PAINT / equivalent fires.
     void paint_frame(neui_render_ctx_t ctx, uint32_t parent_index);

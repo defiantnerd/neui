@@ -93,7 +93,9 @@ Verification: `examples/dnd_example.cpp` (drop receiver) builds `neui_dnd_exampl
 | `tristate` | int | CHECKBOX | Implicit on CHECKBOX3. |
 | `multiline` | int | INPUTBOX | Implicit on MULTILINE. |
 | `readonly` | int | INPUTBOX, MULTILINE | Gates modifying keys. |
-| `password` / `border` / `align_text` | int / int / string | various | Reserved — except `align_text` on SECTION, live. |
+| `password` / `border` / `align_text` | int / int / string | various | Reserved — except `align_text` on SECTION, live. On SECTION: `"none"` hides chip + header band entirely so the body fills the rect; `"left"`/`"center"`/`"right"` selects the chip position. |
+| `scroll_mode` | string | SECTION | `"none"` (default) / `"vertical"` / `"horizontal"` / `"both"`. Non-`"none"` clips children to the body rect + scrolls via wheel + scrollbar drag; lazy-allocates a `SectionScrollState`. Live. xpl host only in v1 (native hosts deferred). |
+| `content_width` / `content_height` | int (logical px) | SECTION | Override the auto-bounding content extent (`max(child.x + child.width)` / `max(child.y + child.height)`). 0/unset = auto. Live. |
 | `tab_stop` | int | focusable | Replaces deprecated `widgets->set_tab_stop`. |
 | `min_width` / `min_height` / `max_width` / `max_height` | int (logical px) | APPWINDOW | Drives `WM_GETMINMAXINFO` / `NSWindow.min/maxSize`. `max < min` = no maximum. |
 | `icon_path` | string | APPWINDOW | `.ico` / `.png` / `.bmp` / `.jpg`. Live. |
@@ -192,7 +194,7 @@ Process-wide `neui_detail::Palette` (`theme_palette.h`) - flat array indexed by 
 | `SLIDER` | Horizontal / vertical via `orientation`; `steps` snaps. |
 | `KNOB` | Painted rotary; right-click → "Reset to default" popup; drag mode via `NEUI_ATTR_KNOB_MODE`. |
 | `IMAGE` | Source = file path (`set_text`) OR pre-loaded handle (`set_asset`); last-set-wins, `""` / `asset_none` clears. Aspect-preserving fit; honours `NEUI_ATTR_ROTATION`. No refcount on the asset - clear/destroy widget before `assets->destroy`. |
-| `SECTION` | Non-interactive container. Body filled with `NEUI_ATTR_BACKGROUND` (fallback `shade(frame_bg, +24)`; macOS flips lift direction when it saturates light bg). Optional `set_text` header as a "title chip" (rest of band transparent), positioned via `NEUI_ATTR_ALIGN_TEXT`. `emit_events=false`. Children paint on top. |
+| `SECTION` | Visual container. Body filled with `NEUI_ATTR_BACKGROUND` (fallback `shade(frame_bg, +24)`; macOS flips lift direction when it saturates light bg). Optional `set_text` header as a "title chip" (rest of band transparent), positioned via `NEUI_ATTR_ALIGN_TEXT`. **Children's (x, y) is relative to the BODY top-left**, so chip `"none"` (or empty text) auto-expands the children area into the former band. `emit_events=false` for non-scrolling; `=true` when `NEUI_ATTR_SCROLL_MODE != "none"` (xpl host only in v1). Children paint on top, clipped to the body rect when scrolling. |
 | `CUSTOMDRAW` | Client-rendered surface. Emits `WIDGET_PAINT` each frame with `neui_painter_api_t* painter_api` + opaque `neui_painter_t* p` + widget-local size + focus. Origin (0,0) widget-local; framework wraps dispatch in `push_transform / push_clip(bounds) / pop_*`. MOUSE / KEY flow normally. All three hosts. Invalidate via `widgets->invalidate`. Also accepts a **compound asset** (visual) and **behavior asset** (input) via `widgets->set_asset` (kind-routed); the two are independent and compose. |
 | `GRID` | Scrollable multi-column table; cells are paint-state, not widgets. Per-column `editable` flag opens an in-place editor on ENTER in cell-focus mode; optional `NEUI_API_GRID_CLIENT::validate_cell` gates the commit. See below. |
 

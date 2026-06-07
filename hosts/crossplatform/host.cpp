@@ -457,8 +457,26 @@ namespace xpl_host
             // passes clicks through to its parent / siblings.
             if (wd.emit_events && wd.enabled)
               result = idx;
-            uint32_t deeper = widget_at_recursive(widgets, idx, x, y);
-            if (deeper != 0) result = deeper;
+            // SECTION: only descend into children when the cursor is
+            // inside the body rect. The body is clipped on paint, so
+            // children outside the body aren't visible and shouldn't be
+            // hit-testable either. Cursor over the band / scrollbar
+            // keeps the SECTION as the hit, so scrollbar drag has no
+            // contention from descendants.
+            bool descend = true;
+            if (auto* L = wd.section_layout_ptr()) {
+              int local_x = static_cast<int>(x) - wd.abs_x;
+              int local_y = static_cast<int>(y) - wd.abs_y;
+              bool in_body = local_x >= L->body_x &&
+                             local_x <  L->body_x + L->body_w &&
+                             local_y >= L->body_y &&
+                             local_y <  L->body_y + L->body_h;
+              descend = in_body;
+            }
+            if (descend) {
+              uint32_t deeper = widget_at_recursive(widgets, idx, x, y);
+              if (deeper != 0) result = deeper;
+            }
           }
         }
       }
@@ -774,14 +792,63 @@ namespace xpl_host
                          neui_detail::color(ColorRole::focus_ring));
   }
 
-  // SECTION - non-interactive visual container. Body filled with the
-  // section colour (NEUI_ATTR_BACKGROUND override, else a theme-derived
-  // shade lighter than frame_bg so it reads as a raised panel). Optional
-  // `text` is drawn as a header in a top band, where only a tight title
-  // chip is filled with the section colour - the rest of the band is left
-  // unpainted so the frame's earlier `begin_frame` clear shows through,
-  // giving the chip a "tab" look. Geometry + paint live in the shared
-  // helper so the win32 host renders identically.
+  // Widget-local header band height for a section. Mirrors paint_section's
+  // band logic - 0 when text is empty / align "none", else SECTION_HEADER_H
+  // clamped to fit the section.
+  static int section_band_h(const std::string& text, int height, const char* align)
+  {
+    if (text.empty() || neui_detail::section_align_is_none(align)) return 0;
+    int bh = static_cast<int>(neui_detail::SECTION_HEADER_H);
+    if (bh > height) bh = height;
+    return bh;
+  }
+
+  // Scan `parent_idx`'s direct widget-tree children for the auto-bounding
+  // content extent: max(child.x + child.width) and max(child.y + child.height).
+  static void compute_section_auto_extent(neui_detail::Tree<WidgetData>& widgets,
+                                           uint32_t parent_idx,
+                                           int& out_w, int& out_h)
+  {
+    out_w = 0;
+    out_h = 0;
+    uint32_t idx = widgets.child(parent_idx);
+    while (idx != 0) {
+      if (widgets.exists(idx)) {
+        auto& cw = widgets[idx];
+        if (cw.visible) {
+          int rx = cw.x + cw.width;
+          int by = cw.y + cw.height;
+          if (rx > out_w) out_w = rx;
+          if (by > out_h) out_h = by;
+        }
+      }
+      idx = widgets.next(idx);
+    }
+  }
+
+  void SectionWidget::refresh_scroll_state()
+  {
+    const char* mode = attrs ? attrs->get_string(NEUI_ATTR_SCROLL_MODE) : nullptr;
+    auto axis = neui_detail::parse_section_scroll_mode(mode);
+    if (axis == neui_detail::SectionScrollAxis::None) {
+      // Drop state entirely - non-scrolling sections pay nothing.
+      scroll_state.reset();
+      emit_events = false;
+      return;
+    }
+    if (!scroll_state)
+      scroll_state = std::make_unique<neui_detail::SectionScrollState>();
+    scroll_state->axis = axis;
+    // Scrollable sections must receive mouse events for wheel + scrollbar drag.
+    emit_events = true;
+  }
+
+  // SECTION - visual container. Body filled with the section colour
+  // (NEUI_ATTR_BACKGROUND override, else a theme-derived shade lighter
+  // than frame_bg so it reads as a raised panel). Optional `text` is
+  // drawn as a header in a top band; "none" alignment hides the band
+  // entirely. When NEUI_ATTR_SCROLL_MODE != "none", scrollbars paint over
+  // the body edges and last_layout is cached for hit-testing.
   void SectionWidget::paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
                              bool /*is_focused*/)
   {
@@ -800,6 +867,154 @@ namespace xpl_host
                                 text.c_str(), bg, align,
                                 neui_detail::color(ColorRole::text_primary),
                                 attrs.get());
+
+    // Late-refresh in case set_string(SCROLL_MODE) ran without the explicit
+    // refresh hook firing - cheap when state already matches.
+    refresh_scroll_state();
+
+    // Children are positioned relative to the BODY's top-left (chip
+    // "none" auto-expands the children area into the former band).
+    // Auto content extent = max(child.x + child.width) / .y + .height
+    // across direct children, already in body-local coords.
+    int auto_w = 0, auto_h = 0;
+    if (session)
+      compute_section_auto_extent(session->_widgets, index, auto_w, auto_h);
+    int band_h = section_band_h(text, height, align);
+    int initial_body_w = width;
+    int initial_body_h = height - band_h;
+    if (initial_body_h < 0) initial_body_h = 0;
+
+    int content_w = 0, content_h = 0;
+    auto autofn = [&](int& w, int& h){ w = auto_w; h = auto_h; };
+    neui_detail::resolve_section_content_extent(attrs.get(), autofn,
+                                                  initial_body_w, initial_body_h,
+                                                  content_w, content_h);
+
+    auto axis = scroll_state ? scroll_state->axis
+                              : neui_detail::SectionScrollAxis::None;
+    last_layout = neui_detail::compute_section_layout(width, height, band_h,
+                                                       content_w, content_h,
+                                                       axis);
+    if (scroll_state) {
+      scroll_state->content_w = content_w;
+      scroll_state->content_h = content_h;
+      neui_detail::clamp_section_scroll(*scroll_state, content_w, content_h,
+                                         last_layout.body_w, last_layout.body_h);
+    }
+
+    // Scrollbars overlay the body's right + bottom edges (scrolling only).
+    if (scroll_state &&
+        (last_layout.vert_sb_shown || last_layout.horz_sb_shown)) {
+      uint32_t sep   = neui_detail::color(ColorRole::scrollbar_separator);
+      uint32_t track = neui_detail::color(ColorRole::scrollbar_track);
+      uint32_t thumb = neui_detail::color(ColorRole::scrollbar_thumb);
+      backend->push_transform(ctx);
+      backend->translate(ctx, static_cast<float>(x), static_cast<float>(y));
+      neui_detail::paint_section_scrollbars(backend, ctx, last_layout,
+                                             *scroll_state, sep, track, thumb);
+      backend->pop_transform(ctx);
+    }
+  }
+
+  bool SectionWidget::on_mouse_event(neui_event_t* event)
+  {
+    if (!scroll_state) return false;
+    auto& st = *scroll_state;
+
+    // Widget-local mouse coords (frame -> section).
+    int local_x = event->data.mouse.x - abs_x;
+    int local_y = event->data.mouse.y - abs_y;
+
+    switch (event->type) {
+    case NEUI_EVENT_MOUSE_WHEEL: {
+      int delta = event->data.wheel.delta;
+      // Route the event by the platform-supplied axis (trackpad
+      // horizontal / Shift+wheel) when the section's axis allows it;
+      // otherwise fall back to the only enabled axis. Section "both"
+      // handles both axes - WM_MOUSEHWHEEL drives horizontal, WM_MOUSEWHEEL
+      // drives vertical, so the user sees both work natively.
+      bool axis_h;
+      if (event->data.wheel.is_horizontal &&
+          neui_detail::section_axis_has_h(st.axis))
+        axis_h = true;
+      else if (!event->data.wheel.is_horizontal &&
+               neui_detail::section_axis_has_v(st.axis))
+        axis_h = false;
+      else
+        axis_h = (st.axis == neui_detail::SectionScrollAxis::Horizontal);
+      bool changed = neui_detail::section_apply_wheel(st, last_layout,
+                                                       (double)(-delta),
+                                                       axis_h);
+      if (changed) repaint();
+      return changed;
+    }
+    case NEUI_EVENT_MOUSE_BUTTON_DOWN: {
+      int hit = neui_detail::section_scrollbar_hit(last_layout, local_x, local_y);
+      if (hit == 1) {
+        st.vert_drag.active           = true;
+        st.vert_drag.start_axis_coord = local_y;
+        st.vert_drag.start_position   = st.scroll_y;
+        return true;
+      }
+      if (hit == 2) {
+        st.horz_drag.active           = true;
+        st.horz_drag.start_axis_coord = local_x;
+        st.horz_drag.start_position   = st.scroll_x;
+        return true;
+      }
+      return false;
+    }
+    case NEUI_EVENT_MOUSE_MOVE: {
+      // End drag if the framework swallowed our BUTTON_UP (e.g. release
+      // happened outside the section while pressed).
+      if ((st.vert_drag.active || st.horz_drag.active) &&
+          !(event->data.mouse.buttonmap & NEUI_MK_LBUTTON)) {
+        st.vert_drag.active = false;
+        st.horz_drag.active = false;
+        return true;
+      }
+      // Drag math passes gutter_other=0 to match the paint geometry:
+      // the track runs the full body extent and the corner dead square
+      // overlays the tail when both scrollbars are visible.
+      if (st.vert_drag.active) {
+        auto geom = neui_detail::compute_scrollbar(
+                       last_layout.body_h, 0,
+                       st.content_h, last_layout.body_h, st.vert_drag.start_position);
+        int new_y = neui_detail::scrollbar_drag_apply(
+                       st.vert_drag, local_y, geom,
+                       st.content_h, last_layout.body_h);
+        if (new_y != st.scroll_y) {
+          st.scroll_y = new_y;
+          repaint();
+        }
+        return true;
+      }
+      if (st.horz_drag.active) {
+        auto geom = neui_detail::compute_scrollbar(
+                       last_layout.body_w, 0,
+                       st.content_w, last_layout.body_w, st.horz_drag.start_position);
+        int new_x = neui_detail::scrollbar_drag_apply(
+                       st.horz_drag, local_x, geom,
+                       st.content_w, last_layout.body_w);
+        if (new_x != st.scroll_x) {
+          st.scroll_x = new_x;
+          repaint();
+        }
+        return true;
+      }
+      return false;
+    }
+    case NEUI_EVENT_MOUSE_BUTTON_UP: {
+      if (st.vert_drag.active || st.horz_drag.active) {
+        st.vert_drag.active = false;
+        st.horz_drag.active = false;
+        return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+    }
   }
 
   void ButtonWidget::paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
@@ -1471,13 +1686,46 @@ namespace xpl_host
           wd.paint(backend, ctx, idx == focused_widget);
           if (dim) backend->pop_alpha(ctx);
         }
+        // SECTION descent: children's stored (x, y) is relative to the
+        // BODY's top-left, so we add (body_x, body_y) into the translate.
+        // Chip "none" zeroes body_y so children fill from the section's
+        // top edge; chip present shifts children below the band.
+        // Scrolling sections additionally apply (-scroll_x, -scroll_y).
+        // The body clip is pushed unconditionally for any SECTION so
+        // children that overflow the body stay inside the container's
+        // bounds (matching the visual expectation of "section as a
+        // bounded region").
+        auto* sst = wd.scroll_state_ptr();
+        const auto* slay = wd.section_layout_ptr();
+        int child_origin_x = wd.x;
+        int child_origin_y = wd.y;
+        int abs_origin_x   = wd.abs_x;
+        int abs_origin_y   = wd.abs_y;
+        bool pushed_clip = false;
+        if (slay) {
+          int sx = sst ? sst->scroll_x : 0;
+          int sy = sst ? sst->scroll_y : 0;
+          child_origin_x = wd.x + slay->body_x - sx;
+          child_origin_y = wd.y + slay->body_y - sy;
+          abs_origin_x   = wd.abs_x + slay->body_x - sx;
+          abs_origin_y   = wd.abs_y + slay->body_y - sy;
+          if (backend->push_clip && slay->body_w > 0 && slay->body_h > 0) {
+            backend->push_clip(ctx,
+                                static_cast<float>(wd.x + slay->body_x),
+                                static_cast<float>(wd.y + slay->body_y),
+                                static_cast<float>(slay->body_w),
+                                static_cast<float>(slay->body_h));
+            pushed_clip = true;
+          }
+        }
         // Translate so the child's descendants - which store coords
         // relative to the child - draw at the correct absolute position.
         if (backend->push_transform) backend->push_transform(ctx);
         if (backend->translate)
-          backend->translate(ctx, static_cast<float>(wd.x), static_cast<float>(wd.y));
+          backend->translate(ctx, static_cast<float>(child_origin_x),
+                                  static_cast<float>(child_origin_y));
         paint_widgets_recursive(backend, ctx, widgets, idx,
-                                wd.abs_x, wd.abs_y, focused_widget);
+                                abs_origin_x, abs_origin_y, focused_widget);
         // After-children hook: widget-local coords are active here (we
         // translated by (wd.x, wd.y) above and have not popped yet).
         // Used by CUSTOMDRAW + compound to paint z>=0 layers above the
@@ -1486,6 +1734,7 @@ namespace xpl_host
           wd.paint_after_children(backend, ctx, idx == focused_widget);
         }
         if (backend->pop_transform) backend->pop_transform(ctx);
+        if (pushed_clip && backend->pop_clip) backend->pop_clip(ctx);
       }
       idx = widgets.next(idx);
     }
@@ -1613,6 +1862,29 @@ namespace xpl_host
     if (!w.enabled) return;  // disabled widgets don't receive mouse events
     if (!dispatch_event(ev))
       w.on_mouse_event(ev);
+  }
+
+  // Wheel events bubble up the widget-tree parent chain so a scrolling
+  // SECTION ancestor consumes the wheel when the inner widget under the
+  // cursor (e.g. a LABEL inside the section) doesn't handle it.
+  bool Session::dispatch_wheel_event(uint32_t widget_idx, neui_event_t* ev)
+  {
+    auto try_widget = [&](uint32_t i) -> bool {
+      if (i == 0 || !_widgets.exists(i)) return false;
+      auto& w = _widgets[i];
+      if (!w.emit_events || !w.enabled) return false;
+      // Stamp the bubbling target onto the event so the client (and any
+      // widget code reading ev->data.wheel.widget) sees the actual recipient.
+      ev->data.wheel.widget = { w.widget_id };
+      if (dispatch_event(ev)) return true;
+      return w.on_mouse_event(ev);
+    };
+    if (try_widget(widget_idx)) return true;
+    auto parents = _widgets.get_all_parents(widget_idx);
+    for (uint32_t p : parents) {
+      if (try_widget(p)) return true;
+    }
+    return false;
   }
 
   // -------------------------------------------------------------------------

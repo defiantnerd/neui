@@ -50,11 +50,34 @@ extern "C" {
 // Supersedes neui_widget_api_t::set_tab_stop.
 #define NEUI_ATTR_TAB_STOP  "neui.attr.tab_stop"
 
-// string: "left", "center", "right" (LABEL, BUTTON, SECTION).
+// string: "none", "left", "center", "right" (LABEL, BUTTON, SECTION).
 // On SECTION this selects the horizontal position of the optional header
-// label drawn in the band at the top of the section rectangle. Default
-// for SECTION is "center" (when the attribute is unset).
+// label drawn in the band at the top of the section rectangle. "none"
+// hides the header band entirely so the body fills the whole rect
+// (same path as an empty text). Default is "center" (when the
+// attribute is unset).
 #define NEUI_ATTR_ALIGN_TEXT "neui.attr.align_text"
+
+// string: scroll axis configuration for a SECTION container.
+//   "none"       - non-scrolling (default; existing behaviour).
+//   "vertical"   - vertical scrollbar on the right edge of the body.
+//   "horizontal" - horizontal scrollbar on the bottom edge of the body.
+//   "both"       - dual scrollbars; bottom-right corner is a dead square.
+// When non-"none" the SECTION clips its children to the body rect and
+// translates them by the current scroll offset. Mouse wheel inside the
+// section body scrolls; Shift+wheel scrolls horizontally on the "both"
+// and "horizontal" modes. Read at widget_show; live-updateable.
+#define NEUI_ATTR_SCROLL_MODE "neui.attr.scroll_mode"
+
+// int (logical px): explicit content extent for a scrolling SECTION.
+// 0 / unset = auto: the SECTION scans its direct children and takes
+// max(child.x + child.width) / max(child.y + child.height) as the
+// content size. Setting an explicit value overrides the auto-bound
+// calculation - useful when the SECTION's children are still being
+// added incrementally or when the scrollable region intentionally
+// extends past the laid-out content. Live - the next paint re-clamps.
+#define NEUI_ATTR_CONTENT_WIDTH  "neui.attr.content_width"
+#define NEUI_ATTR_CONTENT_HEIGHT "neui.attr.content_height"
 
 // int (logical pixels): minimum/maximum drag-resize bounds for a frame
 // window (APPWINDOW / PLUGWINDOW). Unset, 0, or negative means no constraint.

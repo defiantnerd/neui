@@ -426,7 +426,9 @@ void wake_app_event_pump()
   ev.data.wheel.x      = (int)lx;
   ev.data.wheel.y      = (int)ly;
   ev.data.wheel.delta  = delta;
-  session->dispatch_mouse_event(hit, &ev);
+  // Wheel bubbles up to ancestors so a scrolling SECTION consumes the
+  // wheel when the inner widget under the cursor doesn't.
+  session->dispatch_wheel_event(hit, &ev);
 }
 
 // ---------------------------------------------------------------------------

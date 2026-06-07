@@ -239,6 +239,32 @@ if(APPLE)
   target_link_libraries(neui_surface_example PRIVATE neui-macoshost)
 endif()
 
+# Scrolling SECTION example. Demonstrates NEUI_ATTR_SCROLL_MODE +
+# NEUI_ATTR_ALIGN_TEXT="none" with runtime toggles for chip position,
+# scroll axes, and a row-count-driven content generator. Pinned to the
+# crossplatform host (where scrolling SECTION ships in v1).
+if(MSVC)
+  add_executable(neui_section_scroll_example WIN32
+    examples/section_scroll_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_section_scroll_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_section_scroll_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_section_scroll_example WIN32 examples/section_scroll_example.cpp)
+elseif(APPLE)
+  add_executable(neui_section_scroll_example MACOSX_BUNDLE examples/section_scroll_example.cpp)
+else()
+  add_executable(neui_section_scroll_example examples/section_scroll_example.cpp)
+endif()
+target_link_libraries(neui_section_scroll_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_section_scroll_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_section_scroll_example PRIVATE neui-macoshost)
+endif()
+
 # Minimal README example - input + button + label echo. Pure C; mirrors the
 # code block in README.md verbatim. Useful as a smoke test that the public
 # C API stays usable from a one-file client.

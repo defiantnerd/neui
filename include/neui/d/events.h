@@ -123,13 +123,21 @@ extern "C" {
     uint32_t buttonmap;
   } neui_event_mouse_t;
 
-  // Scroll-wheel event. delta is in lines: positive = scroll up, negative = scroll down.
+  // Scroll-wheel event. delta is in lines: positive = scroll up / left,
+  // negative = scroll down / right.
+  //   is_horizontal = 0  -> vertical wheel (default; classic WM_MOUSEWHEEL,
+  //                          NSEvent scrollingDeltaY).
+  //   is_horizontal = 1  -> horizontal wheel: trackpad two-finger horizontal
+  //                          (Win32 WM_MOUSEHWHEEL; NSEvent scrollingDeltaX)
+  //                          OR Shift+wheel converted by the platform layer
+  //                          as the conventional mouse fallback.
   typedef struct neui_event_wheel
   {
     neui_widget_t widget;
     int x;
     int y;
     int delta;
+    int is_horizontal;
   } neui_event_wheel_t;
 
   // event_key for all events like keydown/keyup/emitted key
