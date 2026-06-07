@@ -219,6 +219,22 @@ namespace macos_host
                                  uint32_t buttonmap,
                                  neui_detail::DataItem* drop_item);
 
+    // Adapter members consumed by the shared dnd_dispatch_* templates
+    // (hosts/shared/dnd_dispatch.h) backing the dispatch_dnd_* bodies.
+    uint32_t dnd_find_target(uint32_t frame_widget_idx, int x, int y,
+                              const char* const* formats, uint32_t count,
+                              int& out_abs_x, int& out_abs_y)
+    {
+      return find_drop_target_in_frame_macos(frame_widget_idx, x, y,
+                                              formats, count,
+                                              out_abs_x, out_abs_y);
+    }
+    void dnd_send_event(uint32_t widget_idx, uint32_t event_type,
+                         int frame_x, int frame_y, int abs_x, int abs_y,
+                         const char* const* formats, uint32_t count,
+                         uint32_t suggested, uint32_t buttonmap,
+                         neui_data_item_t data_item);  // defined in host.mm
+
     // Optional grid-cell-edit validation callback (NEUI_API_GRID_CLIENT).
     // Fetched once at session create time; called when the user commits a
     // grid in-place cell edit.

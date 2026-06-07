@@ -753,6 +753,11 @@ namespace xpl_host
     uint32_t _last_accepted_action = 0;  // neui_dnd_action_t
     bool     _in_dnd_dispatch      = false;
     bool     _drag_source_active   = false;
+    // Frame-local top-left of `_current_drop_target`, captured at the
+    // last find. The shared dispatch templates use it so MOVE / LEAVE on
+    // the same widget produce widget-local coords without re-walking.
+    int      _current_drop_abs_x   = 0;
+    int      _current_drop_abs_y   = 0;
 
     // Drop hit-test + event dispatch. `frame_widget_idx` identifies the
     // top-level frame whose IDropTarget / NSDraggingDestination fired the
@@ -778,6 +783,20 @@ namespace xpl_host
                                  uint32_t suggested_action,
                                  uint32_t buttonmap,
                                  neui_detail::DataItem* drop_item);
+
+    // Adapter members consumed by the shared dnd_dispatch_* templates
+    // (hosts/shared/dnd_dispatch.h) backing the dispatch_dnd_* bodies.
+    // Defined in host.cpp: the find wraps the hit_test-based walker and
+    // reports the matched widget's cached abs_x/abs_y; the send builds
+    // the NEUI_EVENT_DND_* payload with widget-local coords.
+    uint32_t dnd_find_target(uint32_t frame_widget_idx, int x, int y,
+                              const char* const* formats, uint32_t count,
+                              int& out_abs_x, int& out_abs_y);
+    void dnd_send_event(uint32_t widget_idx, uint32_t event_type,
+                         int frame_x, int frame_y, int abs_x, int abs_y,
+                         const char* const* formats, uint32_t count,
+                         uint32_t suggested, uint32_t buttonmap,
+                         neui_data_item_t data_item);
 
     // Optional menu-item validation callback. Polled at WM_INITMENUPOPUP.
     neui_menu_client_t*             _menu_client               = nullptr;

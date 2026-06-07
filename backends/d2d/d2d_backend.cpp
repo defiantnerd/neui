@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "d2d_backend.h"
+#include "../shared/backend_util.h"
 
 #pragma comment(lib, "d2d1")
 #pragma comment(lib, "d3d11")
@@ -256,7 +257,7 @@ namespace neui_d2d_backend
     if (fs && !fs->family.empty()) key.family = fs->family;
     else                            key.family = L"Segoe UI";
     key.weight   = static_cast<int>(normalise_weight(fs ? fs->weight : 0));
-    key.size_q10 = static_cast<uint32_t>(font_size * 10.0f + 0.5f);
+    key.size_q10 = neui_detail::font_size_q10(font_size);
 
     auto it = g_text_format_cache.find(key);
     if (it != g_text_format_cache.end()) return it->second;
@@ -281,17 +282,14 @@ namespace neui_d2d_backend
 
   static D2D1_COLOR_F argb_to_color(uint32_t argb, float alpha_mul = 1.0f)
   {
-    return D2D1::ColorF(
-      ((argb >> 16) & 0xFF) / 255.0f,
-      ((argb >>  8) & 0xFF) / 255.0f,
-      ( argb        & 0xFF) / 255.0f,
-      ((argb >> 24) & 0xFF) / 255.0f * alpha_mul
-    );
+    float c[4];
+    neui_detail::argb_unpack(argb, c, alpha_mul);
+    return D2D1::ColorF(c[0], c[1], c[2], c[3]);
   }
 
   static inline float current_alpha(const D2DContext* ctx)
   {
-    return ctx->alpha_stack.empty() ? 1.0f : ctx->alpha_stack.back();
+    return neui_detail::alpha_stack_current(ctx->alpha_stack);
   }
 
   // ---------------------------------------------------------------------------
@@ -1004,17 +1002,14 @@ namespace neui_d2d_backend
   {
     auto* ctx = static_cast<D2DContext*>(raw);
     if (!ctx) return;
-    if (factor < 0.0f) factor = 0.0f;
-    if (factor > 1.0f) factor = 1.0f;
-    float prev = ctx->alpha_stack.empty() ? 1.0f : ctx->alpha_stack.back();
-    ctx->alpha_stack.push_back(prev * factor);
+    neui_detail::alpha_stack_push(ctx->alpha_stack, factor);
   }
 
   static void d2d_pop_alpha(neui_render_ctx_t raw)
   {
     auto* ctx = static_cast<D2DContext*>(raw);
-    if (!ctx || ctx->alpha_stack.empty()) return;
-    ctx->alpha_stack.pop_back();
+    if (!ctx) return;
+    neui_detail::alpha_stack_pop(ctx->alpha_stack);
   }
 
   // ---------------------------------------------------------------------------

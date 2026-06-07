@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "cg_backend.h"
+#include "../shared/backend_util.h"
 
 namespace neui_cg_backend
 {
@@ -83,22 +84,14 @@ namespace neui_cg_backend
   // ---------------------------------------------------------------------------
   // Helpers
 
-  static inline CGFloat ch(uint32_t comp)
-  {
-    return static_cast<CGFloat>(comp) / 255.0f;
-  }
-
   static inline void argb_to_rgba(uint32_t argb, CGFloat out[4], float alpha_mul = 1.0f)
   {
-    out[0] = ch((argb >> 16) & 0xFF);  // R
-    out[1] = ch((argb >>  8) & 0xFF);  // G
-    out[2] = ch( argb        & 0xFF);  // B
-    out[3] = ch((argb >> 24) & 0xFF) * static_cast<CGFloat>(alpha_mul);  // A
+    neui_detail::argb_unpack(argb, out, alpha_mul);
   }
 
   static inline float current_alpha(const CGContextState* st)
   {
-    return st->alpha_stack.empty() ? 1.0f : st->alpha_stack.back();
+    return neui_detail::alpha_stack_current(st->alpha_stack);
   }
 
   // CTFont cache - keyed by "family|weight|size_q10". Process-wide and never
@@ -144,7 +137,7 @@ namespace neui_cg_backend
     key += '|';
     key += std::to_string(weight);
     key += '|';
-    key += std::to_string(static_cast<uint32_t>(font_size * 10.0f + 0.5f));
+    key += std::to_string(neui_detail::font_size_q10(font_size));
 
     auto& cache = font_cache();
     auto it = cache.find(key);
@@ -699,17 +692,14 @@ namespace neui_cg_backend
   {
     auto* st = static_cast<CGContextState*>(raw);
     if (!st) return;
-    if (factor < 0.0f) factor = 0.0f;
-    if (factor > 1.0f) factor = 1.0f;
-    float prev = st->alpha_stack.empty() ? 1.0f : st->alpha_stack.back();
-    st->alpha_stack.push_back(prev * factor);
+    neui_detail::alpha_stack_push(st->alpha_stack, factor);
   }
 
   static void cg_pop_alpha(neui_render_ctx_t raw)
   {
     auto* st = static_cast<CGContextState*>(raw);
-    if (!st || st->alpha_stack.empty()) return;
-    st->alpha_stack.pop_back();
+    if (!st) return;
+    neui_detail::alpha_stack_pop(st->alpha_stack);
   }
 
   // ---------------------------------------------------------------------------

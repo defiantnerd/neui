@@ -5,6 +5,7 @@
 // lands in steps 3+ per plans/native-macos-host.md.
 
 #include "host.h"
+#include "../shared/dnd_dispatch.h"
 
 #include <cstring>
 
@@ -60,19 +61,8 @@ namespace macos_host
   // hosts. Coordinates arriving here are frame-local (content view is
   // isFlipped=YES, so already top-down).
 
-  static bool dnd_formats_match_macos(const std::vector<std::string>& accepted,
-                                       const char* const* formats,
-                                       uint32_t formats_count)
-  {
-    if (accepted.empty()) return true;
-    if (!formats || formats_count == 0) return false;
-    for (auto& want : accepted) {
-      for (uint32_t i = 0; i < formats_count; ++i) {
-        if (formats[i] && want == formats[i]) return true;
-      }
-    }
-    return false;
-  }
+  // MIME matching shared with the other hosts (dnd_dispatch.h).
+  using neui_detail::dnd_formats_match;
 
   // (x, y) are frame-local; (abs_x, abs_y) is the target widget's frame-local
   // top-left, so the event carries widget-local coords. Mirror of the win32
@@ -128,7 +118,7 @@ namespace macos_host
           if (frame_x >= abs_x && frame_x < abs_x + wd.width &&
               frame_y >= abs_y && frame_y < abs_y + wd.height) {
             if (wd.enabled && wd.drop_target &&
-                dnd_formats_match_macos(wd.accepted_mimes, formats,
+                dnd_formats_match(wd.accepted_mimes, formats,
                                          formats_count)) {
               out_idx   = idx;
               out_abs_x = abs_x;
@@ -174,12 +164,32 @@ namespace macos_host
     // Fallback: the frame itself (its client-area origin is (0,0)).
     auto& frame_wd = _widgets[frame_widget_idx];
     if (frame_wd.drop_target &&
-        dnd_formats_match_macos(frame_wd.accepted_mimes, formats,
+        dnd_formats_match(frame_wd.accepted_mimes, formats,
                                  formats_count)) {
       return frame_widget_idx;
     }
     return 0;
   }
+
+  // Adapter for the shared dispatch templates - forwards to the
+  // file-static send_dnd_event_macos above.
+  void Session::dnd_send_event(uint32_t widget_idx, uint32_t event_type,
+                                int frame_x, int frame_y, int abs_x, int abs_y,
+                                const char* const* formats, uint32_t count,
+                                uint32_t suggested, uint32_t buttonmap,
+                                neui_data_item_t data_item)
+  {
+    send_dnd_event_macos(this, widget_idx,
+                         static_cast<neui_event_type_t>(event_type),
+                         frame_x, frame_y, abs_x, abs_y,
+                         formats, count, suggested, buttonmap, data_item);
+  }
+
+  // ENTER / re-target / MOVE / LEAVE / DROP state machine shared with the
+  // other hosts (hosts/shared/dnd_dispatch.h); only the hit-test walker
+  // (find_drop_target_in_frame_macos above) and the event-send plumbing
+  // stay macOS-local, reached via the dnd_find_target / dnd_send_event
+  // adapter members in host.h.
 
   uint32_t Session::dispatch_dnd_enter(uint32_t frame_widget_idx,
                                         int x, int y,
@@ -188,19 +198,9 @@ namespace macos_host
                                         uint32_t suggested,
                                         uint32_t buttonmap)
   {
-    int abs_x = 0, abs_y = 0;
-    uint32_t idx = find_drop_target_in_frame_macos(frame_widget_idx, x, y,
-                                                    formats, count,
-                                                    abs_x, abs_y);
-    _current_drop_target  = idx;
-    _current_drop_abs_x   = abs_x;
-    _current_drop_abs_y   = abs_y;
-    _last_accepted_action = 0;
-    if (idx == 0) return 0;
-    send_dnd_event_macos(this, idx, NEUI_EVENT_DND_ENTER, x, y, abs_x, abs_y,
-                         formats, count, suggested, buttonmap,
-                         neui_data_item_none);
-    return _last_accepted_action;
+    return neui_detail::dnd_dispatch_enter(this, frame_widget_idx, x, y,
+                                            formats, count,
+                                            suggested, buttonmap);
   }
 
   uint32_t Session::dispatch_dnd_move(uint32_t frame_widget_idx,
@@ -210,46 +210,14 @@ namespace macos_host
                                        uint32_t suggested,
                                        uint32_t buttonmap)
   {
-    int abs_x = 0, abs_y = 0;
-    uint32_t idx = find_drop_target_in_frame_macos(frame_widget_idx, x, y,
-                                                    formats, count,
-                                                    abs_x, abs_y);
-    if (idx != _current_drop_target) {
-      if (_current_drop_target != 0 && _current_drop_target != UINT32_MAX &&
-          _widgets.exists(_current_drop_target)) {
-        send_dnd_event_macos(this, _current_drop_target, NEUI_EVENT_DND_LEAVE,
-                             x, y, _current_drop_abs_x, _current_drop_abs_y,
-                             nullptr, 0, 0, 0, neui_data_item_none);
-      }
-      _current_drop_target  = idx;
-      _current_drop_abs_x   = abs_x;
-      _current_drop_abs_y   = abs_y;
-      _last_accepted_action = 0;
-      if (idx == 0) return 0;
-      send_dnd_event_macos(this, idx, NEUI_EVENT_DND_ENTER, x, y, abs_x, abs_y,
-                           formats, count, suggested, buttonmap,
-                           neui_data_item_none);
-      return _last_accepted_action;
-    }
-    if (idx == 0) return 0;
-    send_dnd_event_macos(this, idx, NEUI_EVENT_DND_MOVE, x, y, abs_x, abs_y,
-                         formats, count, suggested, buttonmap,
-                         neui_data_item_none);
-    return _last_accepted_action;
+    return neui_detail::dnd_dispatch_move(this, frame_widget_idx, x, y,
+                                           formats, count,
+                                           suggested, buttonmap);
   }
 
   void Session::dispatch_dnd_leave()
   {
-    if (_current_drop_target != 0 && _current_drop_target != UINT32_MAX &&
-        _widgets.exists(_current_drop_target)) {
-      send_dnd_event_macos(this, _current_drop_target, NEUI_EVENT_DND_LEAVE,
-                           0, 0, _current_drop_abs_x, _current_drop_abs_y,
-                           nullptr, 0, 0, 0, neui_data_item_none);
-    }
-    _current_drop_target  = UINT32_MAX;
-    _current_drop_abs_x   = 0;
-    _current_drop_abs_y   = 0;
-    _last_accepted_action = 0;
+    neui_detail::dnd_dispatch_leave(this);
   }
 
   uint32_t Session::dispatch_dnd_drop(uint32_t /*frame_widget_idx*/,
@@ -260,43 +228,8 @@ namespace macos_host
                                        uint32_t buttonmap,
                                        neui_detail::DataItem* drop_item)
   {
-    if (_current_drop_target == 0 || _current_drop_target == UINT32_MAX ||
-        !_widgets.exists(_current_drop_target)) {
-      _current_drop_target  = UINT32_MAX;
-      _current_drop_abs_x   = 0;
-      _current_drop_abs_y   = 0;
-      _last_accepted_action = 0;
-      return 0;
-    }
-
-    uint32_t item_id = 0;
-    if (drop_item) {
-      item_id = _data_items.allocate();
-      auto* slot = _data_items.get(item_id);
-      if (slot) {
-        drop_item->for_each_format([&](const std::string& mime,
-                                        const std::vector<uint8_t>& bytes) {
-          slot->set_format(mime, bytes.data(),
-                           static_cast<uint32_t>(bytes.size()));
-        });
-      } else {
-        item_id = 0;
-      }
-    }
-
-    send_dnd_event_macos(this, _current_drop_target, NEUI_EVENT_DND_DROP,
-                         x, y, _current_drop_abs_x, _current_drop_abs_y,
-                         formats, count, suggested, buttonmap,
-                         neui_data_item_t{ item_id });
-
-    if (item_id) _data_items.release(item_id);
-
-    uint32_t action = _last_accepted_action;
-    _current_drop_target  = UINT32_MAX;
-    _current_drop_abs_x   = 0;
-    _current_drop_abs_y   = 0;
-    _last_accepted_action = 0;
-    return action;
+    return neui_detail::dnd_dispatch_drop(this, x, y, formats, count,
+                                           suggested, buttonmap, drop_item);
   }
 
   // -------------------------------------------------------------------------

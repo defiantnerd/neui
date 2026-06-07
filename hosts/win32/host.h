@@ -382,6 +382,35 @@ namespace win32_host {
                                  uint32_t suggested_action,
                                  uint32_t buttonmap,
                                  neui_detail::DataItem* drop_item);
+
+    // Adapter members consumed by the shared dnd_dispatch_* templates
+    // (hosts/shared/dnd_dispatch.h) backing the dispatch_dnd_* bodies.
+    uint32_t dnd_find_target(uint32_t frame_widget_idx, int x, int y,
+                              const char* const* formats, uint32_t count,
+                              int& out_abs_x, int& out_abs_y)
+    {
+      return find_drop_target_in_frame_w32(frame_widget_idx, x, y,
+                                            formats, count,
+                                            out_abs_x, out_abs_y);
+    }
+    void dnd_send_event(uint32_t widget_idx, uint32_t event_type,
+                         int frame_x, int frame_y, int abs_x, int abs_y,
+                         const char* const* formats, uint32_t count,
+                         uint32_t suggested, uint32_t buttonmap,
+                         neui_data_item_t data_item)
+    {
+      send_dnd_event_internal(widget_idx, event_type, frame_x, frame_y,
+                               abs_x, abs_y, formats, count,
+                               suggested, buttonmap, data_item);
+    }
+
+    // Cached frame-local top-left of `_current_drop_target` so subsequent
+    // MOVE / LEAVE on the same widget can compute widget-local coords
+    // without re-walking the tree. Public so the shared dispatch
+    // templates can maintain them.
+    int _current_drop_abs_x = 0;
+    int _current_drop_abs_y = 0;
+
   private:
     // Internal helpers used by dispatch_dnd_*; live inside Session so they
     // can touch the protected _widgets / _client_widget_api / _token directly.
@@ -408,11 +437,6 @@ namespace win32_host {
                                   uint32_t suggested, uint32_t buttonmap,
                                   neui_data_item_t data_item);
 
-    // Cached frame-local top-left of `_current_drop_target` so subsequent
-    // MOVE / LEAVE on the same widget can compute widget-local coords
-    // without re-walking the tree.
-    int _current_drop_abs_x = 0;
-    int _current_drop_abs_y = 0;
   public:
 
     // Optional menu-item validation callback. Polled at WM_INITMENUPOPUP.
