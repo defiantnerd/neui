@@ -74,26 +74,48 @@ TEST_CASE("section_scroll_commit: in-range raw passes through to the model")
   CHECK_FALSE(st.kinetic_over_h);
 }
 
-TEST_CASE("section_scroll_commit: overscroll is rubber-damped + flagged")
+TEST_CASE("section_scroll_commit: overscroll passes through + flagged")
 {
+  // raw_px is the damped display position (rubber damping is applied at
+  // input time inside scroll_wheel), so commit is a pure round + flag.
+  // The "is the value past the edge?" check still fires kinetic_over_*.
   SectionScrollState st = make_state();
   SectionLayout L = make_layout();
 
-  // Pull 100 raw px past the top: display offset is damped (< 100) and
-  // negative, and the kinetic-overshoot flag claims the axis.
-  st.kin_v.raw_px = -100.0;
+  st.kin_v.raw_px = -20.0;
   section_scroll_commit(st, L, false);
-  CHECK(st.scroll_y < 0);
-  CHECK(st.scroll_y > -100);
+  CHECK_EQ(st.scroll_y, -20);
   CHECK(st.kinetic_over_v);
-  CHECK_EQ(st.kin_v.last_commit_px, st.scroll_y);
+  CHECK_EQ(st.kin_v.last_commit_px, -20);
 
-  // Past the bottom edge symmetric.
-  st.kin_v.raw_px = 650.0 + 100.0;
+  st.kin_v.raw_px = 650.0 + 30.0;
   section_scroll_commit(st, L, false);
-  CHECK(st.scroll_y > 650);
-  CHECK(st.scroll_y < 750);
+  CHECK_EQ(st.scroll_y, 680);
   CHECK(st.kinetic_over_v);
+}
+
+TEST_CASE("section_scroll_wheel_kinetic: rubber damping at input keeps raw bounded")
+{
+  // Regression: previously raw_px integrated input unbounded - heavy
+  // wheeling past the edge piled raw_px arbitrarily far past max_px while
+  // the visible position saturated. The spring-back then had to crawl all
+  // that integrated input back at 29% per tick, making the rubber-band
+  // visibly linger long after the visible position had hit its asymptote.
+  // With damping-at-input, raw_px IS the damped display position and
+  // asymptotes to (max_px + limit) regardless of how much input arrives -
+  // so the bounce settle-time is constant in `limit`, not log of input.
+  SectionScrollState st = make_state();
+  SectionLayout L = make_layout();
+
+  // Hammer the bottom edge with absurd cumulative input. body_h = 150 ->
+  // limit = min(75, SCROLL_OVERSCROLL_MAX = 60) = 60.
+  for (int i = 0; i < 100; ++i)
+    section_scroll_wheel_kinetic(st, L, precise_delta(-1000.0), false);
+
+  CHECK(st.kinetic_over_v);
+  CHECK(st.scroll_y > 650);
+  CHECK(st.kin_v.raw_px - 650.0 < 60.0);   // raw_px did NOT pile up
+  CHECK(st.scroll_y - 650 <= 60);           // visible stays at-or-under limit
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +186,88 @@ TEST_CASE("section_scroll_wheel_kinetic: finger-up overscroll starts the bounce"
   CHECK(b.start_bounce);
 }
 
+TEST_CASE("section_scroll_wheel_kinetic: finger-throw past edge swallows the follow-up momentum stream")
+{
+  // Regression: macOS emits phase_ended (not momentum) when a finger lifts
+  // after a throw past the edge, then follows with momentumPhase=Began/
+  // Changed/Ended events in the same direction. Without arming suppression
+  // at phase_ended-overscroll, the first momentum event slips through and
+  // pushes raw_px further past the edge for one frame against the
+  // already-running spring-back. Visible as a "kick back" before the
+  // bounce settles.
+  SectionScrollState st = make_state();
+  SectionLayout L = make_layout();
+
+  // Throw past the top edge with the finger down.
+  section_scroll_wheel_kinetic(st, L, precise_delta(80.0), false);
+  CHECK(st.kin_v.raw_px < 0.0);
+  double raw_at_lift = st.kin_v.raw_px;
+
+  // Finger lifts while overscrolled.
+  ScrollWheelInput lift;
+  lift.precise     = true;
+  lift.phase_ended = true;
+  lift.delta_px    = 0.0;
+  ScrollWheelAction b = section_scroll_wheel_kinetic(st, L, lift, false);
+  CHECK(b.start_bounce);
+  CHECK(st.kin_v.suppress_momentum);   // <-- the fix: armed at phase_ended
+
+  // The follow-up momentum stream in the same direction must NOT push
+  // raw_px further past the edge - it would fight the spring-back.
+  ScrollWheelInput mom;
+  mom.precise  = true;
+  mom.momentum = true;
+  mom.delta_px = 40.0;                  // same direction as the throw
+  ScrollWheelAction c = section_scroll_wheel_kinetic(st, L, mom, false);
+  CHECK_FALSE(c.changed);
+  CHECK_APPROX(st.kin_v.raw_px, raw_at_lift);
+
+  // momentum_ended still clears suppression so the next gesture is free.
+  ScrollWheelInput end;
+  end.precise        = true;
+  end.momentum       = true;
+  end.momentum_ended = true;
+  end.delta_px       = 0.0;
+  section_scroll_wheel_kinetic(st, L, end, false);
+  CHECK_FALSE(st.kin_v.suppress_momentum);
+}
+
+TEST_CASE("section_scroll_wheel_kinetic: cross-axis wheel on a single-axis section is dropped")
+{
+  // Regression: previously a horizontal trackpad scroll on a vertical-only
+  // section was silently re-aimed at the vertical axis (the per-host
+  // handlers had a "horizontal -> vertical-only" fallback alongside the
+  // legitimate "vertical -> horizontal-only" classic-wheel fallback). The
+  // shared kinetics layer now refuses the call outright when the section's
+  // axis mask doesn't include the requested axis, so neither host nor any
+  // future caller can bleed input across axes.
+  {
+    SectionScrollState st = make_state(SectionScrollAxis::Vertical);
+    SectionLayout L = make_layout();
+
+    ScrollWheelAction a = section_scroll_wheel_kinetic(st, L, precise_delta(-50.0), true);
+    CHECK_FALSE(a.changed);          // no commit
+    CHECK_EQ(st.scroll_x, 0);        // horizontal axis untouched
+    CHECK_EQ(st.scroll_y, 0);        // vertical axis untouched (the call targeted h)
+    CHECK_APPROX(st.kin_h.raw_px, 0.0);
+    CHECK_APPROX(st.kin_v.raw_px, 0.0);
+  }
+  {
+    // Symmetric: vertical wheel call on a horizontal-only section is also
+    // refused at the kinetics layer. (The per-host handlers still re-route
+    // pure-vertical input to the horizontal axis as a classic-wheel-mouse
+    // fallback - that re-routing happens BEFORE this entry point, so the
+    // call here arrives as axis_h=true and is accepted.)
+    SectionScrollState st = make_state(SectionScrollAxis::Horizontal);
+    SectionLayout L = make_layout();
+
+    ScrollWheelAction a = section_scroll_wheel_kinetic(st, L, precise_delta(-50.0), false);
+    CHECK_FALSE(a.changed);
+    CHECK_EQ(st.scroll_x, 0);
+    CHECK_EQ(st.scroll_y, 0);
+  }
+}
+
 TEST_CASE("section_scroll_wheel_kinetic: external mutation resyncs the integrator")
 {
   SectionScrollState st = make_state();
@@ -227,6 +331,43 @@ TEST_CASE("section_scroll_bounce_step: in-range axis is a no-op")
   section_scroll_commit(st, L, false);
   CHECK_FALSE(section_scroll_bounce_step(st, L, false));
   CHECK_EQ(st.scroll_y, 100);
+}
+
+TEST_CASE("section_scroll_bounce_step: debounce holds the lerp until the wheel stream goes quiet")
+{
+  // Regression: previously the bounce lerped on every tick from the moment
+  // start_bounce fired - so when wheel events kept arriving (Win32 inertia
+  // notches, a touchpad coast-down, or just a user still wheeling past the
+  // edge), each event re-extended the rubber and each bounce tick pulled
+  // it back, visibly jittering. The quiet-tick gate holds the lerp until
+  // the wheel stream has been silent for SCROLL_BOUNCE_DEBOUNCE_TICKS.
+  SectionScrollState st = make_state();
+  SectionLayout L = make_layout();
+
+  // Wheel past the top edge (positive delta = scroll up = raw goes negative).
+  section_scroll_wheel_kinetic(st, L, precise_delta(200.0), false);
+  CHECK(st.kinetic_over_v);
+  CHECK(st.scroll_y < 0);
+  int stretched = st.scroll_y;
+
+  // First SCROLL_BOUNCE_DEBOUNCE_TICKS bounce ticks must NOT move the
+  // position - they're the quiet-time window.
+  for (int i = 0; i < SCROLL_BOUNCE_DEBOUNCE_TICKS; ++i) {
+    bool more = section_scroll_bounce_step(st, L, false);
+    CHECK(more);
+    CHECK_EQ(st.scroll_y, stretched);   // pinned in place
+  }
+  // The very next tick lerps.
+  CHECK(section_scroll_bounce_step(st, L, false));
+  CHECK(st.scroll_y > stretched);   // moved toward the top edge (0)
+
+  // A wheel event arriving mid-bounce re-arms the debounce.
+  section_scroll_wheel_kinetic(st, L, precise_delta(10.0), false);
+  int re_extended = st.scroll_y;
+  for (int i = 0; i < SCROLL_BOUNCE_DEBOUNCE_TICKS; ++i) {
+    section_scroll_bounce_step(st, L, false);
+    CHECK_EQ(st.scroll_y, re_extended);
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -459,11 +459,15 @@ void wake_app_event_pump()
 
   bool has_v = section_axis_has_v(st->axis);
   bool has_h = section_axis_has_h(st->axis);
-  // Single-axis fallback, matching section_apply_wheel's routing: a
-  // vertical-only delta still scrolls a horizontal-only section (plain
-  // wheel mice have no horizontal axis) and vice versa.
+  // Asymmetric single-axis fallback. A horizontal-only section absorbs a
+  // pure vertical wheel because classic wheel mice have no horizontal axis
+  // and the user otherwise has no way to scroll it (matches the macOS
+  // Finder gallery view). A vertical-only section does NOT absorb pure
+  // horizontal input - tilt wheels, trackpad two-finger left/right, and
+  // Shift+wheel all represent an explicit horizontal-scroll intent that
+  // should simply be ignored when the axis isn't supported, not silently
+  // re-aimed at the vertical axis.
   if (!has_v && has_h && dh == 0.0 && dv != 0.0) { dh = dv; dv = 0.0; }
-  if (has_v && !has_h && dv == 0.0 && dh != 0.0) { dv = dh; dh = 0.0; }
 
   // Zero-delta events still matter when they carry gesture-phase edges
   // (phase_began cancels a bounce; phase_ended / momentum_ended drive the

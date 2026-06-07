@@ -327,17 +327,18 @@ namespace neui_detail
     return v < 0.0 ? 0.0 : v;
   }
 
-  // Commit the (rubber-mapped) raw kinetics position into the model's flat
-  // px offset. Records last_commit_px + the kinetic-overshoot flag so the
-  // paint-time clamp and the next wheel event's external-mutation detection
+  // Commit the kinetics' damped display position into the model's flat px
+  // offset. `raw_px` is already the rubber-damped value (damping is applied
+  // at input time inside scroll_wheel), so commit just rounds and routes
+  // it. Records last_commit_px + the kinetic-overshoot flag so the paint-
+  // time clamp and the next wheel event's external-mutation detection
   // both work. Does NOT repaint - the host does that.
   inline void section_scroll_commit(SectionScrollState& st,
                                       const SectionLayout& L, bool axis_h)
   {
     ScrollKinetics& k = axis_h ? st.kin_h : st.kin_v;
     double max_px = section_scroll_max_px(st, L, axis_h);
-    double dim    = axis_h ? (double)L.body_w : (double)L.body_h;
-    double pos    = scroll_rubber(k.raw_px, max_px, dim);
+    double pos    = k.raw_px;
     int p = (int)std::lround(pos);
     bool over = pos < 0.0 || pos > max_px;
     if (axis_h) { st.scroll_x = p; st.kinetic_over_h = over; }
@@ -347,11 +348,18 @@ namespace neui_detail
 
   // Apply a rich wheel event to one axis' kinetics + commit. Thin wrapper
   // over scroll_wheel - behaviourally the SECTION twin of grid_scroll_wheel.
+  // Refuses (no-op return) when the section's axis mask doesn't include
+  // the requested axis - so a stray cross-axis wheel that slipped past
+  // the per-host filter (tilt wheel / two-finger sideways trackpad scroll
+  // on a vertical-only section, or the reverse) can't silently feed the
+  // other axis' kinetics.
   inline ScrollWheelAction section_scroll_wheel_kinetic(SectionScrollState& st,
                                                           const SectionLayout& L,
                                                           const ScrollWheelInput& in,
                                                           bool axis_h)
   {
+    if (axis_h ? !section_axis_has_h(st.axis) : !section_axis_has_v(st.axis))
+      return {};
     ScrollKinetics& k = axis_h ? st.kin_h : st.kin_v;
     double max_px = section_scroll_max_px(st, L, axis_h);
     double dim    = axis_h ? (double)L.body_w : (double)L.body_h;

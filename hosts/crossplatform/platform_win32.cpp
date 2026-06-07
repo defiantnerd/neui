@@ -126,11 +126,15 @@ namespace xpl_host
 
     bool has_v = section_axis_has_v(st->axis);
     bool has_h = section_axis_has_h(st->axis);
-    // Single-axis fallback, matching section_apply_wheel's routing: a
-    // vertical-only delta still scrolls a horizontal-only section (plain
-    // wheel mice have no horizontal axis) and vice versa.
+    // Asymmetric single-axis fallback. A horizontal-only section absorbs a
+    // pure vertical wheel because classic wheel mice have no horizontal
+    // axis and the user otherwise has no way to scroll it. A vertical-
+    // only section does NOT absorb pure horizontal input: WM_MOUSEHWHEEL
+    // (tilt wheels, precision-touchpad horizontal scroll), Shift+wheel,
+    // and trackpad two-finger left/right all represent an explicit
+    // horizontal-scroll intent that should simply be ignored when the
+    // axis isn't supported, not silently re-aimed at the vertical axis.
     if (!has_v && has_h && dh == 0.0 && dv != 0.0) { dh = dv; dv = 0.0; }
-    if (has_v && !has_h && dv == 0.0 && dh != 0.0) { dv = dh; dh = 0.0; }
 
     ScrollWheelAction act_v{}, act_h{};
     if (has_v && dv != 0.0) {

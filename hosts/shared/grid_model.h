@@ -617,14 +617,15 @@ namespace neui_detail
     return v < 0.0 ? 0.0 : v;
   }
 
-  // Decompose the (rubber-mapped) raw position into the model's row index +
-  // fine pixel offset. Records last_commit_px so the next wheel event can
+  // Decompose the kinetics' damped display position into the model's row
+  // index + fine pixel offset. `raw_px` is already the rubber-damped value
+  // (damping is applied at input time in scroll_wheel), so this is a pure
+  // round + decompose. Records last_commit_px so the next wheel event can
   // detect external mutations. Does NOT repaint - the host does that.
   inline void grid_scroll_commit(GridModel& m, const GridViewport& vp, int row_h)
   {
     if (row_h <= 0) row_h = 1;
-    double max_px = grid_scroll_max_px(m, vp, row_h);
-    double pos = grid_scroll_rubber(m.scroll_kin.raw_px, max_px, (double)vp.body_h);
+    double pos = m.scroll_kin.raw_px;
     if (pos <= 0.0) {
       m.scroll_offset_y  = 0;
       m.scroll_px_offset = (int)std::lround(pos);   // <= 0 -> top rubber-band gap
