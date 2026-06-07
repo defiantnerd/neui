@@ -153,6 +153,13 @@ extern "C" {
     //     "drag_hot_x"     int    hot-spot X on the preview image, logical
     //                             px from top-left. -1 = image centre.
     //     "drag_hot_y"     int    hot-spot Y. -1 = image centre.
+    //     "result_attr"    string attr key the runtime writes (as int) with
+    //                             the negotiated NEUI_DND_ACTION_* after
+    //                             begin_drag returns. NONE (0) on cancel.
+    //                             Fires NEUI_EVENT_ATTR_CHANGED on every
+    //                             drag completion so a bound compound layer
+    //                             (or the client's onevent) can react. Empty
+    //                             / unset = drop the action (no feedback).
     //
     //   hit region (any kind):
     //     "anchor_parent" int     neui_anchor_t on widget rect (default

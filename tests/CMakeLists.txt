@@ -15,7 +15,8 @@ add_executable(neui_tests
   test_text_edit.cpp
   test_tree.cpp
   test_scrollbar.cpp
-  test_shortcut_format.cpp)
+  test_shortcut_format.cpp
+  test_clipboard_item.cpp)
 
 target_include_directories(neui_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/include

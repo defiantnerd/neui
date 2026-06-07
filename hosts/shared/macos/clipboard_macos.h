@@ -152,6 +152,18 @@ namespace neui_detail
         return;
       }
 
+      // ---- image/png -> NSPasteboardTypePNG (+ MIME alias) ----
+      // PNG is the native macOS bitmap clipboard format; emit it under
+      // its UTI so Preview / Photos / Mail see the image, and keep the
+      // raw MIME alias for neui-to-neui round-trip fidelity.
+      if (mime == "image/png") {
+        if (pb_set_data_macos(pb, NSPasteboardTypePNG,
+                                bytes.data(),
+                                static_cast<uint32_t>(bytes.size())))
+          any = true;
+        // Fall through to also publish under the MIME name.
+      }
+
       // ---- arbitrary MIME -> UTI passthrough using MIME as the type ----
       NSString* t = [NSString stringWithUTF8String:mime.c_str()];
       if (t && pb_set_data_macos(pb, t,
@@ -219,6 +231,18 @@ namespace neui_detail
       }
     }
 
+    // ---- NSPasteboardTypePNG -> image/png ----
+    // Last so a neui-source-published "image/png" registered MIME wins
+    // over the NS-typed PNG (same fidelity since both carry the raw PNG
+    // bytes, but matches the Win32 ordering for symmetry).
+    if (!item.has_format("image/png")) {
+      if (NSData* d = [pb dataForType:NSPasteboardTypePNG]) {
+        item.set_format("image/png",
+                        [d bytes], static_cast<uint32_t>([d length]));
+        any = true;
+      }
+    }
+
     return any;
   }
 
@@ -236,6 +260,8 @@ namespace neui_detail
       note("text/plain;charset=utf-8");
     if ([pb availableTypeFromArray:@[NSPasteboardTypeHTML]])
       note("text/html");
+    if ([pb availableTypeFromArray:@[NSPasteboardTypePNG]])
+      note("image/png");
     NSArray<NSURL*>* urls = [pb readObjectsForClasses:@[[NSURL class]]
                                                 options:nil];
     if (urls) {

@@ -86,6 +86,12 @@ namespace neui_detail
     std::string drag_preview_key;
     int         drag_hot_x      = -1;
     int         drag_hot_y      = -1;
+    // Attr key the runtime writes (as int) with the negotiated
+    // NEUI_DND_ACTION_* after begin_drag returns. Empty = no feedback
+    // (the action is dropped). Fires NEUI_EVENT_ATTR_CHANGED + invalidate
+    // on every drag completion regardless of whether the value changed,
+    // since a drag end is itself the signal the client subscribes to.
+    std::string result_attr;
 
     // ---- Hit region (compound-style 9-pt anchor) --------------------------
     neui_anchor_t anchor_parent = NEUI_ANCHOR_TOP_LEFT;
@@ -203,6 +209,7 @@ namespace neui_detail
     if (prop == "fine_modifier")  { H.fine_modifier   = parse_fine_modifier(sv); return; }
     if (prop == "drag_data_key")  { H.drag_data_key   = sv; return; }
     if (prop == "drag_preview_key") { H.drag_preview_key = sv; return; }
+    if (prop == "result_attr")    { H.result_attr     = sv; return; }
   }
 
   // ---- Hit region resolution ----------------------------------------------

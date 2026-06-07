@@ -426,3 +426,205 @@ TEST_CASE("DRAG_SOURCE preview: prop setters wire to handler fields")
   CHECK_EQ(H->drag_hot_x, 5);
   CHECK_EQ(H->drag_hot_y, 7);
 }
+
+// ---------------------------------------------------------------------------
+// DRAG_SOURCE result_attr: runtime writes the negotiated action as int and
+// fires emit_attr_changed + invalidate after begin_drag returns.
+// ---------------------------------------------------------------------------
+
+namespace {
+  struct ResultProbe {
+    int attr_changed_calls = 0;
+    int invalidate_calls   = 0;
+    std::string last_attr_key;
+    float       last_attr_value = 0.0f;
+  };
+
+  void result_emit_attr_changed(void* host_data, const char* attr_key, float value)
+  {
+    auto* p = static_cast<ResultProbe*>(host_data);
+    p->attr_changed_calls++;
+    p->last_attr_key   = attr_key ? attr_key : "";
+    p->last_attr_value = value;
+  }
+  void result_invalidate(void* host_data)
+  {
+    auto* p = static_cast<ResultProbe*>(host_data);
+    p->invalidate_calls++;
+  }
+}
+
+TEST_CASE("DRAG_SOURCE result_attr: negotiated action lands in the bag + ATTR_CHANGED fires")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  H->threshold_px = 2.0f;
+  H->result_attr  = "drag.result";
+
+  // Use two separate probe structs so host_data has one type at a time;
+  // glue them via a tiny shim that forwards to both. The simpler approach:
+  // reuse DragSourceProbe for begin_drag and put the result-receiver in
+  // host_data, then chain by hand inside the test.
+  struct Glue { DragSourceProbe ds; ResultProbe rp; } glue;
+  glue.ds.result = NEUI_DND_ACTION_MOVE;
+
+  auto begin_drag = +[](void* hd, neui_data_item_t item, uint32_t allowed,
+                         uint32_t preview, int hx, int hy) -> uint32_t
+  {
+    auto* g = static_cast<Glue*>(hd);
+    g->ds.call_count++;
+    g->ds.last_item_id = item.id;
+    g->ds.last_allowed = allowed;
+    g->ds.last_preview = preview;
+    g->ds.last_hot_x   = hx;
+    g->ds.last_hot_y   = hy;
+    return g->ds.result;
+  };
+  auto on_attr_changed = +[](void* hd, const char* k, float v) {
+    auto* g = static_cast<Glue*>(hd);
+    g->rp.attr_changed_calls++;
+    g->rp.last_attr_key   = k ? k : "";
+    g->rp.last_attr_value = v;
+  };
+  auto on_invalidate = +[](void* hd) {
+    auto* g = static_cast<Glue*>(hd);
+    g->rp.invalidate_calls++;
+  };
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  BehaviorDispatchCtx ctx;
+  ctx.bag = &bag;
+  ctx.widget_w = 100; ctx.widget_h = 100;
+  ctx.host_data         = &glue;
+  ctx.begin_drag        = begin_drag;
+  ctx.emit_attr_changed = on_attr_changed;
+  ctx.invalidate        = on_invalidate;
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 0, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &down, 0, 0);
+  // invalidate may also fire incidentally; capture the baseline so we can
+  // assert the begin_drag-driven invalidate added one more.
+  int invalidate_baseline = glue.rp.invalidate_calls;
+  neui_event_t move = { NEUI_EVENT_MOUSE_MOVE };
+  move.data.mouse = { wid, 5, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &move, 5, 0);
+
+  CHECK_EQ(glue.ds.call_count, 1);
+  CHECK_EQ(bag.get_int("drag.result", -1), (int)NEUI_DND_ACTION_MOVE);
+  CHECK_EQ(glue.rp.attr_changed_calls, 1);
+  CHECK_EQ(glue.rp.last_attr_key, std::string("drag.result"));
+  CHECK_APPROX(glue.rp.last_attr_value, (double)NEUI_DND_ACTION_MOVE);
+  CHECK(glue.rp.invalidate_calls > invalidate_baseline);
+}
+
+TEST_CASE("DRAG_SOURCE result_attr: NONE on cancel still writes + fires")
+{
+  // begin_drag returning NEUI_DND_ACTION_NONE (0) is a real signal
+  // ("user cancelled"), not a silent path. The runtime writes 0.
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  H->threshold_px = 2.0f;
+  H->result_attr  = "drag.result";
+
+  DragSourceProbe ds;
+  ds.result = NEUI_DND_ACTION_NONE;
+  ResultProbe rp;
+  struct Pair { DragSourceProbe* ds; ResultProbe* rp; } pair { &ds, &rp };
+
+  auto begin_drag = +[](void* hd, neui_data_item_t, uint32_t, uint32_t,
+                         int, int) -> uint32_t
+  {
+    auto* p = static_cast<Pair*>(hd);
+    p->ds->call_count++;
+    return p->ds->result;
+  };
+  auto on_attr_changed = +[](void* hd, const char* k, float v) {
+    auto* p = static_cast<Pair*>(hd);
+    p->rp->attr_changed_calls++;
+    p->rp->last_attr_value = v;
+    p->rp->last_attr_key   = k ? k : "";
+  };
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  BehaviorDispatchCtx ctx;
+  ctx.bag = &bag;
+  ctx.widget_w = 100; ctx.widget_h = 100;
+  ctx.host_data         = &pair;
+  ctx.begin_drag        = begin_drag;
+  ctx.emit_attr_changed = on_attr_changed;
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 0, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &down, 0, 0);
+  neui_event_t move = { NEUI_EVENT_MOUSE_MOVE };
+  move.data.mouse = { wid, 5, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &move, 5, 0);
+
+  CHECK_EQ(ds.call_count, 1);
+  CHECK_EQ(bag.get_int("drag.result", -1), 0);
+  CHECK_EQ(rp.attr_changed_calls, 1);
+  CHECK_APPROX(rp.last_attr_value, 0.0);
+}
+
+TEST_CASE("DRAG_SOURCE result_attr: empty/unset drops the action silently")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  H->threshold_px = 2.0f;
+  // result_attr left empty.
+
+  DragSourceProbe ds;
+  ds.result = NEUI_DND_ACTION_LINK;
+  ResultProbe rp;
+  struct Pair { DragSourceProbe* ds; ResultProbe* rp; } pair { &ds, &rp };
+
+  auto begin_drag = +[](void* hd, neui_data_item_t, uint32_t, uint32_t,
+                         int, int) -> uint32_t
+  {
+    auto* p = static_cast<Pair*>(hd);
+    p->ds->call_count++;
+    return p->ds->result;
+  };
+  auto on_attr_changed = +[](void* hd, const char*, float) {
+    auto* p = static_cast<Pair*>(hd);
+    p->rp->attr_changed_calls++;
+  };
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  BehaviorDispatchCtx ctx;
+  ctx.bag = &bag;
+  ctx.widget_w = 100; ctx.widget_h = 100;
+  ctx.host_data         = &pair;
+  ctx.begin_drag        = begin_drag;
+  ctx.emit_attr_changed = on_attr_changed;
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 0, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &down, 0, 0);
+  neui_event_t move = { NEUI_EVENT_MOUSE_MOVE };
+  move.data.mouse = { wid, 5, 0, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &move, 5, 0);
+
+  CHECK_EQ(ds.call_count, 1);
+  CHECK_FALSE(bag.has("drag.result"));
+  CHECK_EQ(rp.attr_changed_calls, 0);
+}
+
+TEST_CASE("DRAG_SOURCE result_attr: prop setter accepts the string key")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  apply_behavior_set_string(*H, "result_attr", "myapp.last_drop_action");
+  CHECK_EQ(H->result_attr, std::string("myapp.last_drop_action"));
+}

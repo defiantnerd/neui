@@ -180,6 +180,7 @@ namespace neui_detail
       }
     }
 
+
     // Enumerate remaining MIME-like registered formats.
     IEnumFORMATETC* en = nullptr;
     if (obj->EnumFormatEtc(DATADIR_GET, &en) == S_OK && en) {
@@ -213,6 +214,34 @@ namespace neui_detail
         fetched = 0;
       }
       en->Release();
+    }
+
+    // CF_DIBV5 / CF_DIB -> image/png (last so the registered "image/png"
+    // wins when both are present - PNG bytes round-trip with higher
+    // fidelity than the DIB re-encode). Native shells (Paint, Snipping
+    // Tool, browsers) typically send only the bitmap formats; this is
+    // where they surface as image/png to neui clients.
+    if (!item.has_format("image/png")) {
+      FORMATETC fe = { CF_DIBV5, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+      STGMEDIUM sm = {};
+      if (obj->GetData(&fe, &sm) != S_OK) {
+        fe.cfFormat = CF_DIB;
+        if (obj->GetData(&fe, &sm) != S_OK) sm.tymed = TYMED_NULL;
+      }
+      if (sm.tymed == TYMED_HGLOBAL && sm.hGlobal) {
+        SIZE_T sz = GlobalSize(sm.hGlobal);
+        auto*  p  = GlobalLock(sm.hGlobal);
+        if (p && sz > 0) {
+          auto png = dib_bytes_to_png_bytes_w32(
+            static_cast<const uint8_t*>(p),
+            static_cast<uint32_t>(sz));
+          if (!png.empty())
+            item.set_format("image/png", png.data(),
+                            static_cast<uint32_t>(png.size()));
+        }
+        if (p) GlobalUnlock(sm.hGlobal);
+        ReleaseStgMedium(&sm);
+      }
     }
   }
 
@@ -419,6 +448,11 @@ namespace neui_detail
       if (UINT cf_html = clipboard_cf_html_format())
         probe(cf_html, "text/html");
       probe(CF_HDROP, "text/uri-list");
+      // CF_DIBV5 / CF_DIB advertise as image/png (the framework re-encodes
+      // on DROP via dib_bytes_to_png_bytes_w32). Native shells set only
+      // these formats for bitmap drags.
+      probe(CF_DIBV5, "image/png");
+      probe(CF_DIB,   "image/png");
 
       IEnumFORMATETC* en = nullptr;
       if (obj->EnumFormatEtc(DATADIR_GET, &en) == S_OK && en) {

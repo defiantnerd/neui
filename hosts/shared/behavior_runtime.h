@@ -416,8 +416,18 @@ namespace neui_detail
               int v = ctx.bag->get_int(H->drag_preview_key, 0);
               if (v != 0) preview_id = static_cast<uint32_t>(v);
             }
-            ctx.begin_drag(ctx.host_data, item, H->allowed_actions,
-                            preview_id, H->drag_hot_x, H->drag_hot_y);
+            uint32_t action = ctx.begin_drag(ctx.host_data, item,
+                                              H->allowed_actions,
+                                              preview_id,
+                                              H->drag_hot_x, H->drag_hot_y);
+            if (ctx.bag && !H->result_attr.empty()) {
+              ctx.bag->set_int(H->result_attr, static_cast<int>(action));
+              if (ctx.emit_attr_changed) {
+                ctx.emit_attr_changed(ctx.host_data, H->result_attr.c_str(),
+                                       static_cast<float>(action));
+              }
+              if (ctx.invalidate) ctx.invalidate(ctx.host_data);
+            }
           }
           return true;
         }

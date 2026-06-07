@@ -18,6 +18,7 @@
 #include "../clipboard_item.h"
 #include "clipboard_format_html_win32.h"
 #include "clipboard_format_urilist_win32.h"
+#include "clipboard_format_png_win32.h"
 
 // Win32 system-clipboard helpers. Header-only / `inline` so multiple host
 // static libs can include them without ODR violations.
@@ -185,6 +186,22 @@ namespace neui_detail
         return;
       }
 
+      // ---- image/png -> CF_DIBV5 (+ keep as registered MIME) ----
+      // Publish both: native shells read CF_DIBV5; neui apps round-trip
+      // the original PNG bytes verbatim through the registered MIME.
+      if (mime == "image/png") {
+        auto dib = png_bytes_to_dibv5_bytes_w32(
+          bytes.data(), static_cast<uint32_t>(bytes.size()));
+        if (!dib.empty()) {
+          HGLOBAL hg = clipboard_make_global_bytes_win32(dib.data(), dib.size());
+          if (hg) {
+            if (SetClipboardData(CF_DIBV5, hg)) any = true;
+            else                                GlobalFree(hg);
+          }
+        }
+        // Fall through to also publish under the MIME name.
+      }
+
       // ---- arbitrary MIME -> RegisterClipboardFormatA(mime) ----
       UINT cf = RegisterClipboardFormatA(mime.c_str());
       if (!cf) return;
@@ -251,6 +268,32 @@ namespace neui_detail
         item.set_format("text/uri-list", bytes.data(),
                         static_cast<uint32_t>(bytes.size()));
         any = true;
+      }
+    }
+
+    // ---- CF_DIBV5 / CF_DIB -> image/png ----
+    // Prefer CF_DIBV5 (more header info, alpha mask) and only fall back
+    // to CF_DIB when V5 is absent. Skip if a previous registered MIME
+    // pass already populated image/png (i.e. another neui app wrote it
+    // verbatim, in which case the PNG bytes are higher fidelity than the
+    // DIB->PNG re-encode would be).
+    if (!item.has_format("image/png")) {
+      HANDLE h = GetClipboardData(CF_DIBV5);
+      if (!h) h = GetClipboardData(CF_DIB);
+      if (h) {
+        SIZE_T sz = GlobalSize(h);
+        auto*  p  = GlobalLock(h);
+        if (p && sz > 0) {
+          auto png = dib_bytes_to_png_bytes_w32(
+            static_cast<const uint8_t*>(p),
+            static_cast<uint32_t>(sz));
+          if (!png.empty()) {
+            item.set_format("image/png", png.data(),
+                            static_cast<uint32_t>(png.size()));
+            any = true;
+          }
+        }
+        if (p) GlobalUnlock(h);
       }
     }
 

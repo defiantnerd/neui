@@ -5,6 +5,8 @@
 #import <AppKit/AppKit.h>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "../clipboard_item.h"
@@ -35,6 +37,72 @@ namespace neui_detail
   NSDragOperation  allowedOps;  // mask from the client
 }
 @end
+
+// Provider delegate retained by NSPasteboardItem.setDataProvider:. Holds a
+// snapshot of (mime, provider, userdata) tuples taken at registration
+// time. AppKit keeps the delegate alive for the lifetime of the
+// pasteboard / drag session and fires
+// pasteboard:item:provideDataForType: when something asks for one of the
+// registered types. The snapshot model avoids retaining a pointer to the
+// source DataItem - safe even when the DataItem is released right after
+// the registration call returns (the clipboard case).
+@interface NEUIDataProviderDelegate : NSObject<NSPasteboardItemDataProvider>
+- (void)addMapping:(NSString*)type
+              mime:(const std::string&)mime
+          provider:(neui_detail::DataProviderFn)provider
+          userdata:(void*)userdata;
+@end
+#ifdef NEUI_DND_SOURCE_MACOS_IMPLEMENTATION
+@implementation NEUIDataProviderDelegate
+{
+  // ivar: heap-allocated map mime -> (provider, userdata). The pasteboard
+  // type the OS hands back to us in provideDataForType: is the same string
+  // we registered with setDataProvider: (built via stringWithUTF8String
+  // from the MIME), so its UTF8String is a key into this map.
+  std::unordered_map<std::string,
+                      std::pair<neui_detail::DataProviderFn, void*>>* _mappings;
+}
+- (instancetype)init
+{
+  if ((self = [super init])) {
+    _mappings = new std::unordered_map<std::string,
+                                         std::pair<neui_detail::DataProviderFn, void*>>();
+  }
+  return self;
+}
+- (void)addMapping:(NSString*)type
+              mime:(const std::string&)mime
+          provider:(neui_detail::DataProviderFn)provider
+          userdata:(void*)userdata
+{
+  (void)type;
+  if (_mappings) (*_mappings)[mime] = std::make_pair(provider, userdata);
+}
+- (void)dealloc
+{
+  delete _mappings;
+}
+- (void)pasteboard:(NSPasteboard*)pb
+              item:(NSPasteboardItem*)item
+provideDataForType:(NSPasteboardType)type
+{
+  (void)pb;
+  if (!_mappings || !type) return;
+  const char* c = [type UTF8String];
+  if (!c) return;
+  auto it = _mappings->find(std::string(c));
+  if (it == _mappings->end()) return;
+  auto  provider = it->second.first;
+  void* userdata = it->second.second;
+  uint32_t size = 0;
+  const uint8_t* p = provider ? provider(userdata, c, &size) : nullptr;
+  if (p && size > 0) {
+    NSData* d = [NSData dataWithBytes:p length:size];
+    if (d) [item setData:d forType:type];
+  }
+}
+@end
+#endif // NEUI_DND_SOURCE_MACOS_IMPLEMENTATION
 
 // This header is included by both the native (hosts/macos) and xpl
 // (hosts/crossplatform) macOS hosts, which co-link in every example binary.
@@ -177,12 +245,34 @@ namespace neui_detail
     NSMutableDictionary<NSPasteboardType, id>* shared_payloads =
       [NSMutableDictionary dictionary];
 
+    // Lazy-MIME registrations (arbitrary MIMEs only - built-in MIMEs always
+    // materialise eagerly because the OS-side transformations need the
+    // bytes). Held off shared_payloads so AppKit gets a setDataProvider:
+    // call instead of setData:. The pasteboard type is built fresh from
+    // the MIME string at stamp time so the C++ vector stays free of
+    // Obj-C-pointer members (ARC + std::vector aggregate semantics are a
+    // known footgun area).
+    struct LazyMime { std::string mime;
+                       DataProviderFn provider;
+                       void* userdata; };
+    std::vector<LazyMime> lazy_mimes;
+
     // text/uri-list: emit one NSDraggingItem per URL.
     std::vector<NSURL*> uri_urls;
 
-    item.for_each_format([&](const std::string& mime,
-                              const std::vector<uint8_t>& bytes) {
+    auto fetch_bytes = [&](const std::string& mime) {
+      std::vector<uint8_t> v;
+      int n = item.get_format(mime, nullptr, 0);
+      if (n > 0) {
+        v.resize(static_cast<size_t>(n));
+        item.get_format(mime, v.data(), n);
+      }
+      return v;
+    };
+
+    item.for_each_mime([&](const std::string& mime) {
       if (mime == "text/plain;charset=utf-8" || mime == "text/plain") {
+        auto bytes = fetch_bytes(mime);
         uint32_t n = static_cast<uint32_t>(bytes.size());
         if (n > 0 && bytes[n - 1] == 0) --n;
         NSString* s = [[NSString alloc] initWithBytes:bytes.data()
@@ -192,11 +282,13 @@ namespace neui_detail
         return;
       }
       if (mime == "text/html") {
+        auto bytes = fetch_bytes(mime);
         NSData* d = [NSData dataWithBytes:bytes.data() length:bytes.size()];
         if (d) shared_payloads[NSPasteboardTypeHTML] = d;
         return;
       }
       if (mime == "text/uri-list") {
+        auto bytes = fetch_bytes(mime);
         const char* p = reinterpret_cast<const char*>(bytes.data());
         size_t len = bytes.size();
         size_t i = 0;
@@ -220,13 +312,48 @@ namespace neui_detail
         }
         return;
       }
-      // Arbitrary MIME passthrough.
+      // Arbitrary MIME: eager-pass-through unless registered as a lazy
+      // provider. Lazy entries land in lazy_mimes and ride
+      // setDataProvider: on every emitted NSPasteboardItem.
+      DataProviderFn provider = nullptr;
+      void*          userdata = nullptr;
+      if (item.get_lazy_provider(mime, &provider, &userdata)) {
+        lazy_mimes.push_back({ mime, provider, userdata });
+        return;
+      }
       NSString* t = [NSString stringWithUTF8String:mime.c_str()];
-      if (t) {
-        NSData* d = [NSData dataWithBytes:bytes.data() length:bytes.size()];
-        if (d) shared_payloads[t] = d;
+      if (!t) return;
+      auto bytes = fetch_bytes(mime);
+      NSData* d = [NSData dataWithBytes:bytes.data() length:bytes.size()];
+      if (!d) return;
+      shared_payloads[t] = d;
+      // image/png: also stamp under NSPasteboardTypePNG so native macOS
+      // receivers (Preview, Photos, Mail) see the image. Same bytes -
+      // PNG is the native macOS bitmap format.
+      if (mime == "image/png") {
+        shared_payloads[NSPasteboardTypePNG] = d;
       }
     });
+
+    // Build a single shared delegate + the parallel NSString* types array.
+    // The types array is an NSArray (ARC-owned), keeping it disjoint from
+    // the C++ lazy_mimes vector. AppKit retains the delegate via
+    // setDataProvider:.
+    NEUIDataProviderDelegate* lazy_delegate = nil;
+    NSMutableArray<NSPasteboardType>* lazy_types = nil;
+    if (!lazy_mimes.empty()) {
+      lazy_delegate = [[NEUIDataProviderDelegate alloc] init];
+      lazy_types    = [NSMutableArray array];
+      for (auto& lm : lazy_mimes) {
+        NSString* t = [NSString stringWithUTF8String:lm.mime.c_str()];
+        if (!t) continue;
+        [lazy_delegate addMapping:t
+                              mime:lm.mime
+                          provider:lm.provider
+                          userdata:lm.userdata];
+        [lazy_types addObject:t];
+      }
+    }
 
     auto stamp_shared = [&](NSPasteboardItem* pbitem) {
       for (NSPasteboardType type in shared_payloads) {
@@ -235,6 +362,9 @@ namespace neui_detail
           [pbitem setString:(NSString*)val forType:type];
         else
           [pbitem setData:(NSData*)val forType:type];
+      }
+      if (lazy_delegate && lazy_types && [lazy_types count] > 0) {
+        [pbitem setDataProvider:lazy_delegate forTypes:lazy_types];
       }
     };
 

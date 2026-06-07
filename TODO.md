@@ -12,8 +12,13 @@ mouse + keyboard, `set_focus` + Tab traversal (creation order), layout
 (`set_pos` / `set_size` / `hide` / tree traversal), blocking
 `popup_menu` + KNOB right-click reset, routed commands +
 `tree->set_menu_cmd`, clipboard text + item API, `NEUI_W_IMAGE` via the
-shared asset manager, enabled/disabled, and fonts (cg backend font
-stack + native `NSFont`). Two small macOS-only divergences remain:
+shared asset manager, enabled/disabled (including macOS via
+`apply_enabled_native_macos`), fonts (cg backend font stack + native
+`NSFont`), drag-source + drop-target with custom preview image,
+per-widget DnD hit-testing in software so child widgets receive ENTER /
+MOVE / LEAVE / DROP on every host, native blocking modal dialogs.
+
+Two small macOS-only divergences remain:
 
 - **KNOB is not a keyboard tab-stop on macOS.** On win32 a KNOB carries
   `WS_TABSTOP`; on macOS its `NSView` refuses first responder, so Tab
@@ -27,8 +32,8 @@ stack + native `NSFont`). Two small macOS-only divergences remain:
   `WS_TABSTOP`. Hand-roll Tab (like the xpl host's `focus_next`) if
   fully deterministic cross-platform traversal is required.
 
-(Remaining cross-platform gaps below - native blocking modal, custom
-clipboard formats, Tier B accessibility - are deferred symmetrically on
+(Remaining cross-platform gaps below - Tier B accessibility, image
+clipboard formats, lazy DnD promises - are deferred symmetrically on
 *both* hosts, not macOS-only.)
 
 ## Audio-plugin / drawable framework
@@ -47,16 +52,17 @@ is a real initiative, not trivial; together they form one programme.
   a consumer of the named-slot system + introspection above; not
   worth designing the slot system without them, not worth shipping
   them without it. Build the abstraction alongside the first one.
-- **Compound layer kinds beyond v1.** `rect` / `path` / `group` (the
-  last unlocks nested transform scopes for a tree of layers).
-  Format specs in templates (`{key:.2f}`). Asset-layer `tint`
-  (ARGB multiplier) reserved in docs but not yet wired through the
-  backends.
+- **Compound layer kinds beyond v1.** `text` / `asset` / `rect` /
+  `path` shipped. Remaining: `group` (nested transform scopes for a
+  tree of layers), cubic/quad bezier on `path` (needs painter API
+  extension first), template format specs (`{key:.2f}` reserved but
+  parser not implemented - `include/neui/d/compound.h:36`), SVG-mini
+  string form for `set_path`.
 - **Behavior follow-ups.** Declarative interactivity v1 shipped as
   `NEUI_ASSET_KIND_BEHAVIOR` (drag V/H/rotational/biaxial, wheel,
-  key step, click toggle/cycle, context reset) - one asset bundles
-  multiple handlers + reuses compound's 9-pt anchor system for
-  per-region hit zones. Open extensions:
+  key step, click toggle/cycle, context reset, drag-source) - one
+  asset bundles multiple handlers + reuses compound's 9-pt anchor
+  system for per-region hit zones. Open extensions:
   - **Detent / plateau modifier** on drag handlers. `set_string(h,
     "detents", "0.5:0.02:0.04")` (`value:pull_radius:release`); sticky
     values that resist near specific points without quantizing
@@ -74,12 +80,6 @@ is a real initiative, not trivial; together they form one programme.
     though it works on drag + key. Add modifier bits to the wheel
     event payload (or factor wheel through the mouse struct) before
     wiring the fine path in `behavior_runtime.h`.
-
-## Widgets
-
-- **Native blocking modal** (Cocoa `runModalForWindow`, Win32
-  `DialogBoxIndirect`). Current non-blocking modal matches the
-  event-loop shape; revisit only if a real use case demands it.
 
 ## Grid sort follow-ups
 
@@ -100,24 +100,32 @@ extensions are deferred:
 ## Clipboard / drag&drop
 
 `text/plain`, `text/html`, `text/uri-list`, and arbitrary MIME passthrough
-are wired for both clipboard and drag&drop drop-target. See
-`plans/clipboard-and-dnd.md` for the full handoff. Remaining:
+are wired for both clipboard and drag&drop (drop-target **and**
+drag-source on all three hosts, with custom drag-preview image on
+macOS + Win32). See `plans/clipboard-and-dnd.md` and
+`plans/dnd-drag-source-fixes.md` for the handoff. Remaining:
 
-- **Image formats.** `image/png` (or any bitmap MIME) is not yet on the
-  clipboard / DnD path. Needs Win32 `CF_DIBV5` ↔ PNG decode and macOS
-  `NSPasteboardTypePNG` / `NSPasteboardTypeTIFF` wrap. The asset API
-  already loads PNG bytes (`hosts/shared/win32/image_loader_win32.h`,
-  `hosts/shared/macos/image_loader_macos.h`) - the clipboard converters
-  can share that decode path.
-- **Drag source.** Drop-target side ships on all three hosts; the
-  next phase is letting widgets initiate drags from inside the app
-  (Win32 `DoDragDrop` + `IDataObject` wrapping a `DataItem`, macOS
-  `beginDraggingSessionWithItems:` + `<NSDraggingSource>`). API shape
-  will likely be `dnd->begin_drag(session, source_widget, payload,
-  allowed_actions)` plus (deferred) a behavior-asset handler kind.
-- **Per-child-widget DnD on macOS native.** `NEUINativeContentView`
-  dispatches drops at frame level; per-painted-view `<NSDraggingDestination>`
-  opt-in is deferred. Win32 native + xpl already walk the widget tree.
+- **`image/tiff` (and other bitmap MIMEs).** `image/png` ships on all
+  three hosts (Win32 publishes as `CF_DIBV5` alongside the registered
+  MIME via WIC; macOS stamps `NSPasteboardTypePNG`); TIFF / JPEG /
+  WebP would follow the same shape but are deferred until a concrete
+  need surfaces. Helpers live in
+  `hosts/shared/win32/clipboard_format_png_win32.h`.
+- **File-promise interop on drag-source.** The generic
+  `item_set_format_callback` provider lands lazily for arbitrary MIMEs
+  on Win32 `IDataObject::GetData` and macOS `NSPasteboardItemDataProvider`,
+  but Explorer / Outlook / Finder look specifically for
+  `CFSTR_FILECONTENTS` + `CFSTR_FILEDESCRIPTOR` (Win32) and
+  `NSFilePromiseProvider` (macOS). These map a lazy MIME to "promise of
+  a file on disk" semantics. Wire on top of the generic provider so
+  file-export-on-drop interops with native shells.
+- **True deferred-render on clipboard write.** Lazy MIMEs on
+  `clipboard->write` materialise at write time today (one provider
+  invocation, bytes eagerly placed on the OS clipboard). Lifting to
+  WM_RENDERFORMAT (needs a persistent owner HWND) on Win32 and
+  `NSPasteboardItem` setDataProvider: on macOS would defer encoding
+  until the receiver actually reads the clipboard. Deferred until a
+  real use case justifies the WM_RENDERFORMAT plumbing.
 
 ## Accessibility / IME
 
@@ -132,6 +140,8 @@ are wired for both clipboard and drag&drop drop-target. See
   requirement, (b) Microsoft ships first-class CMake support for
   Windows App SDK, or (c) a user specifically asks for Fluent
   Design.
+- **WASM host.** WebAssembly target via Canvas-2D backend - see
+  `plans/wasm-host.md`. Deferred; phased path documented.
 - **Multi-level redo on win32 native.** `NEUI_CMD_REDO` maps to
   `EM_UNDO` (single-level toggle). Clients that need multi-level
   redo should select the xpl host's text widgets (full `EditHistory`).
@@ -158,10 +168,14 @@ are wired for both clipboard and drag&drop drop-target. See
 
 | File | Status |
 |---|---|
-| `plans/painter-and-asset-api.md` | Shipped; kept for the design-decision rationale. |
+| `plans/painter-and-asset-api.md` | Shipped (curated `neui_painter_t` + asset API). |
+| `plans/render-to-surface.md` | Shipped (`NEUI_ASSET_KIND_SURFACE` + `paint_surface`). |
+| `plans/backend-tint-effect.md` | Shipped (D2D `CLSID_D2D1Tint` + CG mask-clip + multiply). |
 | `plans/grid-macos-port.md` | Shipped (GRID macOS native port). |
 | `plans/grid-sorting.md` | Shipped (multi-column sort + per-column kind/sortable + visual nav). |
-| `plans/clipboard-and-dnd.md` | Shipped (unified data-item, multi-format clipboard, DnD drop targets). Drag source is the next phase. |
+| `plans/clipboard-and-dnd.md` | Shipped (unified data-item, multi-format clipboard, DnD drop targets). |
+| `plans/dnd-drag-source-fixes.md` | Shipped (drag-source + custom preview on all three hosts). |
 | `plans/winui3-host.md` | Feasibility analysis; deferred indefinitely. |
 | `plans/wasm-host.md` | Feasibility analysis; deferred. |
 | `plans/how-to-port.md` | Reference playbook for new platform ports. |
+| `plans/crossplatform-host-sketch.md` | Archival - superseded by the shipped xpl host. |

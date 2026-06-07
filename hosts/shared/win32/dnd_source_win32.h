@@ -20,6 +20,7 @@
 #include "../clipboard_item.h"
 #include "clipboard_format_html_win32.h"
 #include "clipboard_format_urilist_win32.h"
+#include "clipboard_format_png_win32.h"
 #include "dnd_target_win32.h"   // dnd_ensure_ole_initialized + dnd_action_to_dropeffect
 
 // Drag-source side of NEUI_API_DND. Mirror of dnd_target_win32.h.
@@ -34,15 +35,28 @@ namespace neui_detail
 {
   // -------------------------------------------------------------------------
   // Pre-encoded format entry: one CLIPFORMAT + its OS-native byte payload.
-
+  //
+  // Lazy entries (only legal for arbitrary registered MIMEs - text/plain,
+  // text/html and text/uri-list are always materialised eagerly because
+  // they have transformations that depend on the bytes themselves, e.g.
+  // the file-vs-non-file URI fallback) carry `materialised = false` and a
+  // pointer to the source DataItem + mime; bytes are produced on the first
+  // GetData call for this CF_*. The cached result lives on the
+  // DataObjectImpl for the rest of the drag.
   struct DragSourceFormat
   {
     CLIPFORMAT            cf;
-    std::vector<uint8_t>  bytes;        // payload for HGLOBAL
+    std::vector<uint8_t>  bytes;        // payload for HGLOBAL (filled lazily for lazy entries)
     bool                  is_hdrop = false;  // CF_HDROP needs a special HGLOBAL layout
+    bool                  materialised = true;
+    const DataItem*       src_item = nullptr;
+    std::string           src_mime;
   };
 
   // Build a snapshot of every MIME on `item` as the matching CF_* + bytes.
+  // Eager MIMEs are encoded immediately (today's path); lazy registered
+  // MIMEs go in with materialised=false so DataObjectImpl::GetData encodes
+  // them on demand.
   inline std::vector<DragSourceFormat>
   drag_source_snapshot(const DataItem& item)
   {
@@ -74,11 +88,27 @@ namespace neui_detail
     // fallback after the loop unless an explicit text payload claimed it.
     std::vector<std::string> other_uris;
 
-    item.for_each_format([&](const std::string& mime,
-                              const std::vector<uint8_t>& bytes) {
+    // Walk MIME names without forcing materialisation. The built-in
+    // transformations (text/plain, text/html, text/uri-list) pull eagerly
+    // through get_format (firing the provider once, cached); arbitrary
+    // MIMEs decide eager-vs-lazy via is_lazy_format.
+    item.for_each_mime([&](const std::string& mime) {
+      // For eager fetch the bytes once via get_format. Built-in MIMEs use
+      // these bytes directly; arbitrary MIMEs only consult them when
+      // !is_lazy_format(mime).
+      auto fetch_bytes = [&]() {
+        std::vector<uint8_t> v;
+        int n = item.get_format(mime, nullptr, 0);
+        if (n > 0) {
+          v.resize(static_cast<size_t>(n));
+          item.get_format(mime, v.data(), n);
+        }
+        return v;
+      };
       // text/plain;charset=utf-8 -> CF_UNICODETEXT
       if (mime == "text/plain;charset=utf-8" || mime == "text/plain") {
         if (has_cf(CF_UNICODETEXT)) return;  // first wins
+        auto bytes = fetch_bytes();
         // bytes are UTF-8 (with or without trailing null).
         const char* p = reinterpret_cast<const char*>(bytes.data());
         int blen = static_cast<int>(bytes.size());
@@ -91,6 +121,7 @@ namespace neui_detail
       if (mime == "text/html") {
         UINT cf = clipboard_cf_html_format();
         if (!cf) return;
+        auto bytes = fetch_bytes();
         auto encoded = clipboard_encode_cf_html(bytes.data(),
                                                  static_cast<uint32_t>(bytes.size()));
         DragSourceFormat f;
@@ -106,6 +137,7 @@ namespace neui_detail
         // shape). Pre-render the DROPFILES bytes here and mark this
         // entry so GetData allocates a movable HGLOBAL of the same
         // layout (the same bytes work either way).
+        auto bytes = fetch_bytes();
         auto uris = urilist_parse(bytes.data(), bytes.size());
         std::vector<std::wstring> paths;
         paths.reserve(uris.size());
@@ -141,15 +173,43 @@ namespace neui_detail
         return;
       }
 
+      // image/png -> CF_DIBV5 (plus the registered MIME below). Native
+      // Windows apps speak CF_DIBV5; the registered MIME is kept for
+      // neui-to-neui round-trip fidelity. Lazy PNG is materialised here
+      // (DIB conversion needs the bytes); the registered-MIME entry can
+      // still ride the lazy path.
+      if (mime == "image/png") {
+        auto pngs = fetch_bytes();
+        if (!pngs.empty()) {
+          auto dib = png_bytes_to_dibv5_bytes_w32(
+            pngs.data(), static_cast<uint32_t>(pngs.size()));
+          if (!dib.empty()) {
+            DragSourceFormat fd;
+            fd.cf    = CF_DIBV5;
+            fd.bytes = std::move(dib);
+            out.push_back(std::move(fd));
+          }
+        }
+        // Fall through to publish under the MIME name too.
+      }
+
       // Anything else: register the MIME as a clipboard format name and
       // carry the bytes through unchanged. Matches the drop-target
-      // enumeration on the receiving side.
+      // enumeration on the receiving side. Lazy entries postpone the byte
+      // copy until GetData fires.
       if (mime.find('/') == std::string::npos) return;
       UINT cf = RegisterClipboardFormatA(mime.c_str());
       if (!cf) return;
       DragSourceFormat f;
       f.cf    = static_cast<CLIPFORMAT>(cf);
-      f.bytes = bytes;
+      if (item.is_lazy_format(mime)) {
+        f.materialised = false;
+        f.src_item     = &item;
+        f.src_mime     = mime;
+      } else {
+        f.bytes        = fetch_bytes();
+        f.materialised = true;
+      }
       out.push_back(std::move(f));
     });
 
@@ -275,8 +335,21 @@ namespace neui_detail
       std::memset(pMedium, 0, sizeof(*pMedium));
       if (pFormatEtcIn->dwAspect != DVASPECT_CONTENT) return DV_E_DVASPECT;
 
-      const DragSourceFormat* f = find(pFormatEtcIn->cfFormat);
+      // Mutable lookup so lazy entries can cache their bytes in place. The
+      // shared snapshot vector stays valid for the rest of the drag.
+      DragSourceFormat* f = find_mut(pFormatEtcIn->cfFormat);
       if (!f) return DV_E_FORMATETC;
+      if (!f->materialised) {
+        if (f->src_item) {
+          int n = f->src_item->get_format(f->src_mime, nullptr, 0);
+          if (n > 0) {
+            f->bytes.resize(static_cast<size_t>(n));
+            f->src_item->get_format(f->src_mime, f->bytes.data(), n);
+          }
+        }
+        f->materialised = true;
+      }
+      if (f->bytes.empty()) return DV_E_FORMATETC;
 
       // The Shell's IDragSourceHelper writes some of its bookkeeping
       // formats via TYMED_ISTREAM and reads them back the same way; the
@@ -409,6 +482,11 @@ namespace neui_detail
 
   private:
     const DragSourceFormat* find(CLIPFORMAT cf) const
+    {
+      for (auto& f : _formats) if (f.cf == cf) return &f;
+      return nullptr;
+    }
+    DragSourceFormat* find_mut(CLIPFORMAT cf)
     {
       for (auto& f : _formats) if (f.cf == cf) return &f;
       return nullptr;

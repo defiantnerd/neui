@@ -39,6 +39,13 @@ extern "C" {
 #define NEUI_MIME_TEXT      "text/plain;charset=utf-8"
 #define NEUI_MIME_HTML      "text/html"
 #define NEUI_MIME_URI_LIST  "text/uri-list"
+// Image MIMEs. image/png round-trips between neui apps natively (registered
+// MIME bytes); on Win32 it's also published as CF_DIBV5 so native shells
+// (Explorer, Paint, Outlook) see the same image as a 32bpp BGRA bitmap, and
+// CF_DIBV5 read from external apps surfaces back as image/png. On macOS
+// image/png maps to NSPasteboardTypePNG with no conversion (PNG bytes are
+// the native format).
+#define NEUI_MIME_PNG       "image/png"
 
 // Backwards-compatible alias for the original text macro.
 #define NEUI_CLIPBOARD_MIME_TEXT  NEUI_MIME_TEXT
@@ -50,6 +57,26 @@ extern "C" {
 typedef struct neui_data_item { uint32_t id; } neui_data_item_t;
 #endif
 static const neui_data_item_t neui_data_item_none = { UINT32_MAX };
+
+// Lazy-data provider callback. Registered on a data item via
+// item_set_format_callback; the framework invokes it when something
+// (drag-drop receiver, clipboard reader, or the client itself via
+// item_get_format) actually asks for the bytes. The callback returns a
+// pointer to its bytes and writes the byte count to *out_size; the
+// framework copies the bytes immediately into its own buffer, so the
+// pointer only has to remain valid for the duration of the call. Returning
+// NULL or 0 = "no bytes available" (same effect as the format being absent).
+//
+// Lifetime: the provider must outlive every framework call that might
+// invoke it. The framework caches the first non-empty result on the data
+// item, so the provider is typically called at most once per format per
+// item; on macOS DnD it's called by AppKit during the dragging session, on
+// Win32 DnD by IDataObject::GetData inside DoDragDrop, on clipboard write
+// during the write() call itself.
+typedef const uint8_t* (NEUI_ABI *neui_data_provider_t)(
+    void* userdata,
+    const char* mime,
+    uint32_t* out_size);
 
 typedef struct neui_clipboard_api {
   uint32_t neui_version;
@@ -113,6 +140,24 @@ typedef struct neui_clipboard_api {
   bool (NEUI_ABI *item_has_format)(neui_session_t session,
                                     neui_data_item_t item,
                                     const char* mime);
+
+  // Register a lazy-data callback for the given format. The bytes are
+  // produced by the provider on first read (see neui_data_provider_t).
+  // Calling item_set_format on the same mime later switches the entry
+  // back to eager bytes. Returns 1 on success, 0 on bad item / null mime
+  // / null provider.
+  //
+  // Use this when the bytes are expensive to compute (PNG encode, file
+  // bundling) and the receiver may not actually ask for that format. On
+  // DnD source the framework registers the format with the OS as a
+  // deferred-render entry so other apps see it in the format list without
+  // forcing materialisation; the provider only fires if the receiver
+  // requests those bytes.
+  int (NEUI_ABI *item_set_format_callback)(neui_session_t session,
+                                            neui_data_item_t item,
+                                            const char* mime,
+                                            neui_data_provider_t provider,
+                                            void* userdata);
 } neui_clipboard_api_t;
 
 #ifdef __cplusplus

@@ -1588,6 +1588,20 @@ namespace xpl_host
     return it && it->has_format(mime);
   }
 
+  static int NEUI_ABI cb_item_set_format_callback(neui_session_t session,
+                                                   neui_data_item_t item,
+                                                   const char* mime,
+                                                   neui_data_provider_t provider,
+                                                   void* userdata)
+  {
+    auto* s = get_session(session);
+    if (!s || !mime || !provider) return 0;
+    auto* it = s->_data_items.get(item.id);
+    if (!it) return 0;
+    it->set_format_provider(mime, provider, userdata);
+    return 1;
+  }
+
   neui_clipboard_api_t clipboard_api = {
     NEUI_VERSION,
     cb_set_text,
@@ -1600,6 +1614,7 @@ namespace xpl_host
     cb_item_set_format,
     cb_item_get_format,
     cb_item_has_format,
+    cb_item_set_format_callback,
   };
 
   // -------------------------------------------------------------------------
