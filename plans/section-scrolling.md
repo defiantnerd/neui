@@ -335,12 +335,99 @@ All previous per-child `SetWindowRgn` plumbing (the clip-cache fields,
 reverted to just returning scroll_x / scroll_y (no body_x / body_y
 term) because body_hwnd's own frame.origin handles the band offset.
 
-## Deferred follow-up: macOS native inner body view
+## Follow-up shipped: macOS native inner body view (2026-06-08)
 
-macOS still has the same chip / gutter overpaint and (potential)
-scroll-flicker issues that the Win32 host had before the inner-body
-refactor above. The same architectural fix applies; the only
-differences are AppKit semantics for the body view.
+Shipped. macOS now mirrors the Win32 inner-body refactor: a scrolling
+SECTION owns an inner `NEUISectionBodyView` (a subview of the section
+painted view, positioned at the body rect), and the section's tree
+children parent to it instead of the section view. This fixes the chip /
+gutter overpaint (children clip to the body, no longer bleed over the
+title-chip band or the right-edge scrollbar gutter) and aligns the
+body-local child-coord contract with Win32 (the band offset lives in the
+body view's own `frame.origin`).
+
+Two macOS-specific deviations from the Win32 reference, both verified:
+
+1. **The body view does NOT paint its own background.** An opaque
+   `NSRectFill` in its `drawRect:` broke the non-layer-backed sibling
+   rendering of the section painted view + the toolbar controls (they
+   stopped drawing entirely). The body view stays a transparent
+   structural container; the section's own paint (`paint_section`) fills
+   the body bg underneath and shows through. (`section_resolve_bg_argb`
+   was extracted so the section paint + - if ever needed - the body view
+   share the bg resolution.)
+2. **Subview clipping is explicit.** NSView does NOT clip subviews to
+   bounds by default (the original plan assumption was wrong), so a
+   scrolled child spilled over the band + out of the section. The body
+   view sets `wantsLayer = YES` + `layer.masksToBounds = YES` for a
+   portable clip (`clipsToBounds` is macOS 14+ only). Layer-backing is
+   safe here precisely because the body view doesn't draw - the earlier
+   regression was the opaque fill, not the layer. **The section painted
+   view itself also clips** (same `wantsLayer`+`masksToBounds`) for
+   *every* SECTION, scrolling or not: win32 gets this free from HWND
+   parenting, but on macOS a non-scrolling section - or one switched to
+   `scroll_mode="none"` at runtime - would otherwise let overflowing
+   children spill outside the section rect.
+3. **The inner body container is created lazily on first scroll and KEPT
+   for the section's lifetime - including after a flip back to `"none"`.**
+   Originally the body view was destroyed on a flip-to-`"none"` and the
+   children re-parented to the section painted view; that dropped them
+   from body-local coords (below the chip band, via the body view's own
+   `frame.origin`) to section-local coords, so they jumped up *into* the
+   chip band and overpainted it (and the same on win32). Keeping the body
+   view means children stay body-local + clipped in every mode. A section
+   created `"none"` and never scrolled gets no body view (children parent
+   to the section view directly, section-local - matching the documented
+   non-scrolling contract). Switching `scroll_mode` resets the scroll
+   offset to 0,0 (for `"none"` the destroyed `SectionScrollState` makes the
+   reposition use offset 0; an explicit reset covers scroll->scroll
+   transitions like vertical->both). The same keep-the-container fix was
+   mirrored on win32 (`section_body_hwnd` kept across flips;
+   `section_destroy_body_hwnd_w32` removed - the body HWND is torn down only
+   by the `DestroyWindow` cascade in `widget_destroy`).
+
+Impl (`hosts/macos/window.mm`): `NEUISectionBodyView` class +
+`section_create_body_view_macos` / `_destroy_body_view_macos` /
+`_reparent_children_macos` / `section_child_container_macos`;
+`create_native_for_widget` creates the body view for scrolling sections,
+`create_descendants_native` + `find_parent_content_view` route children
+through `section_child_container_macos`, `section_apply_layout_changes_macos`
+resizes it, `release_native_control_macos` releases it.
+`hosts/macos/widgets.mm`: the `NEUI_ATTR_SCROLL_MODE` setter creates the
+body view + reparents children the first time the section becomes
+scrollable, keeps it across later flips, and resets the scroll offset
+(mirror of the Win32 attr setter). `WidgetData::section_body_view`
+(`hosts/macos/host.h`) holds the retained view.
+
+Verified via `examples/section_scroll_example.cpp` (native macOS host):
+chip + toolbar intact, vertical / horizontal / both-axis scroll, the
+no-band `align="none"` + `scroll="both"` path, edge clamping, and
+clipping at both the band boundary and the scrollbar gutter.
+
+Also fixed here (was a pre-existing, section-unrelated macOS gap exposed
+by this example's "Regenerate" button): the macOS native host's
+`widget_create` did not realize native views for children added *after*
+`widget_show`, so dynamically-added widgets never appeared (the body
+stayed empty after Regenerate - same on the clean baseline). The win32
+host already had an immediate-creation path in `widget_create`; macOS
+only realized during `widget_show` -> `create_descendants_native`. Added
+`realize_widget_macos(Session*, idx)` (`hosts/macos/window.mm`) called
+from `Session::widget_create`: when `find_parent_content_view` finds a
+realized ancestor (i.e. the frame is already shown) it builds the NSView
+immediately via `create_native_for_widget`, re-lays-out the parent if it
+is a scrolling SECTION (so the new child positions at scroll-adjusted
+body-local coords + the scrollbar/content extent updates), and joins the
+frame's key-view loop when the new widget is a tab stop. Before
+`widget_show` there is no realized ancestor, so it is a no-op and the
+existing `create_descendants_native` path builds the view at show time
+(no double-creation). Verified: Regenerate repopulates + the new rows
+scroll / clip identically to the initial ones.
+
+### Original plan (superseded by the shipped impl above)
+
+The Win32 host had chip / gutter overpaint + scroll-flicker before its
+inner-body refactor; macOS had the same. The same architectural fix
+applies; the only differences are AppKit semantics for the body view.
 
 Reference impl on Win32: `hosts/win32/widgets.cpp` (`section_create_body_hwnd_w32`
 / `section_child_parent_hwnd_w32` / `section_reparent_children_w32` /

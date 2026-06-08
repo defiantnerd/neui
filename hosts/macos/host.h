@@ -137,6 +137,15 @@ namespace macos_host
     // for hit-testing, scrollbar drag, and kinetics.
     std::unique_ptr<neui_detail::SectionScrollState> section_scroll_state;
     neui_detail::SectionLayout                       section_last_layout{};
+
+    // Inner body view for a scrolling SECTION (NEUISectionBodyView*, retained
+    // via __bridge_retained). Sits at the section's body rect; the section's
+    // tree children parent to it rather than the section painted view, so
+    // AppKit's default subview clipping confines them to the body and they
+    // can't overpaint the title-chip band or scrollbar gutter. Null for
+    // non-scrolling sections (and every non-SECTION widget). Mirror of the
+    // win32 host's section_body_hwnd.
+    void*                                            section_body_view = nullptr;
   };
 
   class Session

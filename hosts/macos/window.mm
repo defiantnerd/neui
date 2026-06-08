@@ -73,6 +73,20 @@ namespace macos_host {
   void parent_scroll_offset_macos(Session* sess, uint32_t widget_index,
                                     int& out_x, int& out_y);
 
+  // Resolve the body-fill ARGB for a SECTION (NEUI_ATTR_BACKGROUND override or
+  // the direction-aware SECTION_BG_LIFT default). Shared by the section paint
+  // branch + the inner body view's drawRect.
+  uint32_t section_resolve_bg_argb(WidgetData& wd);
+
+  // Inner body view lifecycle for a scrolling SECTION. Mirror of the win32
+  // host's section_create_body_hwnd_w32 / _destroy / _reparent_children. The
+  // NEUISectionBodyView referenced here is declared just below alongside
+  // NEUINativePaintedView.
+  void section_create_body_view_macos(WidgetData& sec);
+  void section_destroy_body_view_macos(WidgetData& sec);
+  void section_reparent_children_macos(WidgetData& sec, bool to_body);
+  NSView* section_child_container_macos(const WidgetData& sec);
+
   // Painter draw_asset thunk - mirror of
   // hosts/win32/widgets.cpp::w32_painter_draw_asset_thunk. Resolves the
   // neui_asset_t through the session's MacOSAssetManager, lazy-uploads a
@@ -1085,6 +1099,35 @@ NSWindowStyleMask styles_for_appwindow()
 }
 @end
 
+// Inner body view for a scrolling SECTION. Positioned at the section's body
+// rect (below the title-chip band, inside the scrollbar gutter); the
+// section's tree children parent to this view so AppKit's default subview
+// clipping confines them to the body - they can no longer overpaint the chip
+// band or the scrollbar gutter, and the body-local child coords match the
+// win32 host's body_hwnd contract. isFlipped = YES matches the section view's
+// Y-down convention.
+//
+// Unlike the win32 body HWND, this view is a *transparent clipping container*
+// and does NOT paint its own background: the section's own painted view
+// (drawRect: SECTION branch -> paint_section) already fills the body rect with
+// the resolved bg, and that shows through here. An opaque NSRectFill in this
+// view's drawRect: disturbed the non-layer-backed sibling rendering of the
+// section + toolbar controls (they stopped drawing entirely), so the body
+// view stays purely structural - AppKit clips children to its bounds whether
+// or not it draws. Equivalent end result to the win32 body HWND minus the
+// self-fill.
+@interface NEUISectionBodyView : NSView
+{
+@public
+  uint32_t widget_id;  // the owning SECTION's widget id
+}
+@end
+
+@implementation NEUISectionBodyView
+- (BOOL)isFlipped { return YES; }
+- (BOOL)isOpaque  { return NO; }
+@end
+
 // KNOB drag tunables - mirror of the xpl host's KnobWidget constants
 // (hosts/crossplatform/host.cpp around the KnobWidget block).
 static constexpr float NEUI_KNOB_SWEEP_RAD   = 4.71238898f;  // 1.5*PI (270deg)
@@ -1434,16 +1477,7 @@ static float neui_snap_to_steps(float v, int steps)
     // newer appearances). When the lift saturates, the section becomes
     // invisible against the NSWindow background. Detect that and shade
     // down instead so the section reads as a depressed panel.
-    uint32_t bg;
-    if (wd->attrs && wd->attrs->has(NEUI_ATTR_BACKGROUND)) {
-      bg = (uint32_t)wd->attrs->get_int(NEUI_ATTR_BACKGROUND, 0);
-    } else {
-      uint32_t fbg    = neui_detail::color(neui_detail::ColorRole::frame_bg);
-      uint32_t lifted = neui_detail::shade(fbg,  neui_detail::SECTION_BG_LIFT);
-      if (lifted == fbg)
-        lifted = neui_detail::shade(fbg, -neui_detail::SECTION_BG_LIFT);
-      bg = lifted;
-    }
+    uint32_t bg = macos_host::section_resolve_bg_argb(*wd);
     const char* align = wd->attrs ? wd->attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
     uint32_t text_argb = neui_detail::color(neui_detail::ColorRole::text_primary);
     neui_detail::paint_section(backend, render_ctx,
@@ -2830,8 +2864,9 @@ namespace macos_host
       if (!s->_widgets.exists(p)) continue;
       auto& pw = s->_widgets[p];
       if (widget_is_native_container(pw) && pw.native_control) {
-        id obj = (__bridge id)pw.native_control;
-        if ([obj isKindOfClass:[NSView class]]) return (NSView*)obj;
+        // Scrolling section -> inner body view; non-scrolling -> section view.
+        NSView* container = section_child_container_macos(pw);
+        if (container) return container;
       }
       if (pw.native_window) {
         NSWindow* w = native_window_from(pw.native_window);
@@ -2872,6 +2907,11 @@ namespace macos_host
       if (wd.session && pv->render_ctx)
         wd.session->_asset_manager.release_context(pv->render_ctx,
                                                    neui_cg_backend::get_backend());
+      // Release the scrolling-section inner body view (a subview of pv). The
+      // section's tree children have already been torn down bottom-up by the
+      // time the section itself is released, so the body view has no live
+      // child subviews left. No-op for non-scrolling sections / non-sections.
+      section_destroy_body_view_macos(wd);
       [pv removeFromSuperview];
     } else if ([obj isKindOfClass:[NSView class]]) {
       [(NSView*)obj removeFromSuperview];
@@ -3189,6 +3229,23 @@ namespace macos_host
   // scroll position changes. Mirror of the win32 native helpers in
   // hosts/win32/widgets.cpp (parent_scroll_offset_w32 / ...).
 
+  // Resolve a SECTION's body-fill ARGB: explicit NEUI_ATTR_BACKGROUND wins,
+  // else the direction-aware SECTION_BG_LIFT default (lift frame_bg towards
+  // white, shade down instead when the lift saturates near-white system bg -
+  // see the drawRect: SECTION branch for the rationale). Shared by the
+  // section paint + the inner body view's drawRect: so they stay in lockstep.
+  uint32_t section_resolve_bg_argb(WidgetData& wd)
+  {
+    using neui_detail::ColorRole;
+    if (wd.attrs && wd.attrs->has(NEUI_ATTR_BACKGROUND))
+      return (uint32_t)wd.attrs->get_int(NEUI_ATTR_BACKGROUND, 0);
+    uint32_t fbg    = neui_detail::color(ColorRole::frame_bg);
+    uint32_t lifted = neui_detail::shade(fbg,  neui_detail::SECTION_BG_LIFT);
+    if (lifted == fbg)
+      lifted = neui_detail::shade(fbg, -neui_detail::SECTION_BG_LIFT);
+    return lifted;
+  }
+
   void section_refresh_scroll_state_macos(WidgetData& wd)
   {
     if (!wd.type || strcmp(wd.type, NEUI_W_SECTION) != 0) return;
@@ -3202,6 +3259,86 @@ namespace macos_host
       wd.section_scroll_state =
         std::make_unique<neui_detail::SectionScrollState>();
     wd.section_scroll_state->axis = axis;
+  }
+
+  // Create the section's inner body view at the body rect and add it as a
+  // subview of the section painted view. Children of a scrolling section
+  // parent to this view (see create_descendants_native / find_parent_content_view)
+  // so they clip to the body. Retained via __bridge_retained, released by
+  // section_destroy_body_view_macos. Mirror of section_create_body_hwnd_w32.
+  void section_create_body_view_macos(WidgetData& sec)
+  {
+    if (!sec.native_control || sec.section_body_view) return;
+    id sv = (__bridge id)sec.native_control;
+    if (![sv isKindOfClass:[NSView class]]) return;
+    section_compute_layout_macos(sec);
+    const auto& L = sec.section_last_layout;
+    NEUISectionBodyView* body = [[NEUISectionBodyView alloc]
+      initWithFrame:NSMakeRect(L.body_x, L.body_y,
+                                L.body_w > 0 ? L.body_w : 1,
+                                L.body_h > 0 ? L.body_h : 1)];
+    body->widget_id = sec.widget_id;
+    // NSView does NOT clip its subviews to bounds by default, so a scrolled
+    // child would spill over the chip band + out of the section entirely.
+    // Layer-backing + masksToBounds gives the clip portably (clipsToBounds is
+    // macOS 14+ only). The view stays transparent (no drawRect: fill), so the
+    // earlier opaque-fill sibling-rendering regression doesn't recur.
+    body.wantsLayer = YES;
+    body.layer.masksToBounds = YES;
+    [(NSView*)sv addSubview:body];
+    sec.section_body_view = (__bridge_retained void*)body;
+  }
+
+  void section_destroy_body_view_macos(WidgetData& sec)
+  {
+    if (!sec.section_body_view) return;
+    NSView* body = (__bridge_transfer NSView*)sec.section_body_view;
+    sec.section_body_view = nullptr;
+    [body removeFromSuperview];
+  }
+
+  // Re-parent every direct child NSView of `sec` between the section painted
+  // view and the inner body view. Called when SCROLL_MODE flips at runtime.
+  // Mirror of section_reparent_children_w32.
+  void section_reparent_children_macos(WidgetData& sec, bool to_body)
+  {
+    if (!sec.native_control || !sec.session) return;
+    NSView* new_parent = nil;
+    if (to_body) {
+      if (!sec.section_body_view) return;
+      new_parent = (__bridge NSView*)sec.section_body_view;
+    } else {
+      id sv = (__bridge id)sec.native_control;
+      if (![sv isKindOfClass:[NSView class]]) return;
+      new_parent = (NSView*)sv;
+    }
+    uint32_t idx = sec.session->_widgets.child(sec.index);
+    while (idx != 0) {
+      if (sec.session->_widgets.exists(idx)) {
+        auto& cw = sec.session->_widgets[idx];
+        if (cw.native_control) {
+          id obj = (__bridge id)cw.native_control;
+          if ([obj isKindOfClass:[NSView class]] &&
+              ((NSView*)obj).superview != new_parent)
+            [new_parent addSubview:(NSView*)obj];
+        }
+      }
+      idx = sec.session->_widgets.next(idx);
+    }
+  }
+
+  // The NSView that children of `sec` should parent to: the inner body view
+  // for a scrolling section, else the section's own painted view. Mirror of
+  // section_child_parent_hwnd_w32.
+  NSView* section_child_container_macos(const WidgetData& sec)
+  {
+    if (sec.section_body_view)
+      return (__bridge NSView*)sec.section_body_view;
+    if (sec.native_control) {
+      id obj = (__bridge id)sec.native_control;
+      if ([obj isKindOfClass:[NSView class]]) return (NSView*)obj;
+    }
+    return nil;
   }
 
   void section_compute_layout_macos(WidgetData& wd)
@@ -3264,6 +3401,18 @@ namespace macos_host
     if (!sec.native_control || !sec.type ||
         strcmp(sec.type, NEUI_W_SECTION) != 0) return;
     section_compute_layout_macos(sec);
+    // Resize the inner body view to the recomputed body rect before
+    // repositioning children (whose frames are body-view-local). The body
+    // view's own frame.origin carries the band offset, so the child math in
+    // section_reposition_children_macos stays a plain (cw.x - sx, cw.y - sy).
+    if (sec.section_body_view) {
+      NSView* body = (__bridge NSView*)sec.section_body_view;
+      const auto& L = sec.section_last_layout;
+      [body setFrame:NSMakeRect(L.body_x, L.body_y,
+                                 L.body_w > 0 ? L.body_w : 1,
+                                 L.body_h > 0 ? L.body_h : 1)];
+      [body setNeedsDisplay:YES];
+    }
     section_reposition_children_macos(sec);
     mark_widget_dirty_for_paint(sec);
   }
@@ -3624,8 +3773,23 @@ namespace macos_host
       NEUINativePaintedView* v = create_painted_view(w);
       [parent_content addSubview:v];
       w.native_control = (__bridge_retained void*)v;
-      if (!strcmp(w.type, NEUI_W_SECTION))
+      if (!strcmp(w.type, NEUI_W_SECTION)) {
+        // A SECTION always clips its children to its bounds, matching the
+        // win32 host (HWND parenting clips child windows inherently). NSView
+        // does NOT clip subviews by default, so without this a non-scrolling
+        // section - or one just switched to scroll_mode="none" - lets
+        // overflowing children spill outside the section rect. Scrolling
+        // sections additionally clip to the body via the inner body view.
+        v.wantsLayer = YES;
+        v.layer.masksToBounds = YES;
         section_refresh_scroll_state_macos(w);
+        // Scrolling sections get an inner body view so children clip to the
+        // body (below the chip band, inside the scrollbar gutter). Created
+        // here, before create_descendants_native descends into the children
+        // and parents them to the body via section_child_container_macos.
+        if (w.section_scroll_state)
+          section_create_body_view_macos(w);
+      }
     }
 
     // Apply any pre-show enabled state now that the native control exists.
@@ -3749,13 +3913,59 @@ namespace macos_host
         }
         NSView* child_parent = parent_content;
         if (widget_is_native_container(cw) && cw.native_control) {
-          id obj = (__bridge id)cw.native_control;
-          if ([obj isKindOfClass:[NSView class]])
-            child_parent = (NSView*)obj;
+          // For a scrolling SECTION this is the inner body view; otherwise
+          // the section's own painted view (section_child_container_macos
+          // resolves both cases).
+          NSView* container = section_child_container_macos(cw);
+          if (container) child_parent = container;
         }
         create_descendants_native(s, i, child_parent);
       }
       i = s->_widgets.next(i);
+    }
+  }
+
+  // Immediate realization for a widget created AFTER its containing frame
+  // was already shown. Mirror of the win32 host's "parent HWND already
+  // exists" branch in widget_create: before widget_show there is no
+  // realized ancestor, so find_parent_content_view returns nil and we
+  // defer to create_descendants_native at show time; once the frame is up,
+  // a freshly-created child needs its NSView built right away (otherwise it
+  // never appears - e.g. the section example's Regenerate button rebuilding
+  // rows). Called from Session::widget_create in widgets.mm.
+  void realize_widget_macos(Session* s, uint32_t idx)
+  {
+    if (!s || !s->_widgets.exists(idx)) return;
+    auto& w = s->_widgets[idx];
+    if (w.native_control || w.native_window) return;  // already realized
+    if (w.type && !strcmp(w.type, NEUI_W_MENUBAR)) return;  // NSMenu path
+    // No realized ancestor frame/container yet -> defer to widget_show.
+    NSView* parent_content = find_parent_content_view(s, idx);
+    if (!parent_content) return;
+    create_native_for_widget(s, w, parent_content);
+    if (!w.native_control) return;
+    // If the parent is a scrolling SECTION, re-layout it: content extent
+    // grew, the body view + scrollbar geometry need refresh, and the new
+    // child must be repositioned at scroll-adjusted body-local coords
+    // (create_native_for_widget placed it at raw (x,y)).
+    uint32_t pidx = s->_widgets.get_parent(idx);
+    if (pidx && s->_widgets.exists(pidx)) {
+      auto& pw = s->_widgets[pidx];
+      if (pw.type && !strcmp(pw.type, NEUI_W_SECTION) && pw.section_scroll_state)
+        section_apply_layout_changes_macos(pw);
+    }
+    // Join the frame's Tab / Shift-Tab key-view loop if the new widget is a
+    // tab stop. Gate on tab_stop_view_macos so non-focusable additions
+    // (LABEL / SECTION / IMAGE) don't trigger a whole-tree loop rebuild.
+    if (tab_stop_view_macos(w)) {
+      auto parents = s->_widgets.get_all_parents(idx);
+      for (uint32_t p : parents) {
+        if (p && s->_widgets.exists(p) && s->_widgets[p].native_window) {
+          rebuild_key_view_loop_macos(s, p,
+            native_window_from(s->_widgets[p].native_window));
+          break;
+        }
+      }
     }
   }
 

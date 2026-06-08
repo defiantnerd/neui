@@ -1147,13 +1147,10 @@ namespace win32_host
     sec.section_body_hwnd = body;
   }
 
-  static void section_destroy_body_hwnd_w32(WidgetData& sec)
-  {
-    if (sec.section_body_hwnd) {
-      DestroyWindow(sec.section_body_hwnd);
-      sec.section_body_hwnd = nullptr;
-    }
-  }
+  // (The section's body HWND is now kept for the section's lifetime once
+  // created - see the SCROLL_MODE setter - and torn down only by the
+  // DestroyWindow cascade in widget_destroy, so there is no standalone
+  // destroy helper.)
 
   // Re-parent every direct child of `sec` between section.hwnd and
   // body_hwnd depending on `to_body`. Called when SCROLL_MODE flips at
@@ -3864,33 +3861,40 @@ namespace win32_host
       section_apply_layout_changes_w32(*w);
     }
     // Section scroll-mode change: allocate / drop scroll state, switch
-    // the painted_msg_fn hook, create / destroy the inner body HWND, and
-    // re-parent existing children between section.hwnd and body_hwnd.
+    // the painted_msg_fn hook, and reset the scroll offset.
     if (w->hwnd && w->type && !strcmp(w->type, NEUI_W_SECTION) &&
         !strcmp(key, NEUI_ATTR_SCROLL_MODE)) {
-      bool was_scrolling = (w->section_scroll_state != nullptr);
       section_refresh_scroll_state_w32(*w);
       bool now_scrolling = (w->section_scroll_state != nullptr);
-      if (now_scrolling && !was_scrolling) {
-        // Off -> on: install msg hook, add WS_CLIPCHILDREN so the
-        // section's paint skips the body HWND's pixels, create the
-        // body HWND, and re-parent existing children into it.
-        w->painted_msg_fn = &painted_msg_section_w32;
-        w->emit_events    = true;
+      // The inner body HWND is created the first time a section becomes
+      // scrollable and KEPT for its lifetime - including after switching
+      // back to "none" - so children stay body-local (laid out below the
+      // chip band) + clipped to the body rect in every mode. Destroying it
+      // on a flip-to-"none" dropped children to section-local coords, so
+      // they jumped up into the chip band and overpainted it. Mirror of the
+      // macOS host. Children only need re-parenting the first time the body
+      // HWND appears.
+      if (now_scrolling && !w->section_body_hwnd) {
         LONG style = GetWindowLongW(w->hwnd, GWL_STYLE);
         if (!(style & WS_CLIPCHILDREN))
           SetWindowLongW(w->hwnd, GWL_STYLE, style | WS_CLIPCHILDREN);
         section_create_body_hwnd_w32(*w);
         section_reparent_children_w32(*w, /*to_body*/true);
-      } else if (!now_scrolling && was_scrolling) {
-        // On -> off: kill the bounce timer, re-parent children back to
-        // the section HWND, then destroy the body HWND. painted_msg_fn
-        // is cleared so PaintedWndProc stops dispatching wheel / drag.
+      }
+      // Toggle wheel / scrollbar input handling with the mode; the body HWND
+      // itself stays put.
+      w->painted_msg_fn = now_scrolling ? &painted_msg_section_w32 : nullptr;
+      w->emit_events    = now_scrolling;
+      if (!now_scrolling)
         KillTimer(w->hwnd, SECTION_BOUNCE_TIMER_ID);
-        w->painted_msg_fn = nullptr;
-        w->emit_events    = false;
-        section_reparent_children_w32(*w, /*to_body*/false);
-        section_destroy_body_hwnd_w32(*w);
+      // Switching scroll mode resets the scroll offset to 0,0. (For "none"
+      // the scroll state is gone and the reposition below already uses
+      // offset 0; this covers scroll->scroll transitions like vertical->both.)
+      if (w->section_scroll_state) {
+        auto& st = *w->section_scroll_state;
+        st.scroll_x = st.scroll_y = 0;
+        st.kin_v = st.kin_h = neui_detail::ScrollKinetics{};
+        st.kinetic_over_v = st.kinetic_over_h = false;
       }
       section_apply_layout_changes_w32(*w);
     }

@@ -64,6 +64,12 @@ namespace macos_host
     return s;
   }
 
+  // Defined in window.mm. Realizes a widget's NSView immediately if its
+  // containing frame is already shown (post-show dynamic creation); no-op
+  // before widget_show (deferred to create_descendants_native). Declared
+  // here so widget_create below can call it.
+  void realize_widget_macos(Session* s, uint32_t idx);
+
   // -------------------------------------------------------------------------
   // Session::widget_create / widget_destroy - pure C++ tree manipulation.
   // widget_show lives in window.mm because it touches AppKit.
@@ -121,7 +127,15 @@ namespace macos_host
       [m setAutoenablesItems:NO];
       neui_detail::macos_install_app_menu(m);
       _widgets[slot].native_control = (__bridge_retained void*)m;
+      return IndexToWidget(_session_id, slot);
     }
+
+    // If the containing frame is already on screen, realize this widget's
+    // NSView now (post-show dynamic creation). Before widget_show there is
+    // no realized ancestor, so this is a no-op and create_descendants_native
+    // builds the view at show time. Mirror of the win32 host's immediate
+    // child-HWND creation in widget_create.
+    realize_widget_macos(this, slot);
 
     return IndexToWidget(_session_id, slot);
   }
@@ -154,6 +168,9 @@ namespace macos_host
   // changes.
   void section_refresh_scroll_state_macos(WidgetData& wd);
   void section_apply_layout_changes_macos(WidgetData& sec);
+  void section_create_body_view_macos(WidgetData& sec);
+  void section_destroy_body_view_macos(WidgetData& sec);
+  void section_reparent_children_macos(WidgetData& sec, bool to_body);
 
   // True for the three font attribute keys. Used by the attr setters to
   // re-apply the native font + repaint painted text on a live change.
@@ -1245,6 +1262,29 @@ namespace macos_host
     if (wd.type && !strcmp(wd.type, NEUI_W_SECTION) &&
         !strcmp(key, NEUI_ATTR_SCROLL_MODE)) {
       section_refresh_scroll_state_macos(wd);
+      bool now_scrolling = (wd.section_scroll_state != nullptr);
+      // The inner body view is created the first time a section becomes
+      // scrollable and then KEPT for the section's lifetime - including
+      // after switching back to "none". Keeping it means children stay
+      // body-local (laid out below the chip band) and clipped to the body
+      // rect in every mode; destroying it on a flip-to-"none" dropped the
+      // children to section-local coords, so they jumped up into the chip
+      // band and overpainted it. Children only need re-parenting the first
+      // time the body view appears. Mirror of the win32 host.
+      if (wd.native_control && now_scrolling && !wd.section_body_view) {
+        section_create_body_view_macos(wd);
+        section_reparent_children_macos(wd, /*to_body*/true);
+      }
+      // Switching scroll mode resets the scroll offset to 0,0. (When the
+      // mode is "none" the scroll state is gone and the reposition below
+      // already uses offset 0; this covers scroll->scroll transitions like
+      // vertical->both.)
+      if (wd.section_scroll_state) {
+        auto& st = *wd.section_scroll_state;
+        st.scroll_x = st.scroll_y = 0;
+        st.kin_v = st.kin_h = neui_detail::ScrollKinetics{};
+        st.kinetic_over_v = st.kinetic_over_h = false;
+      }
       section_apply_layout_changes_macos(wd);
     }
     // NEUI_ATTR_FONT_FAMILY: re-apply native control font + repaint painted text.
