@@ -63,6 +63,19 @@ namespace win32_host
   static void painted_msg_grid_w32(WidgetData& wd, UINT msg,
                                     WPARAM wParam, LPARAM lParam);
 
+  // SECTION painted-widget hooks. Defined alongside paint_section_w32;
+  // forward-declared so CreateChildHwnd can install painted_msg_section_w32
+  // when the SECTION opts into scrolling (NEUI_ATTR_SCROLL_MODE != "none").
+  static void painted_msg_section_w32(WidgetData& wd, UINT msg,
+                                       WPARAM wParam, LPARAM lParam);
+  static void section_refresh_scroll_state_w32(WidgetData& wd);
+  static void section_reposition_children_w32(WidgetData& sec);
+  // Timer ID for the scrolling-SECTION spring-back animation on win32
+  // native. Per-section: SetTimer is installed on the SECTION's own HWND
+  // (unlike xpl where it lives on the frame), so the timer id can stay a
+  // small constant.
+  static constexpr UINT_PTR SECTION_BOUNCE_TIMER_ID = 0x6E736362;  // 'nscb'
+
   neui_widget_t IndexToWidget(uint32_t session_id, uint32_t idx)
   {
     return { ((session_id & 0xffff) << 16) | (idx & 0xffff) };
@@ -1004,6 +1017,237 @@ namespace win32_host
   // the title band's non-chip area is truly transparent and the parent
   // frame's pixels show through underneath.
 
+  // Refresh wd.section_scroll_state from NEUI_ATTR_SCROLL_MODE. Allocates
+  // when the section opts into a scroll axis, drops when it opts out. Safe
+  // to call repeatedly. Matches the xpl host's SectionWidget::refresh_scroll_state.
+  static void section_refresh_scroll_state_w32(WidgetData& wd)
+  {
+    if (!wd.type || strcmp(wd.type, NEUI_W_SECTION) != 0) return;
+    const char* mode = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_SCROLL_MODE) : nullptr;
+    auto axis = neui_detail::parse_section_scroll_mode(mode);
+    if (axis == neui_detail::SectionScrollAxis::None) {
+      wd.section_scroll_state.reset();
+      return;
+    }
+    if (!wd.section_scroll_state)
+      wd.section_scroll_state =
+        std::make_unique<neui_detail::SectionScrollState>();
+    wd.section_scroll_state->axis = axis;
+  }
+
+  // Compute the SECTION's body / scrollbar layout for the current size +
+  // attrs + content extent. Cached on wd.section_last_layout so the
+  // painted-msg hook (drag, hit-test, kinetics) can read it back without
+  // re-measuring. Updates wd.section_scroll_state->content_w/h.
+  static void section_compute_layout_w32(WidgetData& wd)
+  {
+    if (!wd.session) return;
+    const char* align = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
+    int band_h = neui_detail::section_band_h_for(wd.text.c_str(), wd.height, align);
+    int initial_body_w = wd.width;
+    int initial_body_h = wd.height - band_h;
+    if (initial_body_h < 0) initial_body_h = 0;
+
+    int content_w = 0, content_h = 0;
+    auto autofn = [&](int& w, int& h){
+      neui_detail::section_compute_auto_extent(wd.session->_widgets,
+                                                 wd.index, w, h);
+    };
+    neui_detail::resolve_section_content_extent(wd.attrs.get(), autofn,
+                                                  initial_body_w, initial_body_h,
+                                                  content_w, content_h);
+
+    auto axis = wd.section_scroll_state
+                  ? wd.section_scroll_state->axis
+                  : neui_detail::SectionScrollAxis::None;
+    wd.section_last_layout = neui_detail::compute_section_layout(
+                               wd.width, wd.height, band_h,
+                               content_w, content_h, axis);
+    if (wd.section_scroll_state) {
+      wd.section_scroll_state->content_w = content_w;
+      wd.section_scroll_state->content_h = content_h;
+      // Idle clamp: keep mid-gesture rubber-band overshoot, snap any
+      // externally-caused out-of-range (resize / content shrunk) back in.
+      neui_detail::clamp_section_scroll_idle(*wd.section_scroll_state,
+                                               content_w, content_h,
+                                               wd.section_last_layout.body_w,
+                                               wd.section_last_layout.body_h);
+    }
+  }
+
+  // If `widget_index`'s parent is a scrolling SECTION, return its scroll
+  // offset in logical px (the value subtracted from the child's stored
+  // body-local (x, y) to derive its body_hwnd-local HWND coords). For
+  // non-scrolling sections both outputs stay 0 - children parent to the
+  // section's own HWND at section-local coords, preserving today's
+  // behaviour.
+  static void parent_scroll_offset_w32(Session* sess, uint32_t widget_index,
+                                        int& out_off_x, int& out_off_y)
+  {
+    out_off_x = 0; out_off_y = 0;
+    if (!sess) return;
+    uint32_t parent_idx = sess->_widgets.get_parent(widget_index);
+    if (parent_idx == 0 || !sess->_widgets.exists(parent_idx)) return;
+    auto& pw = sess->_widgets[parent_idx];
+    if (pw.section_scroll_state) {
+      out_off_x = pw.section_scroll_state->scroll_x;
+      out_off_y = pw.section_scroll_state->scroll_y;
+    }
+  }
+
+  // Return the HWND that should be used as the win32 parent for child
+  // widgets of `parent_wd`. For a scrolling SECTION this is the inner
+  // body HWND; for everything else it's the widget's own HWND. The body
+  // HWND only exists when the section is scrolling so children of
+  // non-scrolling sections fall through to the legacy section-HWND
+  // parenting unchanged.
+  static HWND section_child_parent_hwnd_w32(const WidgetData& parent_wd)
+  {
+    if (parent_wd.section_body_hwnd) return parent_wd.section_body_hwnd;
+    return parent_wd.hwnd;
+  }
+
+  // Create the section's inner body HWND. Called from CreateChildHwnd
+  // for a scrolling section, and from the SCROLL_MODE attr setter when
+  // the section transitions from non-scrolling to scrolling at runtime.
+  // body_hwnd is positioned at the section's body rect (in section-client
+  // physical px) so children parented to it lay out body-local. Stores
+  // the section's WidgetData* in body_hwnd's GWLP_USERDATA so the wndproc
+  // can read attrs for paint.
+  //
+  // WS_EX_COMPOSITED enables off-screen double-buffering for the body +
+  // all its descendants: the OS composites the body fill and every child
+  // into a backbuffer, then blits the result in one pass. This is the
+  // standard Win32 idiom for flicker-free scrolling containers - it
+  // eliminates the visible-intermediate-state during the brief window
+  // between SetWindowPos moving a child and the child's WM_PAINT firing.
+  // (Docs nominally restrict the flag to top-level windows, but in
+  // practice the compositor honours it on child HWNDs too, and the
+  // alternative - hand-rolled memory-DC offscreen compositing - has the
+  // same effect at much higher complexity.)
+  static void section_create_body_hwnd_w32(WidgetData& sec)
+  {
+    if (!sec.hwnd || sec.section_body_hwnd) return;
+    // Compute the body rect for the current geometry; positions below
+    // get clamped on every layout change anyway.
+    section_compute_layout_w32(sec);
+    UINT dpi = sec.session ? sec.session->get_dpi_for_widget(sec.index) : 96;
+    if (dpi == 0) dpi = 96;
+    const auto& L = sec.section_last_layout;
+    int phys_x = LogicalToPhysical(L.body_x, dpi);
+    int phys_y = LogicalToPhysical(L.body_y, dpi);
+    int phys_w = LogicalToPhysical(L.body_w > 0 ? L.body_w : 1, dpi);
+    int phys_h = LogicalToPhysical(L.body_h > 0 ? L.body_h : 1, dpi);
+    HWND body = CreateWindowExW(WS_EX_COMPOSITED, L"neui.sectionbody", L"",
+                                 WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN
+                                   | WS_CLIPSIBLINGS,
+                                 phys_x, phys_y, phys_w, phys_h,
+                                 sec.hwnd, nullptr, get_hinstance(),
+                                 &sec);
+    sec.section_body_hwnd = body;
+  }
+
+  static void section_destroy_body_hwnd_w32(WidgetData& sec)
+  {
+    if (sec.section_body_hwnd) {
+      DestroyWindow(sec.section_body_hwnd);
+      sec.section_body_hwnd = nullptr;
+    }
+  }
+
+  // Re-parent every direct child of `sec` between section.hwnd and
+  // body_hwnd depending on `to_body`. Called when SCROLL_MODE flips at
+  // runtime so existing children move to the correct container. The
+  // child's stored (x, y) is body-local for scrolling sections and the
+  // contract is preserved by the per-host SetWindowPos that follows.
+  static void section_reparent_children_w32(WidgetData& sec, bool to_body)
+  {
+    if (!sec.session) return;
+    HWND new_parent = to_body ? sec.section_body_hwnd : sec.hwnd;
+    if (!new_parent) return;
+    uint32_t idx = sec.session->_widgets.child(sec.index);
+    while (idx != 0) {
+      if (sec.session->_widgets.exists(idx)) {
+        auto& cw = sec.session->_widgets[idx];
+        if (cw.hwnd && GetParent(cw.hwnd) != new_parent)
+          SetParent(cw.hwnd, new_parent);
+      }
+      idx = sec.session->_widgets.next(idx);
+    }
+  }
+
+  // Reposition every direct child HWND of a SECTION to its scroll-adjusted
+  // coordinates. For a scrolling section, children are parented to
+  // body_hwnd and positioned at body_hwnd-local `(wd.x - scroll_x,
+  // wd.y - scroll_y)`. Win32's default child-window clipping confines
+  // them to body_hwnd's client rect, so no per-child SetWindowRgn is
+  // needed and the OS's standard paint pipeline handles repaints (the
+  // window manager invalidates exposed strips on its own when child
+  // positions move). For non-scrolling sections this is a no-op shape
+  // (sx, sy = 0) that just re-applies the existing section-local
+  // coords - safe to call after any geometry change.
+  static void section_reposition_children_w32(WidgetData& sec)
+  {
+    if (!sec.hwnd || !sec.session) return;
+    UINT dpi = sec.session->get_dpi_for_widget(sec.index);
+    if (dpi == 0) dpi = 96;
+    int sx = sec.section_scroll_state ? sec.section_scroll_state->scroll_x : 0;
+    int sy = sec.section_scroll_state ? sec.section_scroll_state->scroll_y : 0;
+    HDWP hdwp = BeginDeferWindowPos(8);
+    uint32_t idx = sec.session->_widgets.child(sec.index);
+    while (idx != 0) {
+      if (sec.session->_widgets.exists(idx)) {
+        auto& cw = sec.session->_widgets[idx];
+        if (cw.hwnd) {
+          int phys_x = LogicalToPhysical(cw.x - sx, dpi);
+          int phys_y = LogicalToPhysical(cw.y - sy, dpi);
+          int phys_w = LogicalToPhysical(cw.width,  dpi);
+          int phys_h = LogicalToPhysical(cw.height, dpi);
+          UINT flags = SWP_NOZORDER | SWP_NOACTIVATE;
+          if (hdwp) {
+            hdwp = DeferWindowPos(hdwp, cw.hwnd, nullptr,
+                                   phys_x, phys_y, phys_w, phys_h, flags);
+          } else {
+            SetWindowPos(cw.hwnd, nullptr, phys_x, phys_y, phys_w, phys_h,
+                          flags);
+          }
+        }
+      }
+      idx = sec.session->_widgets.next(idx);
+    }
+    if (hdwp) EndDeferWindowPos(hdwp);
+  }
+
+  // After any change that can affect a SECTION's layout (resize,
+  // scroll-mode attr, content extent attr), recompute the layout cache,
+  // resize the inner body_hwnd to match the new body rect, re-clamp the
+  // scroll position, and reposition every child. No-op when the HWND
+  // hasn't been created yet (deferred creation) - the same recompute
+  // will run on first paint anyway. Non-static so window.cpp's WM_SIZE
+  // handler can call it.
+  void section_apply_layout_changes_w32(WidgetData& wd)
+  {
+    if (!wd.hwnd || !wd.type || strcmp(wd.type, NEUI_W_SECTION) != 0) return;
+    section_compute_layout_w32(wd);
+    if (wd.section_body_hwnd) {
+      UINT dpi = wd.session ? wd.session->get_dpi_for_widget(wd.index) : 96;
+      if (dpi == 0) dpi = 96;
+      const auto& L = wd.section_last_layout;
+      int phys_x = LogicalToPhysical(L.body_x, dpi);
+      int phys_y = LogicalToPhysical(L.body_y, dpi);
+      int phys_w = LogicalToPhysical(L.body_w > 0 ? L.body_w : 1, dpi);
+      int phys_h = LogicalToPhysical(L.body_h > 0 ? L.body_h : 1, dpi);
+      SetWindowPos(wd.section_body_hwnd, nullptr,
+                    phys_x, phys_y, phys_w, phys_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    section_reposition_children_w32(wd);
+    // Section itself only needs repaint for chip + scrollbar; body_hwnd
+    // owns the body fill and children. The OS auto-invalidates body_hwnd's
+    // pixels in the strip uncovered by SetWindowPos above.
+    InvalidateRect(wd.hwnd, nullptr, FALSE);
+  }
+
   static void paint_section_w32(neui_render_backend_t* backend,
                                  neui_render_ctx_t      ctx,
                                  float w, float h,
@@ -1021,6 +1265,184 @@ namespace win32_host
                                 wd.text.c_str(), bg, align,
                                 neui_detail::color(ColorRole::text_primary),
                                 wd.attrs.get());
+
+    // Late-refresh in case set_string(SCROLL_MODE) ran without the explicit
+    // refresh hook firing - cheap when state already matches. Mirrors the
+    // xpl host's SectionWidget::paint safety net.
+    section_refresh_scroll_state_w32(wd);
+
+    section_compute_layout_w32(wd);
+
+    if (wd.section_scroll_state &&
+        (wd.section_last_layout.vert_sb_shown ||
+         wd.section_last_layout.horz_sb_shown)) {
+      uint32_t sep   = neui_detail::color(ColorRole::scrollbar_separator);
+      uint32_t track = neui_detail::color(ColorRole::scrollbar_track);
+      uint32_t thumb = neui_detail::color(ColorRole::scrollbar_thumb);
+      neui_detail::paint_section_scrollbars(backend, ctx,
+                                              wd.section_last_layout,
+                                              *wd.section_scroll_state,
+                                              sep, track, thumb);
+    }
+  }
+
+  // Feed a synthetic precise wheel delta into a section's per-axis
+  // kinetics. dv / dh are logical px with the kinetics' sign convention
+  // (positive = scroll up / left); the function picks the right axis,
+  // commits the new scroll position, repositions children, and starts
+  // the spring-back timer on overscroll release. No-op when the section
+  // isn't scrolling. Mirror of the xpl host's section_kinetic_wheel_w32.
+  static void section_kinetic_wheel_native_w32(WidgetData& wd,
+                                                 double dv, double dh)
+  {
+    using namespace neui_detail;
+    if (!wd.section_scroll_state || !wd.hwnd) return;
+    auto& st = *wd.section_scroll_state;
+    auto& L  = wd.section_last_layout;
+    bool has_v = section_axis_has_v(st.axis);
+    bool has_h = section_axis_has_h(st.axis);
+    // Asymmetric single-axis fallback (same rule as xpl): a horizontal-only
+    // section absorbs a pure vertical wheel because classic wheel mice have
+    // no horizontal axis; a vertical-only section does NOT absorb pure
+    // horizontal input (explicit horizontal intent should be ignored).
+    if (!has_v && has_h && dh == 0.0 && dv != 0.0) { dh = dv; dv = 0.0; }
+
+    ScrollWheelAction act_v{}, act_h{};
+    if (has_v && dv != 0.0) {
+      ScrollWheelInput in;
+      in.precise  = true;
+      in.delta_px = dv;
+      act_v = section_scroll_wheel_kinetic(st, L, in, false);
+    }
+    if (has_h && dh != 0.0) {
+      ScrollWheelInput in;
+      in.precise  = true;
+      in.delta_px = dh;
+      act_h = section_scroll_wheel_kinetic(st, L, in, true);
+    }
+    if (act_v.changed || act_h.changed) {
+      section_reposition_children_w32(wd);
+      InvalidateRect(wd.hwnd, nullptr, FALSE);
+    }
+    if (act_v.start_bounce || act_h.start_bounce)
+      SetTimer(wd.hwnd, SECTION_BOUNCE_TIMER_ID, 16, nullptr);
+  }
+
+  // Message hook for scrolling SECTION. PaintedWndProc forwards mouse /
+  // wheel / timer / destroy events through wd.painted_msg_fn; the hook
+  // owns scroll-state mutations + child repositioning. Non-scrolling
+  // sections never reach here (painted_msg_fn is left null at create).
+  static void painted_msg_section_w32(WidgetData& wd, UINT msg,
+                                       WPARAM wParam, LPARAM lParam)
+  {
+    using namespace neui_detail;
+    if (!wd.section_scroll_state || !wd.hwnd) return;
+    auto& st = *wd.section_scroll_state;
+    auto& L  = wd.section_last_layout;
+
+    // Teardown: cancel any running bounce timer so a HWND-keyed slot stays
+    // clean across slot reuse.
+    if (msg == WM_DESTROY) {
+      KillTimer(wd.hwnd, SECTION_BOUNCE_TIMER_ID);
+      return;
+    }
+
+    // Spring-back tick.
+    if (msg == WM_TIMER && wParam == SECTION_BOUNCE_TIMER_ID) {
+      bool more_v = section_scroll_bounce_step(st, L, false);
+      bool more_h = section_scroll_bounce_step(st, L, true);
+      section_reposition_children_w32(wd);
+      InvalidateRect(wd.hwnd, nullptr, FALSE);
+      if (!more_v && !more_h)
+        KillTimer(wd.hwnd, SECTION_BOUNCE_TIMER_ID);
+      return;
+    }
+
+    if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) {
+      short delta_raw = (short)HIWORD(wParam);
+      UINT lines = 3;
+      SystemParametersInfo(msg == WM_MOUSEWHEEL ? SPI_GETWHEELSCROLLLINES
+                                                 : SPI_GETWHEELSCROLLCHARS,
+                            0, &lines, 0);
+      if (lines == 0) lines = 3;
+      double notches = (double)delta_raw / (double)WHEEL_DELTA;
+      double delta_px = notches * (double)lines * SECTION_WHEEL_LINE_PX;
+      // Shift+wheel routes the vertical wheel to the horizontal axis -
+      // the classic Win32 "horizontal scroll without a tilt wheel" trick.
+      // WM_MOUSEHWHEEL: positive raw delta = tilt right. The kinetics
+      // sign convention is "positive delta_px = scroll left" (raw_px -=
+      // delta), so negate for the horizontal path - matches the xpl
+      // platform_win32 SECTION wheel handler.
+      bool shift_held = (wParam & MK_SHIFT) != 0;
+      if (msg == WM_MOUSEWHEEL && !shift_held)
+        section_kinetic_wheel_native_w32(wd, delta_px, 0.0);
+      else
+        section_kinetic_wheel_native_w32(wd, 0.0, -delta_px);
+      return;
+    }
+
+    if (msg == WM_LBUTTONDOWN || msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP) {
+      UINT dpi = wd.session ? wd.session->get_dpi_for_widget(wd.index) : 96;
+      if (dpi == 0) dpi = 96;
+      // lParam carries client-area physical px; convert to widget-local
+      // logical px.
+      int phys_x = GET_X_LPARAM(lParam);
+      int phys_y = GET_Y_LPARAM(lParam);
+      int local_x = MulDiv(phys_x, 96, dpi);
+      int local_y = MulDiv(phys_y, 96, dpi);
+
+      if (msg == WM_LBUTTONDOWN) {
+        int hit = section_scrollbar_hit(L, local_x, local_y);
+        if (hit == 1) {
+          st.vert_drag.active           = true;
+          st.vert_drag.start_axis_coord = local_y;
+          st.vert_drag.start_position   = st.scroll_y;
+          // PaintedWndProc already called SetCapture(hwnd), so we'll
+          // receive WM_MOUSEMOVE / WM_LBUTTONUP regardless of where the
+          // cursor goes.
+        } else if (hit == 2) {
+          st.horz_drag.active           = true;
+          st.horz_drag.start_axis_coord = local_x;
+          st.horz_drag.start_position   = st.scroll_x;
+        }
+        return;
+      }
+
+      if (msg == WM_MOUSEMOVE) {
+        if (st.vert_drag.active) {
+          auto geom = compute_scrollbar(L.body_h, 0, st.content_h,
+                                          L.body_h, st.vert_drag.start_position);
+          int new_y = scrollbar_drag_apply(st.vert_drag, local_y, geom,
+                                             st.content_h, L.body_h);
+          if (new_y != st.scroll_y) {
+            st.scroll_y = new_y;
+            // External mutation: drop any kinetic overshoot claim on this
+            // axis so the next idle clamp pulls it back in if needed.
+            st.kinetic_over_v = false;
+            section_reposition_children_w32(wd);
+            InvalidateRect(wd.hwnd, nullptr, FALSE);
+          }
+        } else if (st.horz_drag.active) {
+          auto geom = compute_scrollbar(L.body_w, 0, st.content_w,
+                                          L.body_w, st.horz_drag.start_position);
+          int new_x = scrollbar_drag_apply(st.horz_drag, local_x, geom,
+                                             st.content_w, L.body_w);
+          if (new_x != st.scroll_x) {
+            st.scroll_x = new_x;
+            st.kinetic_over_h = false;
+            section_reposition_children_w32(wd);
+            InvalidateRect(wd.hwnd, nullptr, FALSE);
+          }
+        }
+        return;
+      }
+
+      if (msg == WM_LBUTTONUP) {
+        st.vert_drag.active = false;
+        st.horz_drag.active = false;
+        return;
+      }
+    }
   }
 
   // Build and apply the section's window region so anything outside
@@ -1203,15 +1625,26 @@ namespace win32_host
       return hwnd;
     }
 
-    // Section: non-interactive painted container. No tab stop, no mouse
-    // hook. WS_CLIPSIBLINGS so the section's paint stays clipped out of
-    // its child siblings' rects (children parent to the frame and sit on
-    // top of the section in z-order). After the HWND exists, the window
-    // region is installed so the band's non-chip area is transparent.
+    // Section: non-interactive painted container by default; opts into
+    // scrolling when NEUI_ATTR_SCROLL_MODE != "none". In that case an
+    // inner "neui.sectionbody" HWND is created at the body rect; the
+    // section's children HWND-parent to that body HWND so Win32's
+    // default child-window clipping confines them to the body without
+    // any per-child window regions. WS_CLIPCHILDREN on the section makes
+    // its own paint skip the body HWND's pixels (we paint chip +
+    // scrollbar; body_hwnd paints the body fill).
     if (!strcmp(wd.type, NEUI_W_SECTION)) {
+      // Refresh the scroll state from any attrs the client set pre-show
+      // so we know whether to opt into the scrolling code path.
+      section_refresh_scroll_state_w32(wd);
       DWORD style = WS_CHILD | WS_CLIPSIBLINGS;
       if (wd.visible) style |= WS_VISIBLE;
+      if (wd.section_scroll_state) style |= WS_CLIPCHILDREN;
       wd.paint_fn = &paint_section_w32;
+      if (wd.section_scroll_state) {
+        wd.painted_msg_fn = &painted_msg_section_w32;
+        wd.emit_events    = true;
+      }
       HWND hwnd = CreateWindowExW(0, L"neui.painted", L"", style,
         LogicalToPhysical(wd.x, parent_dpi),
         LogicalToPhysical(wd.y, parent_dpi),
@@ -1224,6 +1657,8 @@ namespace win32_host
       if (hwnd) {
         wd.hwnd = hwnd;
         apply_section_region_w32(wd);
+        if (wd.section_scroll_state)
+          section_create_body_hwnd_w32(wd);
       }
       return hwnd;
     }
@@ -1406,9 +1841,13 @@ namespace win32_host
           // Reposition + resize this child to its logical geometry at the
           // new DPI. wd.x / wd.y are parent-relative logical pixels; the
           // new physical px land at the right spot in the parent HWND's
-          // (already-resized) client area.
-          int new_x = LogicalToPhysical(wd.x, new_dpi);
-          int new_y = LogicalToPhysical(wd.y, new_dpi);
+          // (already-resized) client area. If the parent is a scrolling
+          // SECTION, subtract its scroll offset so the child's HWND lives
+          // where the body-local coords say it does.
+          int off_x = 0, off_y = 0;
+          parent_scroll_offset_w32(this, child_idx, off_x, off_y);
+          int new_x = LogicalToPhysical(wd.x - off_x, new_dpi);
+          int new_y = LogicalToPhysical(wd.y - off_y, new_dpi);
           int new_w = LogicalToPhysical(wd.width,  new_dpi);
           int new_h = LogicalToPhysical(wd.height, new_dpi);
           SetWindowPos(wd.hwnd, nullptr, new_x, new_y, new_w, new_h,
@@ -1422,9 +1861,12 @@ namespace win32_host
           if (backend && backend->update_dpi && wd.paint_ctx)
             backend->update_dpi(wd.paint_ctx, new_dpi);
           // Section: window region was computed in old physical px;
-          // recompute against the new DPI.
-          if (wd.type && !strcmp(wd.type, NEUI_W_SECTION))
+          // recompute against the new DPI. Also resize the inner body
+          // HWND so its client rect tracks the body rect at the new DPI.
+          if (wd.type && !strcmp(wd.type, NEUI_W_SECTION)) {
             apply_section_region_w32(wd);
+            section_apply_layout_changes_w32(wd);
+          }
           // Image: re-pick the @Nx asset variant if the new DPI scale
           // crosses a boundary (no-op for client-owned assets).
           if (wd.type && !strcmp(wd.type, NEUI_W_IMAGE))
@@ -1462,7 +1904,9 @@ namespace win32_host
   {
     if (!_widgets.exists(parent_index)) return;
     auto& parent_wd = _widgets[parent_index];
-    HWND parent_hwnd = parent_wd.hwnd;
+    // For scrolling SECTIONs, descendants HWND-parent to the inner body
+    // HWND so Win32 clips them naturally to the body rect.
+    HWND parent_hwnd = section_child_parent_hwnd_w32(parent_wd);
     UINT parent_dpi  = parent_wd.dpi;
 
     // Create a DPI-scaled font for this frame window on first use
@@ -1550,6 +1994,16 @@ namespace win32_host
       }
       child_idx = _widgets.next(child_idx);
     }
+    // Scrolling SECTION: now that every child HWND exists, re-run the
+    // layout helper so child positions are body-relative + scroll-shifted
+    // and per-child clip regions cover the body rect. CreateChildHwnd
+    // creates children at their raw (x, y) - correct for non-scrolling
+    // sections, but a scrolling section needs the body / scroll offsets
+    // applied and the chip + scrollbar areas masked out.
+    if (parent_wd.type && !strcmp(parent_wd.type, NEUI_W_SECTION) &&
+        parent_wd.section_scroll_state) {
+      section_apply_layout_changes_w32(parent_wd);
+    }
   }
 
   neui_widget_t Session::widget_create(neui_widget_t parent, const char* type, int x, int y, int width, int height, void* userdata)
@@ -1611,10 +2065,34 @@ namespace win32_host
         return widget;
       }
 
-      // If parent HWND already exists, create child HWND immediately
+      // If parent HWND already exists, create child HWND immediately.
+      // For scrolling SECTIONs, parent to the inner body HWND so Win32
+      // clips children to the body rect naturally; then SetWindowPos at
+      // body-local minus the current scroll so a child added mid-scroll
+      // lands at the right spot. CreateChildHwnd uses (wd.x, wd.y) raw
+      // which is correct only at scroll=0; the re-pos covers the rest.
       if (_widgets.exists(parent_index) && _widgets[parent_index].hwnd != nullptr) {
         UINT parent_dpi = get_dpi_for_widget(parent_index);
-        _widgets[widget_id].hwnd = CreateChildHwnd(_widgets[widget_id], _widgets[parent_index].hwnd, parent_dpi);
+        auto& w = _widgets[widget_id];
+        auto& parent_wd = _widgets[parent_index];
+        HWND child_parent_hwnd = section_child_parent_hwnd_w32(parent_wd);
+        w.hwnd = CreateChildHwnd(w, child_parent_hwnd, parent_dpi);
+        if (w.hwnd && parent_wd.type &&
+            !strcmp(parent_wd.type, NEUI_W_SECTION) &&
+            parent_wd.section_scroll_state) {
+          section_compute_layout_w32(parent_wd);
+          int off_x = 0, off_y = 0;
+          parent_scroll_offset_w32(this, widget_id, off_x, off_y);
+          SetWindowPos(w.hwnd, nullptr,
+            LogicalToPhysical(w.x - off_x, parent_dpi),
+            LogicalToPhysical(w.y - off_y, parent_dpi),
+            LogicalToPhysical(w.width,  parent_dpi),
+            LogicalToPhysical(w.height, parent_dpi),
+            SWP_NOZORDER | SWP_NOACTIVATE);
+          // Section repaint picks up the new scrollbar geometry (more
+          // content -> thinner thumb).
+          InvalidateRect(parent_wd.hwnd, nullptr, FALSE);
+        }
       }
     }
     return widget;
@@ -1662,6 +2140,9 @@ namespace win32_host
       if (w.isroot) RevokeDragDrop(w.hwnd);
       DestroyWindow(w.hwnd);
       w.hwnd = nullptr;
+      // DestroyWindow cascades to descendants so the section's inner
+      // body HWND is gone too. Null out the cached pointer to match.
+      w.section_body_hwnd = nullptr;
     }
     if (w.hfont) {
       DeleteObject(w.hfont);
@@ -1817,13 +2298,21 @@ namespace win32_host
     w.x = x; w.y = y; w.width = width; w.height = height;
     if (w.hwnd) {
       UINT dpi = get_dpi_for_widget(index);
+      // If this widget is a child of a scrolling SECTION it lives inside
+      // the section's body HWND - subtract the section's scroll so the
+      // body-local (x, y) lands at the right body_hwnd-local px.
+      int off_x = 0, off_y = 0;
+      parent_scroll_offset_w32(this, index, off_x, off_y);
       SetWindowPos(w.hwnd, nullptr,
-        LogicalToPhysical(x, dpi),
-        LogicalToPhysical(y, dpi),
+        LogicalToPhysical(x - off_x, dpi),
+        LogicalToPhysical(y - off_y, dpi),
         LogicalToPhysical(width, dpi),
         LogicalToPhysical(height, dpi),
         SWP_NOZORDER | SWP_NOACTIVATE);
     }
+    // Section self-resize: rebuild layout + reposition own children.
+    if (w.type && !strcmp(w.type, NEUI_W_SECTION))
+      section_apply_layout_changes_w32(w);
   }
 
   void Session::widget_set_size(neui_widget_t widget, int width, int height)
@@ -3329,6 +3818,13 @@ namespace win32_host
         w->compound_asset.id != asset_none.id) {
       InvalidateRect(w->hwnd, nullptr, FALSE);
     }
+    // SECTION content extent override: recompute layout + reposition
+    // children so the scrollbar reflects the new content size.
+    if (w->type && !strcmp(w->type, NEUI_W_SECTION) &&
+        (!strcmp(key, NEUI_ATTR_CONTENT_WIDTH) ||
+         !strcmp(key, NEUI_ATTR_CONTENT_HEIGHT))) {
+      section_apply_layout_changes_w32(*w);
+    }
     return 1;
   }
 
@@ -3364,7 +3860,39 @@ namespace win32_host
     if (w->hwnd && w->type && !strcmp(w->type, NEUI_W_SECTION) &&
         !strcmp(key, NEUI_ATTR_ALIGN_TEXT)) {
       apply_section_region_w32(*w);
-      InvalidateRect(w->hwnd, nullptr, FALSE);
+      // align="none" / non-empty band swap changes band_h -> layout.
+      section_apply_layout_changes_w32(*w);
+    }
+    // Section scroll-mode change: allocate / drop scroll state, switch
+    // the painted_msg_fn hook, create / destroy the inner body HWND, and
+    // re-parent existing children between section.hwnd and body_hwnd.
+    if (w->hwnd && w->type && !strcmp(w->type, NEUI_W_SECTION) &&
+        !strcmp(key, NEUI_ATTR_SCROLL_MODE)) {
+      bool was_scrolling = (w->section_scroll_state != nullptr);
+      section_refresh_scroll_state_w32(*w);
+      bool now_scrolling = (w->section_scroll_state != nullptr);
+      if (now_scrolling && !was_scrolling) {
+        // Off -> on: install msg hook, add WS_CLIPCHILDREN so the
+        // section's paint skips the body HWND's pixels, create the
+        // body HWND, and re-parent existing children into it.
+        w->painted_msg_fn = &painted_msg_section_w32;
+        w->emit_events    = true;
+        LONG style = GetWindowLongW(w->hwnd, GWL_STYLE);
+        if (!(style & WS_CLIPCHILDREN))
+          SetWindowLongW(w->hwnd, GWL_STYLE, style | WS_CLIPCHILDREN);
+        section_create_body_hwnd_w32(*w);
+        section_reparent_children_w32(*w, /*to_body*/true);
+      } else if (!now_scrolling && was_scrolling) {
+        // On -> off: kill the bounce timer, re-parent children back to
+        // the section HWND, then destroy the body HWND. painted_msg_fn
+        // is cleared so PaintedWndProc stops dispatching wheel / drag.
+        KillTimer(w->hwnd, SECTION_BOUNCE_TIMER_ID);
+        w->painted_msg_fn = nullptr;
+        w->emit_events    = false;
+        section_reparent_children_w32(*w, /*to_body*/false);
+        section_destroy_body_hwnd_w32(*w);
+      }
+      section_apply_layout_changes_w32(*w);
     }
     // CUSTOMDRAW + compound: any attr change can change a text-layer's
     // template resolution, so repaint.

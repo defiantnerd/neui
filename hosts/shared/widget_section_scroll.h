@@ -176,6 +176,43 @@ namespace neui_detail
     return st.scroll_x != old_x || st.scroll_y != old_y;
   }
 
+  // Auto-bounding content extent over a parent's direct children. Tree<T>
+  // must expose child(i) / next(i) / exists(i) and yield a T with x / y /
+  // width / height / visible (the WidgetData shape on all three hosts).
+  // Hidden children are skipped. Out params zeroed before the walk.
+  template <typename TreeT>
+  inline void section_compute_auto_extent(TreeT& widgets, uint32_t parent_idx,
+                                            int& out_w, int& out_h)
+  {
+    out_w = 0;
+    out_h = 0;
+    uint32_t idx = widgets.child(parent_idx);
+    while (idx != 0) {
+      if (widgets.exists(idx)) {
+        auto& cw = widgets[idx];
+        if (cw.visible) {
+          int rx = cw.x + cw.width;
+          int by = cw.y + cw.height;
+          if (rx > out_w) out_w = rx;
+          if (by > out_h) out_h = by;
+        }
+      }
+      idx = widgets.next(idx);
+    }
+  }
+
+  // Header-band height for a section, mirroring paint_section's band
+  // logic: 0 when text is empty or align "none", else SECTION_HEADER_H
+  // clamped to fit the section's height.
+  inline int section_band_h_for(const char* text, int height, const char* align)
+  {
+    if (!text || !*text) return 0;
+    if (section_align_is_none(align)) return 0;
+    int bh = static_cast<int>(SECTION_HEADER_H);
+    if (bh > height) bh = height;
+    return bh;
+  }
+
   // Resolve the scrollable content extent from the AttrBag + an auto-
   // bounding callback. Auto = max(child.x + child.width) / .y + .height
   // across direct children; the explicit content_width / content_height

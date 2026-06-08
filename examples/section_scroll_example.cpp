@@ -7,9 +7,11 @@
 //   * Content generator: pick a row count, click Regenerate, and the
 //     section's children are torn down and rebuilt at that count.
 //
-// The example explicitly requests the crossplatform host - scrolling
-// SECTION lives there in v1; the native win32 + macOS hosts get the
-// feature in a follow-up (chip "none" already works on all hosts).
+// The example picks the default host (native on Win32 + macOS, xpl on
+// Linux / null) so the user can compare native + xpl rendering of the
+// scrolling SECTION side by side. Set NEUI_FORCE_XPL_HOST=1 in the
+// environment (or edit ACTIVE_HOST below) to pin to the xpl host
+// regardless of platform.
 //
 // Each generated row is a horizontal stripe of a LABEL + three BUTTONs,
 // laid out wider than the section so horizontal scrolling has something
@@ -28,9 +30,9 @@
 #include <windows.h>
 #endif
 
-// Scrolling SECTION ships on the xpl host first. Pin the example to it
-// so the demo behaves identically on Win32 + macOS + Linux.
-#define ACTIVE_HOST "neui.host.crossplatform"
+// Default: nullptr (first registered host). On Win32 / macOS that's the
+// native host; on Linux it's the xpl host. Override here to pin.
+#define ACTIVE_HOST nullptr
 
 static void dbglog(const char* fmt, ...)
 {

@@ -140,6 +140,22 @@ namespace neui_detail
       return parents;
     }
 
+    // Direct parent of `some_leaf`, or knone.id (0) if it's the root sentinel
+    // or otherwise unparented. Linear scan over the slot vector - cheap for
+    // the small widget trees the host produces. Public so per-host helpers
+    // (parent_scroll_offset_w32, ...) can read it without re-implementing.
+    uint32_t get_parent(uint32_t some_leaf) const
+    {
+      for (size_t i = 0; i < _data.size(); ++i) {
+        uint32_t child = _data[i].first_child_ndx;
+        while (child != 0) {
+          if (child == some_leaf) return static_cast<uint32_t>(i);
+          child = _data[child].next_sibling;
+        }
+      }
+      return knone.id;
+    }
+
   private:
     // Recursively reset ndx and all descendants without touching the
     // parent/sibling chain (the caller has already detached ndx). Each freed
@@ -177,18 +193,6 @@ namespace neui_detail
         if (i.first_child_ndx == some_leaf) return &i.first_child_ndx;
       }
       return nullptr;
-    }
-
-    uint32_t get_parent(uint32_t some_leaf) const
-    {
-      for (size_t i = 0; i < _data.size(); ++i) {
-        uint32_t child = _data[i].first_child_ndx;
-        while (child != 0) {
-          if (child == some_leaf) return static_cast<uint32_t>(i);
-          child = _data[child].next_sibling;
-        }
-      }
-      return knone.id;
     }
 
     uint32_t get_last_sibling(uint32_t some_sibling)

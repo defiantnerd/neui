@@ -22,6 +22,7 @@ namespace win32_host
   void register_classes();
   LRESULT CALLBACK AppWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   LRESULT CALLBACK PaintedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+  LRESULT CALLBACK SectionBodyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   LRESULT CALLBACK ChildSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 
   // Apply the dark / light visual style to a native control. Called after

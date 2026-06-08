@@ -1,6 +1,17 @@
 # Plan: Scrolling SECTION + chip "none" option
 
-**Status**: phases 0-3a + 5 (example) shipped on the xpl host. Native-host wiring (phases 3b + 3c) and the kinetics opt-in (phase 4) deferred to follow-ups.
+**Status**: phases 0-3 + 5 (example) shipped on all three hosts; the
+kinetics opt-in (phase 4) is deferred. macOS native + Win32 native
+landed in a follow-up after the v1 xpl-only landing, sharing the same
+`SectionScrollState` + `widget_section_scroll.h` runtime; per-host
+glue lives in `hosts/win32/widgets.cpp` (`painted_msg_section_w32` +
+`section_apply_layout_changes_w32` etc.) and `hosts/macos/window.mm`
+(`NEUINativePaintedView` `sectionScrollWheel:` / `sectionBounceTick:` +
+`macos_host::section_apply_layout_changes_macos` etc.). Child positions
+on the native hosts are scroll-adjusted at `widget_set_pos` /
+`apply_geometry_native_macos` time via `parent_scroll_offset_{w32,macos}`
+- the body-local (x, y) the client stores stays stable; the native
+HWND / NSView frame is the section's scroll subtracted.
 
 ## Context
 
@@ -222,6 +233,45 @@ bubbles the line event only through the widgets below it
 (`dispatch_wheel_event(hit, ev, stop_before)`), so children like MULTILINE
 keep consuming their own wheel. Tier-1 tests in
 `tests/test_section_scroll.cpp`.
+
+## Follow-up shipped: native-host wiring (2026-06)
+
+Phase 3b (Win32 native) and phase 3c (macOS native) ship together using
+the same `SectionScrollState` + `SectionLayout` allocated lazily on
+`WidgetData` (so non-scrolling sections still pay nothing). Common
+shape: `section_refresh_scroll_state_<host>` allocates / drops state
+on `NEUI_ATTR_SCROLL_MODE`; `section_compute_layout_<host>` reads the
+child tree via the new shared `section_compute_auto_extent` template
+(`widget_section_scroll.h`); `section_apply_layout_changes_<host>`
+rebuilds + reposits children + invalidates; `section_kinetic_wheel_*`
+(or the painted-view's `sectionScrollWheel:` on macOS) feeds the rich
+wheel input into `section_scroll_wheel_kinetic`; a per-section
+spring-back tick (`SetTimer` on Win32, `NSTimer` on macOS) runs
+`section_scroll_bounce_step`. Child widgets store **body-local**
+(x, y); the host applies the section's scroll subtraction at HWND
+positioning (`SetWindowPos`) / NSView positioning (`setFrame:`) time
+via a tiny `parent_scroll_offset_*` helper called from
+`widget_set_pos` + `cascade_dpi` (Win32) /
+`apply_geometry_native_macos` (macOS). `Tree::get_parent` was lifted
+to the public API so the helper can read it without re-implementing
+the linear scan.
+
+Win32 specifics: the SECTION HWND gains `WS_CLIPCHILDREN` when scrolling
+is on so child HWNDs clip to its bounds; `PaintedWndProc` already
+forwards mouse / wheel / timer to `painted_msg_fn`, so the new
+`painted_msg_section_w32` plugs into the same seam KNOB / GRID /
+CUSTOMDRAW use; `WM_MOUSEHWHEEL` was added to the seam's forwarded set.
+The wheel ladder handles `SPI_GETWHEELSCROLLLINES` /
+`SPI_GETWHEELSCROLLCHARS` per axis, with Shift+wheel routing to
+horizontal for non-tilt-wheel users.
+
+macOS specifics: `NEUINativePaintedView` gained an `NSTimer*
+section_bounce_timer` + `sectionScrollWheel:widget:` /
+`sectionBounceTick:` methods, and now picks SECTION as an interactive
+case in `scrollWheel:` / `mouseDown:` / `mouseDragged:` / `mouseUp:`
+when the widget's `section_scroll_state` is allocated. Wheel input is
+fed through the shared kinetics with full NSEvent phase / momentum /
+precise-delta plumbing - identical kinetic feel to GRID smooth-scroll.
 
 ## Deferred follow-ups
 

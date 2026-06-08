@@ -28,6 +28,7 @@ namespace win32_host
   // (or DPI change, which propagates through WM_SIZE) refreshes the
   // region in physical pixels.
   void apply_section_region_w32(WidgetData& wd);
+  void section_apply_layout_changes_w32(WidgetData& wd);
 }
 
 // DWMWA_USE_IMMERSIVE_DARK_MODE attribute id varies by Windows version.
@@ -207,6 +208,18 @@ namespace win32_host
     wc.hbrBackground = nullptr;
     wc.lpszClassName = L"neui.painted";
     RegisterClassExW(&wc);
+
+    // Scrolling-SECTION inner body container. Hosts the section's child
+    // widgets so Win32's default subview-clip naturally hides children
+    // that overflow the body rect on either axis - no per-child window
+    // regions needed. Paint just fills the body bg colour (read from the
+    // parent section's NEUI_ATTR_BACKGROUND attr at draw time). WS_CLIPCHILDREN
+    // is set on each instance so the bg fill paints around children.
+    wc.style         = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc   = SectionBodyWndProc;
+    wc.hbrBackground = nullptr;
+    wc.lpszClassName = L"neui.sectionbody";
+    RegisterClassExW(&wc);
   }
 
   // Shared WndProc for self-painted widgets (NEUI_W_KNOB and future
@@ -249,9 +262,19 @@ namespace win32_host
                         static_cast<uint32_t>(HIWORD(lParam)));
       }
       // SECTION region tracks physical-pixel widget size, so a resize
-      // must rebuild it before the next paint.
-      if (wd && wd->type && !strcmp(wd->type, NEUI_W_SECTION))
+      // must rebuild it before the next paint. Scrolling sections also
+      // need their layout cache rebuilt + children repositioned (the
+      // scroll position may now be out of range for the smaller body).
+      if (wd && wd->type && !strcmp(wd->type, NEUI_W_SECTION)) {
         apply_section_region_w32(*wd);
+        // Scrolling sections also need their layout cache rebuilt +
+        // children repositioned (the scroll position may now be out of
+        // range for the smaller body, and clamp runs in the layout
+        // helper - children must reflect the new scroll before the next
+        // mouse event).
+        if (wd->section_scroll_state)
+          section_apply_layout_changes_w32(*wd);
+      }
       return 0;
     }
     case WM_ERASEBKGND:
@@ -340,6 +363,7 @@ namespace win32_host
       return 0;
     case WM_LBUTTONDBLCLK:
     case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
     case WM_RBUTTONDOWN:
     case WM_RBUTTONUP:
       if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
@@ -458,6 +482,86 @@ namespace win32_host
         wd->paint_ctx = nullptr;
       }
       return 0;
+    }
+    default:
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+  }
+
+  // Inner body container for a scrolling SECTION. Children of the
+  // SECTION HWND-parent here so Win32 clips them naturally to the body
+  // rect (no per-child window region needed). Wheel events bubble up
+  // through DefWindowProc to the section's painted_msg_fn. The body
+  // bg colour is read from the parent section's NEUI_ATTR_BACKGROUND
+  // attr on every paint - cheap, and keeps live theme / attr changes
+  // reflected without extra plumbing. GWLP_USERDATA holds the section's
+  // WidgetData* (set at create time).
+  LRESULT CALLBACK SectionBodyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+  {
+    switch (msg) {
+    case WM_NCCREATE: {
+      CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+      if (cs && cs->lpCreateParams)
+        SetWindowLongPtr(hwnd, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+    case WM_ERASEBKGND:
+      return 1;  // we paint everything in WM_PAINT
+    case WM_PAINT: {
+      PAINTSTRUCT ps;
+      HDC hdc = BeginPaint(hwnd, &ps);
+      auto* sec = reinterpret_cast<WidgetData*>(
+                    GetWindowLongPtr(hwnd, GWLP_USERDATA));
+      using neui_detail::ColorRole;
+      uint32_t bg_argb;
+      if (sec && sec->attrs && sec->attrs->has(NEUI_ATTR_BACKGROUND)) {
+        bg_argb = static_cast<uint32_t>(
+                    sec->attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
+      } else {
+        bg_argb = neui_detail::shade(
+                    neui_detail::color(ColorRole::frame_bg),
+                    neui_detail::SECTION_BG_LIFT);
+      }
+      HBRUSH br = neui_detail::brush_from_argb(bg_argb);
+      FillRect(hdc, &ps.rcPaint, br);
+      DeleteObject(br);
+      EndPaint(hwnd, &ps);
+      return 0;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN: {
+      // Mirror the section's brush handling so STATIC text children
+      // (labels, checkbox text) painted onto the body show the body bg
+      // colour rather than the system default.
+      auto* sec = reinterpret_cast<WidgetData*>(
+                    GetWindowLongPtr(hwnd, GWLP_USERDATA));
+      if (sec && sec->session) {
+        using neui_detail::ColorRole;
+        neui_detail::ScopedPaletteOverride scope(
+          sec->session->effective_palette_ptr());
+        uint32_t bg_argb;
+        if (sec->attrs && sec->attrs->has(NEUI_ATTR_BACKGROUND)) {
+          bg_argb = static_cast<uint32_t>(
+                      sec->attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
+        } else {
+          bg_argb = neui_detail::shade(
+                      neui_detail::color(ColorRole::frame_bg),
+                      neui_detail::SECTION_BG_LIFT);
+        }
+        if (!sec->section_ctl_bg_brush ||
+            sec->section_ctl_bg_brush_argb != bg_argb) {
+          if (sec->section_ctl_bg_brush) DeleteObject(sec->section_ctl_bg_brush);
+          sec->section_ctl_bg_brush      = neui_detail::brush_from_argb(bg_argb);
+          sec->section_ctl_bg_brush_argb = bg_argb;
+        }
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, neui_detail::colorref_from_argb(
+                            neui_detail::color(ColorRole::text_primary)));
+        return reinterpret_cast<LRESULT>(sec->section_ctl_bg_brush);
+      }
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
     default:
       return DefWindowProcW(hwnd, msg, wParam, lParam);

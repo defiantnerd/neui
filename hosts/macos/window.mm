@@ -62,6 +62,17 @@ namespace macos_host {
   // definition appears.
   void grid_painted_char_macos(WidgetData& wd, uint32_t cp);
 
+  // Scrolling-SECTION helpers (defined further down). The painted view's
+  // drawRect: / mouseDown: / mouseDragged: / mouseUp: / scrollWheel:
+  // reference them before the definitions appear.
+  void section_refresh_scroll_state_macos(WidgetData& wd);
+  void section_compute_layout_macos(WidgetData& wd);
+  void section_reposition_children_macos(WidgetData& sec);
+  void section_apply_layout_changes_macos(WidgetData& sec);
+  bool section_bounce_step_macos(WidgetData& wd);
+  void parent_scroll_offset_macos(Session* sess, uint32_t widget_index,
+                                    int& out_x, int& out_y);
+
   // Painter draw_asset thunk - mirror of
   // hosts/win32/widgets.cpp::w32_painter_draw_asset_thunk. Resolves the
   // neui_asset_t through the session's MacOSAssetManager, lazy-uploads a
@@ -1066,6 +1077,11 @@ NSWindowStyleMask styles_for_appwindow()
   // it is shared with the elastic math in grid_model.h. The view only owns the
   // spring-back animation timer.
   NSTimer*          grid_bounce_timer;
+
+  // SECTION smooth-scroll: per-axis kinetics integrators live in the
+  // widget's SectionScrollState.kin_v/_h (hosts/shared/widget_section_scroll.h).
+  // The view only owns the 60 Hz spring-back animation timer.
+  NSTimer*          section_bounce_timer;
 }
 @end
 
@@ -1240,9 +1256,11 @@ static float neui_snap_to_steps(float v, int steps)
 
 - (void)dealloc
 {
-  // Stop any in-flight GRID spring-back animation (the timer retains self,
-  // so it normally self-terminates first; this is belt-and-suspenders).
+  // Stop any in-flight GRID / SECTION spring-back animation (the timer
+  // retains self, so it normally self-terminates first; this is belt-
+  // and-suspenders).
   [self gridStopBounce];
+  [self sectionStopBounce];
   // The IMAGE bitmap now lives in the session's MacOSAssetManager, not on
   // the view; its per-ctx GPU cache for this render_ctx is dropped by
   // release_native_control_macos before teardown. Here we only destroy the
@@ -1433,6 +1451,24 @@ static float neui_snap_to_steps(float v, int steps)
                                  wd->text.c_str(),
                                  bg, align, text_argb,
                                  wd->attrs.get());
+
+    // Late-refresh in case set_string(SCROLL_MODE) ran without the explicit
+    // refresh hook firing - cheap when state already matches. Mirror of the
+    // xpl host's SectionWidget::paint safety net.
+    macos_host::section_refresh_scroll_state_macos(*wd);
+    macos_host::section_compute_layout_macos(*wd);
+
+    if (wd->section_scroll_state &&
+        (wd->section_last_layout.vert_sb_shown ||
+         wd->section_last_layout.horz_sb_shown)) {
+      uint32_t sep   = neui_detail::color(neui_detail::ColorRole::scrollbar_separator);
+      uint32_t track = neui_detail::color(neui_detail::ColorRole::scrollbar_track);
+      uint32_t thumb = neui_detail::color(neui_detail::ColorRole::scrollbar_thumb);
+      neui_detail::paint_section_scrollbars(backend, render_ctx,
+                                              wd->section_last_layout,
+                                              *wd->section_scroll_state,
+                                              sep, track, thumb);
+    }
   }
 
   if (dim_disabled) backend->pop_alpha(render_ctx);
@@ -1588,8 +1624,43 @@ static float neui_snap_to_steps(float v, int steps)
   [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event] buttonmap:0];
 }
 
+// Resolve the SECTION + state pointer for the painted view if this widget
+// is a scrolling section. Used by mouseDown / Dragged / Up to drive the
+// shared scrollbar drag math.
+- (macos_host::WidgetData*)sectionInputWidget
+{
+  auto* wd = macos_host::widget_for_id(widget_id);
+  if (!wd || !wd->type) return nullptr;
+  if (strcmp(wd->type, NEUI_W_SECTION) != 0) return nullptr;
+  if (!wd->section_scroll_state) return nullptr;
+  return wd;
+}
+
 - (void)mouseDown:(NSEvent*)event
 {
+  // SECTION scrollbar drag start. Hit-test the scrollbar gutters in
+  // widget-local logical px; if the click lands in one, latch a drag.
+  if (auto* sec_wd = [self sectionInputWidget]) {
+    NSPoint p = [self localPoint:event];
+    auto& st = *sec_wd->section_scroll_state;
+    auto& L  = sec_wd->section_last_layout;
+    int hit = neui_detail::section_scrollbar_hit(L, (int)p.x, (int)p.y);
+    if (hit == 1) {
+      st.vert_drag.active           = true;
+      st.vert_drag.start_axis_coord = (int)p.y;
+      st.vert_drag.start_position   = st.scroll_y;
+      [self sectionStopBounce];
+      return;
+    }
+    if (hit == 2) {
+      st.horz_drag.active           = true;
+      st.horz_drag.start_axis_coord = (int)p.x;
+      st.horz_drag.start_position   = st.scroll_x;
+      [self sectionStopBounce];
+      return;
+    }
+    // Click in body / outside scrollbar - pass through.
+  }
   if ([self isKnob]) {
     // Disabled knob ignores all pointer input (no drag, no double-click
     // reset). dragging stays false, so mouseDragged / mouseUp are inert too.
@@ -1653,6 +1724,40 @@ static float neui_snap_to_steps(float v, int steps)
 
 - (void)mouseDragged:(NSEvent*)event
 {
+  // SECTION scrollbar drag: continue if we latched on mouseDown.
+  if (auto* sec_wd = [self sectionInputWidget]) {
+    auto& st = *sec_wd->section_scroll_state;
+    auto& L  = sec_wd->section_last_layout;
+    if (st.vert_drag.active || st.horz_drag.active) {
+      NSPoint p = [self localPoint:event];
+      if (st.vert_drag.active) {
+        auto geom = neui_detail::compute_scrollbar(
+                       L.body_h, 0, st.content_h, L.body_h,
+                       st.vert_drag.start_position);
+        int new_y = neui_detail::scrollbar_drag_apply(
+                       st.vert_drag, (int)p.y, geom, st.content_h, L.body_h);
+        if (new_y != st.scroll_y) {
+          st.scroll_y       = new_y;
+          st.kinetic_over_v = false;
+          macos_host::section_reposition_children_macos(*sec_wd);
+          [self setNeedsDisplay:YES];
+        }
+      } else {
+        auto geom = neui_detail::compute_scrollbar(
+                       L.body_w, 0, st.content_w, L.body_w,
+                       st.horz_drag.start_position);
+        int new_x = neui_detail::scrollbar_drag_apply(
+                       st.horz_drag, (int)p.x, geom, st.content_w, L.body_w);
+        if (new_x != st.scroll_x) {
+          st.scroll_x       = new_x;
+          st.kinetic_over_h = false;
+          macos_host::section_reposition_children_macos(*sec_wd);
+          [self setNeedsDisplay:YES];
+        }
+      }
+      return;
+    }
+  }
   if (auto* gwd = [self gridInputWidget]) {
     NSPoint p = [self localPoint:event];
     macos_host::grid_painted_msg_macos(*gwd, macos_host::GridMsg::Drag,
@@ -1690,6 +1795,15 @@ static float neui_snap_to_steps(float v, int steps)
 
 - (void)mouseUp:(NSEvent*)event
 {
+  // SECTION scrollbar drag release.
+  if (auto* sec_wd = [self sectionInputWidget]) {
+    auto& st = *sec_wd->section_scroll_state;
+    if (st.vert_drag.active || st.horz_drag.active) {
+      st.vert_drag.active = false;
+      st.horz_drag.active = false;
+      return;
+    }
+  }
   if (auto* gwd = [self gridInputWidget]) {
     macos_host::grid_painted_msg_macos(*gwd, macos_host::GridMsg::Up,
                                         0, 0, 0, 0, 0);
@@ -1774,6 +1888,108 @@ static float neui_snap_to_steps(float v, int steps)
   if (!more) [self gridStopBounce];
 }
 
+// --- Scrolling SECTION smooth-scroll plumbing ------------------------------
+
+// Stop / start the 60 Hz spring-back timer driving the rubber-band release.
+- (void)sectionStopBounce
+{
+  if (section_bounce_timer) { [section_bounce_timer invalidate]; section_bounce_timer = nil; }
+}
+
+- (void)sectionStartBounce
+{
+  [self sectionStopBounce];
+  section_bounce_timer = [NSTimer timerWithTimeInterval:1.0 / 60.0
+                                                 target:self
+                                               selector:@selector(sectionBounceTick:)
+                                               userInfo:nil
+                                                repeats:YES];
+  [[NSRunLoop currentRunLoop] addTimer:section_bounce_timer
+                               forMode:NSRunLoopCommonModes];
+}
+
+- (void)sectionBounceTick:(NSTimer*)timer
+{
+  (void)timer;
+  auto* wd = macos_host::widget_for_id(widget_id);
+  if (!wd || !wd->section_scroll_state) { [self sectionStopBounce]; return; }
+  bool more = macos_host::section_bounce_step_macos(*wd);
+  [self setNeedsDisplay:YES];
+  if (!more) [self sectionStopBounce];
+}
+
+// SECTION wheel - rich phase / momentum / precise-delta plumbing per axis.
+// Mirror of gridScrollWheel:, feeding section_scroll_wheel_kinetic via
+// the shared helper that also handles asymmetric single-axis fallback.
+- (void)sectionScrollWheel:(NSEvent*)event widget:(macos_host::WidgetData*)wd
+{
+  using namespace neui_detail;
+  if (!wd->section_scroll_state) return;
+  auto& st = *wd->section_scroll_state;
+  auto& L  = wd->section_last_layout;
+
+  bool has_v = section_axis_has_v(st.axis);
+  bool has_h = section_axis_has_h(st.axis);
+
+  // Build the per-axis ScrollWheelInput. precise => trackpad / Magic Mouse
+  // (deltas in points); classic mouse-wheel deltas arrive in lines which
+  // we scale by SECTION_WHEEL_LINE_PX so the visual speed matches the
+  // kinetic-precise path.
+  bool precise = event.hasPreciseScrollingDeltas;
+  double dy = (double)event.scrollingDeltaY;
+  double dx = (double)event.scrollingDeltaX;
+  if (!precise) {
+    dy *= (double)SECTION_WHEEL_LINE_PX;
+    dx *= (double)SECTION_WHEEL_LINE_PX;
+  }
+  // Asymmetric single-axis fallback (mirror of the win32 + xpl shape):
+  // a horizontal-only section absorbs a pure vertical wheel because
+  // classic mouse wheels have no horizontal axis. A vertical-only
+  // section does NOT absorb pure horizontal input - the user explicitly
+  // requested horizontal motion (two-finger sideways trackpad).
+  if (!has_v && has_h && dx == 0.0 && dy != 0.0) { dx = dy; dy = 0.0; }
+  // Cross-axis input that the section's axis mask doesn't support is
+  // dropped at the per-axis check below.
+
+  ScrollWheelInput base;
+  base.precise        = precise;
+  base.phase_began    = (event.phase == NSEventPhaseBegan);
+  base.phase_changed  = (event.phase == NSEventPhaseChanged);
+  base.phase_ended    = (event.phase == NSEventPhaseEnded) ||
+                        (event.phase == NSEventPhaseCancelled);
+  base.momentum       = (event.momentumPhase != NSEventPhaseNone);
+  base.momentum_ended = (event.momentumPhase == NSEventPhaseEnded);
+
+  // Zero-delta events still matter when they carry gesture-phase edges
+  // (phase_began cancels a bounce; phase_ended / momentum_ended drive the
+  // spring-back + momentum-suppression bookkeeping). Same shape as the xpl
+  // host's sectionKineticWheel:.
+  bool phase_signal = base.phase_began || base.phase_ended ||
+                      base.momentum || base.momentum_ended;
+
+  ScrollWheelAction act_v{}, act_h{};
+  if (has_v && (dy != 0.0 || phase_signal)) {
+    ScrollWheelInput in = base;
+    in.delta_px = dy;
+    act_v = section_scroll_wheel_kinetic(st, L, in, false);
+  }
+  if (has_h && (dx != 0.0 || phase_signal)) {
+    ScrollWheelInput in = base;
+    // Horizontal axis: scrollingDeltaX matches scrollingDeltaY's natural-
+    // scroll convention (positive = content moves right = scroll_x
+    // decreases). raw_px -= delta_px in the kinetics, so we pass dx
+    // through unchanged - same as the xpl host's sectionKineticWheel:.
+    in.delta_px = dx;
+    act_h = section_scroll_wheel_kinetic(st, L, in, true);
+  }
+  if (act_v.stop_bounce || act_h.stop_bounce) [self sectionStopBounce];
+  if (act_v.changed || act_h.changed) {
+    macos_host::section_reposition_children_macos(*wd);
+    [self setNeedsDisplay:YES];
+  }
+  if (act_v.start_bounce || act_h.start_bounce) [self sectionStartBounce];
+}
+
 - (void)gridScrollWheel:(NSEvent*)event widget:(macos_host::WidgetData*)wd
 {
   auto& m   = macos_host::ensure_grid_model_macos(*wd);
@@ -1828,14 +2044,34 @@ static float neui_snap_to_steps(float v, int steps)
   bool wants_knob = [self isKnob];
   macos_host::WidgetData* grid_wd = wants_knob ? nullptr : [self gridInputWidget];
   bool wants_grid = (grid_wd != nullptr);
-  bool wants_cd   = !wants_knob && !wants_grid && [self customDrawWantsInput];
-  if (!wants_knob && !wants_grid && !wants_cd) { [super scrollWheel:event]; return; }
+  // SECTION scrolling: the painted view's widget is a SECTION with an
+  // allocated SectionScrollState. Sections are otherwise non-interactive.
+  macos_host::WidgetData* sec_wd = nullptr;
+  if (!wants_knob && !wants_grid) {
+    auto* wd = macos_host::widget_for_id(widget_id);
+    if (wd && wd->type && !strcmp(wd->type, NEUI_W_SECTION)
+        && wd->section_scroll_state)
+      sec_wd = wd;
+  }
+  bool wants_section = (sec_wd != nullptr);
+  bool wants_cd   = !wants_knob && !wants_grid && !wants_section &&
+                     [self customDrawWantsInput];
+  if (!wants_knob && !wants_grid && !wants_section && !wants_cd) {
+    [super scrollWheel:event]; return;
+  }
 
   // GRID gets pixel-precise smooth scrolling with inertial momentum + elastic
   // rubber-band - it consumes momentum events rather than dropping them, so it
   // must run before the knob / customdraw tick model below.
   if (wants_grid) {
     [self gridScrollWheel:event widget:grid_wd];
+    return;
+  }
+
+  // SECTION shares the same shape - rich NSEvent phase / momentum / precise
+  // deltas feed section_scroll_wheel_kinetic per axis.
+  if (wants_section) {
+    [self sectionScrollWheel:event widget:sec_wd];
     return;
   }
 
@@ -2925,7 +3161,13 @@ namespace macos_host
     id obj = (__bridge id)wd.native_control;
     if (![obj isKindOfClass:[NSView class]]) return;
     NSView* v = (NSView*)obj;
-    [v setFrame:NSMakeRect(wd.x, wd.y, wd.width, wd.height)];
+    // If this widget's parent is a scrolling SECTION, subtract its scroll
+    // offset so the NSView frame.origin lives where the body-local coords
+    // say it does even when the section is scrolled.
+    int off_x = 0, off_y = 0;
+    if (wd.session)
+      parent_scroll_offset_macos(wd.session, wd.index, off_x, off_y);
+    [v setFrame:NSMakeRect(wd.x - off_x, wd.y - off_y, wd.width, wd.height)];
     if ([obj isKindOfClass:[NEUINativePaintedView class]]) {
       NEUINativePaintedView* pv = (NEUINativePaintedView*)obj;
       auto* backend = neui_cg_backend::get_backend();
@@ -2933,7 +3175,129 @@ namespace macos_host
         backend->resize(pv->render_ctx, (uint32_t)wd.width, (uint32_t)wd.height);
       [pv setNeedsDisplay:YES];
     }
+    // Section self-resize: rebuild layout + reposition own children.
+    if (wd.type && !strcmp(wd.type, NEUI_W_SECTION))
+      section_apply_layout_changes_macos(wd);
   }
+
+  // -------------------------------------------------------------------------
+  // Scrolling SECTION runtime helpers.
+  //
+  // The kinetics math + scrollbar geometry live in hosts/shared/
+  // widget_section_scroll.h. The macOS host owns the painted view's
+  // NSTimer spring-back driver + the NSView frame.origin shuffle when
+  // scroll position changes. Mirror of the win32 native helpers in
+  // hosts/win32/widgets.cpp (parent_scroll_offset_w32 / ...).
+
+  void section_refresh_scroll_state_macos(WidgetData& wd)
+  {
+    if (!wd.type || strcmp(wd.type, NEUI_W_SECTION) != 0) return;
+    const char* mode = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_SCROLL_MODE) : nullptr;
+    auto axis = neui_detail::parse_section_scroll_mode(mode);
+    if (axis == neui_detail::SectionScrollAxis::None) {
+      wd.section_scroll_state.reset();
+      return;
+    }
+    if (!wd.section_scroll_state)
+      wd.section_scroll_state =
+        std::make_unique<neui_detail::SectionScrollState>();
+    wd.section_scroll_state->axis = axis;
+  }
+
+  void section_compute_layout_macos(WidgetData& wd)
+  {
+    if (!wd.session) return;
+    const char* align = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
+    int band_h = neui_detail::section_band_h_for(wd.text.c_str(), wd.height, align);
+    int initial_body_w = wd.width;
+    int initial_body_h = wd.height - band_h;
+    if (initial_body_h < 0) initial_body_h = 0;
+    int content_w = 0, content_h = 0;
+    auto autofn = [&](int& w, int& h){
+      neui_detail::section_compute_auto_extent(wd.session->_widgets,
+                                                 wd.index, w, h);
+    };
+    neui_detail::resolve_section_content_extent(wd.attrs.get(), autofn,
+                                                  initial_body_w, initial_body_h,
+                                                  content_w, content_h);
+    auto axis = wd.section_scroll_state
+                  ? wd.section_scroll_state->axis
+                  : neui_detail::SectionScrollAxis::None;
+    wd.section_last_layout = neui_detail::compute_section_layout(
+                               wd.width, wd.height, band_h,
+                               content_w, content_h, axis);
+    if (wd.section_scroll_state) {
+      wd.section_scroll_state->content_w = content_w;
+      wd.section_scroll_state->content_h = content_h;
+      neui_detail::clamp_section_scroll_idle(*wd.section_scroll_state,
+                                               content_w, content_h,
+                                               wd.section_last_layout.body_w,
+                                               wd.section_last_layout.body_h);
+    }
+  }
+
+  // Reposition every direct child NSView of the SECTION to its scroll-
+  // adjusted frame.origin. No-op for non-scrolling sections.
+  void section_reposition_children_macos(WidgetData& sec)
+  {
+    if (!sec.native_control || !sec.session) return;
+    int sx = sec.section_scroll_state ? sec.section_scroll_state->scroll_x : 0;
+    int sy = sec.section_scroll_state ? sec.section_scroll_state->scroll_y : 0;
+    uint32_t idx = sec.session->_widgets.child(sec.index);
+    while (idx != 0) {
+      if (sec.session->_widgets.exists(idx)) {
+        auto& cw = sec.session->_widgets[idx];
+        if (cw.native_control) {
+          id obj = (__bridge id)cw.native_control;
+          if ([obj isKindOfClass:[NSView class]]) {
+            NSView* v = (NSView*)obj;
+            [v setFrame:NSMakeRect(cw.x - sx, cw.y - sy, cw.width, cw.height)];
+          }
+        }
+      }
+      idx = sec.session->_widgets.next(idx);
+    }
+  }
+
+  void section_apply_layout_changes_macos(WidgetData& sec)
+  {
+    if (!sec.native_control || !sec.type ||
+        strcmp(sec.type, NEUI_W_SECTION) != 0) return;
+    section_compute_layout_macos(sec);
+    section_reposition_children_macos(sec);
+    mark_widget_dirty_for_paint(sec);
+  }
+
+  // Step the SECTION's per-axis spring-back kinetics one frame. Returns
+  // true while still animating. Called from sectionBounceTick:.
+  bool section_bounce_step_macos(WidgetData& wd)
+  {
+    if (!wd.section_scroll_state) return false;
+    auto& st = *wd.section_scroll_state;
+    auto& L  = wd.section_last_layout;
+    bool more_v = neui_detail::section_scroll_bounce_step(st, L, false);
+    bool more_h = neui_detail::section_scroll_bounce_step(st, L, true);
+    section_reposition_children_macos(wd);
+    return more_v || more_h;
+  }
+
+  // Parent-scroll offset query. If `widget_index`'s parent is a scrolling
+  // SECTION, write its scroll offset (logical px) and return; otherwise
+  // both outputs stay 0.
+  void parent_scroll_offset_macos(Session* sess, uint32_t widget_index,
+                                    int& out_x, int& out_y)
+  {
+    out_x = 0; out_y = 0;
+    if (!sess) return;
+    uint32_t parent_idx = sess->_widgets.get_parent(widget_index);
+    if (parent_idx == 0 || !sess->_widgets.exists(parent_idx)) return;
+    auto& pw = sess->_widgets[parent_idx];
+    if (pw.section_scroll_state) {
+      out_x = pw.section_scroll_state->scroll_x;
+      out_y = pw.section_scroll_state->scroll_y;
+    }
+  }
+
 
   // Push WidgetData::enabled into the live native control. Mirror of the
   // win32 host's EnableWindow path (hosts/win32/widgets.cpp::set_enabled +
@@ -3253,12 +3617,15 @@ namespace macos_host
             || !strcmp(w.type, NEUI_W_SECTION)) {
       // SECTION uses a painted view for the body fill + title chip; child
       // widgets nest into it via the recursive descendant walker (see
-      // create_descendants_native). Pointer-events pass through to
-      // siblings via NSView default hit-test - the widget is non-
-      // interactive in v1.
+      // create_descendants_native). For scrolling sections (NEUI_ATTR_SCROLL_MODE
+      // != "none") the painted view also intercepts wheel / mouse for
+      // scrollbar drag + kinetics; non-scrolling sections stay pointer-
+      // pass-through.
       NEUINativePaintedView* v = create_painted_view(w);
       [parent_content addSubview:v];
       w.native_control = (__bridge_retained void*)v;
+      if (!strcmp(w.type, NEUI_W_SECTION))
+        section_refresh_scroll_state_macos(w);
     }
 
     // Apply any pre-show enabled state now that the native control exists.

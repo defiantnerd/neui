@@ -149,6 +149,12 @@ namespace macos_host
   // NSFont (no-op for painted widgets + when no font attr is set).
   void apply_font_native_macos(WidgetData& wd);
 
+  // Defined in window.mm. SECTION scrolling helpers; the attr setters
+  // call them on NEUI_ATTR_SCROLL_MODE / CONTENT_WIDTH / CONTENT_HEIGHT
+  // changes.
+  void section_refresh_scroll_state_macos(WidgetData& wd);
+  void section_apply_layout_changes_macos(WidgetData& sec);
+
   // True for the three font attribute keys. Used by the attr setters to
   // re-apply the native font + repaint painted text on a live change.
   static inline bool is_font_attr(const char* key)
@@ -1189,6 +1195,13 @@ namespace macos_host
         !strcmp(key, NEUI_ATTR_BACKGROUND)) {
       mark_widget_dirty_for_paint(wd);
     }
+    // SECTION content extent override: rebuild layout + reposition children
+    // so the scrollbar reflects the new content size.
+    if (wd.type && !strcmp(wd.type, NEUI_W_SECTION) &&
+        (!strcmp(key, NEUI_ATTR_CONTENT_WIDTH) ||
+         !strcmp(key, NEUI_ATTR_CONTENT_HEIGHT))) {
+      section_apply_layout_changes_macos(wd);
+    }
     // NEUI_ATTR_FONT_WEIGHT: re-apply native control font + repaint painted text.
     if (is_font_attr(key)) { apply_font_native_macos(wd); mark_widget_dirty_for_paint(wd); }
     return 1;
@@ -1218,11 +1231,21 @@ namespace macos_host
       mark_widget_dirty_for_paint(wd);
     }
     // SECTION: NEUI_ATTR_ALIGN_TEXT drives the title chip position - the
-    // shared paint_section helper reads it each draw, so a repaint is
-    // enough to live-update. NEUI_ATTR_BACKGROUND is handled in a_set_int.
+    // shared paint_section helper reads it each draw. align="none" /
+    // empty band swap changes band_h -> layout rebuild + reposition
+    // children. NEUI_ATTR_BACKGROUND is handled in a_set_int.
     if (wd.type && !strcmp(wd.type, NEUI_W_SECTION) &&
         !strcmp(key, NEUI_ATTR_ALIGN_TEXT)) {
-      mark_widget_dirty_for_paint(wd);
+      section_apply_layout_changes_macos(wd);
+    }
+    // SECTION scroll-mode change: allocate / drop scroll state, rebuild
+    // layout + reposition children. The painted view's scrollWheel: /
+    // mouseDown: routes through SectionScrollState's nullable pointer
+    // so the live opt-in / opt-out works without view recreation.
+    if (wd.type && !strcmp(wd.type, NEUI_W_SECTION) &&
+        !strcmp(key, NEUI_ATTR_SCROLL_MODE)) {
+      section_refresh_scroll_state_macos(wd);
+      section_apply_layout_changes_macos(wd);
     }
     // NEUI_ATTR_FONT_FAMILY: re-apply native control font + repaint painted text.
     if (is_font_attr(key)) { apply_font_native_macos(wd); mark_widget_dirty_for_paint(wd); }

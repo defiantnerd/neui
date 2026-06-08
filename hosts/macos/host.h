@@ -7,6 +7,7 @@
 #include "../shared/theme_palette.h"
 #include "../shared/behavior_runtime.h"
 #include "../shared/grid_model.h"
+#include "../shared/widget_section_scroll.h"
 #include "asset_manager_macos.h"
 
 #include <memory>
@@ -128,6 +129,14 @@ namespace macos_host
     // selection, column-resize / scrollbar drag state. Lazy-allocated;
     // every other widget pays a single pointer.
     std::unique_ptr<neui_detail::GridModel> grid_model;
+
+    // SECTION scrolling state. Allocated lazily when
+    // NEUI_ATTR_SCROLL_MODE != "none" via section_refresh_scroll_state_macos.
+    // section_last_layout is the layout cached during the most recent
+    // paint pass; mouse / wheel handlers on the painted view read it
+    // for hit-testing, scrollbar drag, and kinetics.
+    std::unique_ptr<neui_detail::SectionScrollState> section_scroll_state;
+    neui_detail::SectionLayout                       section_last_layout{};
   };
 
   class Session

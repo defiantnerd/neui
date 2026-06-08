@@ -8,6 +8,7 @@
 #include "../shared/behavior_runtime.h"
 #include "../shared/grid_model.h"
 #include "../shared/edit_history.h"
+#include "../shared/widget_section_scroll.h"
 #include "asset_manager_w32.h"
 #include <memory>
 #include <string>
@@ -225,6 +226,23 @@ namespace win32_host {
     // selection, column-resize / scrollbar drag state. Lazy-allocated;
     // every other widget pays a single pointer.
     std::unique_ptr<neui_detail::GridModel> grid_model;
+
+    // SECTION scrolling state. Allocated lazily when
+    // NEUI_ATTR_SCROLL_MODE != "none" via section_refresh_scroll_state_w32.
+    // section_last_layout is the layout cached during the most recent
+    // paint pass; painted_msg_section_w32 reads it for hit-testing,
+    // scrollbar drag, and kinetics.
+    std::unique_ptr<neui_detail::SectionScrollState> section_scroll_state;
+    neui_detail::SectionLayout                       section_last_layout{};
+
+    // SECTION scrolling inner body HWND. Created alongside scroll_state;
+    // hosts the section's tree-children (they HWND-parent here, not to
+    // the section's own HWND). Sized to the body rect so Win32's default
+    // child-window clipping naturally hides children that overflow the
+    // body on either axis - no per-child window regions needed, and the
+    // standard WM_PAINT pipeline handles repaints during scroll without
+    // manual InvalidateRect storms. Null for non-scrolling sections.
+    HWND section_body_hwnd = nullptr;
 
     // Multi-level undo / redo for native EDIT-backed widgets (INPUTBOX,
     // MULTILINE). Lazy-allocated on first mutation by the subclass-proc
