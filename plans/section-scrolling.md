@@ -273,6 +273,157 @@ when the widget's `section_scroll_state` is allocated. Wheel input is
 fed through the shared kinetics with full NSEvent phase / momentum /
 precise-delta plumbing - identical kinetic feel to GRID smooth-scroll.
 
+## Follow-up shipped: Win32 inner body HWND (2026-06-08)
+
+The initial Win32 wiring positioned children directly inside the section
+HWND and tried to clip them to the body rect via `SetWindowRgn`. That
+worked but produced two visible bugs:
+1. The chip band and right-side scrollbar gutter could be overpainted by
+   children at the top of the section or by columns extending past the
+   body width.
+2. Per-tick `SetWindowRgn` on every direct child during smooth scroll
+   was prohibitively slow (each call synchronously updates the window
+   tree's clip metadata; with 200+ children at 60 Hz the OS couldn't
+   keep up and paint tearing appeared).
+
+The fix is the standard Win32 idiom for scrollable native containers:
+**inner body HWND** (`neui.sectionbody` window class, registered in
+`hosts/win32/window.cpp::register_classes`). Each scrolling SECTION
+creates one as a child of the section HWND, positioned at the body
+rect. The section's tree children HWND-parent to this body HWND
+instead of the section itself, so Win32's default subview clipping
+naturally confines them to the body without any per-child regions.
+The chip band and scrollbar gutter live outside body_hwnd's client
+rect and can't be overpainted by children.
+
+Paint responsibility split:
+- SECTION HWND (`paint_section_w32`): chip + scrollbar only; its body
+  fill is clipped away by `WS_CLIPCHILDREN` since body_hwnd covers
+  the body area.
+- body_hwnd (`SectionBodyWndProc::WM_PAINT`): plain `FillRect` of the
+  body bg colour (read from the parent section's `NEUI_ATTR_BACKGROUND`
+  at paint time). `WS_CLIPCHILDREN` makes its fill paint *around*
+  children. `WM_CTLCOLORSTATIC` / `_BTN` are forwarded so STATIC text
+  children pick up the section's bg.
+- Children: their own normal paint pipeline.
+
+body_hwnd is created with `WS_EX_COMPOSITED` so the OS composites the
+body fill + every descendant into an off-screen backbuffer and blits
+the result in one pass. Without this flag, the brief window between
+`SetWindowPos` moving a child and the child's `WM_PAINT` firing shows
+intermediate bg pixels and the scroll tears visibly.
+
+Lifecycle (`hosts/win32/widgets.cpp`):
+- `section_create_body_hwnd_w32(sec)` / `section_destroy_body_hwnd_w32(sec)`
+- `section_child_parent_hwnd_w32(parent_wd)` returns `section_body_hwnd`
+  if scrolling, else `parent_wd.hwnd`. Used in `create_child_windows`
+  and `widget_create`'s immediate-creation path.
+- `section_reparent_children_w32(sec, to_body)` uses `SetParent` to
+  move existing children between section.hwnd and body_hwnd when
+  `NEUI_ATTR_SCROLL_MODE` flips at runtime.
+- `section_reposition_children_w32(sec)` walks the section's tree
+  children and `SetWindowPos`-es each in body_hwnd-local coords
+  `(wd.x - scroll_x, wd.y - scroll_y)`, batched via `HDWP`.
+- `section_apply_layout_changes_w32(sec)` resizes body_hwnd to the
+  current body rect + repositions children. Called on resize, attr
+  change, DPI flip.
+- `widget_destroy` cascades: `DestroyWindow(section.hwnd)` tears down
+  body_hwnd automatically; the field is nulled.
+
+All previous per-child `SetWindowRgn` plumbing (the clip-cache fields,
+`section_clip_child_to_body_w32`) was deleted. `parent_scroll_offset_w32`
+reverted to just returning scroll_x / scroll_y (no body_x / body_y
+term) because body_hwnd's own frame.origin handles the band offset.
+
+## Deferred follow-up: macOS native inner body view
+
+macOS still has the same chip / gutter overpaint and (potential)
+scroll-flicker issues that the Win32 host had before the inner-body
+refactor above. The same architectural fix applies; the only
+differences are AppKit semantics for the body view.
+
+Reference impl on Win32: `hosts/win32/widgets.cpp` (`section_create_body_hwnd_w32`
+/ `section_child_parent_hwnd_w32` / `section_reparent_children_w32` /
+`section_reposition_children_w32` / `section_apply_layout_changes_w32`,
+plus the SCROLL_MODE flip handling in `a_set_string`) and
+`hosts/win32/window.cpp` (`SectionBodyWndProc` + the `neui.sectionbody`
+class registration in `register_classes()`).
+
+macOS work plan:
+
+1. **WidgetData**: add `void* section_body_view` (retained NSView*) on
+   `WidgetData` in `hosts/macos/host.h`, alongside the existing
+   `section_scroll_state` field.
+
+2. **Body view class**: new `NEUISectionBodyView : NSView` in
+   `hosts/macos/window.mm`. `isFlipped = YES` (matches the section
+   view). `drawRect:` does one `NSRectFill` with the parent section's
+   resolved `NEUI_ATTR_BACKGROUND` colour. Subviews naturally clip to
+   the body's bounds (AppKit default - no `masksToBounds` /
+   `clipsToBounds` needed unless the body grows a layer).
+
+3. **Creation**: in `create_native_for_widget` for SECTION (the
+   `NEUINativePaintedView` branch in `hosts/macos/window.mm`), after
+   the painted view is added as a subview and
+   `section_refresh_scroll_state_macos(w)` runs, also create the body
+   view and add it as a subview of the section view. Stash on
+   `w.section_body_view` retained via `__bridge_retained`. Size to the
+   body rect from `section_compute_layout_macos`.
+
+4. **Container plumbing**: extend `widget_is_native_container` /
+   `create_descendants_native_macos` so that when descending into a
+   scrolling SECTION's children, `parent_content` is the body view
+   rather than the section view. The non-scrolling SECTION case keeps
+   today's section-view-as-container behaviour - non-scrolling sections
+   don't gain a body view, matching the Win32 host (`body_hwnd` is null
+   for non-scrolling sections, `section_child_parent_hwnd_w32` returns
+   `parent_wd.hwnd`). Easiest path: add a `parent_container_view_macos`
+   helper that returns `section_body_view` when present, else
+   `native_control`.
+
+5. **Reposition**: simplify `section_reposition_children_macos` -
+   children's frame is now body-view-local, so the math is just
+   `[v setFrame:NSMakeRect(cw.x - sx, cw.y - sy, cw.w, cw.h)]` (the
+   body offset disappears - it's encoded in the body view's own
+   `frame.origin`). The current macOS `section_reposition_children_macos`
+   in `hosts/macos/window.mm` already has this shape; verify it stays
+   correct once children are body-view children.
+
+6. **Layout changes**: `section_apply_layout_changes_macos` resizes
+   `section_body_view` to the new body rect (same place it currently
+   calls `mark_widget_dirty_for_paint`), then calls
+   `section_reposition_children_macos`. Mirror of the Win32 helper.
+
+7. **SCROLL_MODE flip**: extend the `a_set_string(NEUI_ATTR_SCROLL_MODE)`
+   handler in `hosts/macos/widgets.mm` to create / destroy the body
+   view and re-parent existing children via
+   `removeFromSuperview` + `addSubview:`. Mirror of the Win32 attr
+   setter.
+
+8. **Destroy**: when the section is destroyed, release the body view
+   (`__bridge_transfer` + nil out the field). Children that are still
+   subviews of the body view will be torn down by the existing
+   `release_native_control_macos` cascade as the widget tree walks.
+
+9. **parent_scroll_offset_macos**: stays as it is now (returns
+   `scroll_x`, `scroll_y` only). The body offset already lives in the
+   body view's `frame.origin`; the caller in
+   `apply_geometry_native_macos` just needs to use the body view as the
+   superview when adding children of a scrolling section.
+
+10. **Double-buffering**: AppKit double-buffers NSViews by default, so
+    no explicit `WS_EX_COMPOSITED` equivalent is required. If scroll
+    flicker still shows up after the refactor, set
+    `body_view.wantsLayer = YES` and
+    `body_view.layerContentsRedrawPolicy = NSViewLayerContentsRedrawOnSetNeedsDisplay`
+    (the AppKit knobs for the same effect).
+
+Verification: `examples/section_scroll_example.cpp` with default host
+on macOS. The chip "Scrollable content" must stay visible above the
+content during scroll; the right-edge scrollbar gutter must not be
+overpainted by buttons extending past the body width; scrolling
+through 30+ rows must be flicker-free with smooth kinetics.
+
 ## Deferred follow-ups
 
 - `NEUI_EVENT_SCROLL_CHANGED` event for clients that want to react to scroll position (e.g. lazy-loading content).
