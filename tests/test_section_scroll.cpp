@@ -94,6 +94,63 @@ TEST_CASE("section_scroll_commit: overscroll passes through + flagged")
   CHECK(st.kinetic_over_v);
 }
 
+TEST_CASE("section_scroll_wheel_kinetic: reverse-direction input releases overshoot linearly")
+{
+  // Regression: previously the inverse-rubber map mapped a deep overshoot
+  // (raw_px close to the asymptotic limit) to a very large implicit
+  // cumulative-input integral. A subsequent small reverse-direction wheel
+  // notch was lost in that integral - the user saw the displayed position
+  // barely budge and felt like they were wrestling against the spring.
+  // With the release-direction shortcut, an input that points back toward
+  // the in-range zone subtracts linearly from the displayed position so
+  // 1 px of reverse input = 1 px of release. Sustained over-flicks
+  // (inputs that EXTEND the overshoot) keep the asymptotic damping.
+  SectionScrollState st = make_state();
+  SectionLayout L = make_layout();
+
+  // Drive into a deep bottom overshoot (raw_px near the asymptotic limit).
+  for (int i = 0; i < 50; ++i)
+    section_scroll_wheel_kinetic(st, L, precise_delta(-1000.0), false);
+
+  CHECK(st.kinetic_over_v);
+  double over_before = st.kin_v.raw_px - 650.0;
+  CHECK(over_before > 30.0);   // deep stretch
+
+  // A modest reverse notch (10 px back toward the edge): with the linear
+  // release this should reduce the displayed overshoot by exactly 10 px.
+  // The pre-fix code would barely move raw_px at all.
+  section_scroll_wheel_kinetic(st, L, precise_delta(10.0), false);
+  double over_after = st.kin_v.raw_px - 650.0;
+  CHECK_APPROX(over_before - over_after, 10.0);
+
+  // A reverse notch large enough to release the whole stretch + push back
+  // into the in-range zone lands linearly inside the in-range portion.
+  section_scroll_wheel_kinetic(st, L, precise_delta(over_after + 5.0), false);
+  CHECK_FALSE(st.kinetic_over_v);
+  CHECK_APPROX(st.kin_v.raw_px, 645.0);
+}
+
+TEST_CASE("section_scroll_wheel_kinetic: reverse-direction release also works on top edge")
+{
+  // Same shape on the opposite axis. Drive into a top overshoot (raw_px
+  // negative), then a small reverse notch (delta negative = pull down)
+  // releases the stretch linearly.
+  SectionScrollState st = make_state();
+  SectionLayout L = make_layout();
+  st.scroll_y = 0;
+
+  for (int i = 0; i < 50; ++i)
+    section_scroll_wheel_kinetic(st, L, precise_delta(1000.0), false);
+
+  CHECK(st.kinetic_over_v);
+  CHECK(st.kin_v.raw_px < -30.0);
+  double over_before = -st.kin_v.raw_px;
+
+  section_scroll_wheel_kinetic(st, L, precise_delta(-10.0), false);
+  double over_after = -st.kin_v.raw_px;
+  CHECK_APPROX(over_before - over_after, 10.0);
+}
+
 TEST_CASE("section_scroll_wheel_kinetic: rubber damping at input keeps raw bounded")
 {
   // Regression: previously raw_px integrated input unbounded - heavy

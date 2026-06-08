@@ -26,13 +26,15 @@ namespace neui_detail
   // ---- Tuning constants ---------------------------------------------------
 
   // Spring-back lerp factor per 60 Hz tick (higher = snappier). Exponential
-  // ease, so halving the per-tick decay roughly doubles the settle time.
-  inline constexpr double SCROLL_BOUNCE_LERP = 0.29;
+  // ease, so halving the per-tick decay roughly doubles the settle time;
+  // 0.5 gives ~2x the snap of the previous 0.29 tuning while staying well
+  // under the critical-damping threshold (no oscillation).
+  inline constexpr double SCROLL_BOUNCE_LERP = 0.5;
   // Below this pixel distance the spring-back snaps to target and stops.
   inline constexpr double SCROLL_BOUNCE_EPS = 0.5;
   // Hard cap on how far the content can elastically stretch past an edge
   // (logical px) - keeps the rubber-band tight on a hard flick.
-  inline constexpr double SCROLL_OVERSCROLL_MAX = 60.0;
+  inline constexpr double SCROLL_OVERSCROLL_MAX = 40.0;
   // Stretch stiffness: smaller = more resistance (less travel per unit pull).
   inline constexpr double SCROLL_OVERSCROLL_STIFFNESS = 0.5;
   // Quiet-time debounce in 60 Hz ticks. The bounce step refuses to lerp
@@ -156,10 +158,41 @@ namespace neui_detail
   // re-applies the forward map. In-range portions are linear; portions
   // that lie past an edge are damped. raw_px (in/out) is the damped
   // display position - bounded by `[-limit, max_px + limit]`.
+  //
+  // Releasing-direction shortcut: when the input opposes the current
+  // overshoot direction we bypass the inverse-map step and subtract
+  // the delta directly from the displayed position. For a deep rubber-
+  // band stretch the inverse map blows up (the forward overshoot func
+  // asymptotes, so its inverse asymptotes too) and a small reverse-
+  // direction notch maps to an imperceptible change in cumulative input
+  // - making the user feel like they're "wrestling against the spring"
+  // instead of releasing it. Treating the overshoot as a display-space
+  // value when releasing gives a 1 px-of-input = 1 px-of-release feel,
+  // matching the platform expectation for classic-wheel notches that
+  // reverse direction mid-stretch. (Inputs that EXTEND the overshoot
+  // keep the asymptotic damping so a sustained over-flick still feels
+  // springy.)
   inline double scroll_apply_damped_input(double raw, double delta,
                                             double max_px, double dim)
   {
-    double limit = scroll_rubber_limit(dim);
+    bool releasing_bottom = (raw > max_px && delta > 0.0);
+    bool releasing_top    = (raw < 0.0    && delta < 0.0);
+    if (releasing_bottom || releasing_top) {
+      double new_raw = raw - delta;
+      // If the release was strong enough to cross all the way through
+      // the in-range zone into the opposite overshoot, fold the
+      // residual past-edge portion through the forward damping so the
+      // new stretch still feels springy. The same-direction release
+      // (still in the original overshoot) is left linear: raw_px is
+      // already the damped display position, so re-applying the forward
+      // map would dampen it a second time and shrink the visible
+      // response. Same for landing in-range.
+      if (releasing_bottom && new_raw < 0.0)
+        return -scroll_overshoot(-new_raw, dim);
+      if (releasing_top && new_raw > max_px)
+        return max_px + scroll_overshoot(new_raw - max_px, dim);
+      return new_raw;
+    }
 
     // Step 1: invert raw -> cumulative input integral.
     double integral;
@@ -180,7 +213,6 @@ namespace neui_detail
     } else if (integral > max_px) {
       return max_px + scroll_overshoot(integral - max_px, dim);
     }
-    (void)limit;
     return integral;
   }
 

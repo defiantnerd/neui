@@ -1216,12 +1216,22 @@ namespace win32_host
   }
 
   // After any change that can affect a SECTION's layout (resize,
-  // scroll-mode attr, content extent attr), recompute the layout cache,
-  // resize the inner body_hwnd to match the new body rect, re-clamp the
-  // scroll position, and reposition every child. No-op when the HWND
-  // hasn't been created yet (deferred creation) - the same recompute
-  // will run on first paint anyway. Non-static so window.cpp's WM_SIZE
-  // handler can call it.
+  // scroll-mode attr, content extent attr, chip align attr), recompute
+  // the layout cache, resize the inner body_hwnd to match the new body
+  // rect, re-clamp the scroll position, and reposition every child.
+  // No-op when the HWND hasn't been created yet (deferred creation) -
+  // the same recompute will run on first paint anyway. Non-static so
+  // window.cpp's WM_SIZE handler can call it.
+  //
+  // body_hwnd is explicitly invalidated regardless of whether its rect
+  // changed. WS_EX_COMPOSITED puts body_hwnd's paint behind an off-screen
+  // composition buffer; on a resize the OS auto-invalidates the newly-
+  // covered area, but a same-size change (chip align flip from "left" to
+  // "right" keeps band_h identical) doesn't queue any body_hwnd redraw,
+  // and the section's own InvalidateRect below is masked by
+  // WS_CLIPCHILDREN over body_hwnd's area. Without the explicit
+  // invalidate the body's pixels go stale - the chip moves but the body
+  // underneath keeps its last frame.
   void section_apply_layout_changes_w32(WidgetData& wd)
   {
     if (!wd.hwnd || !wd.type || strcmp(wd.type, NEUI_W_SECTION) != 0) return;
@@ -1237,11 +1247,9 @@ namespace win32_host
       SetWindowPos(wd.section_body_hwnd, nullptr,
                     phys_x, phys_y, phys_w, phys_h,
                     SWP_NOZORDER | SWP_NOACTIVATE);
+      InvalidateRect(wd.section_body_hwnd, nullptr, FALSE);
     }
     section_reposition_children_w32(wd);
-    // Section itself only needs repaint for chip + scrollbar; body_hwnd
-    // owns the body fill and children. The OS auto-invalidates body_hwnd's
-    // pixels in the strip uncovered by SetWindowPos above.
     InvalidateRect(wd.hwnd, nullptr, FALSE);
   }
 
@@ -2115,7 +2123,11 @@ namespace win32_host
     }
 
     auto& w = _widgets[index];
-    if (_client_widget_api) {
+    // Guard against a client_widget_api that left `ondestroy` null. The
+    // public API allows clients to opt out of destroy notifications by
+    // setting the function pointer to nullptr; this host has to honour
+    // that rather than dereferencing it.
+    if (_client_widget_api && _client_widget_api->ondestroy) {
       _client_widget_api->ondestroy(_token, widget, w.userdata);
     }
     if (w.has_subclass && w.hwnd) {
