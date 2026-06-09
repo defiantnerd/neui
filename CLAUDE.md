@@ -116,6 +116,10 @@ Verification: `examples/dnd_example.cpp` (drop receiver) builds `neui_dnd_exampl
 | `grid.show_focus_row` | int bool | GRID | Paint focus-row highlight. Default 1. |
 | `grid.column_min_width_default` | int (px) | GRID | Default per-column min width. Default 24. |
 | `grid.cell_focus` | int bool | GRID | 0 = row-focus (default); 1 = cell (row,col) cursor. Live. |
+| `grid.lines_color` | int ARGB | GRID | Colour of the 1 px grid lines between cells (per-row bottom + per-column right edge, inside the body clip). 0/unset = no grid lines. Live. |
+| `grid.row_bg_a` | int ARGB | GRID | Row background painted behind cell text (under the focus band). Even visible rows use A; with `row_bg_b` set this gives a zebra stripe, else every row uses A. 0/unset = body bg shows through. Live. |
+| `grid.row_bg_b` | int ARGB | GRID | Alternating row background for odd visible rows. 0/unset = odd rows fall back to A (or body bg if A unset). Live. |
+| `grid.header_bg_color` | int ARGB | GRID | Fill colour for the sticky header band. 0/unset = theme `panel_bg` role. Translucent alpha tints over the body bg. Live. |
 | `grid.scroll_mode` | int | GRID | Wheel kinetics. `NEUI_GRID_SCROLL_PLATFORM=0` (default - macOS = smooth, Win32/null = stepped), `_STEPPED=1` (row-quantized, hard-clamp), `_SMOOTH=2` (pixel-precise + rubber-band + 60 Hz spring-back). Live. Superseded by `scroll_kinetics` when both are set; kept as a GRID-only back-compat alias. |
 | `scroll_kinetics` | int | SECTION, GRID | Generic wheel-kinetics selector. `NEUI_SCROLL_KINETICS_PLATFORM=0` (default - macOS = smooth, Win32/null = stepped), `_STEPPED=1` (hard-clamp, no rubber-band, no momentum), `_SMOOTH=2` (rubber-band + 60 Hz spring-back). Numeric values match `NEUI_GRID_SCROLL_*`. On SECTION, STEPPED resyncs the kinetics integrator (via `section_scroll_step_px`) so a later flip to SMOOTH starts cleanly. On GRID this attr takes precedence over `grid.scroll_mode` when both are set. Live. |
 

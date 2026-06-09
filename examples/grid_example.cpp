@@ -45,6 +45,7 @@ struct AppState {
   neui_grid_api_t*   grid    = nullptr;
   neui_attr_api_t*   attrs   = nullptr;
   neui_tree_api_t*   tree    = nullptr;
+  neui_items_api_t*  items   = nullptr;
   neui_session_t     session = {0};
 
   uint32_t win_id        = 0;
@@ -56,11 +57,38 @@ struct AppState {
   uint32_t toggle_btn    = 0;
   uint32_t scroll_chk    = 0;
   uint32_t focus_chk     = 0;
+  uint32_t lines_chk     = 0;
+  uint32_t rowcolor_combo = 0;
+  uint32_t header_combo  = 0;
 
   int next_row_serial = 0;
   bool cell_focus     = false;
   bool show_focus_row = true;
 };
+
+// Demo colours for the grid-lines + row-background pickers. ARGB
+// (0xAARRGGBB); kept translucent so the cell text stays readable on both
+// light and dark themes.
+static const uint32_t k_grid_lines_color = 0x40888888;   // subtle grey
+static const uint32_t k_row_blue         = 0x33336699;   // translucent blue
+static const uint32_t k_row_green        = 0x3340A040;   // translucent green
+static const uint32_t k_header_grey      = 0x55888888;   // translucent grey
+static const uint32_t k_header_red       = 0x55D86A6A;   // translucent light red
+
+// Row-colour combo choices. Index maps to the apply logic in
+// apply_row_colors_from_combo.
+//   0 "none"        - no row backgrounds (body bg shows through)
+//   1 "blue"        - row_bg_a only -> every row blue
+//   2 "green & blue"- row_bg_a green + row_bg_b blue -> alternating zebra
+static const char* k_rowcolor_choices[] = { "none", "blue", "green & blue" };
+static const int   k_rowcolor_count = 3;
+
+// Header-background combo choices. Index maps to apply_header_bg_from_combo.
+//   0 "none"        - theme panel background (no override)
+//   1 "grey"        - translucent grey tint
+//   2 "lighter red" - translucent light-red tint
+static const char* k_header_choices[] = { "none", "grey", "lighter red" };
+static const int   k_header_count = 3;
 
 // CHECKBOX3 state -> scroll mode. The tri-state checkbox cycles
 // unchecked -> checked -> indeterminate on each click, which the user reads
@@ -81,6 +109,54 @@ static const char* scroll_mode_label(int mode)
     case NEUI_GRID_SCROLL_SMOOTH:  return "smooth";
     default:                       return "platform default";
   }
+}
+
+// Apply the row-colour combo selection to the grid's row-background attrs.
+static void apply_row_colors_from_combo(AppState* app)
+{
+  if (!app->items || !app->attrs || !app->grid_id) return;
+  uint32_t sel = app->items->get_selected(app->session, { app->rowcolor_combo });
+  switch (sel) {
+    case 1:  // blue: A only (uniform)
+      app->attrs->set_int(app->session, { app->grid_id },
+                          NEUI_ATTR_GRID_ROW_BG_A, (int)k_row_blue);
+      app->attrs->remove (app->session, { app->grid_id },
+                          NEUI_ATTR_GRID_ROW_BG_B);
+      break;
+    case 2:  // green & blue: A + B (alternating zebra)
+      app->attrs->set_int(app->session, { app->grid_id },
+                          NEUI_ATTR_GRID_ROW_BG_A, (int)k_row_green);
+      app->attrs->set_int(app->session, { app->grid_id },
+                          NEUI_ATTR_GRID_ROW_BG_B, (int)k_row_blue);
+      break;
+    default: // none: clear both
+      app->attrs->remove(app->session, { app->grid_id }, NEUI_ATTR_GRID_ROW_BG_A);
+      app->attrs->remove(app->session, { app->grid_id }, NEUI_ATTR_GRID_ROW_BG_B);
+      break;
+  }
+  app->widgets->invalidate(app->session, { app->grid_id });
+}
+
+// Apply the header-background combo selection to the grid's header-bg attr.
+static void apply_header_bg_from_combo(AppState* app)
+{
+  if (!app->items || !app->attrs || !app->grid_id) return;
+  uint32_t sel = app->items->get_selected(app->session, { app->header_combo });
+  switch (sel) {
+    case 1:  // grey
+      app->attrs->set_int(app->session, { app->grid_id },
+                          NEUI_ATTR_GRID_HEADER_BG_COLOR, (int)k_header_grey);
+      break;
+    case 2:  // lighter red
+      app->attrs->set_int(app->session, { app->grid_id },
+                          NEUI_ATTR_GRID_HEADER_BG_COLOR, (int)k_header_red);
+      break;
+    default: // none: clear override -> theme panel bg
+      app->attrs->remove(app->session, { app->grid_id },
+                         NEUI_ATTR_GRID_HEADER_BG_COLOR);
+      break;
+  }
+  app->widgets->invalidate(app->session, { app->grid_id });
 }
 
 static void set_status(AppState* app, const char* fmt, ...)
@@ -253,6 +329,38 @@ static bool on_event(void* token, neui_event_t* ev)
       set_status(app, "Scroll: %s", scroll_mode_label(mode));
       return true;
     }
+    if (w == app->lines_chk) {
+      bool on = (ev->data.checkbox.state == NEUI_CHECK_CHECKED);
+      if (on)
+        app->attrs->set_int(app->session, { app->grid_id },
+                            NEUI_ATTR_GRID_LINES_COLOR, (int)k_grid_lines_color);
+      else
+        app->attrs->remove(app->session, { app->grid_id },
+                           NEUI_ATTR_GRID_LINES_COLOR);
+      app->widgets->invalidate(app->session, { app->grid_id });
+      set_status(app, "Grid lines: %s", on ? "on" : "off");
+      return true;
+    }
+    return false;
+  }
+
+  case NEUI_EVENT_ITEM_SELECTED: {
+    if (ev->data.item.widget.id == app->rowcolor_combo) {
+      apply_row_colors_from_combo(app);
+      uint32_t sel = app->items->get_selected(app->session,
+                                               { app->rowcolor_combo });
+      set_status(app, "Row colors: %s",
+                 sel < (uint32_t)k_rowcolor_count ? k_rowcolor_choices[sel] : "?");
+      return true;
+    }
+    if (ev->data.item.widget.id == app->header_combo) {
+      apply_header_bg_from_combo(app);
+      uint32_t sel = app->items->get_selected(app->session,
+                                               { app->header_combo });
+      set_status(app, "Header bg: %s",
+                 sel < (uint32_t)k_header_count ? k_header_choices[sel] : "?");
+      return true;
+    }
     return false;
   }
 
@@ -315,7 +423,8 @@ int main(int /*argc*/, char** /*argv*/)
   app.grid    = (neui_grid_api_t*)  app.neui->get_interface(app.session, NEUI_API_GRID);
   app.attrs   = (neui_attr_api_t*)  app.neui->get_interface(app.session, NEUI_API_ATTRS);
   app.tree    = (neui_tree_api_t*)  app.neui->get_interface(app.session, NEUI_API_TREE);
-  if (!app.widgets || !app.grid || !app.attrs || !app.tree) {
+  app.items   = (neui_items_api_t*) app.neui->get_interface(app.session, NEUI_API_ITEMS);
+  if (!app.widgets || !app.grid || !app.attrs || !app.tree || !app.items) {
     dbglog("[grid_example] missing required interface(s)\n");
     return 1;
   }
@@ -338,10 +447,23 @@ int main(int /*argc*/, char** /*argv*/)
   auto quit_item = app.tree->add(app.session, menubar, file_menu, "Quit", (void*)1);
   app.tree->set_shortcut(app.session, menubar, quit_item, NEUI_KMOD_CTRL, NEUI_KEY_Q);
 
-  // Toolbar of buttons + checkbox along the top.
-  int x = 10, y = 10;
+  // Toolbar laid out in two rows. Every control is vertically centred
+  // within a fixed-height row "band" so buttons (28 px), comboboxes /
+  // labels (22 px collapsed bar) and checkboxes (22 px) line up on a
+  // common centreline instead of sitting at staggered tops.
+  const int kBandH   = 28;          // toolbar row height
+  const int kBtnH    = 28;
+  const int kCtrlH   = 22;          // checkbox / label / combo collapsed bar
+  const int kRow1Y   = 10;
+  const int kRow2Y   = kRow1Y + kBandH + 8;   // 8 px gap between rows
+  // Centre a control of height h within a band of height kBandH at band_top.
+  auto centred = [&](int band_top, int h) { return band_top + (kBandH - h) / 2; };
+
+  // ---- Row 1: action buttons + state checkboxes ----
+  int x = 10;
   auto mk_button = [&](const char* label, int w) {
-    auto b = app.widgets->create(app.session, win, NEUI_W_BUTTON, x, y, w, 28, &app);
+    auto b = app.widgets->create(app.session, win, NEUI_W_BUTTON,
+                                  x, centred(kRow1Y, kBtnH), w, kBtnH, &app);
     app.widgets->set_text(app.session, b, label);
     x += w + 6;
     return b.id;
@@ -352,7 +474,7 @@ int main(int /*argc*/, char** /*argv*/)
   app.toggle_btn  = mk_button("Toggle row/cell focus", 180);
 
   auto chk = app.widgets->create(app.session, win, NEUI_W_CHECKBOX,
-                                  x, y + 5, 160, 22, &app);
+                                  x, centred(kRow1Y, kCtrlH), 160, kCtrlH, &app);
   app.widgets->set_text(app.session, chk, "show_focus_row");
   app.widgets->set_check(app.session, chk, NEUI_CHECK_CHECKED);
   app.focus_chk = chk.id;
@@ -361,14 +483,51 @@ int main(int /*argc*/, char** /*argv*/)
   // Tri-state scroll-mode picker. Unchecked = stepped, checked = smooth,
   // indeterminate = platform default (Win32 = stepped, macOS = smooth).
   auto schk = app.widgets->create(app.session, win, NEUI_W_CHECKBOX3,
-                                    x, y + 5, 180, 22, &app);
+                                    x, centred(kRow1Y, kCtrlH), 180, kCtrlH, &app);
   app.widgets->set_text(app.session, schk, "smooth scroll");
   app.widgets->set_check(app.session, schk, NEUI_CHECK_INDETERMINATE);
   app.scroll_chk = schk.id;
 
-  // Grid takes the bulk of the window.
+  // ---- Row 2: grid-lines switch + colour pickers ----
+  const int kRow2Ctrl = centred(kRow2Y, kCtrlH);
+  int x2 = 10;
+  auto lchk = app.widgets->create(app.session, win, NEUI_W_CHECKBOX,
+                                   x2, kRow2Ctrl, 110, kCtrlH, &app);
+  app.widgets->set_text(app.session, lchk, "grid lines");
+  app.widgets->set_check(app.session, lchk, NEUI_CHECK_UNCHECKED);
+  app.lines_chk = lchk.id;
+  x2 += 110 + 12;
+
+  auto rc_lbl = app.widgets->create(app.session, win, NEUI_W_LABEL,
+                                     x2, kRow2Ctrl, 80, kCtrlH, &app);
+  app.widgets->set_text(app.session, rc_lbl, "Row colors:");
+  x2 += 80 + 4;
+
+  // ComboBox height = collapsed-bar (22) + drop capacity (3 * 18) so all
+  // three choices fit when open.
+  auto rc_combo = app.widgets->create(app.session, win, NEUI_W_COMBOBOX,
+                                       x2, kRow2Ctrl, 130, 76, &app);
+  app.rowcolor_combo = rc_combo.id;
+  for (int i = 0; i < k_rowcolor_count; ++i)
+    app.items->add(app.session, rc_combo, k_rowcolor_choices[i], nullptr);
+  app.items->set_selected(app.session, rc_combo, 0);  // "none"
+  x2 += 130 + 12;
+
+  auto hdr_lbl = app.widgets->create(app.session, win, NEUI_W_LABEL,
+                                      x2, kRow2Ctrl, 60, kCtrlH, &app);
+  app.widgets->set_text(app.session, hdr_lbl, "Header:");
+  x2 += 60 + 4;
+
+  auto hdr_combo = app.widgets->create(app.session, win, NEUI_W_COMBOBOX,
+                                        x2, kRow2Ctrl, 130, 76, &app);
+  app.header_combo = hdr_combo.id;
+  for (int i = 0; i < k_header_count; ++i)
+    app.items->add(app.session, hdr_combo, k_header_choices[i], nullptr);
+  app.items->set_selected(app.session, hdr_combo, 0);  // "none"
+
+  // Grid takes the bulk of the window (pushed down for the 2nd toolbar row).
   auto g = app.widgets->create(app.session, win, NEUI_W_GRID,
-                                10, 50, 880, 500, &app);
+                                10, 82, 880, 468, &app);
   app.grid_id = g.id;
   app.attrs->set_int(app.session, g, NEUI_ATTR_GRID_ROW_HEIGHT,      22);
   app.attrs->set_int(app.session, g, NEUI_ATTR_GRID_HEADER_HEIGHT,   24);

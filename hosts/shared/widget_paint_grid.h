@@ -47,7 +47,7 @@ namespace neui_detail
   // Effective fill colour for the header band.
   inline uint32_t grid_resolve_header_bg(const GridPaintConfig& cfg)
   {
-    (void)cfg;
+    if (cfg.header_bg_explicit) return cfg.header_bg_color;
     return color(ColorRole::panel_bg);
   }
 
@@ -56,6 +56,24 @@ namespace neui_detail
   {
     if (cfg.focus_row_color != 0) return cfg.focus_row_color;
     return with_alpha(color(ColorRole::accent), GRID_FOCUS_ROW_ALPHA);
+  }
+
+  // Resolve the per-row "zebra" background for a given VISUAL row index.
+  // Returns true + fills out_argb when the row should be painted with an
+  // explicit background; false means leave the body background showing.
+  // Even rows use A, odd rows use B; an unset B falls back to A so setting
+  // only A yields a uniform row background.
+  inline bool grid_resolve_row_bg(const GridPaintConfig& cfg, int vrow,
+                                   uint32_t& out_argb)
+  {
+    const bool even = (vrow & 1) == 0;
+    if (even) {
+      if (cfg.row_bg_a_set) { out_argb = cfg.row_bg_a; return true; }
+      return false;
+    }
+    if (cfg.row_bg_b_set) { out_argb = cfg.row_bg_b; return true; }
+    if (cfg.row_bg_a_set) { out_argb = cfg.row_bg_a; return true; }
+    return false;
   }
 
   // Glyph metrics for the sort indicator in the header band. The glyph is a
@@ -196,6 +214,20 @@ namespace neui_detail
       int last     = first + vis_rows + (m.scroll_px_offset != 0 ? 2 : 1);
       if (last > (int)m.rows.size()) last = (int)m.rows.size();
 
+      // --- Per-row zebra backgrounds (under the focus band + cell text) ---
+      // Walks VISUAL rows so the stripe alternation tracks what the user
+      // sees after sorting.
+      if ((cfg.row_bg_a_set || cfg.row_bg_b_set) && backend->fill_rect) {
+        for (int vrow = first; vrow < last; ++vrow) {
+          uint32_t rb;
+          if (!grid_resolve_row_bg(cfg, vrow, rb)) continue;
+          float ry = fy + (float)vp.body_y - pxoff +
+                      (float)((vrow - first) * cfg.row_h);
+          backend->fill_rect(ctx, fx + (float)vp.body_x, ry,
+                              (float)vp.body_w, (float)cfg.row_h, rb);
+        }
+      }
+
       // --- Focus-row highlight (under the cell text) ---
       // selected_row is a LOGICAL index; translate to visual position so
       // the band paints under whatever row the user sees as selected after
@@ -300,6 +332,29 @@ namespace neui_detail
             if (dim_cell && backend->pop_alpha) backend->pop_alpha(ctx);
           }
           cx_running += cw;
+        }
+      }
+
+      // --- Grid lines between cells (over backgrounds + text) ----------
+      // A 1 px horizontal line at the bottom of each visible row and a 1 px
+      // vertical line on the right edge of each column, all inside the body
+      // clip so nothing bleeds into the header / scrollbar gutters.
+      if (cfg.lines_explicit && backend->fill_rect) {
+        const float body_left  = fx + (float)vp.body_x;
+        const float body_right = body_left + (float)vp.body_w;
+        for (int vrow = first; vrow < last; ++vrow) {
+          float line_y = fy + (float)vp.body_y - pxoff +
+                          (float)((vrow - first + 1) * cfg.row_h) - 1.0f;
+          backend->fill_rect(ctx, body_left, line_y,
+                              (float)vp.body_w, 1.0f, cfg.lines_color);
+        }
+        float cxr = body_left - (float)m.scroll_offset_x;
+        for (int col = 0; col < n_cols; ++col) {
+          cxr += (float)m.columns[(size_t)col].width;
+          if (cxr < body_left) continue;
+          if (cxr > body_right) break;
+          backend->fill_rect(ctx, cxr - 1.0f, fy + (float)vp.body_y,
+                              1.0f, (float)vp.body_h, cfg.lines_color);
         }
       }
 

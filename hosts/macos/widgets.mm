@@ -171,6 +171,11 @@ namespace macos_host
   void section_create_body_view_macos(WidgetData& sec);
   void section_destroy_body_view_macos(WidgetData& sec);
   void section_reparent_children_macos(WidgetData& sec, bool to_body);
+  // Defined in window.mm. Used by the Scroll API external-commit path
+  // (section_external_commit_macos): shuffle child NSView origins to the
+  // committed scroll offset + fire NEUI_EVENT_SCROLL_CHANGED.
+  void section_reposition_children_macos(WidgetData& sec);
+  void section_notify_scroll_changed_macos(WidgetData& wd);
 
   // True for the three font attribute keys. Used by the attr setters to
   // re-apply the native font + repaint painted text on a live change.

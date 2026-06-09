@@ -62,6 +62,21 @@ namespace neui_detail
     bool     cell_focus      = false;
     uint32_t bg_argb         = 0;
     bool     bg_explicit     = false;
+    // Grid lines drawn between cells (1 px). lines_explicit gates the draw;
+    // lines_color is 0xAARRGGBB.
+    uint32_t lines_color     = 0;
+    bool     lines_explicit  = false;
+    // Per-row "zebra" backgrounds. row_bg_a applies to even visible rows,
+    // row_bg_b to odd ones; *_set gates each (an unset colour falls through
+    // to the body background, or to A for odd rows when only A is set).
+    uint32_t row_bg_a        = 0;
+    bool     row_bg_a_set    = false;
+    uint32_t row_bg_b        = 0;
+    bool     row_bg_b_set    = false;
+    // Header-band fill. header_bg_explicit gates the override; otherwise the
+    // theme's panel_bg role is used. 0xAARRGGBB.
+    uint32_t header_bg_color    = 0;
+    bool     header_bg_explicit = false;
     // Wheel kinetics selector. 0 (NEUI_GRID_SCROLL_PLATFORM) = host picks the
     // natural feel (macOS = smooth, Win32 / null = stepped). 1 = forced STEPPED,
     // 2 = forced SMOOTH. Anything else is treated as PLATFORM.
@@ -1078,6 +1093,22 @@ namespace neui_detail
     if (bag->has(NEUI_ATTR_BACKGROUND)) {
       c.bg_argb     = (uint32_t)bag->get_int(NEUI_ATTR_BACKGROUND, 0);
       c.bg_explicit = true;
+    }
+    if (bag->has(NEUI_ATTR_GRID_LINES_COLOR)) {
+      c.lines_color    = (uint32_t)bag->get_int(NEUI_ATTR_GRID_LINES_COLOR, 0);
+      c.lines_explicit = true;
+    }
+    if (bag->has(NEUI_ATTR_GRID_ROW_BG_A)) {
+      c.row_bg_a     = (uint32_t)bag->get_int(NEUI_ATTR_GRID_ROW_BG_A, 0);
+      c.row_bg_a_set = true;
+    }
+    if (bag->has(NEUI_ATTR_GRID_ROW_BG_B)) {
+      c.row_bg_b     = (uint32_t)bag->get_int(NEUI_ATTR_GRID_ROW_BG_B, 0);
+      c.row_bg_b_set = true;
+    }
+    if (bag->has(NEUI_ATTR_GRID_HEADER_BG_COLOR)) {
+      c.header_bg_color    = (uint32_t)bag->get_int(NEUI_ATTR_GRID_HEADER_BG_COLOR, 0);
+      c.header_bg_explicit = true;
     }
     return c;
   }

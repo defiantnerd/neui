@@ -95,6 +95,32 @@ typedef enum neui_grid_scroll_mode {
   NEUI_GRID_SCROLL_SMOOTH   = 2,
 } neui_grid_scroll_mode_t;
 
+// int (ARGB): colour of the grid lines drawn between cells in the body
+// (a 1 px horizontal line at the bottom of each row + a 1 px vertical line
+// on the right edge of each column). 0 / unset = no grid lines (the
+// default; cells abut with no separator). 0xAARRGGBB; use a translucent
+// alpha for a subtle separator that reads on both light and dark rows.
+#define NEUI_ATTR_GRID_LINES_COLOR "neui.attr.grid.lines_color"
+
+// int (ARGB): row background colour A. When set, the body rows are painted
+// with this colour behind the cell text (under the focus-row highlight).
+// Combined with NEUI_ATTR_GRID_ROW_BG_B this gives an alternating "zebra"
+// stripe: even visible rows use A, odd visible rows use B. If only A is
+// set, every row uses A. 0 / unset = no row background (the grid's body
+// background shows through). 0xAARRGGBB.
+#define NEUI_ATTR_GRID_ROW_BG_A "neui.attr.grid.row_bg_a"
+
+// int (ARGB): alternating row background colour B (see NEUI_ATTR_GRID_ROW_BG_A).
+// Applied to odd visible rows. 0 / unset = odd rows fall back to A (or the
+// body background if A is also unset). 0xAARRGGBB.
+#define NEUI_ATTR_GRID_ROW_BG_B "neui.attr.grid.row_bg_b"
+
+// int (ARGB): fill colour for the sticky column-header band. 0 / unset =
+// the active theme's panel background role. 0xAARRGGBB; a translucent
+// alpha tints over the body background so the header reads on both light
+// and dark themes.
+#define NEUI_ATTR_GRID_HEADER_BG_COLOR "neui.attr.grid.header_bg_color"
+
 // ---- Sorting -------------------------------------------------------------
 
 // Direction of a single sort level. NEUI_GRID_SORT_NONE used by set_sort to

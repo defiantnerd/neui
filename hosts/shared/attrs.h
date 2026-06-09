@@ -84,6 +84,10 @@ namespace neui_detail
     { NEUI_ATTR_GRID_COLUMN_MIN_WIDTH_DEFAULT,AttrKind::INT },
     { NEUI_ATTR_GRID_CELL_FOCUS,              AttrKind::INT },
     { NEUI_ATTR_GRID_SCROLL_MODE,             AttrKind::INT },
+    { NEUI_ATTR_GRID_LINES_COLOR,             AttrKind::INT },
+    { NEUI_ATTR_GRID_ROW_BG_A,                AttrKind::INT },
+    { NEUI_ATTR_GRID_ROW_BG_B,                AttrKind::INT },
+    { NEUI_ATTR_GRID_HEADER_BG_COLOR,         AttrKind::INT },
     { NEUI_ATTR_SCROLL_KINETICS,              AttrKind::INT },
   };
 
