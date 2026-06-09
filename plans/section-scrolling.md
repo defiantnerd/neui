@@ -1,9 +1,8 @@
 # Plan: Scrolling SECTION + chip "none" option
 
-**Status**: phases 0-3 + 5 (example) shipped on all three hosts; the
-kinetics opt-in (phase 4) is deferred. macOS native + Win32 native
-landed in a follow-up after the v1 xpl-only landing, sharing the same
-`SectionScrollState` + `widget_section_scroll.h` runtime; per-host
+**Status**: phases 0-5 shipped on all three hosts. macOS native + Win32
+native landed in a follow-up after the v1 xpl-only landing, sharing the
+same `SectionScrollState` + `widget_section_scroll.h` runtime; per-host
 glue lives in `hosts/win32/widgets.cpp` (`painted_msg_section_w32` +
 `section_apply_layout_changes_w32` etc.) and `hosts/macos/window.mm`
 (`NEUINativePaintedView` `sectionScrollWheel:` / `sectionBounceTick:` +
@@ -11,7 +10,15 @@ glue lives in `hosts/win32/widgets.cpp` (`painted_msg_section_w32` +
 on the native hosts are scroll-adjusted at `widget_set_pos` /
 `apply_geometry_native_macos` time via `parent_scroll_offset_{w32,macos}`
 - the body-local (x, y) the client stores stays stable; the native
-HWND / NSView frame is the section's scroll subtracted.
+HWND / NSView frame is the section's scroll subtracted. Phase 4
+(kinetics opt-in) shipped via the generic `NEUI_ATTR_SCROLL_KINETICS`
+attr (Option B in the original plan): the new key works on both SECTION
+and GRID, with `NEUI_ATTR_GRID_SCROLL_MODE` kept as a GRID-only back-
+compat alias. STEPPED routes through the new `section_scroll_step_px`
+(hard-clamp + integrator resync, the SECTION twin of
+`grid_scroll_step_rows`); SMOOTH keeps the existing kinetic path. Win32
+SECTION's default flipped from "rubber-band on every notch" to STEPPED
+(matching GRID's Win32 default).
 
 ## Context
 

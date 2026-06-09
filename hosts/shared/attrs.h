@@ -84,6 +84,7 @@ namespace neui_detail
     { NEUI_ATTR_GRID_COLUMN_MIN_WIDTH_DEFAULT,AttrKind::INT },
     { NEUI_ATTR_GRID_CELL_FOCUS,              AttrKind::INT },
     { NEUI_ATTR_GRID_SCROLL_MODE,             AttrKind::INT },
+    { NEUI_ATTR_SCROLL_KINETICS,              AttrKind::INT },
   };
 
   // Lookup the documented kind for a well-known key. Returns nullptr when

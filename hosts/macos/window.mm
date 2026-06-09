@@ -1985,6 +1985,27 @@ static float neui_snap_to_steps(float v, int steps)
   // Cross-axis input that the section's axis mask doesn't support is
   // dropped at the per-axis check below.
 
+  // NEUI_ATTR_SCROLL_KINETICS opt-in: STEPPED suppresses rubber-band +
+  // momentum stream; PLATFORM on macOS = SMOOTH (the natural trackpad feel).
+  int  kin_mode = section_read_kinetics_mode(wd->attrs.get());
+  bool smooth   = scroll_kinetics_smooth_enabled(kin_mode,
+                                                  /*platform_default_smooth=*/true);
+  if (!smooth) {
+    // Drop momentum events so a flick doesn't keep stepping after release.
+    if (event.momentumPhase != NSEventPhaseNone) return;
+    bool changed = false;
+    if (has_v && dy != 0.0 && section_scroll_step_px(st, L, dy, false))
+      changed = true;
+    if (has_h && dx != 0.0 && section_scroll_step_px(st, L, dx, true))
+      changed = true;
+    if (changed) {
+      [self sectionStopBounce];
+      macos_host::section_reposition_children_macos(*wd);
+      [self setNeedsDisplay:YES];
+    }
+    return;
+  }
+
   ScrollWheelInput base;
   base.precise        = precise;
   base.phase_began    = (event.phase == NSEventPhaseBegan);

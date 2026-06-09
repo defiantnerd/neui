@@ -469,6 +469,24 @@ void wake_app_event_pump()
   // re-aimed at the vertical axis.
   if (!has_v && has_h && dh == 0.0 && dv != 0.0) { dh = dv; dv = 0.0; }
 
+  // NEUI_ATTR_SCROLL_KINETICS opt-in (macOS default = SMOOTH).
+  int  kin_mode = section_read_kinetics_mode(sw->attrs.get());
+  bool smooth   = scroll_kinetics_smooth_enabled(kin_mode,
+                                                  /*platform_default_smooth=*/true);
+  if (!smooth) {
+    if (event.momentumPhase != NSEventPhaseNone) return;
+    bool changed = false;
+    if (has_v && dv != 0.0 && section_scroll_step_px(*st, *L, dv, false))
+      changed = true;
+    if (has_h && dh != 0.0 && section_scroll_step_px(*st, *L, dh, true))
+      changed = true;
+    if (changed) {
+      [self sectionStopBounce];
+      [self setNeedsDisplay:YES];
+    }
+    return;
+  }
+
   // Zero-delta events still matter when they carry gesture-phase edges
   // (phase_began cancels a bounce; phase_ended / momentum_ended drive the
   // spring-back + momentum-suppression bookkeeping).

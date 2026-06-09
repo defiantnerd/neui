@@ -4,6 +4,9 @@
 //     none - "none" hides the band entirely so the body fills the rect).
 //   * Runtime toggle for the scroll axes (none / vertical / horizontal /
 //     both) via NEUI_ATTR_SCROLL_MODE.
+//   * Runtime toggle for the wheel kinetics (platform / stepped / smooth)
+//     via NEUI_ATTR_SCROLL_KINETICS - lets you compare hard-clamp vs
+//     rubber-band + spring-back side by side at runtime.
 //   * Content generator: pick a row count, click Regenerate, and the
 //     section's children are torn down and rebuilt at that count.
 //
@@ -54,13 +57,14 @@ struct AppState {
   neui_items_api_t*  items   = nullptr;
   neui_session_t     session = { 0 };
 
-  uint32_t win_id       = 0;
-  uint32_t align_combo  = 0;
-  uint32_t scroll_combo = 0;
-  uint32_t count_input  = 0;
-  uint32_t regen_btn    = 0;
-  uint32_t status_label = 0;
-  uint32_t section_id   = 0;
+  uint32_t win_id          = 0;
+  uint32_t align_combo     = 0;
+  uint32_t scroll_combo    = 0;
+  uint32_t kinetics_combo  = 0;
+  uint32_t count_input     = 0;
+  uint32_t regen_btn       = 0;
+  uint32_t status_label    = 0;
+  uint32_t section_id      = 0;
 
   std::vector<uint32_t> row_widget_ids;  // every widget owned by the section's content
   int                    row_count       = 30;
@@ -78,6 +82,14 @@ static const char* const k_scroll_choices[] = {
 };
 static const int k_scroll_count =
   static_cast<int>(sizeof(k_scroll_choices) / sizeof(k_scroll_choices[0]));
+
+// Labels paired with the numeric NEUI_SCROLL_KINETICS_* values. The index
+// in the combo IS the enum value (PLATFORM=0, STEPPED=1, SMOOTH=2).
+static const char* const k_kinetics_choices[] = {
+  "platform", "stepped", "smooth"
+};
+static const int k_kinetics_count =
+  static_cast<int>(sizeof(k_kinetics_choices) / sizeof(k_kinetics_choices[0]));
 
 // Rebuild the section's content: tear down everything we generated last
 // time, then create `row_count` rows of LABEL + three BUTTONs each. Row
@@ -170,6 +182,16 @@ static void apply_scroll_from_combo(AppState* a)
                         NEUI_ATTR_SCROLL_MODE, k_scroll_choices[sel]);
 }
 
+static void apply_kinetics_from_combo(AppState* a)
+{
+  uint32_t sel = a->items->get_selected(a->session,
+                                          neui_widget_t{ a->kinetics_combo });
+  if (sel >= (uint32_t)k_kinetics_count) sel = 0;
+  // Combo index matches the public enum: 0=PLATFORM, 1=STEPPED, 2=SMOOTH.
+  a->attrs->set_int(a->session, neui_widget_t{ a->section_id },
+                     NEUI_ATTR_SCROLL_KINETICS, (int32_t)sel);
+}
+
 static bool NEUI_ABI on_event(void* token, neui_event_t* event)
 {
   auto* a = static_cast<AppState*>(token);
@@ -204,6 +226,10 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
       }
       if (wid == a->scroll_combo) {
         apply_scroll_from_combo(a);
+        return true;
+      }
+      if (wid == a->kinetics_combo) {
+        apply_kinetics_from_combo(a);
         return true;
       }
       break;
@@ -316,14 +342,34 @@ int main(int /*argc*/, char* /*argv*/[])
   app.status_label = status_label.id;
   app.widgets->set_text(app.session, status_label, "Ready.");
 
+  // ---- Second toolbar row (kinetics selector) ----------------------------
+  int row2_y = toolbar_y + 28;
+  int x2 = 10;
+
+  auto kin_lbl = app.widgets->create(app.session, win, NEUI_W_LABEL,
+                                       x2, row2_y, 80, 22, nullptr);
+  app.widgets->set_text(app.session, kin_lbl, "Kinetics:");
+  x2 += 80 + 4;
+
+  // 22 + 3*18 fits 3 items (drop area capacity).
+  auto kin_combo = app.widgets->create(app.session, win, NEUI_W_COMBOBOX,
+                                         x2, row2_y, 110, 76, nullptr);
+  app.kinetics_combo = kin_combo.id;
+  for (int i = 0; i < k_kinetics_count; ++i)
+    app.items->add(app.session, kin_combo, k_kinetics_choices[i], nullptr);
+  app.items->set_selected(app.session, kin_combo, 0);  // "platform"
+
   // ---- The scrolling SECTION ---------------------------------------------
-  int section_y = toolbar_y + 36;
+  int section_y = row2_y + 30;
   auto section = app.widgets->create(app.session, win, NEUI_W_SECTION,
                                        10, section_y, 740, 580 - section_y - 50,
                                        nullptr);
   app.widgets->set_text(app.session, section, "Scrollable content");
   app.attrs->set_string(app.session, section, NEUI_ATTR_ALIGN_TEXT, "center");
   app.attrs->set_string(app.session, section, NEUI_ATTR_SCROLL_MODE, "vertical");
+  // Default kinetics: PLATFORM (matches the combo's initial selection).
+  app.attrs->set_int(app.session, section, NEUI_ATTR_SCROLL_KINETICS,
+                      NEUI_SCROLL_KINETICS_PLATFORM);
   // Give the section a distinct background so its body rect is visible
   // against the window's clear colour.
   app.attrs->set_int(app.session, section, NEUI_ATTR_BACKGROUND, 0xFFE0E8F0);

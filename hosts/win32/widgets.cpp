@@ -1312,24 +1312,40 @@ namespace win32_host
     // horizontal input (explicit horizontal intent should be ignored).
     if (!has_v && has_h && dh == 0.0 && dv != 0.0) { dh = dv; dv = 0.0; }
 
-    ScrollWheelAction act_v{}, act_h{};
-    if (has_v && dv != 0.0) {
-      ScrollWheelInput in;
-      in.precise  = true;
-      in.delta_px = dv;
-      act_v = section_scroll_wheel_kinetic(st, L, in, false);
+    int  kin_mode = section_read_kinetics_mode(wd.attrs.get());
+    bool smooth   = scroll_kinetics_smooth_enabled(kin_mode,
+                                                    /*platform_default_smooth=*/false);
+
+    bool changed = false;
+    bool start_bounce = false;
+    if (smooth) {
+      ScrollWheelAction act_v{}, act_h{};
+      if (has_v && dv != 0.0) {
+        ScrollWheelInput in;
+        in.precise  = true;
+        in.delta_px = dv;
+        act_v = section_scroll_wheel_kinetic(st, L, in, false);
+      }
+      if (has_h && dh != 0.0) {
+        ScrollWheelInput in;
+        in.precise  = true;
+        in.delta_px = dh;
+        act_h = section_scroll_wheel_kinetic(st, L, in, true);
+      }
+      changed      = act_v.changed      || act_h.changed;
+      start_bounce = act_v.start_bounce || act_h.start_bounce;
+    } else {
+      // STEPPED: hard-clamp, no rubber-band, no spring-back.
+      if (has_v && dv != 0.0 && section_scroll_step_px(st, L, dv, false))
+        changed = true;
+      if (has_h && dh != 0.0 && section_scroll_step_px(st, L, dh, true))
+        changed = true;
     }
-    if (has_h && dh != 0.0) {
-      ScrollWheelInput in;
-      in.precise  = true;
-      in.delta_px = dh;
-      act_h = section_scroll_wheel_kinetic(st, L, in, true);
-    }
-    if (act_v.changed || act_h.changed) {
+    if (changed) {
       section_reposition_children_w32(wd);
       InvalidateRect(wd.hwnd, nullptr, FALSE);
     }
-    if (act_v.start_bounce || act_h.start_bounce)
+    if (start_bounce)
       SetTimer(wd.hwnd, SECTION_BOUNCE_TIMER_ID, 16, nullptr);
   }
 

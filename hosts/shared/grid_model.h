@@ -1067,8 +1067,14 @@ namespace neui_detail
     c.focus_row_color = (uint32_t)bag->get_int(NEUI_ATTR_GRID_FOCUS_ROW_COLOR, 0);
     c.show_focus_row  = bag->get_int(NEUI_ATTR_GRID_SHOW_FOCUS_ROW, 1) != 0;
     c.cell_focus      = bag->get_int(NEUI_ATTR_GRID_CELL_FOCUS, 0) != 0;
-    c.scroll_mode     = bag->get_int(NEUI_ATTR_GRID_SCROLL_MODE,
-                                       NEUI_GRID_SCROLL_PLATFORM);
+    // Generic NEUI_ATTR_SCROLL_KINETICS takes precedence when set; the
+    // legacy NEUI_ATTR_GRID_SCROLL_MODE remains as a back-compat alias.
+    // Numeric values are identical across both enums.
+    c.scroll_mode     = bag->has(NEUI_ATTR_SCROLL_KINETICS)
+                          ? bag->get_int(NEUI_ATTR_SCROLL_KINETICS,
+                                          NEUI_GRID_SCROLL_PLATFORM)
+                          : bag->get_int(NEUI_ATTR_GRID_SCROLL_MODE,
+                                          NEUI_GRID_SCROLL_PLATFORM);
     if (bag->has(NEUI_ATTR_BACKGROUND)) {
       c.bg_argb     = (uint32_t)bag->get_int(NEUI_ATTR_BACKGROUND, 0);
       c.bg_explicit = true;

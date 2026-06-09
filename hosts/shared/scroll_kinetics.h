@@ -23,6 +23,21 @@
 
 namespace neui_detail
 {
+  // ---- Kinetics mode selector --------------------------------------------
+  //
+  // Public attr `NEUI_ATTR_SCROLL_KINETICS` picks the wheel feel for a
+  // scrollable widget (SECTION, GRID). The numeric values match the legacy
+  // GRID-only `NEUI_GRID_SCROLL_*` constants so a single helper resolves
+  // both. Hosts pass their own platform default (macOS = smooth, Win32 /
+  // null = stepped); PLATFORM (0) defers to it, STEPPED (1) and SMOOTH (2)
+  // force the corresponding choice.
+  inline bool scroll_kinetics_smooth_enabled(int mode, bool platform_default_smooth)
+  {
+    if (mode == 2 /* SMOOTH  */) return true;
+    if (mode == 1 /* STEPPED */) return false;
+    return platform_default_smooth;
+  }
+
   // ---- Tuning constants ---------------------------------------------------
 
   // Spring-back lerp factor per 60 Hz tick (higher = snappier). Exponential

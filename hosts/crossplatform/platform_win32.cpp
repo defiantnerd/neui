@@ -114,6 +114,8 @@ namespace xpl_host
   // tuning). dv / dh are logical px with the kinetics' sign convention
   // (raw_px -= delta; positive dv = scroll up, positive dh = scroll left).
   // Starts the frame-HWND spring-back timer on overscroll release.
+  // Respects NEUI_ATTR_SCROLL_KINETICS: STEPPED hard-clamps + skips bounce,
+  // SMOOTH / PLATFORM-on-macOS-not-applicable-here (Win32 default = STEPPED).
   static void section_kinetic_wheel_w32(HWND hwnd, WindowUserData* wud,
                                          uint32_t sec_idx,
                                          double dv, double dh)
@@ -136,22 +138,37 @@ namespace xpl_host
     // axis isn't supported, not silently re-aimed at the vertical axis.
     if (!has_v && has_h && dh == 0.0 && dv != 0.0) { dh = dv; dv = 0.0; }
 
-    ScrollWheelAction act_v{}, act_h{};
-    if (has_v && dv != 0.0) {
-      ScrollWheelInput in;
-      in.precise  = true;   // px-true synthetic input; enables rubber-band
-      in.delta_px = dv;
-      act_v = section_scroll_wheel_kinetic(*st, *L, in, false);
+    int  kin_mode = section_read_kinetics_mode(sw->attrs.get());
+    bool smooth   = scroll_kinetics_smooth_enabled(kin_mode,
+                                                    /*platform_default_smooth=*/false);
+
+    bool changed = false;
+    bool start_bounce = false;
+    if (smooth) {
+      ScrollWheelAction act_v{}, act_h{};
+      if (has_v && dv != 0.0) {
+        ScrollWheelInput in;
+        in.precise  = true;   // px-true synthetic input; enables rubber-band
+        in.delta_px = dv;
+        act_v = section_scroll_wheel_kinetic(*st, *L, in, false);
+      }
+      if (has_h && dh != 0.0) {
+        ScrollWheelInput in;
+        in.precise  = true;
+        in.delta_px = dh;
+        act_h = section_scroll_wheel_kinetic(*st, *L, in, true);
+      }
+      changed      = act_v.changed      || act_h.changed;
+      start_bounce = act_v.start_bounce || act_h.start_bounce;
+    } else {
+      if (has_v && dv != 0.0 && section_scroll_step_px(*st, *L, dv, false))
+        changed = true;
+      if (has_h && dh != 0.0 && section_scroll_step_px(*st, *L, dh, true))
+        changed = true;
     }
-    if (has_h && dh != 0.0) {
-      ScrollWheelInput in;
-      in.precise  = true;
-      in.delta_px = dh;
-      act_h = section_scroll_wheel_kinetic(*st, *L, in, true);
-    }
-    if (act_v.changed || act_h.changed)
+    if (changed)
       InvalidateRect(hwnd, nullptr, FALSE);
-    if (act_v.start_bounce || act_h.start_bounce) {
+    if (start_bounce) {
       wud->bouncing_section_index = sec_idx;
       SetTimer(hwnd, XPL_SECTION_BOUNCE_TIMER_ID, 16, nullptr);
     }

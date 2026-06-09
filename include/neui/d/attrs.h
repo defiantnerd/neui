@@ -79,6 +79,24 @@ extern "C" {
 #define NEUI_ATTR_CONTENT_WIDTH  "neui.attr.content_width"
 #define NEUI_ATTR_CONTENT_HEIGHT "neui.attr.content_height"
 
+// int (neui_scroll_kinetics_t): wheel kinetics selector for scrollable
+// widgets (SECTION + GRID). Generic alternative to the GRID-only
+// NEUI_ATTR_GRID_SCROLL_MODE; numeric values are intentionally identical
+// so existing GRID callers can adopt either key.
+//   NEUI_SCROLL_KINETICS_PLATFORM (0, default) - host picks the natural
+//                                                 feel. macOS: SMOOTH;
+//                                                 Win32 / null: STEPPED.
+//   NEUI_SCROLL_KINETICS_STEPPED  (1) - hard-clamp at top / bottom, no
+//                                       momentum, no rubber-band.
+//   NEUI_SCROLL_KINETICS_SMOOTH   (2) - pixel-precise motion with
+//                                       WebKit-style elastic overscroll
+//                                       and a 60 Hz spring-back to the
+//                                       boundary.
+// Live - the next wheel tick uses the new mode. On GRID, this attr takes
+// precedence over NEUI_ATTR_GRID_SCROLL_MODE when both are set; the GRID
+// attr remains as a back-compat alias.
+#define NEUI_ATTR_SCROLL_KINETICS "neui.attr.scroll_kinetics"
+
 // int (logical pixels): minimum/maximum drag-resize bounds for a frame
 // window (APPWINDOW / PLUGWINDOW). Unset, 0, or negative means no constraint.
 // max < min is treated as "no maximum". Hosts also clamp programmatic
@@ -230,6 +248,14 @@ enum {
   NEUI_THEME_MODE_LIGHT = 1,   // force light palette
   NEUI_THEME_MODE_DARK  = 2,   // force dark palette
 };
+
+// Values for NEUI_ATTR_SCROLL_KINETICS. Numerically identical to
+// neui_grid_scroll_mode_t so the two attrs can be treated as aliases.
+typedef enum neui_scroll_kinetics {
+  NEUI_SCROLL_KINETICS_PLATFORM = 0,   // host picks (macOS=smooth, Win32=stepped)
+  NEUI_SCROLL_KINETICS_STEPPED  = 1,   // hard-clamp, no rubber-band
+  NEUI_SCROLL_KINETICS_SMOOTH   = 2,   // elastic + spring-back
+} neui_scroll_kinetics_t;
 
 // Values for NEUI_ATTR_KNOB_MODE.
 enum {

@@ -447,6 +447,92 @@ TEST_CASE("clamp_section_scroll_idle: kinetic overshoot survives the paint clamp
   CHECK_EQ(st.scroll_y, stretched);
 }
 
+// ---------------------------------------------------------------------------
+// scroll_kinetics_smooth_enabled
+// ---------------------------------------------------------------------------
+
+TEST_CASE("scroll_kinetics_smooth_enabled: PLATFORM defers, STEPPED / SMOOTH force")
+{
+  // PLATFORM (0) returns whatever the host passes as its default.
+  CHECK(scroll_kinetics_smooth_enabled(NEUI_SCROLL_KINETICS_PLATFORM,
+                                         /*platform_default_smooth=*/true));
+  CHECK_FALSE(scroll_kinetics_smooth_enabled(NEUI_SCROLL_KINETICS_PLATFORM,
+                                               /*platform_default_smooth=*/false));
+  // STEPPED (1) forces off regardless of host default.
+  CHECK_FALSE(scroll_kinetics_smooth_enabled(NEUI_SCROLL_KINETICS_STEPPED,
+                                               /*platform_default_smooth=*/true));
+  // SMOOTH (2) forces on regardless of host default.
+  CHECK(scroll_kinetics_smooth_enabled(NEUI_SCROLL_KINETICS_SMOOTH,
+                                         /*platform_default_smooth=*/false));
+  // Numeric parity with the GRID alias.
+  CHECK_EQ(NEUI_SCROLL_KINETICS_PLATFORM, NEUI_GRID_SCROLL_PLATFORM);
+  CHECK_EQ(NEUI_SCROLL_KINETICS_STEPPED,  NEUI_GRID_SCROLL_STEPPED);
+  CHECK_EQ(NEUI_SCROLL_KINETICS_SMOOTH,   NEUI_GRID_SCROLL_SMOOTH);
+}
+
+// ---------------------------------------------------------------------------
+// section_scroll_step_px (STEPPED mode driver)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("section_scroll_step_px: hard-clamps + resyncs kinetics integrator")
+{
+  SectionScrollState st = make_state();
+  SectionLayout L = make_layout();
+
+  // In-range step. The helper applies SECTION_STEPPED_SCALE internally so
+  // a 100 px raw-kinetic-path delta commits as 50 px of stepped travel.
+  CHECK(section_scroll_step_px(st, L, -100.0, false));
+  CHECK_EQ(st.scroll_y, 50);
+  // Kinetics integrator resynced to committed position so a later flip to
+  // SMOOTH doesn't spring back to wherever raw_px happened to be.
+  CHECK_APPROX(st.kin_v.raw_px, 50.0);
+  CHECK_EQ(st.kin_v.last_commit_px, 50);
+  CHECK(st.kin_v.suppress_momentum);
+  // No rubber-band overshoot ever flagged on the stepped path.
+  CHECK_FALSE(st.kinetic_over_v);
+
+  // Past-edge step hard-clamps to max (650).
+  CHECK(section_scroll_step_px(st, L, -10000.0, false));
+  CHECK_EQ(st.scroll_y, 650);
+  CHECK_APPROX(st.kin_v.raw_px, 650.0);
+  CHECK_FALSE(st.kinetic_over_v);
+
+  // Top-edge: hard-clamp to 0.
+  CHECK(section_scroll_step_px(st, L, 10000.0, false));
+  CHECK_EQ(st.scroll_y, 0);
+  CHECK_APPROX(st.kin_v.raw_px, 0.0);
+  CHECK_FALSE(st.kinetic_over_v);
+}
+
+TEST_CASE("section_scroll_step_px: drops a stale kinetic overshoot flag on the axis")
+{
+  // Simulate a SMOOTH-mode overscroll, then flip to STEPPED + step. The
+  // STEPPED helper must clear the overshoot flag so the next paint clamp
+  // is authoritative.
+  SectionScrollState st = make_state();
+  SectionLayout L = make_layout();
+
+  st.kin_v.raw_px = -30.0;
+  section_scroll_commit(st, L, false);
+  CHECK(st.kinetic_over_v);
+
+  // Stepped wheel down by 50 px raw (× 0.5 scale = 25 effective).
+  CHECK(section_scroll_step_px(st, L, -50.0, false));
+  CHECK_FALSE(st.kinetic_over_v);
+  // Committed position is -30 + 25 = -5, hard-clamped to 0.
+  CHECK_EQ(st.scroll_y, 0);
+}
+
+TEST_CASE("section_scroll_step_px: refuses cross-axis input on a single-axis section")
+{
+  SectionScrollState st = make_state(SectionScrollAxis::Vertical);
+  SectionLayout L = make_layout();
+
+  // Horizontal input on a vertical-only section: rejected.
+  CHECK_FALSE(section_scroll_step_px(st, L, -50.0, true));
+  CHECK_EQ(st.scroll_x, 0);
+}
+
 TEST_CASE("clamp_section_scroll_idle: external out-of-range still clamps")
 {
   SectionScrollState st = make_state();

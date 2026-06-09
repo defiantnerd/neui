@@ -311,6 +311,14 @@ namespace neui_detail
     return 0;
   }
 
+  // Read the section's kinetics-mode attr. Defaults to 0
+  // (NEUI_SCROLL_KINETICS_PLATFORM) when unset; null bag returns 0.
+  inline int section_read_kinetics_mode(const AttrBag* bag)
+  {
+    if (!bag) return 0;
+    return bag->get_int(NEUI_ATTR_SCROLL_KINETICS, 0);
+  }
+
   // Apply a wheel event to the section's scroll state. axis_h = true to
   // route the delta to the horizontal axis (e.g. Shift+wheel). Returns
   // true if the position changed.
@@ -335,6 +343,57 @@ namespace neui_detail
       return st.scroll_y != before;
     }
     return false;
+  }
+
+  // Per-notch scale applied to the smooth-path wheel delta before committing
+  // it in stepped mode. The smooth-path tuning (SECTION_WHEEL_LINE_PX = 40
+  // px/line; on Win32 also multiplied by SPI_GETWHEELSCROLLLINES = 3 by
+  // default) is sized for the damped + integrated kinetic feel where each
+  // notch's full magnitude bleeds across many paint frames. Applied
+  // verbatim to a discrete stepped commit it feels chunky - one Win32
+  // wheel notch jumps 120 px (~5 button rows) before kinetics' damping
+  // can do its job. Halving lands at ~60 px/notch on Win32 default,
+  // matching GRID stepped's per-notch feel (3 rows * row_h = 66 px).
+  inline constexpr double SECTION_STEPPED_SCALE = 0.5;
+
+  // Hard-clamp stepped wheel step: drives a flat px delta into the chosen
+  // axis with no rubber-band / momentum, then resyncs the kinetics
+  // integrator so a later flip to SMOOTH picks up from the committed
+  // position instead of springing back to wherever the integrator last
+  // was. Refuses (returns false) when the section's axis mask doesn't
+  // include the requested axis. SECTION twin of grid_scroll_step_rows.
+  // Returns true on position change so callers know to repaint / reposition.
+  //
+  // Sign convention matches section_scroll_wheel_kinetic (positive delta =
+  // scroll up = position decreases) so host wheel handlers can swap between
+  // STEPPED + SMOOTH paths without re-deriving the delta. NB: this is the
+  // opposite of `section_apply_wheel`'s legacy "position += delta"
+  // convention, which is why STEPPED can't simply delegate to it. Callers
+  // pass the same delta they would pass to section_scroll_wheel_kinetic;
+  // this helper applies SECTION_STEPPED_SCALE internally so a discrete-
+  // notch commit doesn't feel twice as coarse as the smooth path.
+  inline bool section_scroll_step_px(SectionScrollState& st,
+                                       const SectionLayout& L,
+                                       double delta_px, bool axis_h)
+  {
+    if (axis_h ? !section_axis_has_h(st.axis) : !section_axis_has_v(st.axis))
+      return false;
+    delta_px *= SECTION_STEPPED_SCALE;
+    int before  = axis_h ? st.scroll_x : st.scroll_y;
+    double dim_max = axis_h ? (double)(st.content_w - L.body_w)
+                            : (double)(st.content_h - L.body_h);
+    int max_px = dim_max < 0.0 ? 0 : (int)dim_max;
+    long long after = (long long)before - (long long)std::lround(delta_px);
+    if (after < 0)              after = 0;
+    if (after > (long long)max_px) after = max_px;
+    int after_i = (int)after;
+    if (axis_h) st.scroll_x = after_i; else st.scroll_y = after_i;
+    ScrollKinetics& k = axis_h ? st.kin_h : st.kin_v;
+    k.raw_px            = (double)after_i;
+    k.last_commit_px    = after_i;
+    k.suppress_momentum = true;
+    if (axis_h) st.kinetic_over_h = false; else st.kinetic_over_v = false;
+    return after_i != before;
   }
 
   // ---- Smooth-scroll kinetics (same curve + tuning as GRID) ----------------
