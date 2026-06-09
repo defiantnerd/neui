@@ -70,6 +70,7 @@ namespace macos_host {
   void section_reposition_children_macos(WidgetData& sec);
   void section_apply_layout_changes_macos(WidgetData& sec);
   bool section_bounce_step_macos(WidgetData& wd);
+  void section_notify_scroll_changed_macos(WidgetData& wd);
   void parent_scroll_offset_macos(Session* sess, uint32_t widget_index,
                                     int& out_x, int& out_y);
 
@@ -342,6 +343,26 @@ namespace macos_host {
     ev.data.grid_column_resize.col       = col;
     ev.data.grid_column_resize.old_width = old_w;
     ev.data.grid_column_resize.new_width = new_w;
+    wd.session->dispatch_event(&ev);
+  }
+
+  // Fire NEUI_EVENT_SCROLL_CHANGED iff the section's committed offset
+  // moved since the last notification. Called from every commit path
+  // (wheel kinetic + stepped, scrollbar drag, bounce tick, programmatic
+  // scroll API). Sentinel INT32_MIN ensures the first notify fires.
+  void section_notify_scroll_changed_macos(WidgetData& wd)
+  {
+    if (!wd.session || !wd.section_scroll_state) return;
+    auto& st = *wd.section_scroll_state;
+    if (st.scroll_x == st.last_notified_x &&
+        st.scroll_y == st.last_notified_y) return;
+    st.last_notified_x = st.scroll_x;
+    st.last_notified_y = st.scroll_y;
+    neui_event_t ev{};
+    ev.type                  = NEUI_EVENT_SCROLL_CHANGED;
+    ev.data.scroll.widget.id = wd.widget_id;
+    ev.data.scroll.scroll_x  = st.scroll_x;
+    ev.data.scroll.scroll_y  = st.scroll_y;
     wd.session->dispatch_event(&ev);
   }
 
@@ -1775,6 +1796,7 @@ static float neui_snap_to_steps(float v, int steps)
           st.kinetic_over_v = false;
           macos_host::section_reposition_children_macos(*sec_wd);
           [self setNeedsDisplay:YES];
+          macos_host::section_notify_scroll_changed_macos(*sec_wd);
         }
       } else {
         auto geom = neui_detail::compute_scrollbar(
@@ -1787,6 +1809,7 @@ static float neui_snap_to_steps(float v, int steps)
           st.kinetic_over_h = false;
           macos_host::section_reposition_children_macos(*sec_wd);
           [self setNeedsDisplay:YES];
+          macos_host::section_notify_scroll_changed_macos(*sec_wd);
         }
       }
       return;
@@ -1949,6 +1972,7 @@ static float neui_snap_to_steps(float v, int steps)
   if (!wd || !wd->section_scroll_state) { [self sectionStopBounce]; return; }
   bool more = macos_host::section_bounce_step_macos(*wd);
   [self setNeedsDisplay:YES];
+  macos_host::section_notify_scroll_changed_macos(*wd);
   if (!more) [self sectionStopBounce];
 }
 
@@ -2002,6 +2026,7 @@ static float neui_snap_to_steps(float v, int steps)
       [self sectionStopBounce];
       macos_host::section_reposition_children_macos(*wd);
       [self setNeedsDisplay:YES];
+      macos_host::section_notify_scroll_changed_macos(*wd);
     }
     return;
   }
@@ -2041,6 +2066,7 @@ static float neui_snap_to_steps(float v, int steps)
   if (act_v.changed || act_h.changed) {
     macos_host::section_reposition_children_macos(*wd);
     [self setNeedsDisplay:YES];
+    macos_host::section_notify_scroll_changed_macos(*wd);
   }
   if (act_v.start_bounce || act_h.start_bounce) [self sectionStartBounce];
 }

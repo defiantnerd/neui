@@ -142,6 +142,13 @@ namespace xpl_host
     // hit-tester can offset + clip child positioning. nullptr otherwise
     // (non-scrolling SECTION, or any non-SECTION widget).
     virtual neui_detail::SectionScrollState* scroll_state_ptr() { return nullptr; }
+
+    // Fire NEUI_EVENT_SCROLL_CHANGED if the widget's scroll position
+    // changed since the last notification. SECTION overrides; other
+    // widgets are inert. Called from every commit path (wheel, scrollbar
+    // drag, spring-back tick, programmatic scroll API) so the platform
+    // layers don't have to downcast.
+    virtual void notify_scroll_changed() {}
     // Cached layout from the last SECTION paint - widget-local body rect +
     // scrollbar visibility. Returns non-null for ANY SECTION (scrolling
     // or not) so the paint walk can apply the body_y offset uniformly
@@ -252,6 +259,17 @@ namespace xpl_host
     // widget_show + attr_changed. Allocates on first scrolling mode; cheap
     // no-op otherwise.
     void refresh_scroll_state();
+    // Fire NEUI_EVENT_SCROLL_CHANGED iff scroll_x/y changed since last
+    // notification. Idempotent, cheap; called from every commit path
+    // (wheel, scrollbar drag, spring-back tick, programmatic scroll API).
+    void notify_scroll_changed() override;
+    // Programmatic external commit: writes (nx, ny) into the scroll
+    // state, resets the per-axis kinetics integrator so a later wheel
+    // event doesn't snap back, repaints, and fires SCROLL_CHANGED.
+    // Public so the NEUI_API_SCROLL implementations (set_scroll,
+    // ensure_visible) can drive it without touching the protected
+    // repaint() seam. Clamps to the current legal scroll range.
+    void external_commit(int nx, int ny);
   };
 
   // MULTILINE - multi-line text editor with caret + selection + vertical scroll.
@@ -687,7 +705,15 @@ namespace xpl_host
     uint32_t widget_at(float x, float y, uint32_t parent_idx);
 
     // Update the logically focused widget, firing focus events as needed.
+    // Also auto-scrolls any enclosing scrolling SECTION so the newly-
+    // focused widget is visible (Tab traversal into off-screen children).
     void set_focus(uint32_t new_idx);
+
+    // Walk parents of widget_idx to find the nearest scrolling SECTION
+    // ancestor and scroll it to bring the widget into view. No-op if
+    // there's no scrolling ancestor or the widget is already visible.
+    // Called from set_focus and the public NEUI_API_SCROLL::ensure_visible.
+    void ensure_widget_visible(uint32_t widget_idx);
 
     // Update the hovered widget, firing mouse enter/leave events.
     void set_hovered(uint32_t new_idx);

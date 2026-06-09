@@ -59,6 +59,7 @@ extern "C" {
     NEUI_EVENT_VALUE_CHANGED            = DEF_WIDGET_EVENT(6),  // slider/knob value changed by user
     NEUI_EVENT_WIDGET_PAINT             = DEF_WIDGET_EVENT(7),  // NEUI_W_CUSTOMDRAW: client draws via backend/ctx
     NEUI_EVENT_ATTR_CHANGED             = DEF_WIDGET_EVENT(8),  // behavior wrote an attr (user-driven)
+    NEUI_EVENT_SCROLL_CHANGED           = DEF_WIDGET_EVENT(9),  // scrolling SECTION's offset moved
 
     NEUI_EVENT_ITEM_SELECTED            = DEF_ITEM_EVENT(1),  // fired when selection changes in listbox/combobox
 
@@ -283,6 +284,19 @@ extern "C" {
     uint32_t           suggested_action; // neui_dnd_action_t bitmask
   } neui_event_dnd_t;
 
+  // Scroll-changed event for a scrolling SECTION. Fires whenever the
+  // committed scroll position changes (wheel, scrollbar drag, spring-back
+  // tick, programmatic scroll->set_scroll / ensure_visible). Suppressed
+  // when the new offset equals the previous one. scroll_x / scroll_y are
+  // in logical pixels at 96 DPI; the values are the same range
+  // scroll->set_scroll accepts.
+  typedef struct neui_event_scroll
+  {
+    neui_widget_t widget;     // the scrolling SECTION
+    int           scroll_x;   // current horizontal offset (logical px)
+    int           scroll_y;   // current vertical offset   (logical px)
+  } neui_event_scroll_t;
+
   // Grid sort-changed event - fires after a user-driven header click that
   // mutates the sort stack (or removes a level). Carries the column that
   // was clicked and its new direction in the stack; clients that need the
@@ -347,6 +361,7 @@ extern "C" {
       neui_event_grid_column_resize_t grid_column_resize;
       neui_event_grid_sort_t          grid_sort;
       neui_event_dnd_t                dnd;
+      neui_event_scroll_t             scroll;
     } data;
 
     // more event data can be added here

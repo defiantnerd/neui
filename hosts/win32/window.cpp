@@ -1276,6 +1276,9 @@ namespace win32_host
           neui_event_t event = { NEUI_EVENT_WIDGET_FOCUS };
           event.data.focus = { wid, true };
           wd->session->dispatch_event(&event);
+          // Auto-scroll any enclosing scrolling SECTION ancestor so a
+          // Tab-into-off-screen child brings it into view.
+          wd->session->ensure_widget_visible(wd->index);
         }
         break;
       case WM_KILLFOCUS:

@@ -55,6 +55,7 @@ struct AppState {
   neui_widget_api_t* widgets = nullptr;
   neui_attr_api_t*   attrs   = nullptr;
   neui_items_api_t*  items   = nullptr;
+  neui_scroll_api_t* scroll  = nullptr;
   neui_session_t     session = { 0 };
 
   uint32_t win_id          = 0;
@@ -63,6 +64,8 @@ struct AppState {
   uint32_t kinetics_combo  = 0;
   uint32_t count_input     = 0;
   uint32_t regen_btn       = 0;
+  uint32_t scroll_to_input = 0;
+  uint32_t scroll_to_btn   = 0;
   uint32_t status_label    = 0;
   uint32_t section_id      = 0;
 
@@ -205,6 +208,26 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
         apply_row_count(a);
         return true;
       }
+      if (wid == a->scroll_to_btn) {
+        // Read the "scroll to row N" input + call ensure_visible on the
+        // first widget of that row. The first widget per row is the
+        // LABEL (row_widget_ids holds 7 entries per row: 1 LABEL + 6
+        // BUTTONs). 1-based input matches the LABEL text.
+        char buf[32] = {0};
+        a->widgets->get_text(a->session,
+                              neui_widget_t{ a->scroll_to_input },
+                              buf, sizeof(buf));
+        int row = atoi(buf);
+        if (row >= 1 && row <= a->row_count && a->scroll) {
+          int per_row = 7;
+          size_t idx = (size_t)(row - 1) * per_row;
+          if (idx < a->row_widget_ids.size()) {
+            a->scroll->ensure_visible(a->session,
+                                       neui_widget_t{ a->row_widget_ids[idx] });
+          }
+        }
+        return true;
+      }
       // Generated content buttons - log clicks so the user can verify
       // the inner widgets receive events through the section's clip.
       for (uint32_t r : a->row_widget_ids) {
@@ -214,6 +237,21 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
           dbglog("[section_scroll] click: %s\n", buf);
           return true;
         }
+      }
+      break;
+    }
+
+    case NEUI_EVENT_SCROLL_CHANGED: {
+      // Demonstrates the new event; mirror the position into the status
+      // label so the user can see scroll motion at a glance.
+      if (event->data.scroll.widget.id == a->section_id) {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "Scroll: (%d, %d)",
+                 event->data.scroll.scroll_x,
+                 event->data.scroll.scroll_y);
+        a->widgets->set_text(a->session,
+                              neui_widget_t{ a->status_label }, buf);
+        return true;
       }
       break;
     }
@@ -274,9 +312,13 @@ int main(int /*argc*/, char* /*argv*/[])
   app.widgets = (neui_widget_api_t*)host->get_interface(app.session, NEUI_API_WIDGETS);
   app.attrs   = (neui_attr_api_t*)  host->get_interface(app.session, NEUI_API_ATTRS);
   app.items   = (neui_items_api_t*) host->get_interface(app.session, NEUI_API_ITEMS);
+  app.scroll  = (neui_scroll_api_t*)host->get_interface(app.session, NEUI_API_SCROLL);
   if (!app.widgets || !app.attrs || !app.items) {
     dbglog("[section_scroll_example] missing API\n"); return 1;
   }
+  // NEUI_API_SCROLL is optional: log if unavailable so the user knows the
+  // "Scroll to row" button + live position readout won't work.
+  if (!app.scroll) dbglog("[section_scroll_example] NEUI_API_SCROLL unavailable\n");
 
   // Window oversize so the 740-wide section + a 740-wide toolbar fit
   // inside the client area (Win32 client < window by border + title).
@@ -342,7 +384,7 @@ int main(int /*argc*/, char* /*argv*/[])
   app.status_label = status_label.id;
   app.widgets->set_text(app.session, status_label, "Ready.");
 
-  // ---- Second toolbar row (kinetics selector) ----------------------------
+  // ---- Second toolbar row (kinetics selector + ensure_visible demo) ------
   int row2_y = toolbar_y + 28;
   int x2 = 10;
 
@@ -358,6 +400,23 @@ int main(int /*argc*/, char* /*argv*/[])
   for (int i = 0; i < k_kinetics_count; ++i)
     app.items->add(app.session, kin_combo, k_kinetics_choices[i], nullptr);
   app.items->set_selected(app.session, kin_combo, 0);  // "platform"
+  x2 += 110 + 24;
+
+  auto stl_lbl = app.widgets->create(app.session, win, NEUI_W_LABEL,
+                                       x2, row2_y, 100, 22, nullptr);
+  app.widgets->set_text(app.session, stl_lbl, "Scroll to row:");
+  x2 += 100 + 4;
+
+  auto stl_input = app.widgets->create(app.session, win, NEUI_W_INPUTBOX,
+                                         x2, row2_y, 50, 22, nullptr);
+  app.scroll_to_input = stl_input.id;
+  app.widgets->set_text(app.session, stl_input, "20");
+  x2 += 50 + 6;
+
+  auto stl_btn = app.widgets->create(app.session, win, NEUI_W_BUTTON,
+                                       x2, row2_y, 70, 22, nullptr);
+  app.widgets->set_text(app.session, stl_btn, "Go");
+  app.scroll_to_btn = stl_btn.id;
 
   // ---- The scrolling SECTION ---------------------------------------------
   int section_y = row2_y + 30;

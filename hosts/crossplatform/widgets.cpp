@@ -1668,6 +1668,54 @@ namespace xpl_host
   };
 
   // ---------------------------------------------------------------------------
+  // Scroll API (NEUI_API_SCROLL)
+  // ---------------------------------------------------------------------------
+
+  static int NEUI_ABI scroll_set(neui_session_t session, neui_widget_t widget,
+                                  int scroll_x, int scroll_y)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    auto* sec = dynamic_cast<SectionWidget*>(&s->_widgets[idx]);
+    if (!sec || !sec->scroll_state) return 0;
+    sec->external_commit(scroll_x, scroll_y);
+    return 1;
+  }
+
+  static int NEUI_ABI scroll_get(neui_session_t session, neui_widget_t widget,
+                                  int* out_x, int* out_y)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    auto* sec = dynamic_cast<SectionWidget*>(&s->_widgets[idx]);
+    if (!sec || !sec->scroll_state) return 0;
+    if (out_x) *out_x = sec->scroll_state->scroll_x;
+    if (out_y) *out_y = sec->scroll_state->scroll_y;
+    return 1;
+  }
+
+  static int NEUI_ABI scroll_ensure_visible(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    s->ensure_widget_visible(idx);
+    return 1;
+  }
+
+  neui_scroll_api_t scroll_api = {
+    NEUI_VERSION,
+    scroll_set,
+    scroll_get,
+    scroll_ensure_visible,
+  };
+
+  // ---------------------------------------------------------------------------
   // Asset API (NEUI_API_ASSETS) - session-scoped media handles backed by
   // the AssetManager's handle table. Handles encode the session id in the
   // upper 16 bits like neui_widget_t; cross-session handles are dropped.

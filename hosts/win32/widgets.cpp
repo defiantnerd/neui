@@ -70,6 +70,7 @@ namespace win32_host
                                        WPARAM wParam, LPARAM lParam);
   static void section_refresh_scroll_state_w32(WidgetData& wd);
   static void section_reposition_children_w32(WidgetData& sec);
+  static void section_external_commit_w32(WidgetData& sec, int nx, int ny);
   // Timer ID for the scrolling-SECTION spring-back animation on win32
   // native. Per-section: SetTimer is installed on the SECTION's own HWND
   // (unlike xpl where it lives on the frame), so the timer id can stay a
@@ -1291,6 +1292,27 @@ namespace win32_host
     }
   }
 
+  // Fire NEUI_EVENT_SCROLL_CHANGED if the section's committed offset has
+  // moved since the last notification. SectionScrollState tracks
+  // last_notified_x/y (INT32_MIN sentinel for "never notified"). Used by
+  // every commit path: wheel kinetic + stepped, scrollbar drag, bounce
+  // tick, programmatic scroll API.
+  static void section_notify_scroll_changed_w32(WidgetData& wd)
+  {
+    if (!wd.session || !wd.section_scroll_state) return;
+    auto& st = *wd.section_scroll_state;
+    if (st.scroll_x == st.last_notified_x &&
+        st.scroll_y == st.last_notified_y) return;
+    st.last_notified_x = st.scroll_x;
+    st.last_notified_y = st.scroll_y;
+    neui_event_t ev{};
+    ev.type                  = NEUI_EVENT_SCROLL_CHANGED;
+    ev.data.scroll.widget.id = wd.widget_id;
+    ev.data.scroll.scroll_x  = st.scroll_x;
+    ev.data.scroll.scroll_y  = st.scroll_y;
+    wd.session->dispatch_event(&ev);
+  }
+
   // Feed a synthetic precise wheel delta into a section's per-axis
   // kinetics. dv / dh are logical px with the kinetics' sign convention
   // (positive = scroll up / left); the function picks the right axis,
@@ -1344,6 +1366,7 @@ namespace win32_host
     if (changed) {
       section_reposition_children_w32(wd);
       InvalidateRect(wd.hwnd, nullptr, FALSE);
+      section_notify_scroll_changed_w32(wd);
     }
     if (start_bounce)
       SetTimer(wd.hwnd, SECTION_BOUNCE_TIMER_ID, 16, nullptr);
@@ -1374,6 +1397,7 @@ namespace win32_host
       bool more_h = section_scroll_bounce_step(st, L, true);
       section_reposition_children_w32(wd);
       InvalidateRect(wd.hwnd, nullptr, FALSE);
+      section_notify_scroll_changed_w32(wd);
       if (!more_v && !more_h)
         KillTimer(wd.hwnd, SECTION_BOUNCE_TIMER_ID);
       return;
@@ -1442,6 +1466,7 @@ namespace win32_host
             st.kinetic_over_v = false;
             section_reposition_children_w32(wd);
             InvalidateRect(wd.hwnd, nullptr, FALSE);
+            section_notify_scroll_changed_w32(wd);
           }
         } else if (st.horz_drag.active) {
           auto geom = compute_scrollbar(L.body_w, 0, st.content_w,
@@ -1453,6 +1478,7 @@ namespace win32_host
             st.kinetic_over_h = false;
             section_reposition_children_w32(wd);
             InvalidateRect(wd.hwnd, nullptr, FALSE);
+            section_notify_scroll_changed_w32(wd);
           }
         }
         return;
@@ -2535,6 +2561,33 @@ namespace win32_host
     }
   }
 
+  void Session::ensure_widget_visible(uint32_t widget_idx)
+  {
+    using namespace neui_detail;
+    if (!_widgets.exists(widget_idx)) return;
+    auto& wd0 = _widgets[widget_idx];
+    int rect_x = wd0.x, rect_y = wd0.y;
+    uint32_t cur = _widgets.get_parent(widget_idx);
+    WidgetData* sec = nullptr;
+    while (cur != 0 && cur != knone.id && _widgets.exists(cur)) {
+      auto& cw = _widgets[cur];
+      if (cw.section_scroll_state) { sec = &cw; break; }
+      rect_x += cw.x;
+      rect_y += cw.y;
+      cur = _widgets.get_parent(cur);
+    }
+    if (!sec) return;
+    auto& st = *sec->section_scroll_state;
+    auto& L  = sec->section_last_layout;
+    int nx, ny;
+    compute_ensure_visible(rect_x, rect_y, wd0.width, wd0.height,
+                            L.body_w, L.body_h,
+                            st.content_w, st.content_h,
+                            st.scroll_x, st.scroll_y,
+                            nx, ny);
+    section_external_commit_w32(*sec, nx, ny);
+  }
+
   void Session::widget_set_owner(neui_widget_t dialog, neui_widget_t owner)
   {
     uint32_t didx = WidgetToIndex(dialog);
@@ -2751,6 +2804,88 @@ namespace win32_host
     NEUI_VERSION,
     cmd_invoke_focused,
     cmd_invoke,
+  };
+
+  // ---------------------------------------------------------------------------
+  // Scroll API implementation
+  // ---------------------------------------------------------------------------
+
+  // External-commit shared by set_scroll + ensure_visible: writes the new
+  // (nx, ny) into the section's state, resets the per-axis kinetics so a
+  // later wheel doesn't spring back, repositions children + invalidates +
+  // fires SCROLL_CHANGED.
+  static void section_external_commit_w32(WidgetData& sec, int nx, int ny)
+  {
+    using namespace neui_detail;
+    if (!sec.section_scroll_state || !sec.hwnd) return;
+    auto& st = *sec.section_scroll_state;
+    if (st.scroll_x == nx && st.scroll_y == ny) return;
+    st.scroll_x = nx;
+    st.scroll_y = ny;
+    st.kin_v.raw_px            = (double)ny;
+    st.kin_v.last_commit_px    = ny;
+    st.kin_v.suppress_momentum = true;
+    st.kin_h.raw_px            = (double)nx;
+    st.kin_h.last_commit_px    = nx;
+    st.kin_h.suppress_momentum = true;
+    st.kinetic_over_v = false;
+    st.kinetic_over_h = false;
+    // Cancel any spring-back so a programmatic set isn't fought by an
+    // in-flight bounce timer.
+    KillTimer(sec.hwnd, SECTION_BOUNCE_TIMER_ID);
+    section_reposition_children_w32(sec);
+    InvalidateRect(sec.hwnd, nullptr, FALSE);
+    section_notify_scroll_changed_w32(sec);
+  }
+
+  static int scroll_set(neui_session_t session, neui_widget_t widget,
+                         int scroll_x, int scroll_y)
+  {
+    auto s = get_session_for_widget(session, widget);
+    if (!s) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    auto& wd = s->_widgets[idx];
+    if (!wd.section_scroll_state) return 0;
+    auto& st = *wd.section_scroll_state;
+    auto& L  = wd.section_last_layout;
+    int max_x = st.content_w - L.body_w; if (max_x < 0) max_x = 0;
+    int max_y = st.content_h - L.body_h; if (max_y < 0) max_y = 0;
+    int nx = scroll_x; if (nx < 0) nx = 0; if (nx > max_x) nx = max_x;
+    int ny = scroll_y; if (ny < 0) ny = 0; if (ny > max_y) ny = max_y;
+    section_external_commit_w32(wd, nx, ny);
+    return 1;
+  }
+
+  static int scroll_get(neui_session_t session, neui_widget_t widget,
+                         int* out_x, int* out_y)
+  {
+    auto s = get_session_for_widget(session, widget);
+    if (!s) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    auto& wd = s->_widgets[idx];
+    if (!wd.section_scroll_state) return 0;
+    if (out_x) *out_x = wd.section_scroll_state->scroll_x;
+    if (out_y) *out_y = wd.section_scroll_state->scroll_y;
+    return 1;
+  }
+
+  static int scroll_ensure_visible(neui_session_t session, neui_widget_t widget)
+  {
+    auto s = get_session_for_widget(session, widget);
+    if (!s) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    s->ensure_widget_visible(idx);
+    return 1;
+  }
+
+  neui_scroll_api_t scroll_api = {
+    NEUI_VERSION,
+    scroll_set,
+    scroll_get,
+    scroll_ensure_visible,
   };
 
   // ---------------------------------------------------------------------------

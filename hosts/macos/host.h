@@ -163,6 +163,13 @@ namespace macos_host
 
     bool dispatch_event(neui_event_t* event);
 
+    // Walk parents of widget_idx to find the nearest scrolling SECTION
+    // ancestor and scroll it to bring the widget into view. Used by the
+    // public NEUI_API_SCROLL::ensure_visible. Per-widget focus is not
+    // emitted on the macOS native host today (Tier B deferred), so the
+    // Tab-into-off-screen-child auto-scroll is wired only on win32 + xpl.
+    void ensure_widget_visible(uint32_t widget_idx);
+
     // Widget API (subset filled per step in plans/native-macos-host.md).
     // Step 3 wires create / destroy / show for APPWINDOW; later widget
     // types extend the show / destroy switch in widgets.mm + window.mm.

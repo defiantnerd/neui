@@ -518,14 +518,21 @@ content during scroll; the right-edge scrollbar gutter must not be
 overpainted by buttons extending past the body width; scrolling
 through 30+ rows must be flicker-free with smooth kinetics.
 
+## Follow-up shipped: scroll event + scroll API + focus auto-scroll (2026-06-09)
+
+Three previously-deferred items shipped together:
+- `NEUI_EVENT_SCROLL_CHANGED { widget, scroll_x, scroll_y }` fires from every commit path (wheel kinetic / stepped, scrollbar drag, spring-back tick, programmatic set). `SectionScrollState.last_notified_x/y` (INT32_MIN sentinel) gate the emission so ticks that don't move the position stay silent.
+- `NEUI_API_SCROLL` (`include/neui/d/scroll.h`): `set_scroll` / `get_scroll` / `ensure_visible`. `set_scroll` clamps + resets the per-axis kinetics integrator (so an in-flight bounce yields on its next tick). `ensure_visible` walks the widget's parent chain to find the nearest scrolling SECTION ancestor + does a minimum-motion scroll (already-visible = no-op; oversized widgets = top-left align).
+- Auto-`ensure_visible` on focus change: wired through `Session::set_focus` (xpl) + `WM_SETFOCUS` (win32 native). macOS native still defers per-widget focus events (Tier B), so the auto-on-Tab path is wired only on win32 + xpl; the programmatic API works everywhere.
+
+Shared math lives in `widget_section_scroll.h::compute_ensure_visible`; per-host `section_external_commit_*` is the commit-and-notify seam. `Session::ensure_widget_visible` lives on all three hosts so the public API delegates uniformly. Tests in `tests/test_section_scroll.cpp`. Example demonstrates a "Scroll to row N" button + live `SCROLL_CHANGED` position readout.
+
 ## Deferred follow-ups
 
-- `NEUI_EVENT_SCROLL_CHANGED` event for clients that want to react to scroll position (e.g. lazy-loading content).
-- Programmatic `widgets->scroll_to(widget, x, y)` / `ensure_visible(widget)` helpers for SECTION children. Mirror of GRID's `ensure_row_visible`.
 - Auto-scroll while drag-hovering near an edge during DnD.
 - Nested scrolling SECTIONs (parent re-receives wheel when child reaches its edge). v1 forwards wheel to whichever SECTION is the deepest hit-test target; the ancestor never receives it. Standard wheel-event escalation is a v2.
 - Horizontal-only fling on Win32 (no `WM_MOUSEHWHEEL` from precision touchpads on older builds - low priority).
-- Per-widget `scroll_into_view` triggered by focus changes (so Tab into an off-screen child auto-scrolls it into view).
+- macOS native: hook per-widget `becomeFirstResponder` into `Session::ensure_widget_visible` so Tab into off-screen children auto-scrolls there too. Bundles with the Tier B focus-parity work.
 
 ## Risks / open questions
 

@@ -533,6 +533,94 @@ TEST_CASE("section_scroll_step_px: refuses cross-axis input on a single-axis sec
   CHECK_EQ(st.scroll_x, 0);
 }
 
+// ---------------------------------------------------------------------------
+// compute_ensure_visible
+// ---------------------------------------------------------------------------
+
+TEST_CASE("compute_ensure_visible: widget fully visible is a no-op")
+{
+  int nx = -1, ny = -1;
+  // Body 200x150 at scroll (50, 30); rect at (60, 40) sized (30, 20) - fully
+  // inside [50, 250] x [30, 180].
+  compute_ensure_visible(60, 40, 30, 20,
+                          /*body*/200, 150,
+                          /*content*/600, 800,
+                          /*cur*/50, 30,
+                          nx, ny);
+  CHECK_EQ(nx, 50);
+  CHECK_EQ(ny, 30);
+}
+
+TEST_CASE("compute_ensure_visible: widget above viewport scrolls to its top")
+{
+  int nx = -1, ny = -1;
+  // Widget at y=10, viewport currently scroll_y=200 → not visible (above).
+  compute_ensure_visible(60, 10, 30, 20,
+                          200, 150,
+                          600, 800,
+                          50, 200,
+                          nx, ny);
+  CHECK_EQ(nx, 50);       // x unchanged (already visible horizontally)
+  CHECK_EQ(ny, 10);       // scrolled up so widget top aligns with body top
+}
+
+TEST_CASE("compute_ensure_visible: widget below viewport scrolls to its bottom")
+{
+  int nx = -1, ny = -1;
+  // Widget at y=400 sized 20; body 150 high; cur scroll 100 means visible
+  // range is [100, 250]. Widget at 400+20=420 below 250.
+  compute_ensure_visible(60, 400, 30, 20,
+                          200, 150,
+                          600, 800,
+                          50, 100,
+                          nx, ny);
+  CHECK_EQ(nx, 50);
+  // Need scroll_y such that scroll_y + body_h >= widget_y + widget_h:
+  // scroll_y = 420 - 150 = 270.
+  CHECK_EQ(ny, 270);
+}
+
+TEST_CASE("compute_ensure_visible: widget to the right scrolls horizontally")
+{
+  int nx = -1, ny = -1;
+  // Widget at x=500 sized 40; body 200 wide; scroll_x=100 means visible
+  // [100, 300]. Widget right edge 540 > 300, so scroll_x = 540 - 200 = 340.
+  compute_ensure_visible(500, 60, 40, 20,
+                          200, 150,
+                          600, 800,
+                          100, 50,
+                          nx, ny);
+  CHECK_EQ(nx, 340);
+  CHECK_EQ(ny, 50);
+}
+
+TEST_CASE("compute_ensure_visible: widget larger than body aligns to top-left")
+{
+  int nx = -1, ny = -1;
+  // Body 100x80; widget 200x150 at (300, 400).
+  compute_ensure_visible(300, 400, 200, 150,
+                          100, 80,
+                          600, 800,
+                          0, 0,
+                          nx, ny);
+  CHECK_EQ(nx, 300);
+  CHECK_EQ(ny, 400);
+}
+
+TEST_CASE("compute_ensure_visible: result clamps to legal scroll range")
+{
+  int nx = -1, ny = -1;
+  // Widget far below the scrollable extent (rect_y = 10000) - should clamp
+  // ny to max(0, content_h - body_h) = 800 - 150 = 650, not 10000-150=9850.
+  compute_ensure_visible(60, 10000, 30, 20,
+                          200, 150,
+                          600, 800,
+                          50, 0,
+                          nx, ny);
+  CHECK_EQ(nx, 50);
+  CHECK_EQ(ny, 650);
+}
+
 TEST_CASE("clamp_section_scroll_idle: external out-of-range still clamps")
 {
   SectionScrollState st = make_state();

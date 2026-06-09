@@ -278,6 +278,12 @@ namespace win32_host {
     neui_widget_t widget_get_first_child(neui_widget_t widget);
     neui_widget_t widget_get_next_sibling(neui_widget_t widget);
     void widget_set_focus(neui_widget_t widget);
+
+    // Walk parents of widget_idx to find the nearest scrolling SECTION
+    // ancestor and scroll it to bring the widget into view (minimum
+    // motion - already-visible widgets are no-ops). Called from
+    // WM_SETFOCUS and the public NEUI_API_SCROLL::ensure_visible.
+    void ensure_widget_visible(uint32_t widget_idx);
     void               widget_set_owner(neui_widget_t dialog, neui_widget_t owner);
     void               widget_set_check(neui_widget_t widget, neui_check_state_t state);
     neui_check_state_t widget_get_check(neui_widget_t widget);

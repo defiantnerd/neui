@@ -109,6 +109,7 @@ namespace xpl_host
   extern neui_behavior_api_t  behavior_api;
   extern neui_grid_api_t      grid_api;
   extern neui_dnd_api_t       dnd_api;
+  extern neui_scroll_api_t    scroll_api;
 
   // -------------------------------------------------------------------------
   // Session management
@@ -153,6 +154,7 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_BEHAVIOR))  return &behavior_api;
     if (!strcmp(iface, NEUI_API_GRID))      return &grid_api;
     if (!strcmp(iface, NEUI_API_DND))       return &dnd_api;
+    if (!strcmp(iface, NEUI_API_SCROLL))    return &scroll_api;
     return nullptr;
   }
 
@@ -689,6 +691,9 @@ namespace xpl_host
         ev.data.focus.focused = true;
         dispatch_event(&ev);
       }
+      // Auto-scroll any enclosing scrolling SECTION ancestor so a Tab
+      // into an off-screen child brings it into view.
+      ensure_widget_visible(new_idx);
     }
 
     uint32_t ref = (new_idx != 0) ? new_idx : _focused_widget;
@@ -919,6 +924,77 @@ namespace xpl_host
     }
   }
 
+  // Fire NEUI_EVENT_SCROLL_CHANGED if the section's scroll position has
+  // moved since the last notification. See SectionScrollState.last_notified_*.
+  void SectionWidget::notify_scroll_changed()
+  {
+    if (!session || !scroll_state) return;
+    auto& st = *scroll_state;
+    if (st.scroll_x == st.last_notified_x &&
+        st.scroll_y == st.last_notified_y) return;
+    st.last_notified_x = st.scroll_x;
+    st.last_notified_y = st.scroll_y;
+    neui_event_t ev{};
+    ev.type                  = NEUI_EVENT_SCROLL_CHANGED;
+    ev.data.scroll.widget.id = widget_id;
+    ev.data.scroll.scroll_x  = st.scroll_x;
+    ev.data.scroll.scroll_y  = st.scroll_y;
+    session->dispatch_event(&ev);
+  }
+
+  void Session::ensure_widget_visible(uint32_t widget_idx)
+  {
+    if (!_widgets.exists(widget_idx)) return;
+    auto& wd0 = _widgets[widget_idx];
+    int rect_x = wd0.x, rect_y = wd0.y;
+    uint32_t cur = _widgets.get_parent(widget_idx);
+    SectionWidget* sec = nullptr;
+    while (cur != 0 && cur != neui_detail::knone.id && _widgets.exists(cur)) {
+      auto& cw = _widgets[cur];
+      if (auto* s = dynamic_cast<SectionWidget*>(&cw); s && s->scroll_state) {
+        sec = s; break;
+      }
+      rect_x += cw.x;
+      rect_y += cw.y;
+      cur = _widgets.get_parent(cur);
+    }
+    if (!sec) return;
+    auto& st = *sec->scroll_state;
+    auto& L  = sec->last_layout;
+    int nx, ny;
+    neui_detail::compute_ensure_visible(rect_x, rect_y, wd0.width, wd0.height,
+                                          L.body_w, L.body_h,
+                                          st.content_w, st.content_h,
+                                          st.scroll_x, st.scroll_y,
+                                          nx, ny);
+    sec->external_commit(nx, ny);
+  }
+
+  void SectionWidget::external_commit(int nx, int ny)
+  {
+    if (!scroll_state) return;
+    auto& st = *scroll_state;
+    int max_x = st.content_w - last_layout.body_w; if (max_x < 0) max_x = 0;
+    int max_y = st.content_h - last_layout.body_h; if (max_y < 0) max_y = 0;
+    if (nx < 0)     nx = 0;
+    if (nx > max_x) nx = max_x;
+    if (ny < 0)     ny = 0;
+    if (ny > max_y) ny = max_y;
+    if (st.scroll_x == nx && st.scroll_y == ny) return;
+    st.scroll_x = nx;
+    st.scroll_y = ny;
+    st.kin_v.raw_px            = (double)ny;
+    st.kin_v.last_commit_px    = ny;
+    st.kin_v.suppress_momentum = true;
+    st.kin_h.raw_px            = (double)nx;
+    st.kin_h.last_commit_px    = nx;
+    st.kin_h.suppress_momentum = true;
+    st.kinetic_over_v = false;
+    st.kinetic_over_h = false;
+    repaint();
+    notify_scroll_changed();
+  }
+
   bool SectionWidget::on_mouse_event(neui_event_t* event)
   {
     if (!scroll_state) return false;
@@ -955,7 +1031,7 @@ namespace xpl_host
                        st, last_layout,
                        (double)(-delta) * neui_detail::SECTION_WHEEL_LINE_PX,
                        axis_h);
-      if (changed) repaint();
+      if (changed) { repaint(); notify_scroll_changed(); }
       return changed;
     }
     case NEUI_EVENT_MOUSE_BUTTON_DOWN: {
@@ -996,6 +1072,7 @@ namespace xpl_host
         if (new_y != st.scroll_y) {
           st.scroll_y = new_y;
           repaint();
+          notify_scroll_changed();
         }
         return true;
       }
@@ -1009,6 +1086,7 @@ namespace xpl_host
         if (new_x != st.scroll_x) {
           st.scroll_x = new_x;
           repaint();
+          notify_scroll_changed();
         }
         return true;
       }

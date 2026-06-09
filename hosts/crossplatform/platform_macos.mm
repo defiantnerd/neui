@@ -426,6 +426,7 @@ void wake_app_event_pump()
   bool more_v = neui_detail::section_scroll_bounce_step(*st, *L, false);
   bool more_h = neui_detail::section_scroll_bounce_step(*st, *L, true);
   [self setNeedsDisplay:YES];
+  hw->notify_scroll_changed();
   if (!more_v && !more_h) [self sectionStopBounce];
 }
 
@@ -483,6 +484,7 @@ void wake_app_event_pump()
     if (changed) {
       [self sectionStopBounce];
       [self setNeedsDisplay:YES];
+      sw->notify_scroll_changed();
     }
     return;
   }
@@ -506,7 +508,10 @@ void wake_app_event_pump()
   }
 
   if (act_v.stop_bounce  || act_h.stop_bounce)  [self sectionStopBounce];
-  if (act_v.changed      || act_h.changed)      [self setNeedsDisplay:YES];
+  if (act_v.changed      || act_h.changed) {
+    [self setNeedsDisplay:YES];
+    sw->notify_scroll_changed();
+  }
   if (act_v.start_bounce || act_h.start_bounce) [self sectionStartBounce:secIdx];
 }
 

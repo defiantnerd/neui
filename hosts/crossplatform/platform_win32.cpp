@@ -166,8 +166,10 @@ namespace xpl_host
       if (has_h && dh != 0.0 && section_scroll_step_px(*st, *L, dh, true))
         changed = true;
     }
-    if (changed)
+    if (changed) {
       InvalidateRect(hwnd, nullptr, FALSE);
+      sw->notify_scroll_changed();
+    }
     if (start_bounce) {
       wud->bouncing_section_index = sec_idx;
       SetTimer(hwnd, XPL_SECTION_BOUNCE_TIMER_ID, 16, nullptr);
@@ -1041,6 +1043,7 @@ namespace xpl_host
         bool more_v = neui_detail::section_scroll_bounce_step(*st, *L, false);
         bool more_h = neui_detail::section_scroll_bounce_step(*st, *L, true);
         InvalidateRect(hwnd, nullptr, FALSE);
+        shw->notify_scroll_changed();
         if (!more_v && !more_h) {
           swud->bouncing_section_index = 0;
           KillTimer(hwnd, XPL_SECTION_BOUNCE_TIMER_ID);

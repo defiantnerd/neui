@@ -24,6 +24,7 @@
 #include "d/menu.h"
 #include "d/theme.h"
 #include "d/grid.h"
+#include "d/scroll.h"
 
 #ifdef __cplusplus
 extern "C" {

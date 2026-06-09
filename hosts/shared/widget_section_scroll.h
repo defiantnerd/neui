@@ -79,6 +79,14 @@ namespace neui_detail
     // mid-gesture / mid-bounce.
     bool kinetic_over_v = false;
     bool kinetic_over_h = false;
+
+    // Last position reported via NEUI_EVENT_SCROLL_CHANGED. The notify
+    // helpers compare against these before firing so a wheel tick that
+    // doesn't actually move the position (already at an edge, in-flight
+    // bounce that rounded to the same px) stays silent. INT_MIN as the
+    // initial sentinel means the first notify always fires.
+    int last_notified_x = INT32_MIN;
+    int last_notified_y = INT32_MIN;
   };
 
   // Logical-px layout of the section's painted regions.
@@ -343,6 +351,55 @@ namespace neui_detail
       return st.scroll_y != before;
     }
     return false;
+  }
+
+  // Compute the scroll offset needed to bring a body-local rect
+  // (rect_x, rect_y, rect_w, rect_h) into the section's visible body
+  // given the current scroll position. The rect is expressed in the same
+  // body-local coordinate system the section's children use (i.e.
+  // wd.x / wd.y for a direct child). Returns the new scroll_x / scroll_y
+  // via out params. Minimum-motion policy:
+  //   - axis fully visible inside [scroll, scroll + body] → no change
+  //   - rect lies above / left of viewport → scroll up to the rect's edge
+  //   - rect lies below / right of viewport → scroll down so the rect's
+  //     trailing edge meets the body's trailing edge
+  //   - rect larger than body → align to top-left (rect.x, rect.y)
+  // Output is clamped to the legal scroll range; the caller compares
+  // against current scroll_x / scroll_y to detect a no-op.
+  inline void compute_ensure_visible(int rect_x, int rect_y,
+                                       int rect_w, int rect_h,
+                                       int body_w, int body_h,
+                                       int content_w, int content_h,
+                                       int cur_scroll_x, int cur_scroll_y,
+                                       int& out_x, int& out_y)
+  {
+    int max_x = content_w - body_w; if (max_x < 0) max_x = 0;
+    int max_y = content_h - body_h; if (max_y < 0) max_y = 0;
+
+    int nx = cur_scroll_x;
+    if (rect_w >= body_w) {
+      nx = rect_x;
+    } else if (rect_x < cur_scroll_x) {
+      nx = rect_x;
+    } else if (rect_x + rect_w > cur_scroll_x + body_w) {
+      nx = rect_x + rect_w - body_w;
+    }
+    if (nx < 0)      nx = 0;
+    if (nx > max_x)  nx = max_x;
+
+    int ny = cur_scroll_y;
+    if (rect_h >= body_h) {
+      ny = rect_y;
+    } else if (rect_y < cur_scroll_y) {
+      ny = rect_y;
+    } else if (rect_y + rect_h > cur_scroll_y + body_h) {
+      ny = rect_y + rect_h - body_h;
+    }
+    if (ny < 0)      ny = 0;
+    if (ny > max_y)  ny = max_y;
+
+    out_x = nx;
+    out_y = ny;
   }
 
   // Per-notch scale applied to the smooth-path wheel delta before committing

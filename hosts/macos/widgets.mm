@@ -1688,6 +1688,133 @@ namespace macos_host
     cmd_invoke_focused, cmd_invoke,
   };
 
+  // ---------------------------------------------------------------------------
+  // Scroll API (NEUI_API_SCROLL)
+  // ---------------------------------------------------------------------------
+
+  // External commit: writes (nx, ny) into the section's state, resets the
+  // per-axis kinetics integrator (so an in-flight bounce yields on its
+  // next tick + a later wheel doesn't snap back from a stale raw_px),
+  // repositions children, invalidates, and fires SCROLL_CHANGED. The
+  // bounce timer self-cancels next tick when last_commit_px diverges.
+  static void section_external_commit_macos(WidgetData& sec, int nx, int ny)
+  {
+    if (!sec.section_scroll_state) return;
+    auto& st = *sec.section_scroll_state;
+    auto& L  = sec.section_last_layout;
+    int max_x = st.content_w - L.body_w; if (max_x < 0) max_x = 0;
+    int max_y = st.content_h - L.body_h; if (max_y < 0) max_y = 0;
+    if (nx < 0)     nx = 0;
+    if (nx > max_x) nx = max_x;
+    if (ny < 0)     ny = 0;
+    if (ny > max_y) ny = max_y;
+    if (st.scroll_x == nx && st.scroll_y == ny) return;
+    st.scroll_x = nx;
+    st.scroll_y = ny;
+    st.kin_v.raw_px            = (double)ny;
+    st.kin_v.last_commit_px    = ny;
+    st.kin_v.suppress_momentum = true;
+    st.kin_h.raw_px            = (double)nx;
+    st.kin_h.last_commit_px    = nx;
+    st.kin_h.suppress_momentum = true;
+    st.kinetic_over_v = false;
+    st.kinetic_over_h = false;
+    section_reposition_children_macos(sec);
+    mark_widget_dirty_for_paint(sec);
+    section_notify_scroll_changed_macos(sec);
+  }
+
+  static int NEUI_ABI scroll_set(neui_session_t session, neui_widget_t widget,
+                                  int scroll_x, int scroll_y)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    auto& wd = s->_widgets[idx];
+    if (!wd.section_scroll_state) return 0;
+    section_external_commit_macos(wd, scroll_x, scroll_y);
+    return 1;
+  }
+
+  static int NEUI_ABI scroll_get(neui_session_t session, neui_widget_t widget,
+                                  int* out_x, int* out_y)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    auto& wd = s->_widgets[idx];
+    if (!wd.section_scroll_state) return 0;
+    if (out_x) *out_x = wd.section_scroll_state->scroll_x;
+    if (out_y) *out_y = wd.section_scroll_state->scroll_y;
+    return 1;
+  }
+
+  // Walk up from widget_idx to the nearest ancestor with a scrolling
+  // SECTION state. Accumulates the widget's body-local position within
+  // that ancestor (sum of widget's own x/y + intermediate parents' x/y).
+  static uint32_t find_scrolling_section_ancestor_macos(Session* s,
+                                                          uint32_t widget_idx,
+                                                          int& out_x, int& out_y)
+  {
+    out_x = 0; out_y = 0;
+    if (!s || !s->_widgets.exists(widget_idx)) return 0;
+    auto& wd0 = s->_widgets[widget_idx];
+    out_x = wd0.x;
+    out_y = wd0.y;
+    uint32_t cur = s->_widgets.get_parent(widget_idx);
+    while (cur != 0 && cur != neui_detail::knone.id && s->_widgets.exists(cur)) {
+      auto& cw = s->_widgets[cur];
+      if (cw.section_scroll_state) return cur;
+      out_x += cw.x;
+      out_y += cw.y;
+      cur = s->_widgets.get_parent(cur);
+    }
+    return 0;
+  }
+
+  // Body of Session::ensure_widget_visible - lives in widgets.mm next to
+  // the section helpers it uses. The public API delegates here.
+  void Session::ensure_widget_visible(uint32_t widget_idx)
+  {
+    using namespace neui_detail;
+    if (!_widgets.exists(widget_idx)) return;
+    auto& wd0 = _widgets[widget_idx];
+    int rect_x = 0, rect_y = 0;
+    uint32_t sec_idx = find_scrolling_section_ancestor_macos(this, widget_idx,
+                                                               rect_x, rect_y);
+    if (sec_idx == 0) return;
+    auto& sec = _widgets[sec_idx];
+    auto& st  = *sec.section_scroll_state;
+    auto& L   = sec.section_last_layout;
+    int nx, ny;
+    compute_ensure_visible(rect_x, rect_y, wd0.width, wd0.height,
+                            L.body_w, L.body_h,
+                            st.content_w, st.content_h,
+                            st.scroll_x, st.scroll_y,
+                            nx, ny);
+    section_external_commit_macos(sec, nx, ny);
+  }
+
+  static int NEUI_ABI scroll_ensure_visible(neui_session_t session,
+                                              neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return 0;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return 0;
+    s->ensure_widget_visible(idx);
+    return 1;
+  }
+
+  neui_scroll_api_t scroll_api = {
+    NEUI_VERSION,
+    scroll_set,
+    scroll_get,
+    scroll_ensure_visible,
+  };
+
   // Asset API. Session-scoped slot table backing the public
   // neui_asset_api_t. Loaded outside the paint loop; per-paint GPU
   // upload happens lazily inside macos_painter_draw_asset_thunk.
