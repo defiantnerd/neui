@@ -9,7 +9,7 @@
 //
 // Per-host feel (win32): the in-phase is short and snappy, the out-phase
 // is a long slow fade with no movement - matches Win11 system toast feel.
-// Hold time defaults to 3 seconds.
+// Hold time defaults to 2 seconds.
 //
 // Lifecycle:
 //   neui_detail::toast_show_w32(parent_hwnd, "Hello\nWorld");
@@ -44,7 +44,7 @@ namespace neui_detail
     int           pad_y_px     = 0;
     DWORD         start_tick   = 0;
     DWORD         fade_in_ms   = 120;
-    DWORD         hold_ms      = 3000;
+    DWORD         hold_ms      = 2000;
     DWORD         fade_out_ms  = 600;
     UINT_PTR      timer_id     = 1;
     uint32_t      bg_color     = 0x00202020;  // BGR, applied via DIB

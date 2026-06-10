@@ -229,7 +229,7 @@ namespace xpl_host
     // Cached duration constants - so the platform timer tick can read
     // total lifetime without recomputing the phase math.
     uint32_t    fade_in_ms    = 200;
-    uint32_t    hold_ms       = 3000;
+    uint32_t    hold_ms       = 2000;
     uint32_t    fade_out_ms   = 400;
   };
 

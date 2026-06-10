@@ -61,7 +61,7 @@ typedef struct neui_notify_api
   // and slides into place from above. `text` is a UTF-8 string; newline
   // characters ('\n') separate display lines and the host measures the
   // widest line to size the toast box. The toast requires no user
-  // interaction and dismisses itself after roughly 3 seconds; a click on
+  // interaction and dismisses itself after roughly 2 seconds; a click on
   // it dismisses immediately. A second call on the same frame while one
   // is still showing replaces the previous toast. Per-host feel varies:
   // xpl + macOS animate a slide + fade in/out; win32 native appears fast

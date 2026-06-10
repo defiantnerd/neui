@@ -3612,7 +3612,7 @@ namespace xpl_host
     ts.height  = h_px;
     ts.line_h  = static_cast<int>(line_h);
     ts.fade_in_ms  = 200;
-    ts.hold_ms     = 3000;
+    ts.hold_ms     = 2000;
     ts.fade_out_ms = 400;
 
     platform_start_toast_animation(fw->native_handle);

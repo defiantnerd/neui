@@ -11,7 +11,7 @@
 // rounded corners + soft shadow, animates fly-in (slide + fade) and
 // fly-out (reverse), and self-destructs after the hold elapses.
 //
-// Per-host feel (macOS): ease-out slide + fade in, hold 3s, ease-in
+// Per-host feel (macOS): ease-out slide + fade in, hold 2s, ease-in
 // fade + small slide out. Matches the rough vibe of macOS Notification
 // Center toasts (without trying to be pixel-identical - we don't depend
 // on private APIs).
@@ -248,7 +248,7 @@ namespace neui_detail
     state.label        = lbl;
     state.parent_window = parent;
     state.fade_in      = 0.22;
-    state.hold         = 3.0;
+    state.hold         = 2.0;
     state.fade_out     = 0.35;
     state.width_px     = w;
     state.height_px    = h;
