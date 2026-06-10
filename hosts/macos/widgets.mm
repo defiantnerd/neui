@@ -177,6 +177,7 @@ namespace macos_host
   void section_create_body_view_macos(WidgetData& sec);
   void section_destroy_body_view_macos(WidgetData& sec);
   void section_reparent_children_macos(WidgetData& sec, bool to_body);
+  void section_ensure_body_view_macos(WidgetData& sec);
   // Defined in window.mm. Used by the Scroll API external-commit path
   // (section_external_commit_macos): shuffle child NSView origins to the
   // committed scroll offset + fire NEUI_EVENT_SCROLL_CHANGED.
@@ -675,12 +676,12 @@ namespace macos_host
     uint32_t i = WidgetToIndex(parent_window);
     if (!s->_widgets.exists(i)) return nil;
     auto& wd = s->_widgets[i];
-    if (!wd.native_handle || !wd.type) return nil;
+    if (!wd.native_window || !wd.type) return nil;
     bool ok = !strcmp(wd.type, NEUI_W_APPWINDOW) ||
               !strcmp(wd.type, NEUI_W_PLUGWINDOW) ||
               !strcmp(wd.type, NEUI_W_DIALOG);
     if (!ok) return nil;
-    return (__bridge NSWindow*)wd.native_handle;
+    return (__bridge NSWindow*)wd.native_window;
   }
 
   static void NEUI_ABI notify_toast(neui_session_t session,
@@ -1311,6 +1312,12 @@ namespace macos_host
     // children. NEUI_ATTR_BACKGROUND is handled in a_set_int.
     if (wd.type && !strcmp(wd.type, NEUI_W_SECTION) &&
         !strcmp(key, NEUI_ATTR_ALIGN_TEXT)) {
+      // A chip may have just appeared (align none -> left/center/right) on a
+      // non-scrolling section: create the body view + reparent children so
+      // they shift below the band. Kept for the section's lifetime, so a
+      // later flip back to "none" leaves children body-local (band_h -> 0
+      // collapses the offset) rather than dropping them onto the chip.
+      section_ensure_body_view_macos(wd);
       section_apply_layout_changes_macos(wd);
     }
     // SECTION scroll-mode change: allocate / drop scroll state, rebuild
@@ -1320,19 +1327,16 @@ namespace macos_host
     if (wd.type && !strcmp(wd.type, NEUI_W_SECTION) &&
         !strcmp(key, NEUI_ATTR_SCROLL_MODE)) {
       section_refresh_scroll_state_macos(wd);
-      bool now_scrolling = (wd.section_scroll_state != nullptr);
       // The inner body view is created the first time a section becomes
-      // scrollable and then KEPT for the section's lifetime - including
-      // after switching back to "none". Keeping it means children stay
-      // body-local (laid out below the chip band) and clipped to the body
-      // rect in every mode; destroying it on a flip-to-"none" dropped the
-      // children to section-local coords, so they jumped up into the chip
-      // band and overpainted it. Children only need re-parenting the first
-      // time the body view appears. Mirror of the win32 host.
-      if (wd.native_control && now_scrolling && !wd.section_body_view) {
-        section_create_body_view_macos(wd);
-        section_reparent_children_macos(wd, /*to_body*/true);
-      }
+      // scrollable (or carries a chip band) and then KEPT for the section's
+      // lifetime - including after switching back to "none". Keeping it
+      // means children stay body-local (laid out below the chip band) and
+      // clipped to the body rect in every mode; destroying it on a
+      // flip-to-"none" dropped the children to section-local coords, so they
+      // jumped up into the chip band and overpainted it. Children only need
+      // re-parenting the first time the body view appears. Mirror of the
+      // win32 host.
+      section_ensure_body_view_macos(wd);
       // Switching scroll mode resets the scroll offset to 0,0. (When the
       // mode is "none" the scroll state is gone and the reposition below
       // already uses offset 0; this covers scroll->scroll transitions like

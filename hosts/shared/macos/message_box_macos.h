@@ -29,6 +29,47 @@
 namespace neui_detail
 {
 
+  // Map the NEUI_MB_ICON* nibble to a tinted SF Symbol, sized for the
+  // NSAlert icon well (~64 pt). Returns nil for NEUI_MB_ICON none, so the
+  // caller leaves NSAlert's default app icon in place. This is a deliberate
+  // divergence from native macOS convention (an NSAlert normally always
+  // shows the app icon) to give the four Win32 icon classes a visibly
+  // distinct, native-looking glyph. Mirrors the SF-Symbol approach in
+  // hosts/macos/checkbox_image.h. macOS 11+ (imageWithSystemSymbolName);
+  // older systems fall through to the app icon.
+  inline NSImage* message_box_icon_macos(uint32_t flags)
+  {
+    NSString* name = nil;
+    NSColor*  tint = nil;
+    switch (flags & 0x00F0u) {
+      case NEUI_MB_ICONERROR:
+        name = @"xmark.octagon.fill";          tint = [NSColor systemRedColor];    break;
+      case NEUI_MB_ICONQUESTION:
+        name = @"questionmark.circle.fill";    tint = [NSColor systemBlueColor];   break;
+      case NEUI_MB_ICONWARNING:
+        name = @"exclamationmark.triangle.fill"; tint = [NSColor systemYellowColor]; break;
+      case NEUI_MB_ICONINFORMATION:
+        name = @"info.circle.fill";            tint = [NSColor systemBlueColor];   break;
+      default:
+        return nil;  // no icon bits -> keep the app icon
+    }
+    if (@available(macOS 11.0, *)) {
+      NSImage* img = [NSImage imageWithSystemSymbolName:name
+                                accessibilityDescription:nil];
+      if (!img) return nil;
+      NSImageSymbolConfiguration* size =
+        [NSImageSymbolConfiguration configurationWithPointSize:64.0
+                                                          weight:NSFontWeightRegular
+                                                           scale:NSImageSymbolScaleLarge];
+      NSImageSymbolConfiguration* color =
+        [NSImageSymbolConfiguration configurationWithHierarchicalColor:tint];
+      NSImageSymbolConfiguration* cfg =
+        [size configurationByApplyingConfiguration:color];
+      return [img imageWithSymbolConfiguration:cfg];
+    }
+    return nil;
+  }
+
   inline int message_box_macos(NSWindow* parent, const char* text,
                                const char* caption, uint32_t flags)
   {
@@ -79,6 +120,12 @@ namespace neui_detail
       case NEUI_MB_ICONWARNING: [alert setAlertStyle:NSAlertStyleWarning];       break;
       default:                  [alert setAlertStyle:NSAlertStyleInformational]; break;
     }
+
+    // Give the Win32 icon classes a distinct SF-Symbol glyph (error /
+    // question / warning / information). nil = no icon bits set -> keep
+    // NSAlert's default app icon.
+    if (NSImage* icon = message_box_icon_macos(flags))
+      [alert setIcon:icon];
 
     for (int i = 0; i < count; ++i) {
       [alert addButtonWithTitle:[NSString stringWithUTF8String:titles[i]]];

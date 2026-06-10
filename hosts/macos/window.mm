@@ -86,6 +86,7 @@ namespace macos_host {
   void section_create_body_view_macos(WidgetData& sec);
   void section_destroy_body_view_macos(WidgetData& sec);
   void section_reparent_children_macos(WidgetData& sec, bool to_body);
+  void section_ensure_body_view_macos(WidgetData& sec);
   NSView* section_child_container_macos(const WidgetData& sec);
 
   // Painter draw_asset thunk - mirror of
@@ -3344,6 +3345,33 @@ namespace macos_host
     [body removeFromSuperview];
   }
 
+  // Ensure the inner body view exists for any section that needs the band
+  // offset (a chip band is present) OR scrolls, then parent the section's
+  // children to it. Children's (x, y) is body-relative on every host (the
+  // documented contract), so a chip-bearing section needs the body view to
+  // shift + clip its children below the band - not just scrolling sections.
+  // Created at most once and KEPT for the section's lifetime (see the
+  // SCROLL_MODE flip comment). A chip-less, non-scrolling section gets no
+  // body view: band_h == 0 makes body-local == section-local, so children
+  // parent to the section view directly. No-op if the body view already
+  // exists. Mirror of section_ensure_body_hwnd_w32.
+  void section_ensure_body_view_macos(WidgetData& sec)
+  {
+    if (!sec.native_control || sec.section_body_view) return;
+    bool scrolling = (sec.section_scroll_state != nullptr);
+    int band_h = 0;
+    if (!scrolling) {
+      const char* align = sec.attrs
+                            ? sec.attrs->get_string(NEUI_ATTR_ALIGN_TEXT)
+                            : nullptr;
+      band_h = neui_detail::section_band_h_for(sec.text.c_str(),
+                                                 sec.height, align);
+    }
+    if (!scrolling && band_h <= 0) return;
+    section_create_body_view_macos(sec);
+    section_reparent_children_macos(sec, /*to_body*/true);
+  }
+
   // Re-parent every direct child NSView of `sec` between the section painted
   // view and the inner body view. Called when SCROLL_MODE flips at runtime.
   // Mirror of section_reparent_children_w32.
@@ -3830,12 +3858,12 @@ namespace macos_host
         v.wantsLayer = YES;
         v.layer.masksToBounds = YES;
         section_refresh_scroll_state_macos(w);
-        // Scrolling sections get an inner body view so children clip to the
-        // body (below the chip band, inside the scrollbar gutter). Created
-        // here, before create_descendants_native descends into the children
-        // and parents them to the body via section_child_container_macos.
-        if (w.section_scroll_state)
-          section_create_body_view_macos(w);
+        // Sections with a chip band (or that scroll) get an inner body view
+        // so children sit + clip below the band, matching the body-relative
+        // child-coordinate contract. Created here, before
+        // create_descendants_native descends into the children and parents
+        // them to the body via section_child_container_macos.
+        section_ensure_body_view_macos(w);
       }
     }
 
