@@ -69,21 +69,6 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // Recursive helpers
 
-  // Mark all non-frame, non-menubar descendants as visible.
-  static void show_children_recursive(Session* s, uint32_t parent_idx)
-  {
-    uint32_t idx = s->_widgets.child(parent_idx);
-    while (idx != 0) {
-      if (s->_widgets.exists(idx)) {
-        auto& wd = s->_widgets[idx];
-        if (!wd.is_frame() && !wd.is_menubar())
-          wd.visible = true;
-        show_children_recursive(s, idx);
-      }
-      idx = s->_widgets.next(idx);
-    }
-  }
-
   // Recursively fire ondestroy for a widget and all its descendants (depth-first).
   static void destroy_recursive(Session* s, uint32_t idx,
                                  neui_widget_client_t* client_api, void* token)
@@ -191,11 +176,10 @@ namespace xpl_host
     obj->height    = height;
     obj->userdata  = userdata;
     // Default visible=true so widgets created post-show appear without
-    // requiring an explicit show() call. Pre-show creation is still fine:
-    // the frame's widget_show runs show_children_recursive which sets
-    // visible=true unconditionally, so this default doesn't change the
-    // pre-show path. Clients that want a hidden widget call widgets->hide
-    // after create.
+    // requiring an explicit show() call. Clients that want a hidden widget
+    // call widgets->hide after create; that intent is honoured on the very
+    // first paint (frame widget_show no longer re-shows descendants, so a
+    // pre-show hide() is not clobbered).
     obj->visible   = true;
     obj->session   = s;
     obj->session_id = session.session;
@@ -310,7 +294,6 @@ namespace xpl_host
           }
           child = s->_widgets.next(child);
         }
-        show_children_recursive(s, idx);
         platform_show_window(wd.native_handle);
 
         // Register the frame as a drag&drop drop target so the OS knows
