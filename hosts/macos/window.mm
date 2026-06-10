@@ -3118,11 +3118,12 @@ namespace macos_host
         NSWindow* w2 = weak_window;
         if (w2 && w2.visible) [w2 close];
       }];
-      // Native blocking modal: spin a nested NSEvent pump until the
-      // dialog's windowWillClose: clears modal_pump_active. The sheet
-      // animation runs concurrently with the pump.
+      // Arm the native blocking modal. The actual nested NSEvent pump is
+      // run by widget_show AFTER create_descendants_native populates the
+      // dialog - pumping here would block before the children are ever
+      // created, leaving an empty dialog. windowWillClose: clears the flag
+      // to unwind the pump.
       w.modal_pump_active = true;
-      neui_detail::run_modal_pump_macos(&w.modal_pump_active);
     } else {
       [window makeKeyAndOrderFront:nil];
     }
@@ -4079,6 +4080,13 @@ namespace macos_host
       // Build the Tab / Shift-Tab key-view loop in creation order now that all
       // descendant controls exist.
       rebuild_key_view_loop_macos(this, index, native_window_from(w.native_window));
+      // A modal DIALOG blocks here - AFTER its children exist - spinning a
+      // nested NSEvent pump until windowWillClose: clears modal_pump_active
+      // (create_dialog armed the flag + presented the sheet). Do not touch
+      // `w` after this returns: the dialog is typically destroyed (slot
+      // freed) by the OK / close handler that unwound the pump.
+      if (w.modal_pump_active)
+        neui_detail::run_modal_pump_macos(&w.modal_pump_active);
       return;
     }
 
