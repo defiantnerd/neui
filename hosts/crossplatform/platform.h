@@ -73,6 +73,29 @@ namespace xpl_host
   // next message-loop iteration. Used after focus changes to update the outline.
   void platform_invalidate(void* native_handle);
 
+  // Start / stop a 16 ms repaint heartbeat on a frame's native window.
+  // Used by the toast overlay (and any future animation that does not
+  // belong to a single widget). The platform layer is responsible for
+  // calling platform_invalidate on each tick so the frame's paint pass
+  // can advance the toast animation phase. Idempotent: starting twice
+  // on the same handle resets the timer; stopping a non-running timer
+  // is a silent no-op.
+  void platform_start_toast_animation(void* native_handle);
+  void platform_stop_toast_animation(void* native_handle);
+
+  // Returns monotonic milliseconds since some fixed reference. Used by
+  // the toast overlay to drive phase math independently of frame-rate.
+  uint64_t platform_now_ms();
+
+  // Modal message box owned by the given frame's native window. Mimics
+  // Win32 MessageBoxEx: `flags` is a NEUI_MB_* combination (numerically
+  // equal to MB_*). Blocks until the user picks a button; returns the
+  // NEUI_ID_* of the chosen button, 0 on failure / null platform.
+  // win32 = MessageBoxExW pass-through (neutral language id); macOS =
+  // NSAlert run modally.
+  int platform_message_box(void* native_handle, const char* text,
+                           const char* caption, uint32_t flags);
+
   // Returns the scale factor (physical pixels per logical pixel) for a native
   // window handle: 1.0f at 96 DPI, 2.0f at 192 DPI, etc.
   float platform_get_scale_factor(void* native_handle);

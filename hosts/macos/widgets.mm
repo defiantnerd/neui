@@ -18,6 +18,12 @@
 #include "../shared/compound.h"
 #include "../../backends/cg/cg_backend.h"
 
+// One TU emits the @implementation NeuiToastMacOS body. Other TUs that
+// include toast_macos.h see only the @interface declaration.
+#define NEUI_TOAST_MACOS_IMPLEMENTATION
+#include "../shared/macos/toast_macos.h"
+#include "../shared/macos/message_box_macos.h"
+
 #include <algorithm>
 #include <cstring>
 
@@ -654,6 +660,53 @@ namespace macos_host
     if (s->_widgets.exists(i)) return s->_widgets[i].enabled;
     return false;
   }
+
+  // -------------------------------------------------------------------------
+  // Notify API (NEUI_API_NOTIFY) - toast + message box. Host-owned chrome
+  // anchored to a frame, outside the widget tree.
+
+  // Resolve `parent_window` to a top-level frame's NSWindow (APPWINDOW /
+  // PLUGWINDOW / DIALOG); nil for anything else.
+  static NSWindow* notify_frame_window(neui_session_t session,
+                                        neui_widget_t parent_window)
+  {
+    auto* s = get_session_for_widget(session, parent_window);
+    if (!s) return nil;
+    uint32_t i = WidgetToIndex(parent_window);
+    if (!s->_widgets.exists(i)) return nil;
+    auto& wd = s->_widgets[i];
+    if (!wd.native_handle || !wd.type) return nil;
+    bool ok = !strcmp(wd.type, NEUI_W_APPWINDOW) ||
+              !strcmp(wd.type, NEUI_W_PLUGWINDOW) ||
+              !strcmp(wd.type, NEUI_W_DIALOG);
+    if (!ok) return nil;
+    return (__bridge NSWindow*)wd.native_handle;
+  }
+
+  static void NEUI_ABI notify_toast(neui_session_t session,
+                                     neui_widget_t parent_window,
+                                     const char* text)
+  {
+    NSWindow* win = notify_frame_window(session, parent_window);
+    if (!win) return;
+    neui_detail::toast_show_macos(win, text ? text : "");
+  }
+
+  static int NEUI_ABI notify_message_box(neui_session_t session,
+                                          neui_widget_t parent_window,
+                                          const char* text, const char* caption,
+                                          uint32_t flags)
+  {
+    NSWindow* win = notify_frame_window(session, parent_window);
+    if (!win) return 0;
+    return neui_detail::message_box_macos(win, text, caption, flags);
+  }
+
+  neui_notify_api_t notify_api = {
+    NEUI_VERSION,
+    notify_toast,
+    notify_message_box,
+  };
 
   neui_widget_api_t widgets_api = {
     w_create, w_destroy, w_show, w_hide,

@@ -33,6 +33,7 @@ namespace win32_host
   extern neui_grid_api_t      grid_api;
   extern neui_dnd_api_t       dnd_api;
   extern neui_scroll_api_t    scroll_api;
+  extern neui_notify_api_t    notify_api;
 
   neui_session_t create_session(neui_client_t* client, void* token)
   {
@@ -76,6 +77,7 @@ namespace win32_host
     if (!strcmp(iface, NEUI_API_GRID))      return &win32_host::grid_api;
     if (!strcmp(iface, NEUI_API_DND))       return &win32_host::dnd_api;
     if (!strcmp(iface, NEUI_API_SCROLL))    return &win32_host::scroll_api;
+    if (!strcmp(iface, NEUI_API_NOTIFY))    return &win32_host::notify_api;
     return nullptr;
   }
 

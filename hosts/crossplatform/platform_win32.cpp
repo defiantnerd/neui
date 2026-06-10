@@ -59,6 +59,8 @@ namespace xpl_host
   static constexpr UINT_PTR XPL_GRID_BOUNCE_TIMER_ID = 0x6E78676B;  // 'nxgk'
   // Timer ID for the scrolling-SECTION spring-back animation.
   static constexpr UINT_PTR XPL_SECTION_BOUNCE_TIMER_ID = 0x6E787363;  // 'nxsc'
+  // Timer ID for the toast animation heartbeat (16 ms tick).
+  static constexpr UINT_PTR XPL_TOAST_TIMER_ID = 0x6E78746F;  // 'nxto'
 
   // UTF-8 -> UTF-16 helper used by menubar platform functions.
   static std::wstring to_wide(const char* utf8)
@@ -718,6 +720,11 @@ namespace xpl_host
         return 0;
       }
 
+      // Toast overlay absorbs a click that lands on its rect, jumping it
+      // to the fade-out phase. Clicks outside the toast rect fall through.
+      if (wud->session->handle_toast_click(wud->widget_index, lx, ly))
+        return 0;
+
       // When a combo overlay is open, all clicks go to combo handling only.
       // The click is consumed regardless of where it lands (inside or outside overlay).
       if (wud->session->handle_combo_click(lx, ly)) {
@@ -1022,6 +1029,14 @@ namespace xpl_host
     }
 
     case WM_TIMER: {
+      // Toast animation tick: just invalidate the frame; paint_toast self-
+      // terminates when the toast lifetime expires (paint_toast clears
+      // toast.active and calls platform_stop_toast_animation, which the
+      // ondemand-frame post-paint pass picks up next tick).
+      if (wParam == XPL_TOAST_TIMER_ID) {
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
       // Scrolling-SECTION spring-back tick - same shape as the grid timer
       // below; both axes step in one tick (a "both" section can overscroll
       // vertically and horizontally in the same gesture).
@@ -1870,6 +1885,45 @@ namespace xpl_host
       default:                    cur = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);  break;
     }
     if (cur) SetCursor(cur);
+  }
+
+  // -------------------------------------------------------------------------
+  // Toast animation heartbeat.
+
+  void platform_start_toast_animation(void* native_handle)
+  {
+    if (!native_handle) return;
+    SetTimer(static_cast<HWND>(native_handle), XPL_TOAST_TIMER_ID, 16, nullptr);
+  }
+
+  void platform_stop_toast_animation(void* native_handle)
+  {
+    if (!native_handle) return;
+    KillTimer(static_cast<HWND>(native_handle), XPL_TOAST_TIMER_ID);
+  }
+
+  uint64_t platform_now_ms()
+  {
+    return static_cast<uint64_t>(GetTickCount64());
+  }
+
+  // -------------------------------------------------------------------------
+  // Modal message box - NEUI_MB_* values match MB_* numerically, so this
+  // is a sanitize-mask + MessageBoxExW pass-through. The OS handles owner
+  // disabling, focus return, and Esc/Enter for us.
+
+  int platform_message_box(void* native_handle, const char* text,
+                           const char* caption, uint32_t flags)
+  {
+    if (!native_handle) return 0;
+    UINT mb = flags & (MB_TYPEMASK | MB_ICONMASK | MB_DEFMASK);
+    if ((mb & MB_TYPEMASK) > MB_CANCELTRYCONTINUE) mb &= ~MB_TYPEMASK;
+    std::wstring wtext    = to_wide(text);
+    std::wstring wcaption = to_wide(caption);
+    return MessageBoxExW(static_cast<HWND>(native_handle),
+                         wtext.c_str(),
+                         caption ? wcaption.c_str() : nullptr,
+                         mb, MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL));
   }
 
 } // namespace xpl_host

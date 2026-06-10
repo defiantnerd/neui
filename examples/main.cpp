@@ -16,7 +16,7 @@
 // hosts and the xpl host fully implement NEUI_W_CUSTOMDRAW + compound
 // drawables, so the same example renders identically on either path.
 #ifdef _WIN32
-#define ACTIVE_HOST "neui.host.crossplatform"
+#define ACTIVE_HOST  "neui.host.crossplatform"
 #define ACTIVE_HOSTx "neui.host.win32"
 #elif defined(__APPLE__)
 #define ACTIVE_HOSTx "neui.host.crossplatform"
@@ -51,10 +51,13 @@ struct AppState {
   neui_asset_api_t*     assets    = nullptr;
   neui_compound_api_t*  compound  = nullptr;
   neui_behavior_api_t*  behavior  = nullptr;
+  neui_notify_api_t*    notify    = nullptr;
   neui_session_t     session   = {0};
   uint32_t           win_id    = 0;
   uint32_t           input_id  = 0;
   uint32_t           button_id = 0;
+  uint32_t           toast_button_id = 0;
+  uint32_t           msgbox_button_id = 0;
   uint32_t           list_id   = 0;
   uint32_t           combo_id  = 0;
   uint32_t           check_id  = 0;
@@ -205,6 +208,28 @@ static neui_widget_client_t widget_client = {
         } else {
           dbglog("input is empty\n");
         }
+      }
+      // Toast demo: a multi-line message anchored to the main window
+      // that fades / slides in from above, holds, fades / slides out.
+      if (app && app->notify && event->data.mouse.widget.id == app->toast_button_id) {
+        neui_session_t sess = app->session;
+        neui_widget_t  win  = { app->win_id };
+        app->notify->toast(sess, win,
+          "Settings saved.\nThis is a multi-line toast.");
+      }
+      // Message box demo: a MessageBoxEx-shaped modal alert; the chosen
+      // button is echoed back as a toast.
+      if (app && app->notify && event->data.mouse.widget.id == app->msgbox_button_id) {
+        neui_session_t sess = app->session;
+        neui_widget_t  win  = { app->win_id };
+        int r = app->notify->message_box(sess, win,
+          "Save changes before closing?", "neui example",
+          NEUI_MB_YESNOCANCEL | NEUI_MB_ICONWARNING | NEUI_MB_DEFBUTTON1);
+        const char* picked = (r == NEUI_ID_YES)    ? "You picked: Yes"
+                           : (r == NEUI_ID_NO)     ? "You picked: No"
+                           : (r == NEUI_ID_CANCEL) ? "You picked: Cancel"
+                                                   : "Message box failed";
+        app->notify->toast(sess, win, picked);
       }
       // OK button inside the modal "About" dialog: dismiss the dialog.
       if (app && app->about_dlg_id != 0 &&
@@ -529,6 +554,7 @@ int main(int argc, char** argv) {
   app.assets  = (neui_asset_api_t*) neui->get_interface(sess, NEUI_API_ASSETS);
   app.compound = (neui_compound_api_t*) neui->get_interface(sess, NEUI_API_COMPOUND);
   app.behavior = (neui_behavior_api_t*) neui->get_interface(sess, NEUI_API_BEHAVIOR);
+  app.notify   = (neui_notify_api_t*)   neui->get_interface(sess, NEUI_API_NOTIFY);
 
   // Window: four columns - left = input + listbox, middle = combobox + checkboxes,
   //   right = treeview, far-right = slider + knob (continuous + 16-step variants).
@@ -587,11 +613,15 @@ int main(int argc, char** argv) {
   auto label  = app.widgets->create(sess, win, NEUI_W_LABEL,     5,   5, 195,  20, nullptr);
   auto input  = app.widgets->create(sess, win, NEUI_W_INPUTBOX,  5,  30, 195,  24, nullptr);
   auto button = app.widgets->create(sess, win, NEUI_W_BUTTON,    5,  60, 100,  28, nullptr);
+  auto toast_btn = app.widgets->create(sess, win, NEUI_W_BUTTON, 110, 60,  90,  28, nullptr);
   app.input_id  = input.id;
   app.button_id = button.id;
+  app.toast_button_id = toast_btn.id;
 
   app.widgets->set_text(sess, label,  "Type something below:");
   app.widgets->set_text(sess, button, "Read input");
+  app.widgets->set_text(sess, toast_btn, "Toast!");
+  app.widgets->set_emit_events(sess, toast_btn, true);
 
   app.attrs->set_string(sess, label, NEUI_ATTR_FONT_FAMILY, "Consolas");
   app.attrs->set_int(sess, label, NEUI_ATTR_FONT_WEIGHT, 700);
@@ -672,6 +702,13 @@ int main(int argc, char** argv) {
 
   app.widgets->set_text(sess, check,  "Enable combobox above");
   app.widgets->set_text(sess, check3, "Allow override");
+
+  // Message box demo button - sits in the gap between the checkboxes and
+  // the asset-fed IMAGE below.
+  auto msgbox_btn = app.widgets->create(sess, win, NEUI_W_BUTTON, 215, 125, 185, 28, nullptr);
+  app.msgbox_button_id = msgbox_btn.id;
+  app.widgets->set_text(sess, msgbox_btn, "Message box...");
+  app.widgets->set_emit_events(sess, msgbox_btn, true);
   // Default the checkbox to checked so the combobox starts enabled. The
   // CHECKBOX_CHANGED handler below mirrors the state into the combo via
   // widgets->set_enabled.

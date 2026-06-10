@@ -2,6 +2,7 @@
 #include <memory>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 #include "host.h"
 #include "platform.h"
@@ -110,6 +111,7 @@ namespace xpl_host
   extern neui_grid_api_t      grid_api;
   extern neui_dnd_api_t       dnd_api;
   extern neui_scroll_api_t    scroll_api;
+  extern neui_notify_api_t    notify_api;
 
   // -------------------------------------------------------------------------
   // Session management
@@ -155,6 +157,7 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_GRID))      return &grid_api;
     if (!strcmp(iface, NEUI_API_DND))       return &dnd_api;
     if (!strcmp(iface, NEUI_API_SCROLL))    return &scroll_api;
+    if (!strcmp(iface, NEUI_API_NOTIFY))    return &notify_api;
     return nullptr;
   }
 
@@ -1883,6 +1886,8 @@ namespace xpl_host
     }
     // Popup-menu overlay sits on top of the combo overlay.
     paint_popup_menu(ctx);
+    // Toast overlay sits on top of every other overlay.
+    paint_toast(ctx, parent_index);
     _backend->end_frame(ctx);
 
     // Restore the previous override so non-paint callers (event
@@ -3525,6 +3530,257 @@ namespace xpl_host
 
     if (frame) platform_invalidate(frame);
     return picked;
+  }
+
+  // -------------------------------------------------------------------------
+  // Toast overlay
+
+  // Toast geometry / animation constants (logical px / ms).
+  static constexpr int      TOAST_PAD_X    = 18;
+  static constexpr int      TOAST_PAD_Y    = 12;
+  static constexpr int      TOAST_LINE_GAP = 4;
+  static constexpr float    TOAST_FONT_PX  = 14.0f;
+  // Width clamp: never wider than this fraction of the frame's client area.
+  static constexpr float    TOAST_MAX_FRAME_FRAC = 0.7f;
+
+  // Slice a UTF-8 string on '\n' into display lines. Empty input becomes a
+  // single empty line so callers can still compute geometry.
+  static void toast_split_lines(const std::string& s,
+                                 std::vector<std::string>& out)
+  {
+    out.clear();
+    size_t start = 0;
+    for (size_t i = 0; i <= s.size(); ++i) {
+      if (i == s.size() || s[i] == '\n') {
+        out.emplace_back(s.data() + start, i - start);
+        start = i + 1;
+      }
+    }
+    if (out.empty()) out.emplace_back();
+  }
+
+  void Session::toast_show(uint32_t parent_window_idx, const char* text)
+  {
+    if (!_widgets.exists(parent_window_idx)) return;
+    auto* fw = dynamic_cast<FrameWidget*>(&_widgets[parent_window_idx]);
+    if (!fw || !fw->native_handle) return;
+
+    ToastState& ts = fw->toast;
+    ts.text   = text ? text : "";
+    ts.active = true;
+    ts.start_ms = platform_now_ms();
+
+    // Measure lines with the default text format. The xpl backend has no
+    // measure-text-with-explicit-font seam beyond push_font, so we use
+    // the default font that the toast paints with. Width = widest line +
+    // 2*PAD_X (clamped to frame fraction). Height = lines*line_h +
+    // (lines-1)*LINE_GAP + 2*PAD_Y. line_h derived from font size so it
+    // matches the rendered glyph height.
+    std::vector<std::string> lines;
+    toast_split_lines(ts.text, lines);
+
+    float line_h = std::round(TOAST_FONT_PX * 1.35f);
+    float max_w  = 0.0f;
+    if (_backend && _backend->measure_text && fw->render_ctx) {
+      for (auto& ln : lines) {
+        float w = _backend->measure_text(fw->render_ctx, ln.c_str(),
+                                          static_cast<int>(ln.size()),
+                                          TOAST_FONT_PX);
+        if (w > max_w) max_w = w;
+      }
+    } else {
+      // Fallback estimate: 7 logical px per character.
+      for (auto& ln : lines) {
+        float w = static_cast<float>(ln.size()) * 7.0f;
+        if (w > max_w) max_w = w;
+      }
+    }
+
+    int max_box_w = static_cast<int>(static_cast<float>(fw->width) *
+                                      TOAST_MAX_FRAME_FRAC);
+    if (max_box_w < 80) max_box_w = 80;
+    int w_px = static_cast<int>(std::ceil(max_w)) + 2 * TOAST_PAD_X;
+    if (w_px > max_box_w) w_px = max_box_w;
+    if (w_px < 80) w_px = 80;
+
+    int n      = static_cast<int>(lines.size());
+    int h_px   = static_cast<int>(line_h) * n
+               + TOAST_LINE_GAP * (n - 1)
+               + 2 * TOAST_PAD_Y;
+
+    ts.width   = w_px;
+    ts.height  = h_px;
+    ts.line_h  = static_cast<int>(line_h);
+    ts.fade_in_ms  = 200;
+    ts.hold_ms     = 3000;
+    ts.fade_out_ms = 400;
+
+    platform_start_toast_animation(fw->native_handle);
+    platform_invalidate(fw->native_handle);
+  }
+
+  // Compute the toast rect (in frame-local logical px) for a frame's
+  // current ToastState. Returns false if no toast is active.
+  static bool toast_current_rect(FrameWidget* fw,
+                                  int& out_x, int& out_y,
+                                  int& out_w, int& out_h)
+  {
+    if (!fw || !fw->toast.active) return false;
+    const ToastState& ts = fw->toast;
+    uint64_t now     = platform_now_ms();
+    uint64_t elapsed = now >= ts.start_ms ? (now - ts.start_ms) : 0;
+    uint32_t total   = ts.fade_in_ms + ts.hold_ms + ts.fade_out_ms;
+    if (elapsed >= total) return false;
+
+    float slide_t = 1.0f;
+    if (elapsed < ts.fade_in_ms) {
+      float p  = static_cast<float>(elapsed) / static_cast<float>(ts.fade_in_ms);
+      float ip = 1.0f - p;
+      slide_t  = 1.0f - ip * ip * ip;
+    } else if (elapsed >= ts.fade_in_ms + ts.hold_ms) {
+      uint64_t oe = elapsed - ts.fade_in_ms - ts.hold_ms;
+      float p     = static_cast<float>(oe) / static_cast<float>(ts.fade_out_ms);
+      float e     = p * p * p;
+      slide_t     = 1.0f - e;
+    }
+    int rest_y  = ts.line_h;
+    int start_y = -ts.height;
+    out_y = static_cast<int>(static_cast<float>(start_y) +
+            (static_cast<float>(rest_y) - static_cast<float>(start_y)) *
+            slide_t);
+    out_x = (fw->width - ts.width) / 2;
+    if (out_x < 0) out_x = 0;
+    out_w = ts.width;
+    out_h = ts.height;
+    return true;
+  }
+
+  bool Session::handle_toast_click(uint32_t frame_widget_idx,
+                                     float lx, float ly)
+  {
+    auto* fw = dynamic_cast<FrameWidget*>(get_widget(frame_widget_idx));
+    if (!fw || !fw->toast.active) return false;
+    int rx, ry, rw, rh;
+    if (!toast_current_rect(fw, rx, ry, rw, rh)) return false;
+    if (lx < static_cast<float>(rx) || lx >= static_cast<float>(rx + rw) ||
+        ly < static_cast<float>(ry) || ly >= static_cast<float>(ry + rh))
+      return false;
+    // Jump to the start of the fade-out phase so the click produces an
+    // immediate visual dismiss. We do this by reprojecting start_ms so
+    // `elapsed == fade_in_ms + hold_ms` right now.
+    ToastState& ts = fw->toast;
+    uint64_t now = platform_now_ms();
+    uint64_t hold_end_offset = ts.fade_in_ms + ts.hold_ms;
+    ts.start_ms = (now >= hold_end_offset) ? (now - hold_end_offset) : 0;
+    if (fw->native_handle) platform_invalidate(fw->native_handle);
+    return true;
+  }
+
+  void Session::paint_toast(neui_render_ctx_t ctx, uint32_t frame_widget_idx)
+  {
+    if (!_backend || !ctx) return;
+    auto* fw = dynamic_cast<FrameWidget*>(get_widget(frame_widget_idx));
+    if (!fw || !fw->toast.active) return;
+    ToastState& ts = fw->toast;
+
+    uint64_t now    = platform_now_ms();
+    uint64_t elapsed = now >= ts.start_ms ? (now - ts.start_ms) : 0;
+    uint32_t total  = ts.fade_in_ms + ts.hold_ms + ts.fade_out_ms;
+    if (elapsed >= total) {
+      ts.active = false;
+      ts.text.clear();
+      if (fw->native_handle) platform_stop_toast_animation(fw->native_handle);
+      return;
+    }
+
+    // Phase math. progress is 0..1 across the current phase. eased uses a
+    // cubic ease-out for the fly-in / fly-out so motion settles smoothly.
+    float alpha     = 1.0f;
+    float slide_t   = 1.0f;  // 0 = fully off-screen above, 1 = at rest
+    if (elapsed < ts.fade_in_ms) {
+      float p = static_cast<float>(elapsed) / static_cast<float>(ts.fade_in_ms);
+      // Ease-out cubic: 1 - (1-p)^3
+      float ip = 1.0f - p;
+      float e  = 1.0f - ip * ip * ip;
+      alpha   = e;
+      slide_t = e;
+    } else if (elapsed < ts.fade_in_ms + ts.hold_ms) {
+      alpha   = 1.0f;
+      slide_t = 1.0f;
+    } else {
+      uint64_t out_elapsed = elapsed - ts.fade_in_ms - ts.hold_ms;
+      float p = static_cast<float>(out_elapsed) /
+                static_cast<float>(ts.fade_out_ms);
+      // Ease-in cubic for out: p^3 - reverse the alpha + slide.
+      float e = p * p * p;
+      alpha   = 1.0f - e;
+      slide_t = 1.0f - e;
+    }
+
+    // Resting position: top edge sits `line_h` below the frame's client-area
+    // top (one-line gap above the toast). Slide_t blends between fully
+    // hidden above the top edge and the resting position.
+    int rest_y   = ts.line_h;                  // top edge gap = one line
+    int start_y  = -ts.height;                 // fully out of view above
+    int top_y    = static_cast<int>(static_cast<float>(start_y) +
+                    (static_cast<float>(rest_y) - static_cast<float>(start_y)) *
+                    slide_t);
+    int left_x   = (fw->width - ts.width) / 2;
+    if (left_x < 0) left_x = 0;
+
+    if (!_backend->push_alpha || !_backend->pop_alpha) {
+      // Alpha stack is required for the cross-fade; without it skip painting
+      // rather than dump a fully opaque toast on top of widgets.
+      return;
+    }
+    _backend->push_alpha(ctx, alpha);
+
+    using neui_detail::ColorRole;
+    // Drop shadow: simple offset rect underneath the toast for depth.
+    uint32_t shadow_argb = 0x60000000;  // semi-transparent black
+    _backend->fill_rect(ctx,
+                        static_cast<float>(left_x + 2),
+                        static_cast<float>(top_y + 3),
+                        static_cast<float>(ts.width),
+                        static_cast<float>(ts.height),
+                        shadow_argb);
+
+    uint32_t bg     = neui_detail::color(ColorRole::control_bg_alt);
+    uint32_t border = neui_detail::color(ColorRole::border);
+    _backend->fill_rect(ctx,
+                        static_cast<float>(left_x),
+                        static_cast<float>(top_y),
+                        static_cast<float>(ts.width),
+                        static_cast<float>(ts.height),
+                        bg);
+    _backend->draw_rect(ctx,
+                        static_cast<float>(left_x),
+                        static_cast<float>(top_y),
+                        static_cast<float>(ts.width),
+                        static_cast<float>(ts.height),
+                        1.0f,
+                        border);
+
+    // Text. One draw_text per line; cell rect is the line strip with
+    // PAD_X horizontal inset. The backend's draw_text vertically centres
+    // text within the cell, so each cell is exactly line_h tall.
+    std::vector<std::string> lines;
+    toast_split_lines(ts.text, lines);
+    uint32_t fg = neui_detail::color(ColorRole::text_primary);
+    int run_y = top_y + TOAST_PAD_Y;
+    for (auto& ln : lines) {
+      _backend->draw_text(ctx,
+                          static_cast<float>(left_x + TOAST_PAD_X),
+                          static_cast<float>(run_y),
+                          static_cast<float>(ts.width - 2 * TOAST_PAD_X),
+                          static_cast<float>(ts.line_h),
+                          ln.c_str(),
+                          TOAST_FONT_PX,
+                          fg);
+      run_y += ts.line_h + TOAST_LINE_GAP;
+    }
+
+    _backend->pop_alpha(ctx);
   }
 
   void Session::open_combo(uint32_t idx)

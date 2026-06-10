@@ -16,6 +16,7 @@
 #include "../shared/win32/icon_win32.h"
 #include "../shared/win32/image_loader_win32.h"
 #include "../shared/win32/accel_table_win32.h"
+#include "../shared/win32/toast_win32.h"
 #include "../shared/shortcut_format.h"
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_section.h"
@@ -3905,6 +3906,59 @@ namespace win32_host
     DestroyMenu(h);
     return static_cast<int>(picked);
   }
+
+  // -------------------------------------------------------------------------
+  // Notify API (NEUI_API_NOTIFY) - toast + message box. Host-owned chrome
+  // anchored to a frame, outside the widget tree.
+
+  // Resolve `parent_window` to a top-level frame's HWND (APPWINDOW /
+  // PLUGWINDOW / DIALOG); nullptr for anything else.
+  static HWND notify_frame_hwnd(neui_session_t session, neui_widget_t parent_window)
+  {
+    auto* s = get_session_for_widget(session, parent_window);
+    if (!s) return nullptr;
+    uint32_t idx = WidgetToIndex(parent_window);
+    auto* wd = s->get_widget(idx);
+    if (!wd || !wd->hwnd || !wd->type) return nullptr;
+    bool ok = wd->isroot
+              || !strcmp(wd->type, NEUI_W_PLUGWINDOW)
+              || !strcmp(wd->type, NEUI_W_DIALOG);
+    return ok ? wd->hwnd : nullptr;
+  }
+
+  static void NEUI_ABI notify_toast(neui_session_t session,
+                                     neui_widget_t parent_window,
+                                     const char* text)
+  {
+    HWND hwnd = notify_frame_hwnd(session, parent_window);
+    if (!hwnd) return;
+    neui_detail::toast_show_w32(hwnd, text ? text : "");
+  }
+
+  // NEUI_MB_* values match MB_* numerically, so the flags pass through to
+  // MessageBoxExW after a sanitize mask. The OS handles owner disabling,
+  // focus return, and Esc/Enter.
+  static int NEUI_ABI notify_message_box(neui_session_t session,
+                                          neui_widget_t parent_window,
+                                          const char* text, const char* caption,
+                                          uint32_t flags)
+  {
+    HWND hwnd = notify_frame_hwnd(session, parent_window);
+    if (!hwnd) return 0;
+    UINT mb = flags & (MB_TYPEMASK | MB_ICONMASK | MB_DEFMASK);
+    if ((mb & MB_TYPEMASK) > MB_CANCELTRYCONTINUE) mb &= ~MB_TYPEMASK;
+    std::wstring wtext    = ToWide(text);
+    std::wstring wcaption = ToWide(caption);
+    return MessageBoxExW(hwnd, wtext.c_str(),
+                         caption ? wcaption.c_str() : nullptr,
+                         mb, MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL));
+  }
+
+  neui_notify_api_t notify_api = {
+    NEUI_VERSION,
+    notify_toast,
+    notify_message_box,
+  };
 
   neui_widget_api_t widgets_api = {
     create,

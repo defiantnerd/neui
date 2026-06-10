@@ -1716,6 +1716,44 @@ namespace xpl_host
   };
 
   // ---------------------------------------------------------------------------
+  // Notify API (NEUI_API_NOTIFY) - toast + message box. Host-owned chrome
+  // anchored to a frame, outside the widget tree.
+  // ---------------------------------------------------------------------------
+
+  static void NEUI_ABI notify_toast(neui_session_t session,
+                                     neui_widget_t parent_window,
+                                     const char* text)
+  {
+    auto* s = get_session_for_widget(session, parent_window);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(parent_window);
+    if (!s->_widgets.exists(idx)) return;
+    if (!s->_widgets[idx].is_frame()) return;
+    s->toast_show(idx, text);
+  }
+
+  static int NEUI_ABI notify_message_box(neui_session_t session,
+                                          neui_widget_t parent_window,
+                                          const char* text, const char* caption,
+                                          uint32_t flags)
+  {
+    auto* s = get_session_for_widget(session, parent_window);
+    if (!s) return 0;
+    uint32_t idx = WidgetToIndex(parent_window);
+    if (!s->_widgets.exists(idx)) return 0;
+    auto& wd = s->_widgets[idx];
+    if (!wd.is_frame() || !wd.native_handle) return 0;
+    return platform_message_box(wd.native_handle, text ? text : "",
+                                 caption, flags);
+  }
+
+  neui_notify_api_t notify_api = {
+    NEUI_VERSION,
+    notify_toast,
+    notify_message_box,
+  };
+
+  // ---------------------------------------------------------------------------
   // Asset API (NEUI_API_ASSETS) - session-scoped media handles backed by
   // the AssetManager's handle table. Handles encode the session id in the
   // upper 16 bits like neui_widget_t; cross-session handles are dropped.

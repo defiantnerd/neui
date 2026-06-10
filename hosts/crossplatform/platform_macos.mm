@@ -36,6 +36,7 @@
 #include "../shared/macos/keys_macos.h"
 #include "../shared/macos/menubar_macos.h"
 #include "../shared/macos/theme_provider_macos.h"
+#include "../shared/macos/message_box_macos.h"
 
 // ---------------------------------------------------------------------------
 // Forward declarations (Objective-C classes).
@@ -106,7 +107,12 @@ void wake_app_event_pump()
   // above; the kinetics live in the section's SectionScrollState.kin_v/_h.
   NSTimer*           _section_bounce_timer;
   uint32_t           _section_bounce_widget;
+  // Toast animation heartbeat. 60 Hz tick that just invalidates the view;
+  // paint_toast self-terminates when the toast lifetime expires.
+  NSTimer*           _toast_timer;
 }
+- (void)toastStart;
+- (void)toastStop;
 @end
 
 @implementation NEUIView
@@ -230,6 +236,9 @@ void wake_app_event_pump()
     session->handle_popup_click((float)p.x, (float)p.y);
     return;
   }
+  // Toast overlay absorbs a click that lands on its rect, jumping it
+  // to the fade-out phase.
+  if (session->handle_toast_click(widget_index, (float)p.x, (float)p.y)) return;
   // When a combo overlay is open, all clicks go to combo handling only -
   // consumed regardless of where they land (inside or outside the overlay).
   // No explicit capture needed: AppKit keeps sending mouseDragged: to this
@@ -428,6 +437,31 @@ void wake_app_event_pump()
   [self setNeedsDisplay:YES];
   hw->notify_scroll_changed();
   if (!more_v && !more_h) [self sectionStopBounce];
+}
+
+// --- Toast animation heartbeat --------------------------------------------
+
+- (void)toastStop
+{
+  if (_toast_timer) { [_toast_timer invalidate]; _toast_timer = nil; }
+}
+
+- (void)toastStart
+{
+  [self toastStop];
+  _toast_timer = [NSTimer timerWithTimeInterval:1.0 / 60.0
+                                          target:self
+                                        selector:@selector(toastTick:)
+                                        userInfo:nil
+                                         repeats:YES];
+  [[NSRunLoop currentRunLoop] addTimer:_toast_timer
+                               forMode:NSRunLoopCommonModes];
+}
+
+- (void)toastTick:(NSTimer*)timer
+{
+  (void)timer;
+  [self setNeedsDisplay:YES];
 }
 
 // Feed a wheel NSEvent into a scrolling SECTION's per-axis kinetics. The
@@ -1818,6 +1852,50 @@ namespace xpl_host
       case NEUI_CURSOR_DEFAULT:
       default:                    [[NSCursor arrowCursor] set];          break;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Toast animation heartbeat. The toast paints inside the frame's
+  // NEUIView so we just kick that view's per-frame timer to drive the
+  // animation.
+
+  void platform_start_toast_animation(void* native_handle)
+  {
+    if (!native_handle) return;
+    NSWindow* win = (__bridge NSWindow*)native_handle;
+    NSView* cv = [win contentView];
+    if ([cv isKindOfClass:[NEUIView class]]) {
+      [(NEUIView*)cv toastStart];
+    }
+  }
+
+  void platform_stop_toast_animation(void* native_handle)
+  {
+    if (!native_handle) return;
+    NSWindow* win = (__bridge NSWindow*)native_handle;
+    NSView* cv = [win contentView];
+    if ([cv isKindOfClass:[NEUIView class]]) {
+      [(NEUIView*)cv toastStop];
+    }
+  }
+
+  uint64_t platform_now_ms()
+  {
+    // mach_absolute_time + NSProcessInfo systemUptime both work; pick the
+    // simplest portable option: CFAbsoluteTimeGetCurrent returns seconds
+    // since 2001, granular enough for animation.
+    return static_cast<uint64_t>(CFAbsoluteTimeGetCurrent() * 1000.0);
+  }
+
+  // -------------------------------------------------------------------------
+  // Modal message box - shared NSAlert mapping.
+
+  int platform_message_box(void* native_handle, const char* text,
+                           const char* caption, uint32_t flags)
+  {
+    if (!native_handle) return 0;
+    NSWindow* win = (__bridge NSWindow*)native_handle;
+    return neui_detail::message_box_macos(win, text, caption, flags);
   }
 
 } // namespace xpl_host

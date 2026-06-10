@@ -104,5 +104,15 @@ namespace xpl_host
 
   void     platform_set_cursor(int /*kind*/)                                  {}
 
+  // Toast animation - no platform timer on the null host; toasts will
+  // still paint a single frame if the client invalidates manually.
+  void platform_start_toast_animation(void* /*native_handle*/)                {}
+  void platform_stop_toast_animation(void* /*native_handle*/)                 {}
+  uint64_t platform_now_ms()                                                  { return 0; }
+
+  // No surface to show a message box on; 0 = failure per the contract.
+  int platform_message_box(void* /*native_handle*/, const char* /*text*/,
+                           const char* /*caption*/, uint32_t /*flags*/)       { return 0; }
+
 } // namespace xpl_host
 

@@ -213,6 +213,26 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // Derived widget classes
 
+  // Transient "toast" overlay attached to a top-level frame. Owned by
+  // FrameWidget and painted on top of all other content during the
+  // frame's paint pass. Animation: fly-in from above + fade-in, hold,
+  // fade-out + slide-up. start_ms is a monotonic timestamp captured when
+  // the toast was created (milliseconds since session start). The
+  // platform layer drives a 16 ms repaint heartbeat while `active`.
+  struct ToastState {
+    bool        active        = false;
+    std::string text;
+    int         width         = 0;   // logical px, including padding
+    int         height        = 0;
+    int         line_h        = 0;   // line height used for the slide gap
+    uint64_t    start_ms      = 0;   // monotonic ms at fly-in t=0
+    // Cached duration constants - so the platform timer tick can read
+    // total lifetime without recomputing the phase math.
+    uint32_t    fade_in_ms    = 200;
+    uint32_t    hold_ms       = 3000;
+    uint32_t    fade_out_ms   = 400;
+  };
+
   // APPWINDOW / PLUGWINDOW - owns native_handle, render_ctx, dpi (in base)
   class FrameWidget : public WidgetData {
   public:
@@ -220,6 +240,8 @@ namespace xpl_host
     // True while a modal DIALOG is blocking inside platform_run_modal_until.
     // Set in widget_show; cleared by the destroy path so the pump exits.
     bool modal_pump_active = false;
+    // Active toast overlay (at most one per frame; replace-on-second-call).
+    ToastState toast;
   };
 
   // Structural / display-only widgets - no extra fields, use base paint
@@ -723,6 +745,27 @@ namespace xpl_host
     // the new widget's `pressed`, and invalidates either side when it
     // has a compound asset with state-filtered layers.
     void set_pressed(uint32_t new_idx);
+
+    // Toast overlay. Configures the FrameWidget's toast state with the
+    // given multi-line text (\n separates lines), measures geometry from
+    // the current default font, and starts the platform animation
+    // heartbeat. `parent_window_idx` must be a frame widget index;
+    // non-frame or unknown indices are silently dropped.
+    void toast_show(uint32_t parent_window_idx, const char* text);
+
+    // Paint the toast overlay over the given frame (called from
+    // paint_frame after every other overlay so the toast sits on top).
+    // Reads the frame's ToastState to compute the current animation
+    // phase. Stops itself once the toast lifetime expires.
+    void paint_toast(neui_render_ctx_t ctx, uint32_t frame_widget_idx);
+
+    // Returns true if (lx, ly) lands on the active toast for the given
+    // frame; when it does, jumps the toast to the start of its fade-out
+    // phase so the user gets an immediate visual dismiss. Called from
+    // the platform layer's mouse-down handler before widget hit-testing
+    // so the toast can absorb the click. lx / ly are frame-local
+    // logical pixels (the same space as widget abs_x/abs_y).
+    bool handle_toast_click(uint32_t frame_widget_idx, float lx, float ly);
 
     // Popup menu overlay (used by widgets->popup_menu). Blocking - runs a
     // nested message loop until the user picks an item or dismisses.
