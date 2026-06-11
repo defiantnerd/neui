@@ -1,6 +1,21 @@
 cmake_minimum_required(VERSION 3.15)
 project(neui LANGUAGES C CXX)
 
+# Whether neui is being configured standalone (its own CMakeLists is the top
+# of the tree) vs. pulled in as a subproject via add_subdirectory(). The
+# examples + tests are only interesting to people hacking on neui itself, so
+# they default ON standalone and OFF when neui is consumed as a dependency.
+# (PROJECT_IS_TOP_LEVEL is only available from CMake 3.21, but our floor is
+# 3.15, so compute it by hand.)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  set(NEUI_IS_TOP_LEVEL ON)
+else()
+  set(NEUI_IS_TOP_LEVEL OFF)
+endif()
+
+option(NEUI_BUILD_EXAMPLES "Build the neui example programs" ${NEUI_IS_TOP_LEVEL})
+option(NEUI_BUILD_TESTS    "Build the neui unit tests"       ${NEUI_IS_TOP_LEVEL})
+
 # Objective-C++ is needed for the macOS host platform layer (.mm files).
 if(APPLE)
   enable_language(OBJCXX)
@@ -31,8 +46,8 @@ add_subdirectory("hosts/crossplatform")
 
 # Tier 1 unit tests for the portable shared logic (hosts/shared/*.h). They
 # depend only on the public headers + the shared utilities, so they build
-# everywhere. Toggle with -DNEUI_BUILD_TESTS=OFF.
-option(NEUI_BUILD_TESTS "Build the neui unit tests" ON)
+# everywhere. Defaults ON when neui is the top-level project, OFF as a
+# subproject; override with -DNEUI_BUILD_TESTS=ON/OFF (option defined above).
 if(NEUI_BUILD_TESTS)
   enable_testing()
   add_subdirectory("tests")
@@ -61,6 +76,10 @@ set_target_properties(neui PROPERTIES
     VERSION 1.0.0
     SOVERSION 1
 )
+
+# Example programs. Defaults ON when neui is the top-level project, OFF as a
+# subproject; override with -DNEUI_BUILD_EXAMPLES=ON/OFF (option defined above).
+if(NEUI_BUILD_EXAMPLES)
 
 # Example program
 # On MSVC we provide the application manifest via an .rc file that
@@ -286,3 +305,5 @@ endif()
 if(APPLE)
   target_link_libraries(readme_example PRIVATE neui-macoshost)
 endif()
+
+endif() # NEUI_BUILD_EXAMPLES
