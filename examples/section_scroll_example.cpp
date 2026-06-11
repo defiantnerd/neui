@@ -338,11 +338,10 @@ int main(int /*argc*/, char* /*argv*/[])
   app.widgets->set_text(app.session, align_lbl, "Chip pos:");
   x += 80 + 4;
 
-  // ComboBox height = collapsed-bar (22) + drop-area capacity. Only the
-  // top 22 px renders when collapsed; the lower part is the phantom drop
-  // surface used to compute max_drop_visible(). 22 + 4*18 fits 4 items.
+  // ComboBox coords describe just the collapsed bar; the drop list sizes
+  // itself from the item count when opened.
   auto align_combo = app.widgets->create(app.session, win, NEUI_W_COMBOBOX,
-                                           x, toolbar_y, 110, 94, nullptr);
+                                           x, toolbar_y, 110, 22, nullptr);
   app.align_combo = align_combo.id;
   for (int i = 0; i < k_align_count; ++i)
     app.items->add(app.session, align_combo, k_align_choices[i], nullptr);
@@ -355,7 +354,7 @@ int main(int /*argc*/, char* /*argv*/[])
   x += 80 + 4;
 
   auto scroll_combo = app.widgets->create(app.session, win, NEUI_W_COMBOBOX,
-                                            x, toolbar_y, 110, 94, nullptr);
+                                            x, toolbar_y, 110, 22, nullptr);
   app.scroll_combo = scroll_combo.id;
   for (int i = 0; i < k_scroll_count; ++i)
     app.items->add(app.session, scroll_combo, k_scroll_choices[i], nullptr);
@@ -393,9 +392,8 @@ int main(int /*argc*/, char* /*argv*/[])
   app.widgets->set_text(app.session, kin_lbl, "Kinetics:");
   x2 += 80 + 4;
 
-  // 22 + 3*18 fits 3 items (drop area capacity).
   auto kin_combo = app.widgets->create(app.session, win, NEUI_W_COMBOBOX,
-                                         x2, row2_y, 110, 76, nullptr);
+                                         x2, row2_y, 110, 22, nullptr);
   app.kinetics_combo = kin_combo.id;
   for (int i = 0; i < k_kinetics_count; ++i)
     app.items->add(app.session, kin_combo, k_kinetics_choices[i], nullptr);

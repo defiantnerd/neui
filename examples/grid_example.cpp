@@ -503,10 +503,10 @@ int main(int /*argc*/, char** /*argv*/)
   app.widgets->set_text(app.session, rc_lbl, "Row colors:");
   x2 += 80 + 4;
 
-  // ComboBox height = collapsed-bar (22) + drop capacity (3 * 18) so all
-  // three choices fit when open.
+  // ComboBox coords describe just the collapsed bar now; the drop list
+  // sizes itself from the item count (capped at NEUI_ATTR_COMBO_MAX_VISIBLE).
   auto rc_combo = app.widgets->create(app.session, win, NEUI_W_COMBOBOX,
-                                       x2, kRow2Ctrl, 130, 76, &app);
+                                       x2, kRow2Ctrl, 130, kCtrlH, &app);
   app.rowcolor_combo = rc_combo.id;
   for (int i = 0; i < k_rowcolor_count; ++i)
     app.items->add(app.session, rc_combo, k_rowcolor_choices[i], nullptr);
@@ -519,7 +519,7 @@ int main(int /*argc*/, char** /*argv*/)
   x2 += 60 + 4;
 
   auto hdr_combo = app.widgets->create(app.session, win, NEUI_W_COMBOBOX,
-                                        x2, kRow2Ctrl, 130, 76, &app);
+                                        x2, kRow2Ctrl, 130, kCtrlH, &app);
   app.header_combo = hdr_combo.id;
   for (int i = 0; i < k_header_count; ++i)
     app.items->add(app.session, hdr_combo, k_header_choices[i], nullptr);

@@ -71,6 +71,8 @@ namespace neui_detail
     { NEUI_ATTR_STEPS,                AttrKind::INT    },
     { NEUI_ATTR_MODAL,                AttrKind::INT    },
     { NEUI_ATTR_VALUE_TEXT,           AttrKind::STRING },
+    { NEUI_ATTR_COMBO_MAX_VISIBLE,    AttrKind::INT    },
+    { NEUI_ATTR_COMBO_DROP_WIDTH,     AttrKind::INT    },
     { NEUI_ATTR_KNOB_MODE,            AttrKind::INT    },
     { NEUI_ATTR_FONT_FAMILY,          AttrKind::STRING },
     { NEUI_ATTR_FONT_SIZE,            AttrKind::FLOAT  },

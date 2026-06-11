@@ -656,11 +656,10 @@ int main(int argc, char** argv) {
                                           5, 290, 195, 20, nullptr);
   app.widgets->set_text(sess, image_label, "Image:");
 
-  // Combo height = COMBO_COLLAPSED_H (22) + room for the 3-item dropdown.
-  // Only the top 22 px is visually rendered when collapsed; siblings
-  // sitting in the lower phantom area (the slider just below) are fine.
+  // Combo coords describe just the collapsed bar; the drop list sizes
+  // itself from the item count when opened.
   auto image_combo = app.widgets->create(sess, win, NEUI_W_COMBOBOX,
-                                          5, 313, 195, 76, nullptr);
+                                          5, 313, 195, 24, nullptr);
   app.image_combo_id = image_combo.id;
   // Userdata is the literal filename so the ITEM_SELECTED handler can
   // pass it straight to widgets->set_text(rot_image, ...).
@@ -685,7 +684,7 @@ int main(int argc, char** argv) {
   // --- Middle column (x=215, width=190) ---
 
   auto combo_label = app.widgets->create(sess, win, NEUI_W_LABEL,   215,  5, 190,  20, nullptr);
-  auto combo       = app.widgets->create(sess, win, NEUI_W_COMBOBOX,215, 30, 190, 150, nullptr);
+  auto combo       = app.widgets->create(sess, win, NEUI_W_COMBOBOX,215, 30, 190,  24, nullptr);
   app.combo_id = combo.id;
 
   app.widgets->set_text(sess, combo_label, "Combobox:");
@@ -770,11 +769,10 @@ int main(int argc, char** argv) {
   // Alignment combobox: sits above the section and drives its
   // NEUI_ATTR_ALIGN_TEXT live. Userdata on each item is the literal
   // attribute string so the ITEM_SELECTED handler can apply it directly.
-  // Combo height includes the dropdown overlay's vertical room (the
-  // collapsed bar is COMBO_COLLAPSED_H = 22 px; the rest is reserved
-  // for the open dropdown).
+  // Combo coords describe just the collapsed bar; the drop list sizes
+  // itself from the item count when opened.
   auto align_combo = app.widgets->create(sess, win, NEUI_W_COMBOBOX,
-                                          215, 320, 200, 80, nullptr);
+                                          215, 320, 200, 24, nullptr);
   app.align_combo_id = align_combo.id;
   app.items->add(sess, align_combo, "left",   (void*)"left");
   app.items->add(sess, align_combo, "middle", (void*)"center");

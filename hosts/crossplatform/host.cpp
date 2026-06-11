@@ -429,6 +429,17 @@ namespace xpl_host
     return nullptr;
   }
 
+  int Session::frame_client_height(uint32_t widget_index)
+  {
+    auto parents = _widgets.get_all_parents(widget_index);
+    for (uint32_t p : parents) {
+      if (p == 0) continue;
+      if (_widgets.exists(p) && _widgets[p].native_handle)
+        return _widgets[p].height;
+    }
+    return 0;
+  }
+
   WidgetData* Session::get_widget(uint32_t index)
   {
     if (_widgets.exists(index))
@@ -3079,16 +3090,83 @@ namespace xpl_host
 
   bool ComboBoxWidget::hit_test(float px, float py) const
   {
-    // Only the top bar (collapsed height) is interactive; the rest is the
-    // drop area. Bounds are in frame-local coords (same space as px/py).
+    // Only the collapsed bar is interactive (the client lays out just the
+    // collapsed control; the drop list is an overlay it never sized for).
+    // Bounds are in frame-local coords (same space as px/py).
     return px >= abs_x && px < abs_x + width &&
-           py >= abs_y && py < abs_y + COMBO_COLLAPSED_H;
+           py >= abs_y && py < abs_y + static_cast<float>(collapsed_h());
+  }
+
+  int ComboBoxWidget::collapsed_h() const
+  {
+    return height > 0 ? height : COMBO_COLLAPSED_H;
   }
 
   int ComboBoxWidget::max_drop_visible() const
   {
-    int avail = height - COMBO_COLLAPSED_H;
-    return (avail > 0) ? avail / LIST_ITEM_H : 0;
+    int n = static_cast<int>(items.size());
+    if (n <= 0) return 0;
+    int cap = attrs ? attrs->get_int(NEUI_ATTR_COMBO_MAX_VISIBLE, 10) : 10;
+    if (cap < 1) cap = 1;
+    return std::min(n, cap);
+  }
+
+  int ComboBoxWidget::drop_width(neui_render_backend_t* backend) const
+  {
+    int collapsed_w = width;
+    int override_w  = attrs ? attrs->get_int(NEUI_ATTR_COMBO_DROP_WIDTH, 0) : 0;
+    if (override_w > 0)
+      return std::max(override_w, collapsed_w);
+
+    // Auto: widest entry + text padding (4px each side), plus the scrollbar
+    // column when the list overflows. Measured at the widget's font size
+    // (family/weight not pushed - matches the popup-menu width heuristic and
+    // keeps this callable from the non-painting hit-test handlers).
+    float ef_size = neui_detail::read_widget_font(attrs.get(), 12.0f).size;
+    float maxw = 0.0f;
+    if (backend && backend->measure_text) {
+      for (auto& it : items) {
+        float w = backend->measure_text(nullptr, it.text.c_str(), -1, ef_size);
+        if (w > maxw) maxw = w;
+      }
+    }
+    bool overflow = static_cast<int>(items.size()) > max_drop_visible();
+    int w = static_cast<int>(maxw + 0.5f) + 8 + (overflow ? SCROLLBAR_W : 0);
+    return std::max(w, collapsed_w);
+  }
+
+  ComboBoxWidget::OverlayRect
+  ComboBoxWidget::overlay_rect(neui_render_backend_t* backend) const
+  {
+    OverlayRect g;
+    int mdv = std::max(1, max_drop_visible());
+    g.w = static_cast<float>(drop_width(backend));
+    g.h = static_cast<float>(mdv * LIST_ITEM_H);
+    g.x = static_cast<float>(abs_x);
+
+    float below_y = static_cast<float>(abs_y + collapsed_h());
+    int   frame_h = session ? session->frame_client_height(index) : 0;
+    if (frame_h <= 0) {
+      // Frame size unknown - keep the historical downward behaviour.
+      g.y = below_y;
+      return g;
+    }
+
+    // Prefer opening below the collapsed bar. Flip above only when the list
+    // overflows the frame's bottom edge AND fits in the gap above the bar;
+    // if it fits neither, open toward whichever side has more room (it then
+    // clips to the frame). space_above is the gap from the frame top down to
+    // the bar; space_below is from just under the bar to the frame bottom.
+    float space_below = static_cast<float>(frame_h) - below_y;
+    float space_above = static_cast<float>(abs_y);
+    if (g.h <= space_below)
+      g.y = below_y;
+    else if (g.h <= space_above)
+      g.y = static_cast<float>(abs_y) - g.h;
+    else
+      g.y = (space_above > space_below) ? static_cast<float>(abs_y) - g.h
+                                        : below_y;
+    return g;
   }
 
   int ComboBoxWidget::visible_rows() const
@@ -3103,7 +3181,7 @@ namespace xpl_host
     float fx = static_cast<float>(x);
     float fy = static_cast<float>(y);
     float fw = static_cast<float>(width);
-    float fh = static_cast<float>(COMBO_COLLAPSED_H);   // only the top bar
+    float fh = static_cast<float>(collapsed_h());   // only the collapsed bar
     const float arrow_w = 18.0f;
 
     // Hover/pressed background on the collapsed bar; pressed wins. Same
@@ -3170,10 +3248,8 @@ namespace xpl_host
     // The overlay is painted by Session::paint_frame OUTSIDE the
     // paint_widgets_recursive walk, so the renderer transform is at the
     // frame's identity here - we must use absolute coords, not local x/y.
-    float ox = static_cast<float>(abs_x);
-    float oy = static_cast<float>(abs_y + COMBO_COLLAPSED_H);
-    float ow = static_cast<float>(width);
-    float oh = static_cast<float>(mdv * LIST_ITEM_H);
+    OverlayRect g = overlay_rect(backend);
+    float ox = g.x, oy = g.y, ow = g.w, oh = g.h;
 
     // Highlight follows hover; falls back to the committed selection so the
     // overlay is never blank when first opened.
@@ -3828,10 +3904,8 @@ namespace xpl_host
 
     uint32_t n       = static_cast<uint32_t>(cb->items.size());
     int      full_vis = std::max(1, cb->max_drop_visible());
-    float ox = static_cast<float>(cb->abs_x);
-    float oy = static_cast<float>(cb->abs_y + COMBO_COLLAPSED_H);
-    float ow = static_cast<float>(cb->width);
-    float oh = static_cast<float>(full_vis * LIST_ITEM_H);
+    ComboBoxWidget::OverlayRect g = cb->overlay_rect(_backend);
+    float ox = g.x, oy = g.y, ow = g.w, oh = g.h;
 
     bool in_overlay = (lx >= ox && lx < ox + ow && ly >= oy && ly < oy + oh);
 
@@ -3888,10 +3962,8 @@ namespace xpl_host
     if (!cb) return false;
 
     int   full_vis = std::max(1, cb->max_drop_visible());
-    float ox = static_cast<float>(cb->abs_x);
-    float oy = static_cast<float>(cb->abs_y + COMBO_COLLAPSED_H);
-    float ow = static_cast<float>(cb->width);
-    float oh = static_cast<float>(full_vis * LIST_ITEM_H);
+    ComboBoxWidget::OverlayRect g = cb->overlay_rect(_backend);
+    float ox = g.x, oy = g.y, ow = g.w, oh = g.h;
 
     // Only consume if cursor is over the overlay rect.
     if (lx < ox || lx >= ox + ow || ly < oy || ly >= oy + oh) return false;
@@ -3948,10 +4020,8 @@ namespace xpl_host
     if (!cb) return false;
 
     int   full_vis = std::max(1, cb->max_drop_visible());
-    float ox = static_cast<float>(cb->abs_x);
-    float oy = static_cast<float>(cb->abs_y + COMBO_COLLAPSED_H);
-    float ow = static_cast<float>(cb->width);
-    float oh = static_cast<float>(full_vis * LIST_ITEM_H);
+    ComboBoxWidget::OverlayRect g = cb->overlay_rect(_backend);
+    float ox = g.x, oy = g.y, ow = g.w, oh = g.h;
 
     bool in_overlay = (lx >= ox && lx < ox + ow && ly >= oy && ly < oy + oh);
     if (!in_overlay) return false;

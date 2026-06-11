@@ -165,6 +165,53 @@ namespace win32_host
     return nullptr;
   }
 
+  // COMBOBOX drop-list sizing. The client lays out only the collapsed bar
+  // (the widget x / y / width / height); the drop list is sized independently
+  // from the item count - capped at NEUI_ATTR_COMBO_MAX_VISIBLE (default 10) -
+  // plus an optional NEUI_ATTR_COMBO_DROP_WIDTH override. We cap the visible
+  // rows via CB_SETMINVISIBLE and grow the HWND height so the native dropdown
+  // has room; the collapsed control keeps its system height, so the extra
+  // height is dropdown-only and invisible while closed (and wd.height /
+  // get_size keep reporting the client's logical collapsed height). Re-applied
+  // from create_child_windows (covers initial show + DPI flips, where the font
+  // is re-broadcast first) and whenever the item set or relevant attrs change.
+  static void apply_combo_drop_sizing_w32(WidgetData& wd)
+  {
+    if (!wd.hwnd || !wd.type || strcmp(wd.type, NEUI_W_COMBOBOX) != 0) return;
+
+    int count  = static_cast<int>(SendMessageW(wd.hwnd, CB_GETCOUNT, 0, 0));
+    int maxvis = wd.attrs ? wd.attrs->get_int(NEUI_ATTR_COMBO_MAX_VISIBLE, 10) : 10;
+    if (maxvis < 1) maxvis = 1;
+    int vis = (count > 0) ? (count < maxvis ? count : maxvis) : 1;
+
+    // Cap the number of rows shown before the list scrolls.
+    SendMessageW(wd.hwnd, CB_SETMINVISIBLE, static_cast<WPARAM>(vis), 0);
+
+    // Physical-pixel row geometry (the control font is already DPI-scaled).
+    // Item height = CB_GETITEMHEIGHT(0); collapsed-field height = (-1).
+    int item_h = static_cast<int>(SendMessageW(wd.hwnd, CB_GETITEMHEIGHT, 0, 0));
+    int edit_h = static_cast<int>(SendMessageW(wd.hwnd, CB_GETITEMHEIGHT,
+                                               static_cast<WPARAM>(-1), 0));
+    if (item_h <= 0) item_h = (edit_h > 0) ? edit_h : 16;
+    if (edit_h <= 0) edit_h = item_h;
+
+    RECT rc; GetWindowRect(wd.hwnd, &rc);
+    int cur_w  = rc.right - rc.left;
+    int drop_h = edit_h + vis * item_h + GetSystemMetrics(SM_CYEDGE) * 4;
+    SetWindowPos(wd.hwnd, nullptr, 0, 0, cur_w, drop_h,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+    // Drop-list width: explicit override (logical px -> physical), otherwise
+    // leave the native default (which tracks the control width).
+    int dw = wd.attrs ? wd.attrs->get_int(NEUI_ATTR_COMBO_DROP_WIDTH, 0) : 0;
+    if (dw > 0) {
+      UINT dpi = GetDpiForWindow(wd.hwnd);
+      if (dpi == 0) dpi = 96;
+      SendMessageW(wd.hwnd, CB_SETDROPPEDWIDTH,
+                   static_cast<WPARAM>(LogicalToPhysical(dw, dpi)), 0);
+    }
+  }
+
   static std::wstring ToWide(const char* utf8)
   {
     if (!utf8 || !*utf8) return {};
@@ -2029,6 +2076,12 @@ namespace win32_host
         // Apply NEUI_ATTR_FONT_* if the client set them before show().
         // No-op when no font attrs are present.
         if (child.hwnd) ensure_custom_font_w32(child);
+        // COMBOBOX: size the drop list from the item count + attrs now that
+        // the font is in place. No-op for every other widget type. Runs here
+        // (not just at create) so a DPI flip - which re-broadcasts the font
+        // above and resets the HWND to its collapsed-only height in
+        // cascade_dpi - re-grows the dropdown with correct metrics.
+        if (child.hwnd) apply_combo_drop_sizing_w32(child);
         // Apply deferred enabled state. Children default to enabled=true;
         // only push to Win32 when the client toggled it before show().
         if (child.hwnd && !child.enabled)
@@ -2901,6 +2954,7 @@ namespace win32_host
     auto* ops = get_items_ops(w.type);
     if (!ops || !w.hwnd) return;
     SendMessageW(w.hwnd, ops->clear, 0, 0);
+    apply_combo_drop_sizing_w32(w);
   }
 
   uint32_t Session::items_add(neui_widget_t widget, const char* text, void* userdata)
@@ -2919,6 +2973,7 @@ namespace win32_host
     LRESULT idx = SendMessageW(w.hwnd, ops->add, 0, (LPARAM)wtext.c_str());
     if (idx < 0) return NEUI_ITEM_NONE;
     SendMessageW(w.hwnd, ops->setdata, (WPARAM)idx, (LPARAM)userdata);
+    apply_combo_drop_sizing_w32(w);
     return static_cast<uint32_t>(idx);
   }
 
@@ -2930,6 +2985,7 @@ namespace win32_host
     auto* ops = get_items_ops(w.type);
     if (!ops || !w.hwnd) return;
     SendMessageW(w.hwnd, ops->del, (WPARAM)index, 0);
+    apply_combo_drop_sizing_w32(w);
   }
 
   uint32_t Session::items_count(neui_widget_t widget)
@@ -4016,6 +4072,12 @@ namespace win32_host
          !strcmp(w->type, NEUI_W_IMAGE)      ||
          !strcmp(w->type, NEUI_W_CUSTOMDRAW))) {
       InvalidateRect(w->hwnd, nullptr, FALSE);
+    }
+    // COMBOBOX drop-list geometry attrs: re-size the native dropdown live.
+    if (w->hwnd && w->type && !strcmp(w->type, NEUI_W_COMBOBOX) &&
+        (!strcmp(key, NEUI_ATTR_COMBO_MAX_VISIBLE) ||
+         !strcmp(key, NEUI_ATTR_COMBO_DROP_WIDTH))) {
+      apply_combo_drop_sizing_w32(*w);
     }
     // Font weight: rebuild the per-widget HFONT and re-broadcast via
     // WM_SETFONT. Native controls (Edit, Button, Static, Checkbox) pick

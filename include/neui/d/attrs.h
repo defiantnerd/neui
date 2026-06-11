@@ -220,6 +220,29 @@ extern "C" {
 // Normal regardless of weight.
 #define NEUI_ATTR_FONT_WEIGHT "neui.attr.font_weight"
 
+// int: maximum number of item rows shown in a COMBOBOX drop list before it
+// scrolls. Applies to COMBOBOX. The drop list grows to fit the item count
+// up to this cap; beyond it a scrollbar appears. Values below 1 are clamped
+// to 1. Unset = 10. The client supplies only the *collapsed* combobox
+// rectangle at create time (x / y / width / height); the drop list is sized
+// independently from this attribute + the item count, so the client no
+// longer reserves drop-list space in the widget height.
+//   xpl host: fully honoured (self-painted overlay).
+//   win32 native: honoured (CB_SETMINVISIBLE + window-height bump).
+//   macOS native: best-effort - NSPopUpButton auto-sizes its menu and has no
+//                 visible-row cap, so this attribute is ignored there.
+#define NEUI_ATTR_COMBO_MAX_VISIBLE "neui.attr.combo_max_visible"
+
+// int (logical px): explicit width override for a COMBOBOX drop list.
+// Applies to COMBOBOX. 0 / unset = auto: the drop list is sized to the widest
+// entry (plus padding and a scrollbar column when the list overflows). When
+// set, the drop list uses this width. In both cases the drop list is never
+// narrower than the collapsed combobox width.
+//   xpl host: fully honoured.
+//   win32 native: honoured (CB_SETDROPPEDWIDTH).
+//   macOS native: ignored (NSPopUpButton auto-sizes its menu width).
+#define NEUI_ATTR_COMBO_DROP_WIDTH "neui.attr.combo_drop_width"
+
 // int: drag interaction style of the KNOB widget.
 //   NEUI_KNOB_MODE_ROTATIONAL = 0 (default) - cursor angle around the
 //                                              knob centre drives the value

@@ -458,8 +458,30 @@ namespace xpl_host
     // Called by Session::paint_frame after all normal widgets to draw the overlay on top.
     void paint_overlay(neui_render_backend_t*, neui_render_ctx_t);
 
-    // Number of item rows that fit in the drop area (widget height minus collapsed bar).
+    // Height of the collapsed combobox bar. This is the client-supplied widget
+    // height (the client lays out only the collapsed control); falls back to a
+    // sane default when the client passed a non-positive height.
+    int collapsed_h() const;
+
+    // Number of item rows shown in the open drop list: min(item count,
+    // NEUI_ATTR_COMBO_MAX_VISIBLE [default 10]). Beyond this the list scrolls.
+    // Independent of the widget height (the drop list is sized from the items,
+    // not from leftover widget space).
     int max_drop_visible() const;
+
+    // Pixel width of the open drop list. NEUI_ATTR_COMBO_DROP_WIDTH overrides;
+    // otherwise the widest entry (+ padding + scrollbar column when the list
+    // overflows) drives it. Never narrower than the collapsed bar. Needs the
+    // backend for text measurement (may be null -> falls back to bar width).
+    int drop_width(neui_render_backend_t* backend) const;
+
+    // Open drop-list rectangle in frame-local absolute coords. The single
+    // source of truth shared by paint_overlay + the Session combo hit-test
+    // handlers, so painting and input always agree. Opens below the collapsed
+    // bar by default; flips above it when the list would overflow the frame's
+    // bottom edge but fits above (falls back to the roomier side, then clips).
+    struct OverlayRect { float x, y, w, h; };
+    OverlayRect overlay_rect(neui_render_backend_t* backend) const;
   };
 
   // TREEVIEW
@@ -682,6 +704,12 @@ namespace xpl_host
     // Walk up the widget tree from widget_index and return the first
     // ancestor's native_handle (the frame HWND). Returns nullptr if none.
     void* find_parent_native_handle(uint32_t widget_index);
+
+    // Logical client height (px) of the frame owning widget_index - i.e. the
+    // height field of the first ancestor carrying a native_handle, kept in
+    // sync with the window client area on WM_SIZE. Returns 0 when no frame
+    // ancestor is found (callers treat 0 as "unknown / no constraint").
+    int frame_client_height(uint32_t widget_index);
 
     // Move keyboard focus to the next (forward=true) or previous (false) widget
     // that has both tab_stop=true and visible=true. Wraps around.

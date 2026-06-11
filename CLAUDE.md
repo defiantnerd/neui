@@ -108,6 +108,8 @@ Verification: `examples/dnd_example.cpp` (drop receiver) builds `neui_dnd_exampl
 | `orientation` | string | SLIDER | `"horizontal"` (default) / `"vertical"`. Read at `widget_show`. |
 | `value_text` | string | KNOB | Overlay text below the disc. Read each paint. |
 | `knob_mode` | int | KNOB | `NEUI_KNOB_MODE_ROTATIONAL=0` (default) / `_VERTICAL=1` / `_HORIZONTAL=2`. Cached at mouse-down. |
+| `combo_max_visible` | int | COMBOBOX | Max item rows shown in the drop list before it scrolls. Default 10; `<1` clamps to 1. The drop list grows to `min(item_count, this)`. xpl + win32 native (`CB_SETMINVISIBLE` + HWND height bump); macOS native ignores it (NSPopUpButton auto-sizes). Live. |
+| `combo_drop_width` | int (px) | COMBOBOX | Explicit drop-list width override. 0/unset = auto (widest entry + padding + scrollbar column on overflow). Never narrower than the collapsed bar. xpl + win32 native (`CB_SETDROPPEDWIDTH`); macOS native ignores it. Live. |
 | `font_family` / `font_size` / `font_weight` | string / float px / int | text-bearing | Empty/unset = host default. Weight CSS 100..900 (400 Normal, 700 Bold). Honoured by d2d + cg backends + native controls (win32 `HFONT`, macOS `NSFont`; unknown families fall back); null ignores. Italic not exposed. Live. |
 | `theme_mode` | int session-level | session | AUTO (0) follows OS; LIGHT (1) / DARK (2) force the palette. Accent stays live. |
 | `grid.row_height` | int (px) | GRID | Body row height. Default 22. |
@@ -208,7 +210,7 @@ Process-wide `neui_detail::Palette` (`theme_palette.h`) - flat array indexed by 
 | `BUTTON` | Centered text + 1px border. |
 | `INPUTBOX` / `MULTILINE` | Cursor / selection / undo / clipboard / word nav. `MULTILINE` = INPUTBOX + `multiline=1`. |
 | `CHECKBOX` / `CHECKBOX3` | 2-state vs 3-state cycle (`tristate=1` on CHECKBOX3). |
-| `LISTBOX` / `COMBOBOX` | COMBOBOX: hover ≠ selection until commit (Enter / click). |
+| `LISTBOX` / `COMBOBOX` | COMBOBOX: hover ≠ selection until commit (Enter / click). The client lays out only the **collapsed** bar (the widget x/y/width/height); the drop list is sized independently from the item count - `min(count, NEUI_ATTR_COMBO_MAX_VISIBLE [default 10])` rows - and an optional `NEUI_ATTR_COMBO_DROP_WIDTH` width override (else auto-fit to the widest entry, floored at the bar width). xpl host paints the overlay below the collapsed bar (flipping **above** it when the list would overflow the frame's bottom edge but fits above - `ComboBoxWidget::overlay_rect` is the shared source of truth for paint + hit-test, so both agree; falls back to the roomier side then clips); win32 native bumps the HWND height + `CB_SETMINVISIBLE`; macOS native NSPopUpButton already conforms (auto-sized menu). |
 | `TREEVIEW` | Per-item expanded; chevrons; Treeview keys. |
 | `MENUBAR` | No HWND. `tree->set_shortcut` + `tree->set_menu_cmd` configure items. |
 | `SLIDER` | Horizontal / vertical via `orientation`; `steps` snaps. |
