@@ -771,6 +771,13 @@ namespace xpl_host
     // Called by the platform layer when WM_PAINT / equivalent fires.
     void paint_frame(neui_render_ctx_t ctx, uint32_t parent_index);
 
+    // The 0xAARRGGBB colour paint_frame clears the frame to (per-frame
+    // NEUI_ATTR_BACKGROUND override, else the theme frame_bg under the frame's
+    // effective palette). Self-contained: applies and restores the palette
+    // override. Used by the platform WM_ERASEBKGND handler so areas exposed
+    // before D2D's next frame match the painted background instead of black.
+    uint32_t frame_clear_color(uint32_t parent_index);
+
     // Notify the render context that the native window has been resized.
     void resize_render_ctx(uint32_t widget_index, uint32_t w, uint32_t h);
 

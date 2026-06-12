@@ -500,9 +500,29 @@ namespace xpl_host
       return 0;
     }
 
-    case WM_ERASEBKGND:
-      // D2D handles background; suppress default GDI erase.
+    case WM_ERASEBKGND: {
+      // Fill the invalidated region with the frame's background colour (the
+      // same colour D2D clears to) rather than leaving it black. The window
+      // class has no background brush and D2D doesn't paint until WM_PAINT, so
+      // without this any area exposed before the next D2D frame - most visibly
+      // while resizing - flashes black. The erase DC is pre-clipped to the
+      // update region, so a full-client FillRect only touches exposed pixels;
+      // and because the fill colour equals the D2D clear colour, the eventual
+      // repaint is seamless. We still return 1 (handled) so DefWindowProc
+      // doesn't erase again with the (null) class brush.
+      HDC  hdc = reinterpret_cast<HDC>(wParam);
+      RECT rc; GetClientRect(hwnd, &rc);
+      COLORREF col = GetSysColor(COLOR_BTNFACE);   // fallback before the frame exists
+      auto* wud = get_wud(hwnd);
+      if (wud && wud->session) {
+        uint32_t argb = wud->session->frame_clear_color(wud->widget_index);
+        col = RGB((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF);
+      }
+      HBRUSH br = CreateSolidBrush(col);
+      FillRect(hdc, &rc, br);
+      DeleteObject(br);
       return 1;
+    }
 
     case WM_PAINT: {
       PAINTSTRUCT ps;

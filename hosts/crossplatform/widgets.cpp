@@ -406,9 +406,18 @@ namespace xpl_host
 
     // IMAGE widget: set_text is the path source. Drop any bound asset
     // handle so the path becomes the live source (mutual-clear with
-    // set_asset). The paint walk will repaint on the next frame.
+    // set_asset).
     if (auto* img = dynamic_cast<ImageWidget*>(&wd))
       img->asset = asset_none;
+
+    // A text/path change is a visible change -> repaint the owning frame, the
+    // same way w_set_asset and the attribute setters do. Without this, the
+    // self-painted xpl widgets (LABEL / BUTTON / MULTILINE / IMAGE / ...) keep
+    // showing the old text until some unrelated event forces a paint. For a
+    // top-level frame this returns nullptr (no parent HWND) and no-ops, which
+    // is correct - the title bar was already updated above.
+    if (void* frame = s->find_parent_native_handle(idx))
+      platform_invalidate(frame);
   }
 
   // Bind an asset handle as the IMAGE widget's source. Drops any path

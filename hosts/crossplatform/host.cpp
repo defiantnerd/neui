@@ -1842,6 +1842,32 @@ namespace xpl_host
     }
   }
 
+  uint32_t Session::frame_clear_color(uint32_t parent_index)
+  {
+    // Mirror paint_frame's palette selection + clear-colour read, but
+    // self-contained (restore the override on return) since this runs outside
+    // a paint (WM_ERASEBKGND). Keep in sync with paint_frame below.
+    const neui_detail::Palette* prev_override =
+      neui_detail::active_palette_override_ptr();
+    bool follow = false;
+    if (parent_index < UINT32_MAX) {
+      WidgetData* fw = get_widget(parent_index);
+      if (fw && fw->attrs &&
+          fw->attrs->get_int(NEUI_ATTR_FOLLOW_SYSTEM_THEME, 0) != 0)
+        follow = true;
+    }
+    neui_detail::set_active_palette_override(
+      follow ? &_effective_palette : &_frozen_palette);
+    uint32_t clear = neui_detail::color(neui_detail::ColorRole::frame_bg);
+    if (parent_index < UINT32_MAX) {
+      WidgetData* fw = get_widget(parent_index);
+      if (fw && fw->attrs && fw->attrs->has(NEUI_ATTR_BACKGROUND))
+        clear = static_cast<uint32_t>(fw->attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
+    }
+    neui_detail::set_active_palette_override(prev_override);
+    return clear;
+  }
+
   void Session::paint_frame(neui_render_ctx_t ctx, uint32_t parent_index)
   {
     if (!_backend || !ctx) return;
