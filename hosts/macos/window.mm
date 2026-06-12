@@ -3978,7 +3978,6 @@ namespace macos_host
     while (i != 0) {
       if (s->_widgets.exists(i)) {
         auto& cw = s->_widgets[i];
-        cw.visible = true;
         if (cw.type && !strcmp(cw.type, NEUI_W_MENUBAR)) {
           if (cw.native_control) {
             NSMenu* m = (__bridge NSMenu*)cw.native_control;
@@ -3986,6 +3985,14 @@ namespace macos_host
           }
         } else {
           create_native_for_widget(s, cw, parent_content);
+          // Honour a pre-show hide(): the fresh NSView is visible by
+          // default, so apply the stored flag (matches the xpl host,
+          // which no longer re-shows descendants on frame show).
+          if (!cw.visible && cw.native_control) {
+            id obj = (__bridge id)cw.native_control;
+            if ([obj isKindOfClass:[NSView class]])
+              [(NSView*)obj setHidden:YES];
+          }
         }
         NSView* child_parent = parent_content;
         if (widget_is_native_container(cw) && cw.native_control) {
