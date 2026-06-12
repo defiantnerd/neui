@@ -1674,8 +1674,11 @@ namespace xpl_host
   void platform_menubar_remove_popup(void* parent_hmenu, void* submenu)
   {
     if (!parent_hmenu || !submenu) return;
+    // Submenus are matched by their HMENU value used as the MF_BYCOMMAND id;
+    // RemoveMenu's position arg is UINT, so take the low 32 bits explicitly
+    // (the same truncation the insert path applied, so it round-trips).
     RemoveMenu(static_cast<HMENU>(parent_hmenu),
-               reinterpret_cast<UINT_PTR>(static_cast<HMENU>(submenu)),
+               static_cast<UINT>(reinterpret_cast<UINT_PTR>(static_cast<HMENU>(submenu))),
                MF_BYCOMMAND);
     DestroyMenu(static_cast<HMENU>(submenu));
   }

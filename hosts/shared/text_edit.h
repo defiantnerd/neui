@@ -206,7 +206,12 @@ namespace neui_detail
                                 int cursor, int anchor,
                                 EditHistory::Action kind, bool has_selection)
   {
-    if (h) h->mark(EditState{ text, cursor, anchor }, kind, has_selection);
+    // Build the full-text snapshot only when it will actually be pushed. A
+    // coalesced typing/deleting keystroke would discard it, so skip the O(N)
+    // copy entirely - mark() in the coalesce case only re-sets _last_action to
+    // the value it already holds, so not calling it is behaviour-preserving.
+    if (!h || !h->would_push(kind, has_selection)) return;
+    h->mark(EditState{ text, cursor, anchor }, kind, has_selection);
   }
 
   // Insert UTF-8 bytes at the cursor, replacing any active selection.

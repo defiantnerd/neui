@@ -44,7 +44,7 @@
 @class NEUIView;
 @class NEUIWindowDelegate;
 
-namespace xpl_host { class Session; struct WidgetData; }
+namespace xpl_host { class Session; class WidgetData; }
 
 // Key + modifier + button translation primitives now live in
 // hosts/shared/macos/keys_macos.h and are shared with the native macOS host.

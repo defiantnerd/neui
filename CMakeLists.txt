@@ -26,6 +26,27 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Warnings-as-linter. The project ships no dedicated static-analysis tool, so
+# the compiler's own diagnostics are the safety net - turn them up. On MSVC we
+# strip the default /W3 first so cl doesn't emit D9025 ("overriding /W3 with
+# /W4") on every translation unit; GCC / AppleClang get the equivalent broad
+# set. Warnings are not errors (no /WX or -Werror) - this surfaces issues
+# without breaking the build. Directory-scoped, so embedding neui as a
+# subproject doesn't disturb the parent's own flags.
+# C4100 / -Wunused-parameter is suppressed: every occurrence here is a
+# fixed-signature parameter that has nothing to fix - base-class virtual no-op
+# defaults (on_keydown / on_keychar / on_mouse_event), the Win32 WinMain and
+# SUBCLASSPROC signatures, callback stubs - where the name documents the slot.
+# Keeping it off leaves the baseline warning-clean so a genuinely new warning
+# (a real unused variable, a narrowing conversion) actually stands out.
+if(MSVC)
+  string(REGEX REPLACE "/W[0-4]" "" CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}")
+  string(REGEX REPLACE "/W[0-4]" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+  add_compile_options(/W4 /wd4100)
+else()
+  add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+endif()
+
 # build a library with a appropriate host
 add_library(neui src/neui.c)
 

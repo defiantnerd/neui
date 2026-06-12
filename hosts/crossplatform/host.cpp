@@ -2149,12 +2149,6 @@ namespace xpl_host
     return clamp01(wd.attrs->get_float(NEUI_PARAM_VALUE, 0.0f));
   }
 
-  static void widget_set_value_silent(WidgetData& wd, float v)
-  {
-    v = snap_to_steps(clamp01(v), widget_get_steps(wd));
-    neui_detail::ensure_attrs(wd.attrs).set_float(NEUI_PARAM_VALUE, v);
-  }
-
   // Write value and fire NEUI_EVENT_VALUE_CHANGED if it actually changed.
   static void widget_set_value_user(WidgetData& wd, float new_v)
   {
@@ -4082,13 +4076,19 @@ namespace xpl_host
     return lo;
   }
 
-  // End byte offset of the given line (exclusive of the '\n'; equals text.size()
-  // for the last line).
+  // End byte offset of the visual line `line` (exclusive). `starts` may hold
+  // hard-break starts (preceded by a consumed '\n') and, when word-wrap is on,
+  // soft-break starts (no separator char). A hard break ends one byte before
+  // the next start (the '\n'); a soft break ends exactly at the next start.
+  // The last line ends at text.size(). Identical to the old logic when every
+  // break is a '\n' (the no-wrap case), so non-wrap behaviour is unchanged.
   static int ml_line_end(const std::string& s, const std::vector<int>& starts,
                           int line)
   {
-    if (line + 1 < static_cast<int>(starts.size()))
-      return starts[line + 1] - 1;   // position of the '\n'
+    if (line + 1 < static_cast<int>(starts.size())) {
+      int ns = starts[line + 1];
+      return (ns > 0 && s[static_cast<size_t>(ns) - 1] == '\n') ? ns - 1 : ns;
+    }
     return static_cast<int>(s.size());
   }
 
@@ -4126,11 +4126,16 @@ namespace xpl_host
     float fw = static_cast<float>(width);
     float fh = static_cast<float>(height);
 
-    auto   starts = ml_line_starts(text);
+    const std::vector<int>& starts = cached_line_starts();
     uint32_t n_lines = static_cast<uint32_t>(starts.size());
     int    vis     = ml_visible_lines(height);
     bool   show_sb = n_lines > static_cast<uint32_t>(vis);
-    float  content_w = show_sb ? fw - static_cast<float>(SCROLLBAR_W) : fw;
+    // When wrapping, the gutter is always reserved (the wrap layout was
+    // computed against that narrower width via ml_wrap_avail_w), so content_w
+    // here must match even when the scrollbar isn't painted - otherwise the
+    // wrapped rows and the paint width would disagree.
+    float  content_w = (show_sb || wrap_enabled())
+                         ? fw - static_cast<float>(SCROLLBAR_W) : fw;
 
     uint32_t scroll_range = (n_lines > static_cast<uint32_t>(vis))
                               ? n_lines - static_cast<uint32_t>(vis) : 0;
@@ -4152,6 +4157,26 @@ namespace xpl_host
     int max_visible = (static_cast<int>(fh) - 2 * ML_PAD_Y + ML_LINE_H - 1) / ML_LINE_H;
     if (max_visible < 1) max_visible = 1;
 
+    const float base_x  = fx + static_cast<float>(ML_PAD_X);
+    const float avail_w = content_w - static_cast<float>(2 * ML_PAD_X);
+
+    // Without horizontal scrolling, glyphs past the right edge are clipped, so
+    // there's no point shaping/drawing them - a long line otherwise costs
+    // O(line length) per paint. Cap how many leading characters of each line
+    // we touch, using a conservative lower bound on glyph advance (~0.12 em)
+    // plus a margin so a visible glyph is never dropped. For normal-length
+    // lines the cap exceeds the line, so nothing changes.
+    const int vis_char_cap =
+        static_cast<int>(content_w / std::max(1.0f, ef.size * 0.12f)) + 16;
+    auto vis_end_of = [&](int ls, int le) -> int {
+      int p = ls, c = 0;
+      while (p < le && c < vis_char_cap) {
+        p += neui_detail::te_utf8_char_len(text, p);
+        ++c;
+      }
+      return p;
+    };
+
     if (backend->push_clip) backend->push_clip(ctx, fx, fy, content_w, fh);
 
     for (int i = 0; i < max_visible; ++i) {
@@ -4159,35 +4184,40 @@ namespace xpl_host
       if (line >= static_cast<int>(n_lines)) break;
       int ls = starts[line];
       int le = ml_line_end(text, starts, line);
+      int ve = vis_end_of(ls, le);   // last char we shape/draw on this line
 
       float row_y   = fy + static_cast<float>(ML_PAD_Y + i * ML_LINE_H);
       float row_h   = static_cast<float>(ML_LINE_H);
-      float base_x  = fx + static_cast<float>(ML_PAD_X);
-      float avail_w = content_w - static_cast<float>(2 * ML_PAD_X);
 
-      // Selection highlight for this line.
+      // Selection highlight for this line. Measure only within the visible
+      // span; if the selection runs off the right edge fill to that edge
+      // (the rect is clipped to content_w anyway).
       if (has_sel && sel_lo <= le && sel_hi >= ls && backend->measure_text) {
-        int lo = std::max(sel_lo, ls);
+        int lo = std::min(std::max(sel_lo, ls), ve);
         int hi = std::min(sel_hi, le);
         float x0 = base_x + backend->measure_text(ctx, text.c_str() + ls,
                                                    lo - ls, ef.size);
-        float x1 = base_x + backend->measure_text(ctx, text.c_str() + ls,
-                                                   hi - ls, ef.size);
-        // If the selection extends past the end-of-line newline, draw a small
-        // trailing strip so the user sees the newline itself as selected.
-        if (sel_hi > le) x1 += 6.0f;
+        float x1;
+        if (hi > ve) {
+          x1 = base_x + avail_w;   // selection end is off-screen
+        } else {
+          x1 = base_x + backend->measure_text(ctx, text.c_str() + ls,
+                                               hi - ls, ef.size);
+          // Selection extending past the end-of-line newline: small trailing
+          // strip so the newline itself reads as selected.
+          if (sel_hi > le) x1 += 6.0f;
+        }
         if (x1 > x0)
           backend->fill_rect(ctx, x0, row_y, x1 - x0, row_h,
                               neui_detail::color(ColorRole::accent_translucent));
       }
 
-      // Line text.
-      if (le > ls && backend->draw_text) {
-        // Render just this line's slice - draw_text takes a null-terminated
-        // pointer + len-via-\0. We copy to a temp to avoid modifying text.
-        std::string seg = text.substr(ls, le - ls);
+      // Line text (capped to the visible span; the remainder is clipped).
+      if (ve > ls && backend->draw_text) {
+        _paint_scratch.assign(text, static_cast<size_t>(ls),
+                              static_cast<size_t>(ve - ls));
         backend->draw_text(ctx, base_x, row_y, avail_w, row_h,
-                           seg.c_str(), ef.size,
+                           _paint_scratch.c_str(), ef.size,
                            neui_detail::color(ColorRole::text_primary));
       }
     }
@@ -4195,8 +4225,11 @@ namespace xpl_host
     // Caret + IME composition overlay.
     if (is_focused && backend->measure_text) {
       int line = ml_line_from_pos(starts, cursor_pos);
+      int cl_le = (line < static_cast<int>(n_lines))
+                    ? ml_line_end(text, starts, line) : cursor_pos;
       if (line >= static_cast<int>(scroll_offset) &&
-          line <  static_cast<int>(scroll_offset) + vis) {
+          line <  static_cast<int>(scroll_offset) + vis &&
+          cursor_pos <= vis_end_of(starts[line], cl_le)) {
         int   ls   = starts[line];
         float col  = backend->measure_text(ctx, text.c_str() + ls,
                                             cursor_pos - ls, ef.size);
@@ -4302,19 +4335,188 @@ namespace xpl_host
     neui_detail::push_widget_font(ml.session->_backend, ctx, ef);
     int ls  = starts[line];
     int le  = ml_line_end(ml.text, starts, line);
-    int pos = ls;
-    float prev_w = 0.0f;
+
+    // Midpoint-snap col_px to the nearest character boundary on [ls, le].
+    // Boundary widths are monotonic in the boundary index, so binary-search
+    // the boundaries instead of measuring every prefix linearly: O(log K)
+    // measure_text calls (each creates a DirectWrite layout) instead of O(K),
+    // and O(K log K) shaping instead of O(K^2). K = chars on the line. The
+    // byte-offset walks (boundary()) are allocation-free and cheap relative
+    // to the shaping the linear version did per character.
     int result = le;
-    while (pos < le) {
-      int char_end = pos + neui_detail::te_utf8_char_len(ml.text, pos);
-      float end_w  = ml.session->_backend->measure_text(
-        ctx, ml.text.c_str() + ls, char_end - ls, ef.size);
-      if (col_px < (prev_w + end_w) * 0.5f) { result = pos; break; }
-      prev_w = end_w;
-      pos    = char_end;
+    if (col_px <= 0.0f) {
+      result = ls;
+    } else {
+      // Number of characters on the line.
+      int K = 0;
+      for (int p = ls; p < le; p += neui_detail::te_utf8_char_len(ml.text, p)) ++K;
+      // Byte offset of the i-th character start (0 <= i <= K; boundary(K) == le).
+      auto boundary = [&](int i) -> int {
+        int p = ls;
+        for (int k = 0; k < i; ++k) p += neui_detail::te_utf8_char_len(ml.text, p);
+        return p;
+      };
+      auto width_at = [&](int i) -> float {
+        if (i <= 0) return 0.0f;
+        int b = boundary(i);
+        return ml.session->_backend->measure_text(
+          ctx, ml.text.c_str() + ls, b - ls, ef.size);
+      };
+      // Largest index lo with width_at(lo) <= col_px (lo == 0 always qualifies
+      // since width_at(0) == 0 < col_px here).
+      int lo = 0, hi = K;
+      while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (width_at(mid) <= col_px) lo = mid; else hi = mid - 1;
+      }
+      if (lo >= K) {
+        result = le;
+      } else {
+        // Snap to whichever of boundary(lo) / boundary(lo+1) is nearer the
+        // midpoint - identical tie-breaking to the old linear walk.
+        float wl = width_at(lo);
+        float wh = width_at(lo + 1);
+        result = (col_px < (wl + wh) * 0.5f) ? boundary(lo) : boundary(lo + 1);
+      }
     }
     neui_detail::pop_widget_font(ml.session->_backend, ctx, ef);
     return result;
+  }
+
+  // ---- Word-wrap line model ---------------------------------------------
+
+  // First render context found walking up from the widget (the frame's ctx).
+  // Needed to measure text outside paint (wrap layout, hit-test). null before
+  // the frame is shown.
+  static neui_render_ctx_t ml_find_ctx(MultilineWidget& ml)
+  {
+    if (!ml.session) return nullptr;
+    for (uint32_t p : ml.session->_widgets.get_all_parents(ml.index)) {
+      if (p == 0) continue;
+      if (ml.session->_widgets.exists(p)) {
+        neui_render_ctx_t ctx = ml.session->_widgets[p].render_ctx;
+        if (ctx) return ctx;
+      }
+    }
+    return nullptr;
+  }
+
+  // Target content width (logical px) a wrapped line must fit within. The
+  // scrollbar gutter is always reserved when wrapping so the layout doesn't
+  // reflow when the vertical scrollbar appears/disappears (which would be a
+  // circular dependency: line count -> scrollbar -> width -> line count).
+  static float ml_wrap_avail_w(const MultilineWidget& ml)
+  {
+    float w = static_cast<float>(ml.width) - 2.0f * ML_PAD_X
+            - static_cast<float>(SCROLLBAR_W);
+    return w > 1.0f ? w : 1.0f;
+  }
+
+  // Largest character boundary in [vs, le] whose prefix width fits avail_w
+  // (at least one char, so an over-wide glyph still makes progress). Uses an
+  // exponential probe then binary search so each measure_text shapes at most
+  // ~2x the fitting length - O(fit chars) shaping, not O(line length).
+  static int ml_fit_chars_end(MultilineWidget& ml, neui_render_ctx_t ctx,
+                              const neui_detail::EffectiveFont& ef,
+                              int vs, int le, float avail_w)
+  {
+    const std::string& s = ml.text;
+    auto* be = ml.session->_backend;
+    auto char_end = [&](int count) -> int {
+      int p = vs;
+      for (int k = 0; k < count && p < le; ++k)
+        p += neui_detail::te_utf8_char_len(s, p);
+      return p;
+    };
+    auto width_n = [&](int count) -> float {
+      int b = char_end(count);
+      if (b <= vs) return 0.0f;
+      return be->measure_text(ctx, s.c_str() + vs, b - vs, ef.size);
+    };
+    // Exponential search for a char count whose width overflows (or hits le).
+    int hi = 1;
+    while (char_end(hi) < le && width_n(hi) <= avail_w) hi *= 2;
+    if (char_end(hi) >= le && width_n(hi) <= avail_w)
+      return le;                       // whole remainder fits on this row
+    int lo = hi / 2;                   // width_n(lo) <= avail_w (or lo == 0)
+    while (lo < hi) {
+      int mid = (lo + hi + 1) / 2;
+      if (width_n(mid) <= avail_w) lo = mid; else hi = mid - 1;
+    }
+    if (lo < 1) lo = 1;                // force progress on an over-wide glyph
+    return char_end(lo);
+  }
+
+  // Build visual-line start offsets with greedy word-wrap to avail_w. Hard
+  // '\n' always starts a new row; within a logical line, each row takes as
+  // many chars as fit, breaking after the last space when there is one (else
+  // a hard char break for an over-long word). Falls back to logical lines
+  // when there is no context to measure with.
+  static std::vector<int> ml_build_wrapped_starts(MultilineWidget& ml,
+      neui_render_ctx_t ctx, const neui_detail::EffectiveFont& ef, float avail_w)
+  {
+    const std::string& s = ml.text;
+    int n = static_cast<int>(s.size());
+    std::vector<int> starts;
+    starts.push_back(0);
+    if (!ctx || !ml.session || !ml.session->_backend ||
+        !ml.session->_backend->measure_text || avail_w <= 1.0f) {
+      for (int i = 0; i < n; ++i) if (s[i] == '\n') starts.push_back(i + 1);
+      return starts;
+    }
+    neui_detail::push_widget_font(ml.session->_backend, ctx, ef);
+    int ls = 0;
+    while (true) {
+      int le = ls;
+      while (le < n && s[le] != '\n') ++le;
+      int vs = ls;
+      while (vs < le) {
+        int b = ml_fit_chars_end(ml, ctx, ef, vs, le, avail_w);
+        if (b >= le) break;                       // remainder fits this row
+        int brk = b;
+        for (int p = b; p > vs; --p) {            // prefer a word boundary
+          if (s[static_cast<size_t>(p) - 1] == ' ') { brk = p; break; }
+        }
+        if (brk <= vs)
+          brk = vs + neui_detail::te_utf8_char_len(s, vs);   // ensure progress
+        if (brk >= le) break;
+        starts.push_back(brk);
+        vs = brk;
+      }
+      if (le >= n) break;
+      ls = le + 1;
+      starts.push_back(ls);                        // hard-break row start
+    }
+    neui_detail::pop_widget_font(ml.session->_backend, ctx, ef);
+    return starts;
+  }
+
+  // Visual line starts, cached. No-wrap: logical lines (cheap O(N) scan).
+  // Wrap: word-wrapped rows (measure-based, hence the cache key on width /
+  // font / wrap). paint never mutates text mid-call, so the returned
+  // reference stays valid for a paint.
+  const std::vector<int>& MultilineWidget::cached_line_starts()
+  {
+    bool  wrap    = wrap_enabled();
+    float avail_w = wrap ? ml_wrap_avail_w(*this) : 0.0f;
+    auto  ef      = neui_detail::read_widget_font(attrs.get(), ML_FONT_SIZE);
+    if (!_ls_dirty && wrap == _cache_wrap &&
+        avail_w == _cache_w && ef.size == _cache_font)
+      return _ls_cache;
+
+    bool built_ok = true;
+    if (!wrap) {
+      _ls_cache = ml_line_starts(text);
+    } else {
+      neui_render_ctx_t ctx = ml_find_ctx(*this);
+      if (!ctx) built_ok = false;     // pre-show: retry once a ctx exists
+      _ls_cache = ml_build_wrapped_starts(*this, ctx, ef, avail_w);
+    }
+    _ls_dirty   = !built_ok;
+    _cache_wrap = wrap;
+    _cache_w    = avail_w;
+    _cache_font = ef.size;
+    return _ls_cache;
   }
 
   bool MultilineWidget::on_keydown(uint32_t keycode, uint32_t modifiers)
@@ -4324,9 +4526,13 @@ namespace xpl_host
     const bool ctrl     = (modifiers & NEUI_KMOD_CTRL)  != 0;
     const bool readonly = ml_readonly(*this);
 
-    auto starts   = ml_line_starts(text);
+    auto starts   = cached_line_starts();   // copy: stable across edits below
     int  text_len = (int)text.size();
-    auto scroll   = [&]{ ml_scroll_to_cursor(*this, ml_line_starts(text)); };
+    // scroll() runs after every mutating branch (BACK / DELETE / RETURN / cut /
+    // paste / undo / redo); nav branches call ml_scroll_to_cursor directly. So
+    // invalidating the visual-line cache here covers all in-place edits; the
+    // following cached_line_starts() then rebuilds the post-edit layout.
+    auto scroll   = [&]{ mark_lines_dirty(); ml_scroll_to_cursor(*this, cached_line_starts()); };
 
     switch (keycode) {
     case NEUI_KEY_LEFT:
@@ -4511,7 +4717,8 @@ namespace xpl_host
     int  n = te_encode_utf8(codepoint, buf);
     te_insert_utf8(text, cursor_pos, sel_anchor, /*overwrite=*/false,
                    buf, n, &history);
-    ml_scroll_to_cursor(*this, ml_line_starts(text));
+    mark_lines_dirty();
+    ml_scroll_to_cursor(*this, cached_line_starts());
     repaint();
     return true;
   }
@@ -4523,7 +4730,7 @@ namespace xpl_host
                                           float* out_x, float* out_y, float* out_h)
   {
     if (!backend || !backend->measure_text || !ctx) return false;
-    auto starts = ml_line_starts(text);
+    auto starts = cached_line_starts();
     int  line   = ml_line_from_pos(starts, cursor_pos);
     int  vis    = ml_visible_lines(height);
     if (line < static_cast<int>(scroll_offset) ||
@@ -4594,7 +4801,8 @@ namespace xpl_host
       composition_caret = 0;
       composition_attrs.clear();
 
-      auto starts = ml_line_starts(text);
+      mark_lines_dirty();
+      auto starts = cached_line_starts();
       ml_scroll_to_cursor(*this, starts);
       repaint();
       return true;
@@ -4615,7 +4823,7 @@ namespace xpl_host
 
   bool MultilineWidget::on_mouse_event(neui_event_t* event)
   {
-    auto starts = ml_line_starts(text);
+    auto starts = cached_line_starts();
     uint32_t n_lines = static_cast<uint32_t>(starts.size());
     int vis = ml_visible_lines(height);
     bool show_sb = n_lines > static_cast<uint32_t>(vis);
@@ -5225,13 +5433,6 @@ namespace xpl_host
   static neui_detail::GridPaintConfig xpl_grid_config(const GridWidget& g)
   {
     return neui_detail::grid_read_config(g.attrs.get());
-  }
-
-  static GridViewport xpl_grid_viewport(const GridWidget& g)
-  {
-    auto cfg = xpl_grid_config(g);
-    return neui_detail::grid_compute_viewport(g.model, g.width, g.height,
-                                                cfg.row_h, cfg.header_h);
   }
 
   static bool xpl_grid_fire_row_selected(GridWidget& g, int row)

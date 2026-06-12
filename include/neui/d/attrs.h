@@ -36,9 +36,30 @@ extern "C" {
 // Implicit on CHECKBOX3.
 #define NEUI_ATTR_TRISTATE  "neui.attr.tristate"
 
-// int (bool): multi-line text editor semantics on INPUTBOX.
-// Implicit on MULTILINE.
+// int (bool): read-only marker, set by the host when a NEUI_W_MULTILINE
+// widget is created. Multi-line vs single-line is determined by the widget
+// TYPE at creation (NEUI_W_MULTILINE vs NEUI_W_INPUTBOX), NOT by this
+// attribute: the hosts never read it, so setting it on a live NEUI_W_INPUTBOX
+// does not turn it into a multi-line editor. Present so clients can query
+// which variant they got via attrs->get_int.
 #define NEUI_ATTR_MULTILINE "neui.attr.multiline"
+
+// int (bool): soft word-wrap for a MULTILINE widget.
+//   0 / unset (default) - no wrap: each logical line (text between '\n's)
+//                          renders as one row; a long line runs past the
+//                          right edge and is clipped (horizontal scrolling
+//                          is not provided).
+//   1                   - wrap: long logical lines are broken into multiple
+//                          visual rows at the widget's content width,
+//                          preferring word boundaries (falling back to a
+//                          character break for a word wider than the line).
+//                          Explicit '\n's still force a new row. Vertical
+//                          scrolling / navigation / selection operate on the
+//                          resulting visual rows. Live - toggling re-flows on
+//                          the next paint. Honoured by the crossplatform host
+//                          today; the native hosts use their control's own
+//                          wrap behaviour.
+#define NEUI_ATTR_LINE_WRAP "neui.attr.line_wrap"
 
 // int (bool): text content cannot be modified by the user (INPUTBOX, MULTILINE).
 #define NEUI_ATTR_READONLY  "neui.attr.readonly"

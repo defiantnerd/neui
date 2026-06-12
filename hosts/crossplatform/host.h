@@ -307,6 +307,35 @@ namespace xpl_host
     int      sb_drag_start_y      = 0;
     uint32_t sb_drag_start_offset = 0;
 
+    // Cached line-start byte offsets (the result of ml_line_starts(text)),
+    // consumed by paint() so it doesn't rescan the whole buffer every frame.
+    // _ls_dirty is set on every text mutation (and external set_text), so the
+    // cache is rebuilt exactly when the line structure can have changed.
+    // Input handlers still build fresh starts for their own use - they run
+    // once per keystroke, not once per frame, so the per-frame paint cost is
+    // the one worth eliminating.
+    // Cache holds VISUAL line starts: logical lines (split on '\n') when wrap
+    // is off, plus soft word-wrap breaks when NEUI_ATTR_LINE_WRAP is set. The
+    // cache key is (text dirty, wrap on/off, wrap width, font size) so it
+    // rebuilds on edits, resize, font change, or toggling wrap; computing the
+    // wrapped layout needs measure_text, so it is only redone when one of
+    // those actually changes.
+    std::vector<int> _ls_cache;
+    bool             _ls_dirty   = true;
+    bool             _cache_wrap = false;
+    float            _cache_w    = -1.0f;
+    float            _cache_font = -1.0f;
+    const std::vector<int>& cached_line_starts();
+    void mark_lines_dirty() { _ls_dirty = true; }
+    bool wrap_enabled() const {
+      return attrs && attrs->get_int(NEUI_ATTR_LINE_WRAP, 0) != 0;
+    }
+
+    // Reused per-line scratch for paint's draw_text slice (draw_text wants a
+    // NUL-terminated pointer). assign() reuses capacity, so painting N visible
+    // lines costs at most one (amortized) allocation instead of one per line.
+    std::string _paint_scratch;
+
     neui_detail::EditHistory history;
 
     // IME composition state. Active only between COMP_START and COMP_END.

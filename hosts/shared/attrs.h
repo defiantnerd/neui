@@ -50,6 +50,7 @@ namespace neui_detail
   inline constexpr WellKnownAttr k_well_known_attrs[] = {
     { NEUI_ATTR_TRISTATE,             AttrKind::INT    },
     { NEUI_ATTR_MULTILINE,            AttrKind::INT    },
+    { NEUI_ATTR_LINE_WRAP,            AttrKind::INT    },
     { NEUI_ATTR_READONLY,             AttrKind::INT    },
     { NEUI_ATTR_PASSWORD,             AttrKind::INT    },
     { NEUI_ATTR_TAB_STOP,             AttrKind::INT    },

@@ -184,10 +184,8 @@ namespace neui_detail
     const uint32_t body_bg     = grid_resolve_body_bg(cfg);
     const uint32_t header_bg   = grid_resolve_header_bg(cfg);
     const uint32_t text_color  = color(ColorRole::text_primary);
-    const uint32_t text_dim    = color(ColorRole::text_disabled);
     const uint32_t border      = color(ColorRole::border);
     const uint32_t accent      = color(ColorRole::accent);
-    const uint32_t accent_text = color(ColorRole::accent_text);
     const uint32_t sb_track    = color(ColorRole::scrollbar_track);
     const uint32_t sb_thumb    = color(ColorRole::scrollbar_thumb);
     const uint32_t sb_sep      = color(ColorRole::scrollbar_separator);

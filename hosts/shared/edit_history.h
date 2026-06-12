@@ -37,16 +37,27 @@ namespace neui_detail
     // `kind` differs from the previous run.
     void mark(const EditState& pre, Action kind, bool has_selection)
     {
-      bool coalesce = (kind != None) &&
-                      (kind == _last_action) &&
-                      !has_selection;
-      if (!coalesce) {
+      if (would_push(kind, has_selection)) {
         _undo.push_back(pre);
         if (_undo.size() > kMaxDepth)
           _undo.erase(_undo.begin());
         _redo.clear();
       }
       _last_action = kind;
+    }
+
+    // Whether a mark() with these parameters would push a fresh undo record
+    // rather than coalesce into the current run. Pure - does not mutate. Lets
+    // callers skip building the (full-text) EditState snapshot when it would
+    // just be discarded. When this returns false the run is coalescing, which
+    // means kind == _last_action already, so a skipped mark() leaves
+    // _last_action unchanged-but-correct.
+    bool would_push(Action kind, bool has_selection) const
+    {
+      bool coalesce = (kind != None) &&
+                      (kind == _last_action) &&
+                      !has_selection;
+      return !coalesce;
     }
 
     // Force the next edit to start a fresh run. Call on cursor moves, mouse

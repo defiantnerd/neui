@@ -395,6 +395,11 @@ namespace xpl_host
     auto& wd = s->_widgets[idx];
     wd.text = text ? text : "";
 
+    // MULTILINE caches line-start offsets for paint; an external text change
+    // invalidates that cache.
+    if (auto* ml = dynamic_cast<MultilineWidget*>(&wd))
+      ml->mark_lines_dirty();
+
     // Frame windows: push the text into the native title bar when live.
     if (wd.is_frame() && wd.native_handle)
       platform_set_window_title(wd.native_handle, wd.text.c_str());

@@ -3260,7 +3260,11 @@ namespace win32_host
       auto& data = it->second;
       bool had_shortcut = (data.shortcut_key != NEUI_KEY_NONE);
       if (data.submenu) {
-        RemoveMenu(data.parent_hmenu, reinterpret_cast<UINT_PTR>(data.submenu), MF_BYCOMMAND);
+        // Submenu matched by its HMENU value as the MF_BYCOMMAND id; the
+        // position arg is UINT, so truncate to the low 32 bits explicitly.
+        RemoveMenu(data.parent_hmenu,
+                   static_cast<UINT>(reinterpret_cast<UINT_PTR>(data.submenu)),
+                   MF_BYCOMMAND);
         DestroyMenu(data.submenu);
       } else {
         RemoveMenu(data.parent_hmenu, data.cmd_id, MF_BYCOMMAND);
@@ -3395,7 +3399,10 @@ namespace win32_host
       UINT flags = (it->second.submenu ? MF_POPUP : MF_STRING);
       UINT_PTR id_or_menu = it->second.submenu ? reinterpret_cast<UINT_PTR>(it->second.submenu)
                                                 : static_cast<UINT_PTR>(it->second.cmd_id);
-      ModifyMenuW(it->second.parent_hmenu, id_or_menu, flags | MF_BYCOMMAND, id_or_menu, wtext.c_str());
+      // uPosition (2nd arg) is UINT - take the low 32 bits of the command id;
+      // uIDNewItem (4th arg) is UINT_PTR and keeps the full value.
+      ModifyMenuW(it->second.parent_hmenu, static_cast<UINT>(id_or_menu),
+                  flags | MF_BYCOMMAND, id_or_menu, wtext.c_str());
       HWND frame = find_parent_hwnd(wi);
       if (frame) DrawMenuBar(frame);
     }
@@ -4926,11 +4933,6 @@ namespace win32_host
   // grids tick independently; chosen well outside any other timer ID space we
   // might use later (none today).
   static constexpr UINT_PTR GRID_BOUNCE_TIMER_ID = 0x6E677562;  // 'ngub'
-
-  static neui_detail::GridModel* grid_model_w32(WidgetData& wd)
-  {
-    return wd.grid_model.get();
-  }
 
   // Convert a physical-pixel HWND-local coord to a logical-pixel one.
   static int phys_to_log_w32(int physical, UINT dpi)

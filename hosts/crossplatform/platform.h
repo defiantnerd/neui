@@ -19,7 +19,7 @@ namespace neui_detail { class DataItem; }
 namespace xpl_host
 {
   class Session;
-  struct WidgetData;
+  class WidgetData;
 
   // Initialize platform resources (window class registration, etc.).
   // Safe to call multiple times; no-op after the first call.
