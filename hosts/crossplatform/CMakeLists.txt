@@ -29,6 +29,26 @@ elseif(APPLE)
     "-framework Foundation"
     "-framework CoreGraphics"
   )
+elseif(UNIX)
+  # Linux (and other X11 Unixes): Cairo software backend + X11 platform layer.
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(CAIRO      REQUIRED cairo)
+  pkg_check_modules(FONTCONFIG REQUIRED fontconfig)
+  find_package(X11 REQUIRED)
+  find_package(Freetype REQUIRED)
+
+  target_sources(neui-xplhost PRIVATE platform_linux.cpp)
+  target_include_directories(neui-xplhost PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/stb
+    ${CAIRO_INCLUDE_DIRS}
+    ${X11_INCLUDE_DIR})
+  target_link_libraries(neui-xplhost PRIVATE
+    neui-backend-cairo
+    X11::X11
+    X11::Xext            # XShm
+    ${CAIRO_LIBRARIES}
+    ${FONTCONFIG_LIBRARIES}
+    Freetype::Freetype)
 else()
   target_sources(neui-xplhost PRIVATE platform_null.cpp)
   target_link_libraries(neui-xplhost PRIVATE neui-backend-null)

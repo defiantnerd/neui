@@ -71,6 +71,12 @@ namespace xpl_host
 
     // Native window handle (APPWINDOW / PLUGWINDOW / DIALOG).
     void* native_handle = nullptr;
+    // Linux/X11 embedding: when non-zero, a PLUGWINDOW is created as a child
+    // of this foreign (DAW-provided) X11 Window id over a dedicated Display
+    // connection, with no neui-owned event loop. Set via the Linux platform
+    // seam platform_set_embed_parent before widget_show. 0 = standalone
+    // top-level. Ignored on every non-Linux host.
+    unsigned long embed_parent_xid = 0;
     // Owned native icon (HICON on Win32) installed on the frame's HWND.
     // Tracked here so it can be DestroyIcon'd on replace / widget destroy.
     void* native_icon   = nullptr;

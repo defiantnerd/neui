@@ -1,14 +1,16 @@
 # CLAUDE.md
 
-Guidance for Claude Code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-**neuilib** is an early-stage C/C++ GUI framework separating a client C API from platform host implementations. Windows + macOS are fully implemented; Linux falls back to a null platform layer. Tier-1 unit tests in `tests/`. No dedicated linter; instead the build runs at a high warning level as the static-analysis safety net (MSVC `/W4`, GCC/AppleClang `-Wall -Wextra`), with `C4100`/`-Wunused-parameter` suppressed (fixed-signature params) - keep the build warning-clean.
+**neuilib** is an early-stage C/C++ GUI framework separating a client C API from platform host implementations. Windows, macOS, and Linux (X11 + Cairo, via the crossplatform host) are implemented; any other platform falls back to a null platform layer. Tier-1 unit tests in `tests/`. No dedicated linter; instead the build runs at a high warning level as the static-analysis safety net (MSVC `/W4`, GCC/AppleClang `-Wall -Wextra`), with `C4100`/`-Wunused-parameter` suppressed (fixed-signature params) - keep the build warning-clean.
 
 ## Build
 
-CMake 3.15+, C++17 (MSVC on Windows, AppleClang on macOS).
+CMake 3.15+, C++17 (MSVC on Windows, AppleClang on macOS, GCC/Clang on Linux).
+
+Linux dev packages (Debian/Ubuntu): `pkg-config libx11-dev libxext-dev libcairo2-dev libfreetype-dev libfontconfig1-dev` (Fedora: `libX11-devel libXext-devel cairo-devel freetype-devel fontconfig-devel`). `stb_image.h` is vendored (`third_party/stb/`), no package.
 
 ```bash
 # Windows / Linux
@@ -18,14 +20,15 @@ cmake -B out/build -DCMAKE_BUILD_TYPE=Debug && cmake --build out/build
 cmake -B out/build -G Xcode && cmake --build out/build --config Debug
 ```
 
-Outputs - Windows: `out/build/Debug/{neui_example.exe, neui.lib, neui-win32host.lib, neui-xplhost.lib, neui-backend-d2d.lib}`. macOS: `out/build/Debug/{neui_example.app, libneui.a}` + per-subdir `libneui-*.a`. Example apps: `neui_example`, `neui_grid_example`.
+Outputs - Windows: `out/build/Debug/{neui_example.exe, neui.lib, neui-win32host.lib, neui-xplhost.lib, neui-backend-d2d.lib}`. macOS: `out/build/Debug/{neui_example.app, libneui.a}` + per-subdir `libneui-*.a`. Example apps (CMake targets): `neui_example`, `neui_grid_example`, `neui_section_scroll_example`, `neui_surface_example`, `neui_dnd_example`, `neui_dnd_source_example`, and `readme_example` (the minimal README walkthrough - `cmake --build out/build --config Debug --target readme_example`).
 
-**Tests**: `tests/` is a Tier-1 header-only unit suite (`neui_tests`) over the portable logic in `hosts/shared/*.h` - links no host and no backend, builds everywhere including the null platform. Toggle with `-DNEUI_BUILD_TESTS=OFF`. Run the binary directly (`out/build/tests/Debug/neui_tests` on macOS Xcode builds) or via `ctest --test-dir out/build -C Debug`.
+**Tests**: `tests/` is a Tier-1 header-only unit suite (`neui_tests`) over the portable logic in `hosts/shared/*.h` - links no host and no backend, builds everywhere including the null platform. Toggle with `-DNEUI_BUILD_TESTS=OFF`. Run the binary directly (`out/build/tests/Debug/neui_tests` on macOS Xcode builds) or via `ctest --test-dir out/build -C Debug`. Linux-only extra targets: `neui_cairo_smoke` (offscreen Cairo backend smoke test - rect/text/arc/bitmap + `read_pixels_bgra`, registered with ctest) and `neui_embed_smoke` (fake-DAW embedding harness - built but not ctest-registered since it needs a live X display; run `out/build/tests/neui_embed_smoke`).
 
 ## Per-platform host + backend selection
 
 - **Windows**: `neui-win32host` + `neui-xplhost`; backend `neui-backend-d2d`; xpl platform `platform_win32.cpp`.
 - **macOS**: `neui-macoshost` + `neui-xplhost`; backend `neui-backend-cg`; xpl platform `platform_macos.mm`.
+- **Linux** (X11): `neui-xplhost`; backend `neui-backend-cairo` (software, blitted via XShm/XPutImage); xpl platform `platform_linux.cpp`. No native host - the xpl host is the only one. Clipboard via the CLIPBOARD selection (`hosts/shared/linux/clipboard_linux.h` - owner window serves `SelectionRequest` from a `DataItem`, reads via a synchronous `XConvertSelection`/`SelectionNotify` pump; text + arbitrary MIMEs, no INCR/PRIMARY yet). DAW-embedding seams (`platform_set_embed_parent` / `platform_embed_event_fd` / `platform_embed_pump_and_tick`) live here. Deferred (clean no-op stubs today): DnD (XDND), native menubar (X11 has none - render in-UI later), message box, `platform_set_cursor`, window icon, smooth-scroll wheel kinetics (XInput2).
 - **Other**: `neui-xplhost`; backend `neui-backend-null`; xpl platform `platform_null.cpp`.
 
 Top-level CMakeLists gates each platform-specific subdirectory; the example links the native host only when present.
@@ -39,7 +42,7 @@ Top-level CMakeLists gates each platform-specific subdirectory; the example link
 - **Win32 Host** `hosts/win32/`: native HWND host. `window.cpp` WinMain + pump; `host.cpp` Session + `get_interface`; `widgets.cpp` full API; `host.h` `WidgetData`; `asset_manager_w32.h` `W32AssetManager`.
 - **macOS Host** `hosts/macos/`: native AppKit host (`neui.host.macos`). `host.{h,mm}` Session; `widgets.mm` full API; `window.mm` NSApp + `NEUINativeContentView` (`isFlipped=YES`) + `NEUINativePaintedView` (per-widget CG context; IMAGE / KNOB / SECTION / CUSTOMDRAW / GRID via per-type `drawRect:` branch); `asset_manager_macos.h` `MacOSAssetManager`. The painted view forwards raw input for CUSTOMDRAW as `NEUI_EVENT_MOUSE_*` / `_KEY*`, and runs internal handling for KNOB (drag + wheel + reset popup) and GRID (selection ladder + nav + smooth scroll). Per-ctx GPU cache dropped in `release_native_control_macos`.
 - **Crossplatform Host** `hosts/crossplatform/`: polymorphic widget hierarchy (`neui.host.crossplatform`). `host.{h,cpp}` `WidgetData` base + per-type subclasses (`FrameWidget` … `GridWidget`) with virtuals (`paint` / `paint_after_children` / `on_keydown` / `on_keychar` / `on_mouse_event` / `hit_test` / `on_destroy` / `on_composition` / `is_frame` / `is_menubar` / `perform_command` / `can_perform_command` / `grid_model_ptr`). `widgets.cpp` full API + `make_widget()` factory. `platform.h` cross-cutting seam (window / menubar / image / clipboard / IME / modal / focus); per-OS impls `platform_{win32.cpp,macos.mm,null.cpp}`.
-- **Backends** `backends/`: `d2d/` (Direct2D, `ID2D1HwndRenderTarget`), `cg/` (CoreGraphics, one `CGContextRef` per frame via `set_current_frame` from `drawRect:`), `null/` (no-op).
+- **Backends** `backends/`: `d2d/` (Direct2D, `ID2D1HwndRenderTarget`), `cg/` (CoreGraphics, one `CGContextRef` per frame via `set_current_frame` from `drawRect:`), `cairo/` (Linux software: one `cairo_t`/image surface per ctx for the window's lifetime - no per-frame rebind, no Y-flip since Cairo is Y-down; `end_frame` blits via XShm/XPutImage; text via Fontconfig + FreeType; image decode via vendored `third_party/stb/stb_image.h`), `null/` (no-op). Backend-agnostic math in `backends/shared/backend_util.h`.
 
 ## Rendering Backend (`d/renderer.h`)
 
@@ -352,4 +355,4 @@ macOS:
 
 ## Plans
 
-`plans/`: `painter-and-asset-api.md` (compound + asset, shipped), `grid-macos-port.md` (GRID macOS port, shipped), `grid-sorting.md` (multi-column sort, shipped), `clipboard-and-dnd.md` (unified data-item + clipboard formats + DnD drop-target, shipped), `dnd-drag-source-fixes.md` (drag-source parity + macOS safety, shipped), `render-to-surface.md` (SURFACE asset kind, shipped), `section-scrolling.md` (scrolling SECTION + chip "none" + smooth kinetics + `NEUI_ATTR_SCROLL_KINETICS` opt-in, shipped), `win32-pointer-and-directmanipulation.md` (WM_POINTER pen/touch + DirectManipulation smooth-scroll on scrolling SECTION + GRID, deferred), `winui3-host.md` (deferred), `wasm-host.md` (deferred), `how-to-port.md` (new-platform playbook), `crossplatform-host-sketch.md` (early xpl design sketch, archival - superseded by the shipped impl).
+`plans/`: `painter-and-asset-api.md` (compound + asset, shipped), `grid-macos-port.md` (GRID macOS port, shipped), `grid-sorting.md` (multi-column sort, shipped), `clipboard-and-dnd.md` (unified data-item + clipboard formats + DnD drop-target, shipped), `dnd-drag-source-fixes.md` (drag-source parity + macOS safety, shipped), `render-to-surface.md` (SURFACE asset kind, shipped), `section-scrolling.md` (scrolling SECTION + chip "none" + smooth kinetics + `NEUI_ATTR_SCROLL_KINETICS` opt-in, shipped), `backend-tint-effect.md` (backend-level D2D tint effect replacing the CPU pre-tint cache, shipped), `linux-port-cairo-x11.md` (Cairo/X11 xpl platform layer + DAW-embedding seams, **shipped** - standalone window/paint/input + offscreen backend + embedding + CLIPBOARD-selection clipboard verified on Linux; remaining deferrables (DnD / native menubar / message box / cursor / XInput2 smooth scroll) are clean no-op stubs), `win32-pointer-and-directmanipulation.md` (WM_POINTER pen/touch + DirectManipulation smooth-scroll on scrolling SECTION + GRID, deferred), `winui3-host.md` (deferred), `wasm-host.md` (deferred), `how-to-port.md` (new-platform playbook), `crossplatform-host-sketch.md` (early xpl design sketch, archival - superseded by the shipped impl).

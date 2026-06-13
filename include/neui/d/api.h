@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>   // uint32_t / uint8_t used throughout the public API
+
 #ifdef __cplusplus
 extern "C" {
 #endif
