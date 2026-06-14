@@ -114,6 +114,22 @@ namespace neui_detail
       return false;
     }
 
+    // Copy `bytes` into the caller buffer per the get_text/get_primary_text
+    // seam contract: returns total bytes needed incl. NUL; buf=NULL queries
+    // size; the copy is clamped to buflen-1 and always NUL-terminated.
+    static int fill_text_out(const std::vector<uint8_t>& bytes,
+                             char* buf, int buflen)
+    {
+      int need = static_cast<int>(bytes.size()) + 1;  // + NUL
+      if (buf && buflen > 0) {
+        int copy = (buflen - 1 < static_cast<int>(bytes.size()))
+                     ? buflen - 1 : static_cast<int>(bytes.size());
+        if (copy > 0) std::memcpy(buf, bytes.data(), copy);
+        buf[copy] = '\0';
+      }
+      return need;
+    }
+
     // Returns total bytes needed incl. NUL terminator (matches the seam
     // contract). buf=NULL queries size. 0 = no text.
     int get_text(char* buf, int buflen)
@@ -129,14 +145,7 @@ namespace neui_detail
           if (!request_target(XA_STRING, bytes, got) || bytes.empty())
             return 0;
       }
-      int need = static_cast<int>(bytes.size()) + 1;  // + NUL
-      if (buf && buflen > 0) {
-        int copy = (buflen - 1 < static_cast<int>(bytes.size()))
-                     ? buflen - 1 : static_cast<int>(bytes.size());
-        if (copy > 0) std::memcpy(buf, bytes.data(), copy);
-        buf[copy] = '\0';
-      }
-      return need;
+      return fill_text_out(bytes, buf, buflen);
     }
 
     // --- PRIMARY selection (text-only: select-to-copy / middle-click-paste) -
@@ -178,14 +187,7 @@ namespace neui_detail
             (!request_target_sel(XA_PRIMARY, XA_STRING, bytes, got) || bytes.empty()))
           return 0;
       }
-      int need = static_cast<int>(bytes.size()) + 1;
-      if (buf && buflen > 0) {
-        int copy = (buflen - 1 < static_cast<int>(bytes.size()))
-                     ? buflen - 1 : static_cast<int>(bytes.size());
-        if (copy > 0) std::memcpy(buf, bytes.data(), copy);
-        buf[copy] = '\0';
-      }
-      return need;
+      return fill_text_out(bytes, buf, buflen);
     }
 
     bool read_item(DataItem& out)
