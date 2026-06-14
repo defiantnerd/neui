@@ -147,6 +147,9 @@ namespace
 #ifdef NEUI_HAS_XI2
   int  g_xi2_opcode      = -1;     // major opcode of XInputExtension, -1 = absent
   bool g_xi2_scroll_seen = false;  // a nonzero XI2 scroll delta has arrived
+  bool g_xi2_motion_seen = false;  // an XI_Motion has arrived (XI2 now drives hover/
+                                   // drag; core MotionNotify is suppressed by the
+                                   // XI_Motion selection, so we skip it from here on)
   std::unordered_map<Display*, bool> g_xi2_inited;   // version negotiated per connection
 
   // One scroll axis on a device: which valuator carries it + its per-unit
@@ -574,14 +577,20 @@ namespace
     }
   }
 
-  void dispatch_motion(LinuxWindow* lw, XMotionEvent& me)
+  // Pointer-motion dispatch core. `state` is an X11 core button/modifier mask
+  // (ShiftMask / ControlMask / Button1Mask ...). Driven by core MotionNotify
+  // when XI2 is absent, and by XI_Motion when XI2 is active (selecting XI_Motion
+  // suppresses core MotionNotify on this server, so XI2 must drive hover/drag
+  // too - not just scroll).
+  void do_motion(LinuxWindow* lw, float lx, float ly, unsigned int state)
   {
     Session* s = lw->session;
-    float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
-    float lx = me.x / scale, ly = me.y / scale;
-
     if (s->_popup_active) { s->handle_popup_hover(lx, ly); return; }
-    if (s->_menu_open && s->handle_menubar_hover(lw->widget_index, lx, ly)) return;
+    if (s->_menu_open) {
+      if (s->handle_menubar_hover(lw->widget_index, lx, ly)) return;
+    } else if (s->handle_menubar_band_hover(lw->widget_index, lx, ly)) {
+      return;  // hovering the (closed) menubar band - highlight only, no widgets here
+    }
     if (s->handle_combo_scroll_drag(ly)) return;
     if (s->handle_combo_hover(lx, ly)) return;
 
@@ -589,9 +598,15 @@ namespace
     s->set_hovered(hit);
 
     uint32_t target = hit;
-    if (s->_pressed_widget != 0 && (me.state & Button1Mask))
+    if (s->_pressed_widget != 0 && (state & Button1Mask))
       target = s->_pressed_widget;   // route drags to the pressed widget
-    send_mouse(lw, NEUI_EVENT_MOUSE_MOVE, target, lx, ly, me.state, 0);
+    send_mouse(lw, NEUI_EVENT_MOUSE_MOVE, target, lx, ly, state, 0);
+  }
+
+  void dispatch_motion(LinuxWindow* lw, XMotionEvent& me)
+  {
+    float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    do_motion(lw, me.x / scale, me.y / scale, me.state);
   }
 
   void dispatch_key_press(LinuxWindow* lw, XKeyEvent& ke)
@@ -1237,7 +1252,21 @@ namespace
     if (ev.xcookie.evtype == XI_Motion) {
       auto* de = static_cast<XIDeviceEvent*>(ev.xcookie.data);
       LinuxWindow* lw = find_window(de->event);
-      if (lw && !lw->input_disabled) handle_xi2_scroll(lw, de);
+      if (lw) {
+        // XI_Motion now owns motion delivery (it suppresses core MotionNotify):
+        // drive hover/drag from it as well as scroll, both gated on the modal
+        // input-block. Rebuild an X11-core button/modifier mask from the XI
+        // device state so do_motion routes drags to the pressed widget.
+        g_xi2_motion_seen = true;
+        if (!lw->input_disabled) {
+          handle_xi2_scroll(lw, de);
+          unsigned int state = static_cast<unsigned int>(de->mods.effective);
+          if (de->buttons.mask_len > 0 && XIMaskIsSet(de->buttons.mask, 1))
+            state |= Button1Mask;
+          float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+          do_motion(lw, de->event_x / scale, de->event_y / scale, state);
+        }
+      }
     }
     XFreeEventData(ev.xcookie.display, &ev.xcookie);
     return true;
@@ -1324,14 +1353,26 @@ namespace
 
       case ButtonPress:   dispatch_button_press(lw, ev.xbutton);   break;
       case ButtonRelease: dispatch_button_release(lw, ev.xbutton); break;
-      case MotionNotify:  dispatch_motion(lw, ev.xmotion);          break;
+      case MotionNotify:
+        // Once XI_Motion is driving (XI2 active), it has replaced core motion;
+        // skip the core event to avoid double-dispatch. Without XI2 this is the
+        // only motion source.
+#ifdef NEUI_HAS_XI2
+        if (!g_xi2_motion_seen) dispatch_motion(lw, ev.xmotion);
+#else
+        dispatch_motion(lw, ev.xmotion);
+#endif
+        break;
       case KeyPress:      dispatch_key_press(lw, ev.xkey);          break;
       case KeyRelease:    dispatch_key_release(lw, ev.xkey);        break;
 
       case FocusIn:  s->_os_focused = true;  lw->needs_paint = true; break;
       case FocusOut: s->_os_focused = false; s->close_menubar_menu(); lw->needs_paint = true; break;
 
-      case LeaveNotify: s->set_hovered(0); break;
+      case LeaveNotify:
+        s->set_hovered(0);
+        if (s->_menu_band_hover != 0) { s->_menu_band_hover = 0; lw->needs_paint = true; }
+        break;
 
       case ClientMessage:
         if (xdnd_handle_client_message(ev.xclient)) break;   // XDND target messages

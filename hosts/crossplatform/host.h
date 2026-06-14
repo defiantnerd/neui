@@ -913,6 +913,11 @@ namespace xpl_host
     // only meaningful while a menu is open and return true when consumed.
     bool handle_menubar_click(uint32_t frame_index, float lx, float ly);
     bool handle_menubar_hover(uint32_t frame_index, float lx, float ly);
+    // Closed-menu hover: highlight the top-level band label under the cursor
+    // so it's an easy mouse target. Returns true while the cursor is over the
+    // band (no widgets live there); false below it (caller continues normal
+    // hover). Clears the highlight when the cursor leaves the band.
+    bool handle_menubar_band_hover(uint32_t frame_index, float lx, float ly);
     bool handle_menubar_key(uint32_t keycode, uint32_t modifiers);
     void close_menubar_menu();
 
@@ -960,6 +965,10 @@ namespace xpl_host
     uint32_t              _menu_bar         = 0;
     std::vector<uint32_t> _menu_path;
     uint32_t              _menu_hover_item  = 0;
+    // Top-level band label under the cursor while the menu is CLOSED (hover
+    // feedback before opening; 0 = none). When a menu is open, highlighting
+    // uses _menu_path / _menu_hover_item instead.
+    uint32_t              _menu_band_hover  = 0;
 
     // Overlay scrollbar drag state (managed by handle_combo_click / handle_combo_scroll_drag).
     bool     _combo_sb_dragging       = false;

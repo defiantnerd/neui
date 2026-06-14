@@ -3941,7 +3941,10 @@ namespace xpl_host
 
     for (auto& b : band) {
       bool open_top = mine && !_menu_path.empty() && _menu_path[0] == b.item_id;
-      bool hovered  = mine && _menu_hover_item == b.item_id;
+      // Open: highlight the hovered/open top-level. Closed: highlight the band
+      // label under the cursor so it's an obvious mouse target.
+      bool hovered  = mine ? (_menu_hover_item == b.item_id)
+                           : (_menu_band_hover == b.item_id);
       if (open_top || hovered)
         _backend->fill_rect(ctx, (float)b.x, 0.0f, (float)b.w, (float)MENUBAR_BAND_H, C(ColorRole::accent));
       _backend->draw_text(ctx, (float)(b.x + MENUBAR_LABEL_PAD), 0.0f,
@@ -4144,6 +4147,38 @@ namespace xpl_host
       return true;
     }
     return true;  // inside an open menu region but over no row: keep capture
+  }
+
+  bool Session::handle_menubar_band_hover(uint32_t frame_index, float lx, float ly)
+  {
+    MenubarWidget* mbp = frame_menubar(frame_index);
+    if (!mbp) {
+      if (_menu_band_hover != 0) {
+        _menu_band_hover = 0;
+        platform_invalidate(_widgets[frame_index].native_handle);
+      }
+      return false;
+    }
+    // Below the band: clear any highlight and let normal widget hover proceed.
+    if (ly < 0.0f || ly >= (float)MENUBAR_BAND_H) {
+      if (_menu_band_hover != 0) {
+        _menu_band_hover = 0;
+        platform_invalidate(_widgets[frame_index].native_handle);
+      }
+      return false;
+    }
+    // Over the band: highlight the label under the cursor (0 = gap between
+    // labels). The band reserves the top inset, so no widgets live here.
+    std::vector<MenuBandItem> band;
+    mb_build_band(this, _widgets[frame_index].render_ctx, *mbp, band);
+    uint32_t hov = 0;
+    for (auto& b : band)
+      if (lx >= (float)b.x && lx < (float)(b.x + b.w)) { hov = b.item_id; break; }
+    if (hov != _menu_band_hover) {
+      _menu_band_hover = hov;
+      platform_invalidate(_widgets[frame_index].native_handle);
+    }
+    return true;
   }
 
   bool Session::handle_menubar_key(uint32_t keycode, uint32_t /*modifiers*/)
