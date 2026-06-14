@@ -38,6 +38,7 @@
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
 #include <X11/Xresource.h>
+#include <X11/cursorfont.h>
 
 #include <sys/select.h>
 #include <sys/timerfd.h>
@@ -75,6 +76,12 @@ namespace
   // CLIPBOARD-selection owner/requestor (X11 selections, hosts/shared/linux).
   neui_detail::ClipboardX11 g_clipboard;
 
+  // Active cursor shape (CursorKind) + per-Display EW-resize cursor cache.
+  // Cursors are a per-connection resource, so embedded windows on their own
+  // Display get their own entry.
+  int g_cursor_kind = NEUI_CURSOR_DEFAULT;
+  std::unordered_map<Display*, Cursor> g_ew_cursors;
+
   // Per-frame window record, stashed on WidgetData::native_handle.
   struct LinuxWindow
   {
@@ -92,6 +99,10 @@ namespace
     uint32_t     dpi          = 96;
     bool         needs_paint  = false;
     bool         toast_anim   = false;
+    // Set when a left-press was consumed by the in-frame menubar, so the
+    // matching release is swallowed (it must not reach a widget under the
+    // now-closed dropdown).
+    bool         swallow_release   = false;
     // Double-click synthesis (X has no native double-click).
     Time         last_click_time   = 0;
     int          last_click_x       = 0;
@@ -231,7 +242,13 @@ namespace
       lw->win = 0;
     }
     // Embedded windows own a dedicated Display connection; close it last.
-    if (lw->owns_display && lw->dpy) { XCloseDisplay(lw->dpy); lw->dpy = nullptr; }
+    // Drop any cached cursor for it first (XCloseDisplay frees the resource,
+    // but a stale Display* key could collide with a later XOpenDisplay reuse).
+    if (lw->owns_display && lw->dpy) {
+      g_ew_cursors.erase(lw->dpy);
+      XCloseDisplay(lw->dpy);
+      lw->dpy = nullptr;
+    }
     delete lw;
   }
 
@@ -317,6 +334,13 @@ namespace
       if (s->_popup_active) { s->handle_popup_click(lx, ly); return; }
       if (s->handle_toast_click(lw->widget_index, lx, ly)) return;
       if (s->handle_combo_click(lx, ly)) return;
+      // In-frame menubar (band + cascading dropdowns) owns clicks in its band
+      // and while open; swallow the matching release so it can't fall through
+      // to a widget under the dismissed dropdown.
+      if (s->handle_menubar_click(lw->widget_index, lx, ly)) {
+        lw->swallow_release = true;
+        return;
+      }
 
       bool dbl = (lw->last_click_button == 1) &&
                  (be.time - lw->last_click_time <= 400) &&
@@ -341,6 +365,7 @@ namespace
 
     if (be.button == 3) {
       if (s->_popup_active) { s->handle_popup_click(lx, ly); return; }
+      if (s->_menu_open) { s->close_menubar_menu(); return; }
       uint32_t hit = s->widget_at(lx, ly, lw->widget_index);
       send_mouse(lw, NEUI_EVENT_MOUSE_RBUTTON_DOWN, hit, lx, ly, be.state, 0x0002);
     }
@@ -354,6 +379,7 @@ namespace
     float lx = be.x / scale, ly = be.y / scale;
 
     if (be.button == 1) {
+      if (lw->swallow_release) { lw->swallow_release = false; return; }
       if (s->_combo_sb_dragging) { s->_combo_sb_dragging = false; return; }
       uint32_t hit     = s->widget_at(lx, ly, lw->widget_index);
       uint32_t pressed = s->_pressed_widget;
@@ -394,6 +420,7 @@ namespace
     float lx = me.x / scale, ly = me.y / scale;
 
     if (s->_popup_active) { s->handle_popup_hover(lx, ly); return; }
+    if (s->_menu_open && s->handle_menubar_hover(lw->widget_index, lx, ly)) return;
     if (s->handle_combo_scroll_drag(ly)) return;
     if (s->handle_combo_hover(lx, ly)) return;
 
@@ -428,6 +455,14 @@ namespace
       s->focus_next(!(mods & NEUI_KMOD_SHIFT));
       return;
     }
+
+    // An open in-frame menubar captures the keyboard (Esc/arrows/Enter).
+    if (s->_menu_open) { s->handle_menubar_key(keycode, mods); return; }
+
+    // Menubar accelerators (Ctrl+S etc.) - matched here on Linux since the
+    // Win32 HACCEL path is MSG-based. On a hit the key is consumed (routed
+    // through dispatch_menu_event, which tries the focused widget first).
+    if (keycode != 0 && s->try_menubar_accel(keycode, mods)) return;
 
     // KEYDOWN: client first (focused widget), then the widget's on_keydown.
     if (keycode != 0) {
@@ -877,11 +912,15 @@ namespace
           if (wd->width != wlog || wd->height != hlog) {
             wd->width  = wlog;
             wd->height = hlog;
+            // The in-frame menubar band reserves the top of the client area;
+            // report the height below it so client layout matches Win32 (where
+            // the menu is non-client). 0 when there's no menubar.
+            int inset = s->frame_top_inset(lw->widget_index);
             neui_event_t re = {};
             re.type               = NEUI_EVENT_RESIZE;
             re.data.resize.widget = { wd->widget_id };
             re.data.resize.width  = wlog;
-            re.data.resize.height = hlog;
+            re.data.resize.height = hlog - inset;
             s->dispatch_event(&re);
           }
         }
@@ -896,7 +935,7 @@ namespace
       case KeyRelease:    dispatch_key_release(lw, ev.xkey);        break;
 
       case FocusIn:  s->_os_focused = true;  lw->needs_paint = true; break;
-      case FocusOut: s->_os_focused = false; lw->needs_paint = true; break;
+      case FocusOut: s->_os_focused = false; s->close_menubar_menu(); lw->needs_paint = true; break;
 
       case LeaveNotify: s->set_hovered(0); break;
 
@@ -1066,11 +1105,7 @@ namespace
     auto C = [](neui_detail::ColorRole r) {
       return neui_detail::current_palette().colors[(size_t)r];
     };
-    auto shade = [](uint32_t c, int dlt) -> uint32_t {
-      auto cl = [](int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); };
-      int a = (c >> 24) & 0xFF, r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
-      return ((uint32_t)a << 24) | (cl(r + dlt) << 16) | (cl(g + dlt) << 8) | cl(b + dlt);
-    };
+    using neui_detail::shade;   // shared ARGB channel shade (theme_palette.h)
 
     // Offscreen ctx for text measurement during layout (logical px).
     neui_render_ctx_t mctx = backend->create_offscreen_context(8, 8, 1.0f);
@@ -1573,8 +1608,18 @@ namespace
     return !g_quit;
   }
 
-  // ---- Menu bar: X11 has no native menu bar; render-in-UI is deferred. ------
-  void* platform_menubar_create(uint32_t /*widget_id*/)                                 { return nullptr; }
+  // ---- Menu bar -------------------------------------------------------------
+  // X11 has no native menu bar, so the host draws it itself inside the frame's
+  // client area (Session::paint_menubar + the handle_menubar_* input path). The
+  // menu *model* still lives in MenubarWidget; these platform hooks that mutate
+  // a native HMENU/NSMenu are therefore no-ops EXCEPT platform_menubar_create,
+  // which must return a non-null handle: widgets.cpp::t_add bails when
+  // mb.hmenu is null, so a null here would leave the model empty. The handle is
+  // an opaque sentinel - never dereferenced - so a fixed non-null value
+  // suffices (destroy is a no-op; the model is reconstructed from parent_item_id
+  // links at paint time).
+  bool  platform_menubar_in_frame()                                                    { return true; }
+  void* platform_menubar_create(uint32_t /*widget_id*/)                                 { return reinterpret_cast<void*>(0x1); }
   void  platform_menubar_destroy(void* /*hmenu*/)                                       {}
   void  platform_menubar_attach(void* /*frame*/, void* /*hmenu*/)                       {}
   void  platform_menubar_refresh(void* /*frame*/)                                       {}
@@ -1891,7 +1936,27 @@ namespace
     return result;
   }
 
-  void platform_set_cursor(int /*kind*/) {}   // per-window cursor deferred (Phase 4)
+  void platform_set_cursor(int kind)
+  {
+    // Called from the GRID header-divider hover on every motion event; an
+    // XDefineCursor is a round-trip, so no-op when the shape hasn't changed.
+    if (kind == g_cursor_kind) return;
+    g_cursor_kind = kind;
+    // X cursors are sticky per window until changed, so set it on every one of
+    // our windows (small count) rather than tracking which is under the pointer.
+    for (auto& kv : g_windows) {
+      LinuxWindow* lw = kv.second;
+      if (!lw->dpy || !lw->win) continue;
+      if (kind == NEUI_CURSOR_EW_RESIZE) {
+        Cursor& c = g_ew_cursors[lw->dpy];
+        if (!c) c = XCreateFontCursor(lw->dpy, XC_sb_h_double_arrow);
+        XDefineCursor(lw->dpy, lw->win, c);
+      } else {
+        XUndefineCursor(lw->dpy, lw->win);   // revert to the inherited arrow
+      }
+      XFlush(lw->dpy);
+    }
+  }
 
   void platform_start_toast_animation(void* native_handle)
   {

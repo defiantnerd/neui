@@ -242,6 +242,14 @@ namespace xpl_host
   // All hmenu / parent_hmenu / submenu parameters are HMENU on Win32 and
   // opaque void* (always nullptr) on non-Windows platforms.
 
+  // True when the platform has no native menu bar and the host must draw the
+  // menubar itself inside the frame's client area (reserving a top band and
+  // offsetting child widgets below it). Linux/X11 returns true; Win32 (HMENU)
+  // and macOS (global NSMenu) return false, as does the null platform. The
+  // shared paint walk consults this (via Session::frame_top_inset) so only the
+  // in-frame platforms reserve band space.
+  bool platform_menubar_in_frame();
+
   // Create a new top-level menu bar handle.
   // menubar_widget_id is the encoded (session_id<<16 | widget_index) used by
   // the macOS implementation to route NSMenuItem activations back to the

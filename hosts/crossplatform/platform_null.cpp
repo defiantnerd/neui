@@ -55,6 +55,7 @@ namespace xpl_host
   bool platform_run_modal_until(bool* /*keep_running*/) { return true; }
 
   // Menu bar - all no-ops on non-Windows platforms.
+  bool  platform_menubar_in_frame()                                                     { return false; }
   void* platform_menubar_create(uint32_t /*widget_id*/)                                 { return nullptr; }
   void  platform_menubar_destroy(void* /*hmenu*/)                                       {}
   void  platform_menubar_attach(void* /*frame*/, void* /*hmenu*/)                       {}

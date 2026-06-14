@@ -875,6 +875,54 @@ namespace xpl_host
     // suppress normal hit-testing in that case).
     bool handle_combo_hover(float lx, float ly);
 
+    // ---- In-frame menubar (Linux / any platform_menubar_in_frame() host) ----
+    // The host draws the menubar itself as a band at the top of the frame's
+    // client area, with cascading dropdowns. Win32 (HMENU) / macOS (NSMenu)
+    // use the OS menu and never reach this code (frame_top_inset returns 0,
+    // paint_menubar early-returns, the platform input layer never calls the
+    // handlers).
+
+    // The visible MENUBAR child of a frame (nullptr if none), and the
+    // popup-open effective-enabled verdict for a menu item (own flag AND
+    // focused-widget-can-perform for built-ins AND menu-client validate).
+    MenubarWidget* frame_menubar(uint32_t frame_index);
+    bool           menu_item_enabled(const MenubarWidget& mb, uint32_t item_id);
+
+    // Reserved top-band height (logical px) for `frame_index`: the menubar
+    // band height when this platform draws menubars in-frame AND the frame has
+    // a visible MENUBAR child, else 0. The shared paint walk offsets children
+    // down by this; the Linux RESIZE path subtracts it from the reported size.
+    int  frame_top_inset(uint32_t frame_index);
+
+    // Usable content area of a widget in its own coordinate space (logical px).
+    // For a frame this excludes any in-frame menubar band (origin (0, inset),
+    // size (w, h-inset)); otherwise (0, 0, width, height). Out-pointers may be
+    // NULL. Backs widgets->get_client_rect and the toast anchor.
+    void widget_client_rect(uint32_t widget_index,
+                            int* x, int* y, int* w, int* h);
+
+    // Paint the menubar band (+ any open cascading dropdowns) for the frame.
+    // Called from paint_frame after the child walk. No-op when the frame has
+    // no menubar or this platform uses a native menu.
+    void paint_menubar(neui_render_ctx_t ctx, uint32_t frame_index);
+
+    // Input hooks, called from the platform layer before normal dispatch.
+    // (lx, ly) are frame-local logical px. handle_menubar_click returns true
+    // when the click is owned by the menubar (in the band, in an open
+    // dropdown, or a click-outside that dismisses an open menu). hover/key are
+    // only meaningful while a menu is open and return true when consumed.
+    bool handle_menubar_click(uint32_t frame_index, float lx, float ly);
+    bool handle_menubar_hover(uint32_t frame_index, float lx, float ly);
+    bool handle_menubar_key(uint32_t keycode, uint32_t modifiers);
+    void close_menubar_menu();
+
+    // Match a key/modifier combo against every menubar item's shortcut and,
+    // on a hit, route it through dispatch_menu_event (built-in command first,
+    // then client TREE_ITEM_ACTIVATED). Returns true if a shortcut matched
+    // (the key is then consumed). Mirrors the Win32 HACCEL path, which is
+    // MSG-based and so does not run on Linux.
+    bool try_menubar_accel(uint32_t keycode, uint32_t modifiers);
+
   public:
     neui_detail::Tree<WidgetData>  _widgets;
     neui_detail::AssetManager      _asset_manager;
@@ -900,6 +948,18 @@ namespace xpl_host
     int                      _popup_x_abs      = 0;     // logical px, frame-local
     int                      _popup_y_abs      = 0;
     std::vector<std::string> _popup_items;
+
+    // In-frame menubar overlay state (see the handle_menubar_* methods).
+    // _menu_open gates the band/dropdown interaction; _menu_bar is the open
+    // menubar's widget index; _menu_path is the chain of open submenu item ids
+    // (path[0] = the open top-level popup, path[1] = an open submenu within it,
+    // ...), so cascades nest arbitrarily; _menu_hover_item is the menu item id
+    // currently under the cursor (0 = none) for row highlighting. Geometry is
+    // recomputed on demand from these (no stored rects), like the popup overlay.
+    bool                  _menu_open        = false;
+    uint32_t              _menu_bar         = 0;
+    std::vector<uint32_t> _menu_path;
+    uint32_t              _menu_hover_item  = 0;
 
     // Overlay scrollbar drag state (managed by handle_combo_click / handle_combo_scroll_drag).
     bool     _combo_sb_dragging       = false;

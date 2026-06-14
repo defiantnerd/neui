@@ -1635,6 +1635,8 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // Native menu bar
 
+  bool platform_menubar_in_frame() { return false; }   // Win32 uses a native HMENU
+
   void* platform_menubar_create(uint32_t /*menubar_widget_id*/)
   {
     // The widget_id arg is for the macOS impl's routing map; Win32 doesn't

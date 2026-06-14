@@ -30,7 +30,11 @@ namespace neui_detail
     if (!rgba) return nullptr;
     if (w <= 0 || h <= 0) { stbi_image_free(rgba); return nullptr; }
 
+    // Guard the BGRA byte-count multiply against size_t overflow before we
+    // new[] it. (stbi_load would already have failed to allocate an absurd
+    // image, but make the bound explicit rather than rely on that.)
     size_t count = static_cast<size_t>(w) * static_cast<size_t>(h);
+    if (count == 0 || count > (SIZE_MAX / 4)) { stbi_image_free(rgba); return nullptr; }
     uint8_t* out = new uint8_t[count * 4];
     for (size_t i = 0; i < count; ++i) {
       uint32_t r = rgba[i * 4 + 0];

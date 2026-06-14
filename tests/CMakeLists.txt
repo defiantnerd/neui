@@ -84,4 +84,16 @@ if(UNIX AND NOT APPLE)
   target_compile_features(neui_notify_smoke PRIVATE cxx_std_17)
   target_link_libraries(neui_notify_smoke PRIVATE
     neui neui-xplhost neui-backend-cairo Threads::Threads)
+
+  # In-frame menubar harness (drives synthetic clicks + accelerators at the
+  # frame and asserts the activated item). Needs a live X display + cooperative
+  # WM; built but not ctest-registered. Run ./tests/neui_menubar_smoke.
+  add_executable(neui_menubar_smoke menubar_smoke.cpp)
+  target_include_directories(neui_menubar_smoke PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/hosts/crossplatform
+    ${CMAKE_SOURCE_DIR}/hosts/shared)
+  target_compile_features(neui_menubar_smoke PRIVATE cxx_std_17)
+  target_link_libraries(neui_menubar_smoke PRIVATE
+    neui neui-xplhost neui-backend-cairo Threads::Threads)
 endif()

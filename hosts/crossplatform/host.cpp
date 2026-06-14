@@ -1908,8 +1908,20 @@ namespace xpl_host
     // Frame is the root of the absolute coord space - start the walk at
     // (0, 0). The frame's own widget rect isn't painted by this walk
     // (the begin_frame above did the clear); recursion enters its
-    // children directly.
-    paint_widgets_recursive(_backend, ctx, _widgets, parent_index, 0, 0, focus_for_paint);
+    // children directly. When this platform draws the menubar in-frame and
+    // the frame has one, reserve a top band: offset the whole child walk down
+    // by `inset` (so cached abs_x/abs_y stay screen-accurate for hit-test) and
+    // paint the band over the cleared strip afterwards. inset is 0 on Win32 /
+    // macOS (native menu) and for frames without a menubar.
+    int inset = frame_top_inset(parent_index);
+    if (inset > 0 && _backend->push_transform && _backend->translate) {
+      _backend->push_transform(ctx);
+      _backend->translate(ctx, 0.0f, (float)inset);
+      paint_widgets_recursive(_backend, ctx, _widgets, parent_index, 0, inset, focus_for_paint);
+      _backend->pop_transform(ctx);
+    } else {
+      paint_widgets_recursive(_backend, ctx, _widgets, parent_index, 0, 0, focus_for_paint);
+    }
     // Draw the open combo overlay on top of all other widgets.
     if (_open_combo != 0 && _widgets.exists(_open_combo)) {
       // Only paint if the combo belongs to this frame.
@@ -1921,6 +1933,9 @@ namespace xpl_host
         if (cb) cb->paint_overlay(_backend, ctx);
       }
     }
+    // In-frame menubar band (+ open cascading dropdowns) over the reserved
+    // top strip. No-op when the frame has no menubar / native-menu platforms.
+    paint_menubar(ctx, parent_index);
     // Popup-menu overlay sits on top of the combo overlay.
     paint_popup_menu(ctx);
     // Toast overlay sits on top of every other overlay.
@@ -3629,6 +3644,649 @@ namespace xpl_host
   }
 
   // -------------------------------------------------------------------------
+  // In-frame menubar (Linux / any platform_menubar_in_frame() host)
+  //
+  // The host draws the menubar itself: a horizontal band at the top of the
+  // frame's client area plus cascading dropdown columns. The menu *model*
+  // lives in MenubarWidget (menu_items keyed by neui item id, linked by
+  // parent_item_id); this code reconstructs the tree from those links at paint
+  // / hit-test time, so it needs no native HMENU. Geometry is recomputed on
+  // demand from (_menu_open, _menu_path) using the frame's own render context
+  // for text measurement - no cached rects, so it stays correct across resize
+  // and multiple frames. Win32 (HMENU) and macOS (NSMenu) use the OS menu and
+  // never enter here (frame_top_inset returns 0; the platform input layer
+  // never calls the handlers).
+
+  static constexpr int MENUBAR_BAND_H     = 24;   // reserved band height (logical px)
+  static constexpr int MENUBAR_LABEL_PAD  = 10;   // padding each side of a top-level label
+  static constexpr int MENUBAR_FONT_PX    = 13;
+  static constexpr int MENU_SHORTCUT_GAP  = 24;   // min gap text -> shortcut in a dropdown
+  static constexpr int MENU_ARROW_W       = 16;   // submenu arrow column width
+
+  namespace {
+
+    // A laid-out dropdown row. y/h are relative to the column's top-left.
+    struct MenuRowL {
+      uint32_t    item_id   = 0;
+      std::string text;
+      std::string shortcut;
+      bool        separator = false;
+      bool        submenu   = false;
+      bool        enabled   = true;
+      int         y         = 0;
+      int         h         = 0;
+    };
+    struct MenuColL {
+      uint32_t              parent_item = 0;  // the item whose children this column shows
+      int                   x = 0, y = 0, w = 0, h = 0;
+      std::vector<MenuRowL> rows;
+    };
+    struct MenuBandItem {
+      uint32_t    item_id = 0;
+      int         x = 0, w = 0;
+      std::string text;
+    };
+
+    // Direct children of `parent_item_id`, in insertion order.
+    void menu_children(const MenubarWidget& mb, uint32_t parent_item_id,
+                       std::vector<uint32_t>& out)
+    {
+      for (uint32_t id : mb.menu_item_ids_ordered) {
+        auto it = mb.menu_items.find(id);
+        if (it != mb.menu_items.end() && it->second.parent_item_id == parent_item_id)
+          out.push_back(id);
+      }
+    }
+
+    bool menu_item_has_children(const MenubarWidget& mb, uint32_t item_id)
+    {
+      for (uint32_t id : mb.menu_item_ids_ordered) {
+        auto it = mb.menu_items.find(id);
+        if (it != mb.menu_items.end() && it->second.parent_item_id == item_id)
+          return true;
+      }
+      return false;
+    }
+
+    int menu_measure(neui_render_backend_t* be, neui_render_ctx_t ctx,
+                     const std::string& s)
+    {
+      if (!be || !be->measure_text || s.empty()) return 0;
+      return static_cast<int>(be->measure_text(ctx, s.c_str(), -1,
+                                               static_cast<float>(MENUBAR_FONT_PX)));
+    }
+
+  } // namespace
+
+  // Forward decl: defined below, used by paint_menubar.
+  static uint32_t frame_menubar_index(neui_detail::Tree<WidgetData>& widgets,
+                                      uint32_t frame_index);
+
+  // The visible MENUBAR child of `frame_index`, or nullptr.
+  MenubarWidget* Session::frame_menubar(uint32_t frame_index)
+  {
+    if (!_widgets.exists(frame_index)) return nullptr;
+    uint32_t idx = _widgets.child(frame_index);
+    while (idx != 0) {
+      if (_widgets.exists(idx)) {
+        auto& wd = _widgets[idx];
+        if (wd.is_menubar() && wd.visible)
+          return dynamic_cast<MenubarWidget*>(&wd);
+      }
+      idx = _widgets.next(idx);
+    }
+    return nullptr;
+  }
+
+  // Effective enabled state of a menu item, mirroring the other hosts'
+  // popup-open auto-disable: the item's own flag AND (for a bound built-in
+  // command) a focused widget that can perform it AND (if a menu client is
+  // registered) its validate() verdict.
+  bool Session::menu_item_enabled(const MenubarWidget& mb, uint32_t item_id)
+  {
+    auto it = mb.menu_items.find(item_id);
+    if (it == mb.menu_items.end()) return false;
+    const auto& mi = it->second;
+    if (mi.is_separator) return false;
+    if (!mi.enabled) return false;
+    if (mi.menu_cmd != 0 && mi.menu_cmd < NEUI_CMD_USER_BASE &&
+        !can_focused_perform_command(mi.menu_cmd))
+      return false;
+    if (_menu_client && _menu_client->validate &&
+        !_menu_client->validate(_token, { mb.widget_id }, { item_id }, mi.menu_cmd))
+      return false;
+    return true;
+  }
+
+  // Lay out the top-level band labels (left to right). Free function (uses
+  // anonymous-namespace layout types, so it can't be a header-declared member).
+  static void mb_build_band(Session* s, neui_render_ctx_t ctx,
+                            const MenubarWidget& mb, std::vector<MenuBandItem>& out)
+  {
+    int x = 0;
+    std::vector<uint32_t> tops;
+    menu_children(mb, 0, tops);
+    for (uint32_t id : tops) {
+      auto it = mb.menu_items.find(id);
+      if (it == mb.menu_items.end() || it->second.is_separator) continue;
+      MenuBandItem bi;
+      bi.item_id = id;
+      bi.text    = it->second.text;
+      bi.x       = x;
+      bi.w       = menu_measure(s->_backend, ctx, bi.text) + MENUBAR_LABEL_PAD * 2;
+      out.push_back(bi);
+      x += bi.w;
+    }
+  }
+
+  // Build the chain of open dropdown columns from `path`, positioning each
+  // below/beside its parent and clamping to the frame so cascades stay visible.
+  static void mb_build_columns(Session* s, neui_render_ctx_t ctx,
+                               const MenubarWidget& mb, int frame_w, int frame_h,
+                               const std::vector<MenuBandItem>& band,
+                               const std::vector<uint32_t>& path,
+                               std::vector<MenuColL>& out)
+  {
+    for (size_t level = 0; level < path.size(); ++level) {
+      uint32_t parent_id = path[level];
+      MenuColL col;
+      col.parent_item = parent_id;
+
+      std::vector<uint32_t> kids;
+      menu_children(mb, parent_id, kids);
+
+      int max_text = 0, max_short = 0;
+      bool any_sub = false;
+      for (uint32_t kid : kids) {
+        auto it = mb.menu_items.find(kid);
+        if (it == mb.menu_items.end()) continue;
+        const auto& mi = it->second;
+        MenuRowL r;
+        r.item_id   = kid;
+        r.text      = mi.text;
+        r.shortcut  = mi.shortcut;
+        r.separator = mi.is_separator;
+        r.submenu   = menu_item_has_children(mb, kid);
+        r.enabled   = r.separator ? false
+                    : (r.submenu ? mi.enabled : s->menu_item_enabled(mb, kid));
+        if (!r.separator) {
+          max_text = std::max(max_text, menu_measure(s->_backend, ctx, r.text));
+          if (!r.shortcut.empty())
+            max_short = std::max(max_short, menu_measure(s->_backend, ctx, r.shortcut));
+          if (r.submenu) any_sub = true;
+        }
+        col.rows.push_back(std::move(r));
+      }
+
+      int w = POPUP_PAD_X * 2 + max_text;
+      if (max_short > 0) w += MENU_SHORTCUT_GAP + max_short;
+      if (any_sub)       w += MENU_ARROW_W;
+      if (w < POPUP_MIN_W) w = POPUP_MIN_W;
+
+      int run = POPUP_PAD_Y;
+      for (auto& r : col.rows) {
+        r.y = run;
+        r.h = r.separator ? POPUP_SEP_H : POPUP_ITEM_H;
+        run += r.h;
+      }
+      col.w = w;
+      col.h = run + POPUP_PAD_Y;
+
+      if (level == 0) {
+        int bx = 0;
+        for (auto& b : band) if (b.item_id == parent_id) { bx = b.x; break; }
+        col.x = bx;
+        col.y = MENUBAR_BAND_H;
+      } else {
+        const MenuColL& prev = out[level - 1];
+        int py = prev.y;
+        for (auto& pr : prev.rows)
+          if (pr.item_id == parent_id) { py = prev.y + pr.y; break; }
+        col.x = prev.x + prev.w;
+        col.y = py;
+      }
+
+      // Horizontal clamp: top-level shifts left; submenus flip to the left of
+      // their parent column if they'd overflow the right edge.
+      if (frame_w > 0 && col.x + col.w > frame_w) {
+        if (level == 0) {
+          col.x = std::max(0, frame_w - col.w);
+        } else {
+          int leftx = out[level - 1].x - col.w;
+          col.x = (leftx >= 0) ? leftx : std::max(0, frame_w - col.w);
+        }
+      }
+      // Vertical clamp.
+      if (frame_h > 0 && col.y + col.h > frame_h)
+        col.y = std::max(0, frame_h - col.h);
+
+      out.push_back(std::move(col));
+    }
+  }
+
+  int Session::frame_top_inset(uint32_t frame_index)
+  {
+    if (!platform_menubar_in_frame()) return 0;
+    return frame_menubar(frame_index) ? MENUBAR_BAND_H : 0;
+  }
+
+  // The usable content area of a widget, in the widget's own coordinate space
+  // (logical px). For a frame this excludes any in-frame menubar band: the
+  // returned origin (0, top_inset) is where child (0,0) lands in window space,
+  // and (w, h) is the content size below the band - the Win32 GetClientRect
+  // analogue. On native-menu platforms / menubar-less frames / non-frame
+  // widgets the inset is 0, so this is just (0, 0, width, height). Internal
+  // callers (toast anchoring) and the public widgets->get_client_rect share it.
+  void Session::widget_client_rect(uint32_t widget_index,
+                                   int* x, int* y, int* w, int* h)
+  {
+    int rx = 0, ry = 0, rw = 0, rh = 0;
+    if (_widgets.exists(widget_index)) {
+      auto& wd = _widgets[widget_index];
+      int inset = frame_top_inset(widget_index);
+      rw = wd.width;
+      ry = inset;
+      rh = wd.height - inset;
+      if (rh < 0) rh = 0;
+    }
+    if (x) *x = rx;
+    if (y) *y = ry;
+    if (w) *w = rw;
+    if (h) *h = rh;
+  }
+
+  void Session::close_menubar_menu()
+  {
+    if (!_menu_open && _menu_path.empty()) return;
+    uint32_t frame = 0;
+    if (_widgets.exists(_menu_bar)) {
+      auto parents = _widgets.get_all_parents(_menu_bar);
+      for (uint32_t p : parents)
+        if (p != 0 && _widgets.exists(p) && _widgets[p].native_handle) { frame = p; break; }
+    }
+    _menu_open = false;
+    _menu_path.clear();
+    _menu_hover_item = 0;
+    _menu_bar = 0;
+    if (frame && _widgets.exists(frame) && _widgets[frame].native_handle)
+      platform_invalidate(_widgets[frame].native_handle);
+  }
+
+  void Session::paint_menubar(neui_render_ctx_t ctx, uint32_t frame_index)
+  {
+    if (!_backend) return;
+    // Only the in-frame platforms draw the band; Win32 (HMENU) / macOS (NSMenu)
+    // xpl hosts have a MenubarWidget but render it through the OS menu.
+    if (!platform_menubar_in_frame()) return;
+    MenubarWidget* mbp = frame_menubar(frame_index);
+    if (!mbp) return;
+    const MenubarWidget& mb = *mbp;
+    using neui_detail::ColorRole;
+    auto C = [](ColorRole r) { return neui_detail::color(r); };
+
+    int fw = _widgets.exists(frame_index) ? _widgets[frame_index].width  : 0;
+    int fh = _widgets.exists(frame_index) ? _widgets[frame_index].height : 0;
+
+    std::vector<MenuBandItem> band;
+    mb_build_band(this, ctx, mb, band);
+
+    // Band background + bottom separator line.
+    _backend->fill_rect(ctx, 0.0f, 0.0f, (float)fw, (float)MENUBAR_BAND_H, C(ColorRole::panel_bg));
+    _backend->fill_rect(ctx, 0.0f, (float)(MENUBAR_BAND_H - 1), (float)fw, 1.0f, C(ColorRole::border));
+
+    // _menu_bar holds the open menu's menubar widget index; only this frame's
+    // own menubar shows its band highlight + dropdowns.
+    uint32_t this_mb_index = frame_menubar_index(_widgets, frame_index);
+    bool mine = _menu_open && _menu_bar == this_mb_index;
+
+    for (auto& b : band) {
+      bool open_top = mine && !_menu_path.empty() && _menu_path[0] == b.item_id;
+      bool hovered  = mine && _menu_hover_item == b.item_id;
+      if (open_top || hovered)
+        _backend->fill_rect(ctx, (float)b.x, 0.0f, (float)b.w, (float)MENUBAR_BAND_H, C(ColorRole::accent));
+      _backend->draw_text(ctx, (float)(b.x + MENUBAR_LABEL_PAD), 0.0f,
+                          (float)(b.w - MENUBAR_LABEL_PAD * 2), (float)MENUBAR_BAND_H,
+                          b.text.c_str(), (float)MENUBAR_FONT_PX,
+                          (open_top || hovered) ? C(ColorRole::accent_text)
+                                                : C(ColorRole::text_primary));
+    }
+
+    if (!mine) return;
+
+    std::vector<MenuColL> cols;
+    mb_build_columns(this, ctx, mb, fw, fh, band, _menu_path, cols);
+    for (auto& col : cols) {
+      _backend->fill_rect(ctx, (float)col.x, (float)col.y, (float)col.w, (float)col.h,
+                          C(ColorRole::control_bg_alt));
+      _backend->draw_rect(ctx, (float)col.x, (float)col.y, (float)col.w, (float)col.h, 1.0f,
+                          C(ColorRole::border));
+      for (auto& r : col.rows) {
+        float ry = (float)(col.y + r.y);
+        if (r.separator) {
+          _backend->fill_rect(ctx, (float)col.x + 4.0f, ry + (float)POPUP_SEP_H * 0.5f,
+                              (float)col.w - 8.0f, 1.0f, C(ColorRole::scrollbar_separator));
+          continue;
+        }
+        // Highlight the hovered row, or the row whose submenu is currently open.
+        bool open_sub = false;
+        for (uint32_t pid : _menu_path) if (pid == r.item_id) { open_sub = true; break; }
+        bool hl = (r.item_id == _menu_hover_item) || open_sub;
+        if (hl)
+          _backend->fill_rect(ctx, (float)col.x + 1.0f, ry, (float)col.w - 2.0f, (float)r.h,
+                              C(ColorRole::accent));
+        uint32_t tcol = !r.enabled ? C(ColorRole::text_disabled)
+                      : hl          ? C(ColorRole::accent_text)
+                                    : C(ColorRole::text_primary);
+        _backend->draw_text(ctx, (float)(col.x + POPUP_PAD_X), ry,
+                            (float)(col.w - POPUP_PAD_X * 2), (float)r.h,
+                            r.text.c_str(), (float)MENUBAR_FONT_PX, tcol);
+        if (!r.shortcut.empty()) {
+          int sw = menu_measure(_backend, ctx, r.shortcut);
+          int sx = col.x + col.w - POPUP_PAD_X - (r.submenu ? MENU_ARROW_W : 0) - sw;
+          uint32_t scol = !r.enabled ? C(ColorRole::text_disabled)
+                        : hl          ? C(ColorRole::accent_text)
+                                      : C(ColorRole::text_secondary);
+          _backend->draw_text(ctx, (float)sx, ry, (float)sw, (float)r.h,
+                              r.shortcut.c_str(), (float)MENUBAR_FONT_PX, scol);
+        }
+        if (r.submenu) {
+          uint32_t acol = !r.enabled ? C(ColorRole::text_disabled)
+                        : hl          ? C(ColorRole::accent_text)
+                                      : C(ColorRole::text_secondary);
+          _backend->draw_text(ctx, (float)(col.x + col.w - MENU_ARROW_W), ry,
+                              (float)MENU_ARROW_W, (float)r.h,
+                              "\xE2\x96\xB8" /* U+25B8 small right triangle */,
+                              (float)MENUBAR_FONT_PX, acol);
+        }
+      }
+    }
+  }
+
+  // Find the index of the visible menubar child of `frame_index` (0 if none).
+  static uint32_t frame_menubar_index(neui_detail::Tree<WidgetData>& widgets,
+                                      uint32_t frame_index)
+  {
+    if (!widgets.exists(frame_index)) return 0;
+    uint32_t idx = widgets.child(frame_index);
+    while (idx != 0) {
+      if (widgets.exists(idx) && widgets[idx].is_menubar() && widgets[idx].visible)
+        return idx;
+      idx = widgets.next(idx);
+    }
+    return 0;
+  }
+
+  bool Session::handle_menubar_click(uint32_t frame_index, float lx, float ly)
+  {
+    MenubarWidget* mbp = frame_menubar(frame_index);
+    if (!mbp) {
+      if (_menu_open) { close_menubar_menu(); return true; }
+      return false;
+    }
+    const MenubarWidget& mb = *mbp;
+    uint32_t this_mb_index = frame_menubar_index(_widgets, frame_index);
+    neui_render_ctx_t ctx = _widgets[frame_index].render_ctx;
+    int fw = _widgets[frame_index].width, fh = _widgets[frame_index].height;
+    bool mine = _menu_open && _menu_bar == this_mb_index;
+
+    std::vector<MenuBandItem> band;
+    mb_build_band(this, ctx, mb, band);
+
+    bool in_band = ly >= 0.0f && ly < (float)MENUBAR_BAND_H;
+
+    if (in_band) {
+      for (auto& b : band) {
+        if (lx >= (float)b.x && lx < (float)(b.x + b.w)) {
+          if (mine && !_menu_path.empty() && _menu_path[0] == b.item_id) {
+            close_menubar_menu();           // toggle the open top-level closed
+          } else {
+            _menu_open       = true;
+            _menu_bar        = this_mb_index;
+            _menu_path       = { b.item_id };
+            _menu_hover_item = b.item_id;
+            platform_invalidate(_widgets[frame_index].native_handle);
+          }
+          return true;
+        }
+      }
+      // Click on empty band area: dismiss if open, else consume (band is ours).
+      if (mine) close_menubar_menu();
+      return true;
+    }
+
+    if (!mine) return false;  // closed + click below the band -> normal dispatch
+
+    std::vector<MenuColL> cols;
+    mb_build_columns(this, ctx, mb, fw, fh, band, _menu_path, cols);
+    for (size_t level = 0; level < cols.size(); ++level) {
+      const MenuColL& col = cols[level];
+      if (lx < (float)col.x || lx >= (float)(col.x + col.w) ||
+          ly < (float)col.y || ly >= (float)(col.y + col.h))
+        continue;
+      for (auto& r : col.rows) {
+        float ry = (float)(col.y + r.y);
+        if (ly < ry || ly >= ry + (float)r.h) continue;
+        if (r.separator) return true;
+        if (r.submenu) {
+          if (!r.enabled) return true;
+          _menu_path.resize(level + 1);
+          _menu_path.push_back(r.item_id);
+          _menu_hover_item = r.item_id;
+          platform_invalidate(_widgets[frame_index].native_handle);
+          return true;
+        }
+        if (r.enabled) {
+          uint32_t cmd_id = mb.menu_items.at(r.item_id).cmd_id;
+          close_menubar_menu();
+          dispatch_menu_event(cmd_id);
+        }
+        return true;  // disabled leaf: consume, no action
+      }
+      return true;     // inside the column padding: consume
+    }
+
+    // Click outside band and all columns while open: dismiss.
+    close_menubar_menu();
+    return true;
+  }
+
+  bool Session::handle_menubar_hover(uint32_t frame_index, float lx, float ly)
+  {
+    if (!_menu_open) return false;
+    MenubarWidget* mbp = frame_menubar(frame_index);
+    uint32_t this_mb_index = frame_menubar_index(_widgets, frame_index);
+    if (!mbp || _menu_bar != this_mb_index) return false;
+    const MenubarWidget& mb = *mbp;
+    neui_render_ctx_t ctx = _widgets[frame_index].render_ctx;
+    int fw = _widgets[frame_index].width, fh = _widgets[frame_index].height;
+
+    std::vector<MenuBandItem> band;
+    mb_build_band(this, ctx, mb, band);
+
+    // Hover over the band switches the open top-level menu.
+    if (ly >= 0.0f && ly < (float)MENUBAR_BAND_H) {
+      for (auto& b : band) {
+        if (lx >= (float)b.x && lx < (float)(b.x + b.w)) {
+          if (_menu_path.empty() || _menu_path[0] != b.item_id) {
+            _menu_path       = { b.item_id };
+            _menu_hover_item = b.item_id;
+            platform_invalidate(_widgets[frame_index].native_handle);
+          } else if (_menu_hover_item != b.item_id) {
+            _menu_hover_item = b.item_id;
+            platform_invalidate(_widgets[frame_index].native_handle);
+          }
+          return true;
+        }
+      }
+      return true;  // over the band but not on a label: keep capture, no change
+    }
+
+    std::vector<MenuColL> cols;
+    mb_build_columns(this, ctx, mb, fw, fh, band, _menu_path, cols);
+    for (size_t level = 0; level < cols.size(); ++level) {
+      const MenuColL& col = cols[level];
+      if (lx < (float)col.x || lx >= (float)(col.x + col.w) ||
+          ly < (float)col.y || ly >= (float)(col.y + col.h))
+        continue;
+      for (auto& r : col.rows) {
+        float ry = (float)(col.y + r.y);
+        if (ly < ry || ly >= ry + (float)r.h) continue;
+        if (r.separator) return true;
+        std::vector<uint32_t> newpath(_menu_path.begin(),
+                                      _menu_path.begin() + (level + 1));
+        if (r.submenu && r.enabled) newpath.push_back(r.item_id);
+        bool changed = (newpath != _menu_path) || (_menu_hover_item != r.item_id);
+        _menu_path       = std::move(newpath);
+        _menu_hover_item = r.item_id;
+        if (changed) platform_invalidate(_widgets[frame_index].native_handle);
+        return true;
+      }
+      return true;
+    }
+    return true;  // inside an open menu region but over no row: keep capture
+  }
+
+  bool Session::handle_menubar_key(uint32_t keycode, uint32_t /*modifiers*/)
+  {
+    if (!_menu_open) return false;
+    MenubarWidget* mbp = _widgets.exists(_menu_bar)
+                       ? dynamic_cast<MenubarWidget*>(&_widgets[_menu_bar]) : nullptr;
+    if (!mbp) { close_menubar_menu(); return true; }
+    const MenubarWidget& mb = *mbp;
+
+    // Resolve the owning frame for invalidation.
+    uint32_t frame = 0;
+    {
+      auto parents = _widgets.get_all_parents(_menu_bar);
+      for (uint32_t p : parents)
+        if (p != 0 && _widgets.exists(p) && _widgets[p].native_handle) { frame = p; break; }
+    }
+    auto invalidate = [&]() {
+      if (frame && _widgets.exists(frame) && _widgets[frame].native_handle)
+        platform_invalidate(_widgets[frame].native_handle);
+    };
+
+    if (keycode == NEUI_KEY_ESCAPE) {
+      if (_menu_path.size() > 1) { _menu_path.pop_back(); _menu_hover_item =
+        _menu_path.empty() ? 0 : _menu_path.back(); invalidate(); }
+      else close_menubar_menu();
+      return true;
+    }
+
+    std::vector<uint32_t> tops; menu_children(mb, 0, tops);
+
+    // Selectable (non-separator) children of the deepest open column.
+    uint32_t cur_parent = _menu_path.empty() ? 0 : _menu_path.back();
+    std::vector<uint32_t> rows;
+    {
+      std::vector<uint32_t> kids; menu_children(mb, cur_parent, kids);
+      for (uint32_t k : kids) {
+        auto it = mb.menu_items.find(k);
+        if (it != mb.menu_items.end() && !it->second.is_separator) rows.push_back(k);
+      }
+    }
+
+    auto move_row = [&](int dir) {
+      if (rows.empty()) return;
+      int cur = -1;
+      for (int i = 0; i < (int)rows.size(); ++i)
+        if (rows[i] == _menu_hover_item) { cur = i; break; }
+      int n = (int)rows.size();
+      int next = (cur < 0) ? (dir > 0 ? 0 : n - 1) : (((cur + dir) % n) + n) % n;
+      // skip disabled
+      for (int guard = 0; guard < n; ++guard) {
+        uint32_t cand = rows[next];
+        bool ok = menu_item_has_children(mb, cand) || menu_item_enabled(mb, cand);
+        if (ok) break;
+        next = ((next + dir) % n + n) % n;
+      }
+      _menu_hover_item = rows[next];
+      invalidate();
+    };
+
+    if (keycode == NEUI_KEY_DOWN) { move_row(+1); return true; }
+    if (keycode == NEUI_KEY_UP)   { move_row(-1); return true; }
+
+    if (keycode == NEUI_KEY_LEFT) {
+      if (_menu_path.size() > 1) {
+        _menu_hover_item = _menu_path.back();
+        _menu_path.pop_back();
+        invalidate();
+      } else {
+        // move to previous top-level menu
+        int cur = -1;
+        for (int i = 0; i < (int)tops.size(); ++i)
+          if (!_menu_path.empty() && tops[i] == _menu_path[0]) { cur = i; break; }
+        if (!tops.empty()) {
+          int prev = (cur <= 0) ? (int)tops.size() - 1 : cur - 1;
+          _menu_path = { tops[prev] }; _menu_hover_item = tops[prev]; invalidate();
+        }
+      }
+      return true;
+    }
+
+    if (keycode == NEUI_KEY_RIGHT) {
+      // If the hovered row is a submenu, descend; else move to the next top-level.
+      if (_menu_hover_item != 0 && menu_item_has_children(mb, _menu_hover_item) &&
+          (_menu_path.empty() || _menu_path.back() != _menu_hover_item)) {
+        _menu_path.push_back(_menu_hover_item);
+        invalidate();
+      } else {
+        int cur = -1;
+        for (int i = 0; i < (int)tops.size(); ++i)
+          if (!_menu_path.empty() && tops[i] == _menu_path[0]) { cur = i; break; }
+        if (!tops.empty()) {
+          int nxt = (cur < 0) ? 0 : (cur + 1) % (int)tops.size();
+          _menu_path = { tops[nxt] }; _menu_hover_item = tops[nxt]; invalidate();
+        }
+      }
+      return true;
+    }
+
+    if (keycode == NEUI_KEY_RETURN) {
+      if (_menu_hover_item != 0) {
+        if (menu_item_has_children(mb, _menu_hover_item)) {
+          if (_menu_path.empty() || _menu_path.back() != _menu_hover_item) {
+            _menu_path.push_back(_menu_hover_item);
+            invalidate();
+          }
+        } else if (menu_item_enabled(mb, _menu_hover_item)) {
+          uint32_t cmd_id = mb.menu_items.at(_menu_hover_item).cmd_id;
+          close_menubar_menu();
+          dispatch_menu_event(cmd_id);
+        }
+      }
+      return true;
+    }
+
+    return true;  // capture all keys while a menu is open
+  }
+
+  bool Session::try_menubar_accel(uint32_t keycode, uint32_t modifiers)
+  {
+    if (keycode == 0 || keycode == NEUI_KEY_NONE) return false;
+    const uint32_t mask = NEUI_KMOD_CTRL | NEUI_KMOD_SHIFT |
+                          NEUI_KMOD_ALT  | NEUI_KMOD_META;
+    uint32_t mods = modifiers & mask;
+    for (uint32_t mb_idx : _menubars) {
+      if (!_widgets.exists(mb_idx)) continue;
+      auto* mbp = dynamic_cast<MenubarWidget*>(&_widgets[mb_idx]);
+      if (!mbp) continue;
+      for (uint32_t id : mbp->menu_item_ids_ordered) {
+        auto it = mbp->menu_items.find(id);
+        if (it == mbp->menu_items.end()) continue;
+        const auto& mi = it->second;
+        if (mi.is_separator || mi.shortcut_key == NEUI_KEY_NONE) continue;
+        if (mi.shortcut_key == keycode && (mi.shortcut_mods & mask) == mods) {
+          dispatch_menu_event(mi.cmd_id);
+          return true;  // accelerator fired (consumed regardless of handler)
+        }
+      }
+    }
+    return false;
+  }
+
+  // -------------------------------------------------------------------------
   // Toast overlay
 
   // Toast geometry / animation constants (logical px / ms).
@@ -3717,7 +4375,7 @@ namespace xpl_host
 
   // Compute the toast rect (in frame-local logical px) for a frame's
   // current ToastState. Returns false if no toast is active.
-  static bool toast_current_rect(FrameWidget* fw,
+  static bool toast_current_rect(FrameWidget* fw, int base_y,
                                   int& out_x, int& out_y,
                                   int& out_w, int& out_h)
   {
@@ -3739,8 +4397,8 @@ namespace xpl_host
       float e     = p * p * p;
       slide_t     = 1.0f - e;
     }
-    int rest_y  = ts.line_h;
-    int start_y = -ts.height;
+    int rest_y  = base_y + ts.line_h;
+    int start_y = base_y - ts.height;
     out_y = static_cast<int>(static_cast<float>(start_y) +
             (static_cast<float>(rest_y) - static_cast<float>(start_y)) *
             slide_t);
@@ -3757,7 +4415,8 @@ namespace xpl_host
     auto* fw = dynamic_cast<FrameWidget*>(get_widget(frame_widget_idx));
     if (!fw || !fw->toast.active) return false;
     int rx, ry, rw, rh;
-    if (!toast_current_rect(fw, rx, ry, rw, rh)) return false;
+    if (!toast_current_rect(fw, frame_top_inset(frame_widget_idx), rx, ry, rw, rh))
+      return false;
     if (lx < static_cast<float>(rx) || lx >= static_cast<float>(rx + rw) ||
         ly < static_cast<float>(ry) || ly >= static_cast<float>(ry + rh))
       return false;
@@ -3813,11 +4472,18 @@ namespace xpl_host
       slide_t = 1.0f - e;
     }
 
-    // Resting position: top edge sits `line_h` below the frame's client-area
-    // top (one-line gap above the toast). Slide_t blends between fully
-    // hidden above the top edge and the resting position.
-    int rest_y   = ts.line_h;                  // top edge gap = one line
-    int start_y  = -ts.height;                 // fully out of view above
+    // Anchor to the client area (below an in-frame menubar band, if any), so
+    // the toast slides down from the content top rather than over the band.
+    // base_y is 0 on native-menu platforms / menubar-less frames.
+    int cx, cy, cw, ch;
+    widget_client_rect(frame_widget_idx, &cx, &cy, &cw, &ch);
+    int base_y   = cy;
+
+    // Resting position: top edge sits `line_h` below the client-area top
+    // (one-line gap above the toast). Slide_t blends between fully hidden
+    // above the client top and the resting position.
+    int rest_y   = base_y + ts.line_h;         // top edge gap = one line
+    int start_y  = base_y - ts.height;         // fully out of view above
     int top_y    = static_cast<int>(static_cast<float>(start_y) +
                     (static_cast<float>(rest_y) - static_cast<float>(start_y)) *
                     slide_t);
@@ -3829,6 +4495,13 @@ namespace xpl_host
       // rather than dump a fully opaque toast on top of widgets.
       return;
     }
+    // Clip to the client area so the fly-in never paints over the menubar band
+    // (the toast is painted after the band). No-op-equivalent full-window clip
+    // when there's no band.
+    bool clipped = _backend->push_clip != nullptr && _backend->pop_clip != nullptr;
+    if (clipped)
+      _backend->push_clip(ctx, static_cast<float>(cx), static_cast<float>(cy),
+                          static_cast<float>(cw), static_cast<float>(ch));
     _backend->push_alpha(ctx, alpha);
 
     using neui_detail::ColorRole;
@@ -3877,6 +4550,7 @@ namespace xpl_host
     }
 
     _backend->pop_alpha(ctx);
+    if (clipped) _backend->pop_clip(ctx);
   }
 
   void Session::open_combo(uint32_t idx)

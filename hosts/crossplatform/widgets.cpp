@@ -620,6 +620,14 @@ namespace xpl_host
     if (height) *height = wd.height;
   }
 
+  static void NEUI_ABI w_get_client_rect(neui_session_t session, neui_widget_t widget,
+                                         int* x, int* y, int* width, int* height)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    s->widget_client_rect(WidgetToIndex(widget), x, y, width, height);
+  }
+
   static int NEUI_ABI w_popup_menu(neui_session_t session, neui_widget_t anchor,
                                     int x, int y, const char* const* items)
   {
@@ -671,6 +679,7 @@ namespace xpl_host
     w_set_asset,
     w_set_enabled,
     w_get_enabled,
+    w_get_client_rect,
   };
 
   // -------------------------------------------------------------------------

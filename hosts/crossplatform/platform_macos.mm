@@ -1568,6 +1568,8 @@ namespace xpl_host
   // activations route through NEUIMenuTarget.neuiMenuPick: -> the matching
   // Session::dispatch_menu_event.
 
+  bool platform_menubar_in_frame() { return false; }   // macOS uses the global NSMenu
+
   void* platform_menubar_create(uint32_t menubar_widget_id)
   {
     NSMenu* m = [[NSMenu alloc] init];

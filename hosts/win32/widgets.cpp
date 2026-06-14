@@ -3889,6 +3889,22 @@ namespace win32_host
     if (height) *height = wd->height;
   }
 
+  // Content area of a widget in its own coordinate space. Win32 frames carry a
+  // native HMENU (non-client), so the client area is the full widget rect with
+  // a (0, 0) origin - no in-frame band inset like the Linux xpl host.
+  static void get_client_rect_api(neui_session_t session, neui_widget_t widget,
+                                  int* x, int* y, int* width, int* height)
+  {
+    auto s = get_session_for_widget(session, widget);
+    if (!s) return;
+    auto* wd = s->get_widget(WidgetToIndex(widget));
+    if (!wd) return;
+    if (x)      *x      = 0;
+    if (y)      *y      = 0;
+    if (width)  *width  = wd->width;
+    if (height) *height = wd->height;
+  }
+
   // ---------------------------------------------------------------------------
   // Invalidate (request repaint)
 
@@ -4048,6 +4064,7 @@ namespace win32_host
     set_asset,
     set_enabled,
     get_enabled,
+    get_client_rect_api,
   };
 
   // -------------------------------------------------------------------------
