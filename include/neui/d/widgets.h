@@ -110,6 +110,19 @@ typedef struct neui_widget_api {
   //   is not yet wired (TODO: NSControl setEnabled:).
   void               (NEUI_ABI *set_enabled)(neui_session_t session, neui_widget_t widget, bool enabled);
   bool               (NEUI_ABI *get_enabled)(neui_session_t session, neui_widget_t widget);
+  // Read the usable content area of a widget in its own coordinate space
+  // (logical px at 96 DPI). For a frame this is the area available for child
+  // widgets, EXCLUDING any host-drawn in-frame menubar band: child widget
+  // coordinates are relative to (x, y), and (width, height) is the content
+  // size. This is the Win32 GetClientRect analogue - on platforms with a
+  // native menu (Win32 HMENU / macOS NSMenu), a menubar-less frame, or a
+  // non-frame widget, it returns (0, 0, widget_width, widget_height). Use it
+  // instead of get_size when laying out against a frame that may carry a
+  // menubar, so layout stays correct on the Linux in-frame-menubar host.
+  // Out-pointers may be NULL to ignore fields. No-op if the widget does not
+  // exist. (Vtable-appended; check the api version / pointer before calling.)
+  void               (NEUI_ABI *get_client_rect)(neui_session_t session, neui_widget_t widget,
+                                                  int* x, int* y, int* width, int* height);
 } neui_widget_api_t;
 
 #define NEUI_W_APPWINDOW  "neui.std.appwindow"

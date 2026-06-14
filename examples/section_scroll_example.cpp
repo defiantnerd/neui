@@ -427,9 +427,13 @@ int main(int /*argc*/, char* /*argv*/[])
   // Default kinetics: PLATFORM (matches the combo's initial selection).
   app.attrs->set_int(app.session, section, NEUI_ATTR_SCROLL_KINETICS,
                       NEUI_SCROLL_KINETICS_PLATFORM);
-  // Give the section a distinct background so its body rect is visible
-  // against the window's clear colour.
-  app.attrs->set_int(app.session, section, NEUI_ATTR_BACKGROUND, 0xFFE0E8F0);
+  // Leave NEUI_ATTR_BACKGROUND unset so the body uses the theme-derived
+  // section shade (a lifted frame_bg): a panel that stays distinct from the
+  // window AND legible with the theme's text colour under both light and dark
+  // system themes. Hardcoding a light colour here (e.g. 0xFFE0E8F0) painted a
+  // light body under a dark theme, leaving the theme-coloured (white) child
+  // labels/buttons low-contrast - the framework paints child widgets from the
+  // palette, it does not re-theme them to a section's custom background.
   app.section_id = section.id;
 
   // First-time generation BEFORE show() so children are present at the

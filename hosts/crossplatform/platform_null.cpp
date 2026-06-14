@@ -55,6 +55,7 @@ namespace xpl_host
   bool platform_run_modal_until(bool* /*keep_running*/) { return true; }
 
   // Menu bar - all no-ops on non-Windows platforms.
+  bool  platform_menubar_in_frame()                                                     { return false; }
   void* platform_menubar_create(uint32_t /*widget_id*/)                                 { return nullptr; }
   void  platform_menubar_destroy(void* /*hmenu*/)                                       {}
   void  platform_menubar_attach(void* /*frame*/, void* /*hmenu*/)                       {}
@@ -86,6 +87,8 @@ namespace xpl_host
   bool platform_clipboard_set_text(const char* /*utf8*/, uint32_t /*length*/) { return false; }
   int  platform_clipboard_get_text(char* /*buf*/, int /*buflen*/)             { return 0;     }
   bool platform_clipboard_has_text()                                          { return false; }
+  void platform_clipboard_set_primary(const char* /*u*/, uint32_t /*l*/)      {}
+  int  platform_clipboard_get_primary(char* /*b*/, int /*n*/)                 { return 0; }
   bool platform_clipboard_write_item(const neui_detail::DataItem& /*item*/)   { return false; }
   bool platform_clipboard_read_item(neui_detail::DataItem& /*item*/)          { return false; }
 

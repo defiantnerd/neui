@@ -1568,6 +1568,8 @@ namespace xpl_host
   // activations route through NEUIMenuTarget.neuiMenuPick: -> the matching
   // Session::dispatch_menu_event.
 
+  bool platform_menubar_in_frame() { return false; }   // macOS uses the global NSMenu
+
   void* platform_menubar_create(uint32_t menubar_widget_id)
   {
     NSMenu* m = [[NSMenu alloc] init];
@@ -1772,6 +1774,10 @@ namespace xpl_host
   {
     return neui_detail::clipboard_has_text_macos();
   }
+
+  // No PRIMARY selection on macOS.
+  void platform_clipboard_set_primary(const char* /*utf8*/, uint32_t /*length*/) {}
+  int  platform_clipboard_get_primary(char* /*buf*/, int /*buflen*/) { return 0; }
 
   bool platform_clipboard_write_item(const neui_detail::DataItem& item)
   {

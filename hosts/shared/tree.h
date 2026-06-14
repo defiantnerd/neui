@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>   // std::reverse
+#include <cstdint>     // uint32_t
 #include <memory>
 #include <vector>
 

@@ -553,6 +553,20 @@ namespace macos_host
     }
     if (w) *w = gw; if (h) *h = gh;
   }
+  // Content area in the widget's own coordinate space. macOS frames use the
+  // global NSMenu (no in-frame band), so this is the full widget rect at a
+  // (0, 0) origin - matching the Linux xpl host's menubar-less / native-menu case.
+  static void  NEUI_ABI w_get_client_rect(neui_session_t session, neui_widget_t widget,
+                                          int* x, int* y, int* w, int* h)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    int gw = 0, gh = 0;
+    if (s) {
+      uint32_t i = WidgetToIndex(widget);
+      if (s->_widgets.exists(i)) { gw = s->_widgets[i].width; gh = s->_widgets[i].height; }
+    }
+    if (x) *x = 0; if (y) *y = 0; if (w) *w = gw; if (h) *h = gh;
+  }
   static int   NEUI_ABI w_popup_menu(neui_session_t session, neui_widget_t anchor,
                                       int x, int y, const char* const* items)
   {
@@ -725,6 +739,7 @@ namespace macos_host
     w_set_asset,
     w_set_enabled,
     w_get_enabled,
+    w_get_client_rect,
   };
 
   // -------------------------------------------------------------------------

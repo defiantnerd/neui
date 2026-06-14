@@ -35,8 +35,38 @@ namespace xpl_host
 
   // Create a borderless embeddable plugin window (PLUGWINDOW).
   // Sets wd.native_handle, wd.render_ctx, and wd.dpi on success.
+  // On Linux, if wd.embed_parent_xid != 0 (see platform_set_embed_parent) the
+  // window is created as a child of that foreign X11 Window over a dedicated
+  // Display connection, and the host owns no event loop for it - the DAW
+  // drives platform_embed_pump_and_tick (below).
   void platform_create_plugwindow(Session* session, uint32_t widget_index,
                                    WidgetData& wd);
+
+  // -------------------------------------------------------------------------
+  // Linux/X11 DAW-embedding seams. The neui side of a plugin adapter: a
+  // foreign-parent child window plus a host-driven pump (no neui-owned event
+  // loop in embedded mode). Implemented only on the Linux platform layer; the
+  // actual VST3/CLAP/LV2 SDK glue is a separate, out-of-scope effort that
+  // calls these. No-ops / absent on other platforms.
+
+  // Set the reparent target for the next PLUGWINDOW created for this widget.
+  // parent_xid is the DAW-provided X11 Window (cast through unsigned long).
+  // parent_xid 0 = standalone top-level. Must be called before widget_show.
+  void platform_set_embed_parent(Session* session, uint32_t widget_index,
+                                 unsigned long parent_xid);
+
+  // The X11 connection file descriptor for an embedded window's dedicated
+  // Display. The DAW registers this with its run loop (VST3 IRunLoop
+  // registerEventHandler / CLAP posix-fd) so it knows when to pump. Returns
+  // -1 for a non-embedded / null handle.
+  int platform_embed_event_fd(void* native_handle);
+
+  // Drain pending X events for an embedded window and, at most once per
+  // ~16 ms, advance one animation tick + repaint. The DAW calls this from its
+  // periodic timer (VST3 IRunLoop registerTimer / CLAP timer / LV2 idle) and
+  // whenever platform_embed_event_fd signals readable. This is the ONLY
+  // heartbeat in embedded mode - neui spins no loop of its own.
+  void platform_embed_pump_and_tick(void* native_handle);
 
   // Create a dialog frame (DIALOG): titlebar + close button, no resize, no
   // minimize/maximize buttons, optionally owned by `owner_native` (its
@@ -146,6 +176,14 @@ namespace xpl_host
   // True if the clipboard currently advertises Unicode text.
   bool platform_clipboard_has_text();
 
+  // X11 PRIMARY selection (select-to-copy / middle-click-paste). Linux only;
+  // no-op / 0 on Win32 + macOS (no PRIMARY concept). set publishes the current
+  // text selection so other apps (and our own middle-click) can paste it; get
+  // reads whatever owns PRIMARY now (same return contract as get_text - total
+  // bytes incl. NUL, buf=NULL queries size, 0 = none).
+  void platform_clipboard_set_primary(const char* utf8, uint32_t length);
+  int  platform_clipboard_get_primary(char* buf, int buflen);
+
   // Place every format on the item onto the system clipboard.
   // Returns true if at least one format was published.
   bool platform_clipboard_write_item(const neui_detail::DataItem& item);
@@ -211,6 +249,14 @@ namespace xpl_host
   // Native menu bar support.
   // All hmenu / parent_hmenu / submenu parameters are HMENU on Win32 and
   // opaque void* (always nullptr) on non-Windows platforms.
+
+  // True when the platform has no native menu bar and the host must draw the
+  // menubar itself inside the frame's client area (reserving a top band and
+  // offsetting child widgets below it). Linux/X11 returns true; Win32 (HMENU)
+  // and macOS (global NSMenu) return false, as does the null platform. The
+  // shared paint walk consults this (via Session::frame_top_inset) so only the
+  // in-frame platforms reserve band space.
+  bool platform_menubar_in_frame();
 
   // Create a new top-level menu bar handle.
   // menubar_widget_id is the encoded (session_id<<16 | widget_index) used by

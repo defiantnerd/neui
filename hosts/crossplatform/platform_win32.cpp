@@ -1635,6 +1635,8 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // Native menu bar
 
+  bool platform_menubar_in_frame() { return false; }   // Win32 uses a native HMENU
+
   void* platform_menubar_create(uint32_t /*menubar_widget_id*/)
   {
     // The widget_id arg is for the macOS impl's routing map; Win32 doesn't
@@ -1804,6 +1806,10 @@ namespace xpl_host
   {
     return neui_detail::clipboard_has_text_win32();
   }
+
+  // No PRIMARY selection on Win32.
+  void platform_clipboard_set_primary(const char* /*utf8*/, uint32_t /*length*/) {}
+  int  platform_clipboard_get_primary(char* /*buf*/, int /*buflen*/) { return 0; }
 
   bool platform_clipboard_write_item(const neui_detail::DataItem& item)
   {
