@@ -1359,6 +1359,9 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // InputBoxWidget key handling
 
+  // Defined below (just before on_mouse_event); used by the key handler too.
+  static void publish_primary_selection(const std::string& text, int cursor, int anchor);
+
   bool InputBoxWidget::on_keydown(uint32_t keycode, uint32_t modifiers)
   {
     using namespace neui_detail;
@@ -1391,6 +1394,7 @@ namespace xpl_host
     case NEUI_KEY_A:
       if (ctrl) {
         te_select_all(text, cursor_pos, sel_anchor, &history);
+        publish_primary_selection(text, cursor_pos, sel_anchor);
         repaint();
         return true;
       }
@@ -1398,8 +1402,10 @@ namespace xpl_host
     case NEUI_KEY_C:
       if (ctrl) {
         std::string sel = te_selected_text(text, cursor_pos, sel_anchor);
-        if (!sel.empty())
+        if (!sel.empty()) {
           platform_clipboard_set_text(sel.c_str(), (uint32_t)sel.size());
+          platform_clipboard_set_primary(sel.c_str(), (uint32_t)sel.size());
+        }
         return true;
       }
       break;
@@ -1511,8 +1517,34 @@ namespace xpl_host
     return true;
   }
 
+  // Publish a text widget's current selection to the X11 PRIMARY selection so
+  // it can be middle-click-pasted (into another app or our own widgets). No-op
+  // with no selection, and on Win32 / macOS (the seam is a no-op there).
+  static void publish_primary_selection(const std::string& text, int cursor, int anchor)
+  {
+    if (!neui_detail::te_has_selection(cursor, anchor)) return;
+    std::string sel = neui_detail::te_selected_text(text, cursor, anchor);
+    if (!sel.empty())
+      platform_clipboard_set_primary(sel.c_str(), static_cast<uint32_t>(sel.size()));
+  }
+
+  bool InputBoxWidget::insert_text(const std::string& utf8)
+  {
+    bool readonly = attrs && attrs->get_int(NEUI_ATTR_READONLY, 0) != 0;
+    if (readonly || utf8.empty()) return false;
+    neui_detail::te_paste(text, cursor_pos, sel_anchor, utf8,
+                          /*strip_newlines=*/true, &history);
+    repaint();
+    return true;
+  }
+
   bool InputBoxWidget::on_mouse_event(neui_event_t* event)
   {
+    // Drag-select ends on button-up: publish the selection to PRIMARY.
+    if (event->type == NEUI_EVENT_MOUSE_BUTTON_UP) {
+      publish_primary_selection(text, cursor_pos, sel_anchor);
+      return false;
+    }
     bool is_down    = (event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN);
     bool is_dblclk  = (event->type == NEUI_EVENT_MOUSE_BUTTON_DBLCLICK);
     bool is_drag    = (event->type == NEUI_EVENT_MOUSE_MOVE) &&
@@ -1573,6 +1605,7 @@ namespace xpl_host
       neui_detail::te_word_bounds(text, new_pos, ws, we);
       sel_anchor = ws;
       cursor_pos = we;
+      publish_primary_selection(text, cursor_pos, sel_anchor);
       repaint();
       return true;
     }
@@ -5347,6 +5380,7 @@ namespace xpl_host
     case NEUI_KEY_A:
       if (ctrl) {
         te_select_all(text, cursor_pos, sel_anchor, &history);
+        publish_primary_selection(text, cursor_pos, sel_anchor);
         repaint();
         return true;
       }
@@ -5355,8 +5389,10 @@ namespace xpl_host
     case NEUI_KEY_C:
       if (ctrl) {
         std::string sel = te_selected_text(text, cursor_pos, sel_anchor);
-        if (!sel.empty())
+        if (!sel.empty()) {
           platform_clipboard_set_text(sel.c_str(), (uint32_t)sel.size());
+          platform_clipboard_set_primary(sel.c_str(), (uint32_t)sel.size());
+        }
         return true;
       }
       break;
@@ -5556,8 +5592,29 @@ namespace xpl_host
 
   // ---- MultilineWidget mouse --------------------------------------------
 
+  bool MultilineWidget::insert_text(const std::string& utf8)
+  {
+    bool readonly = attrs && attrs->get_int(NEUI_ATTR_READONLY, 0) != 0;
+    if (readonly || utf8.empty()) return false;
+    // Keep newlines (multiline), normalise CRLF -> LF.
+    std::string ins;
+    ins.reserve(utf8.size());
+    for (char c : utf8) if (c != '\r') ins.push_back(c);
+    neui_detail::te_paste(text, cursor_pos, sel_anchor, ins,
+                          /*strip_newlines=*/false, &history);
+    mark_lines_dirty();
+    ml_scroll_to_cursor(*this, cached_line_starts());
+    repaint();
+    return true;
+  }
+
   bool MultilineWidget::on_mouse_event(neui_event_t* event)
   {
+    // Drag-select ends on button-up (body, not scrollbar): publish to PRIMARY.
+    if (event->type == NEUI_EVENT_MOUSE_BUTTON_UP && !sb_dragging) {
+      publish_primary_selection(text, cursor_pos, sel_anchor);
+      return false;
+    }
     auto starts = cached_line_starts();
     uint32_t n_lines = static_cast<uint32_t>(starts.size());
     int vis = ml_visible_lines(height);

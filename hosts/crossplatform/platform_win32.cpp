@@ -1807,6 +1807,10 @@ namespace xpl_host
     return neui_detail::clipboard_has_text_win32();
   }
 
+  // No PRIMARY selection on Win32.
+  void platform_clipboard_set_primary(const char* /*utf8*/, uint32_t /*length*/) {}
+  int  platform_clipboard_get_primary(char* /*buf*/, int /*buflen*/) { return 0; }
+
   bool platform_clipboard_write_item(const neui_detail::DataItem& item)
   {
     return neui_detail::clipboard_write_item_win32(item);

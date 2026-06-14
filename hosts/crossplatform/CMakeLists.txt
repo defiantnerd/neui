@@ -64,6 +64,20 @@ elseif(UNIX)
     message(STATUS "neui: libXi not found - XInput2 smooth scroll disabled "
                    "(core Button 4-7 stepped scroll fallback). Install libxi-dev to enable.")
   endif()
+
+  # Optional: system dark/light tracking via the XDG desktop portal over D-Bus.
+  # Present -> NEUI_ATTR_THEME_MODE=AUTO follows the system color-scheme live;
+  # absent -> the host keeps its default palette (no system tracking).
+  pkg_check_modules(DBUS dbus-1)
+  if(DBUS_FOUND)
+    target_compile_definitions(neui-xplhost PRIVATE NEUI_HAS_DBUS=1)
+    target_include_directories(neui-xplhost PRIVATE ${DBUS_INCLUDE_DIRS})
+    target_link_libraries(neui-xplhost PRIVATE ${DBUS_LIBRARIES})
+    message(STATUS "neui: system dark-mode tracking enabled (libdbus-1 found)")
+  else()
+    message(STATUS "neui: libdbus-1 not found - system dark-mode tracking disabled. "
+                   "Install libdbus-1-dev to enable.")
+  endif()
 else()
   target_sources(neui-xplhost PRIVATE platform_null.cpp)
   target_link_libraries(neui-xplhost PRIVATE neui-backend-null)

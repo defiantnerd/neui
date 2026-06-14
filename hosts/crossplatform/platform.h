@@ -176,6 +176,14 @@ namespace xpl_host
   // True if the clipboard currently advertises Unicode text.
   bool platform_clipboard_has_text();
 
+  // X11 PRIMARY selection (select-to-copy / middle-click-paste). Linux only;
+  // no-op / 0 on Win32 + macOS (no PRIMARY concept). set publishes the current
+  // text selection so other apps (and our own middle-click) can paste it; get
+  // reads whatever owns PRIMARY now (same return contract as get_text - total
+  // bytes incl. NUL, buf=NULL queries size, 0 = none).
+  void platform_clipboard_set_primary(const char* utf8, uint32_t length);
+  int  platform_clipboard_get_primary(char* buf, int buflen);
+
   // Place every format on the item onto the system clipboard.
   // Returns true if at least one format was published.
   bool platform_clipboard_write_item(const neui_detail::DataItem& item);

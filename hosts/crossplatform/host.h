@@ -141,6 +141,12 @@ namespace xpl_host
     // Type classification - avoids strcmp in hot paths.
     virtual bool is_frame()   const { return false; }
     virtual bool is_menubar() const { return false; }
+    // Editable text surfaces (INPUTBOX / MULTILINE). Lets the platform layer
+    // target X11 middle-click PRIMARY paste at the right widget. insert_text
+    // inserts UTF-8 at the caret (replacing any selection); returns true if it
+    // consumed (false = not editable / readonly / empty).
+    virtual bool is_text_input() const { return false; }
+    virtual bool insert_text(const std::string& /*utf8*/) { return false; }
     // GRID widgets expose their scroll model so the platform layer can drive
     // pixel-precise smooth scrolling / rubber-band (macOS). nullptr otherwise.
     virtual neui_detail::GridModel* grid_model_ptr() { return nullptr; }
@@ -363,6 +369,8 @@ namespace xpl_host
     bool on_mouse_event(neui_event_t* event) override;
     bool perform_command(uint32_t cmd) override;
     bool can_perform_command(uint32_t cmd) const override;
+    bool is_text_input() const override { return true; }
+    bool insert_text(const std::string& utf8) override;
     bool on_composition(int kind, const char* utf8, int byte_len, int caret_byte,
                         const uint8_t* per_byte_attrs) override;
     bool caret_rect_local(neui_render_backend_t* backend, neui_render_ctx_t ctx,
@@ -393,6 +401,8 @@ namespace xpl_host
     bool on_mouse_event(neui_event_t* event) override;
     bool perform_command(uint32_t cmd) override;
     bool can_perform_command(uint32_t cmd) const override;
+    bool is_text_input() const override { return true; }
+    bool insert_text(const std::string& utf8) override;
     bool on_composition(int kind, const char* utf8, int byte_len, int caret_byte,
                         const uint8_t* per_byte_attrs) override;
     bool caret_rect_local(neui_render_backend_t* backend, neui_render_ctx_t ctx,

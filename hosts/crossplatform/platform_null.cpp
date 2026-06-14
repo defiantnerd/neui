@@ -87,6 +87,8 @@ namespace xpl_host
   bool platform_clipboard_set_text(const char* /*utf8*/, uint32_t /*length*/) { return false; }
   int  platform_clipboard_get_text(char* /*buf*/, int /*buflen*/)             { return 0;     }
   bool platform_clipboard_has_text()                                          { return false; }
+  void platform_clipboard_set_primary(const char* /*u*/, uint32_t /*l*/)      {}
+  int  platform_clipboard_get_primary(char* /*b*/, int /*n*/)                 { return 0; }
   bool platform_clipboard_write_item(const neui_detail::DataItem& /*item*/)   { return false; }
   bool platform_clipboard_read_item(neui_detail::DataItem& /*item*/)          { return false; }
 

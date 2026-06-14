@@ -27,6 +27,7 @@
 #include "../shared/linux/dnd_linux.h"
 #include "../shared/linux/message_box_linux.h"
 #include "../shared/theme_palette.h"
+#include "../shared/linux/theme_provider_linux.h"
 #include "../../backends/cairo/cairo_backend.h"
 
 // This TU emits the single stb_image implementation for the Linux host.
@@ -524,6 +525,24 @@ namespace
       s->set_focus(hit);
       s->set_pressed(hit);
       send_mouse(lw, NEUI_EVENT_MOUSE_BUTTON_DOWN, hit, lx, ly, be.state, 0x0001);
+      return;
+    }
+
+    if (be.button == 2) {
+      // Middle-click paste (X PRIMARY): into the text widget under the cursor.
+      if (s->_menu_open) { s->close_menubar_menu(); return; }
+      uint32_t hit = s->widget_at(lx, ly, lw->widget_index);
+      auto* hw = s->get_widget(hit);
+      if (!hw || !hw->is_text_input()) return;
+      int n = platform_clipboard_get_primary(nullptr, 0);
+      if (n <= 1) return;   // empty PRIMARY (n counts the NUL)
+      // Position the caret at the click first (reuse the widget's BUTTON_DOWN
+      // caret-placement), then insert the PRIMARY text there.
+      s->set_focus(hit);
+      send_mouse(lw, NEUI_EVENT_MOUSE_BUTTON_DOWN, hit, lx, ly, be.state, 0);
+      std::vector<char> buf(static_cast<size_t>(n));
+      platform_clipboard_get_primary(buf.data(), n);
+      hw->insert_text(std::string(buf.data(), static_cast<size_t>(n - 1)));
       return;
     }
 
@@ -1518,7 +1537,7 @@ namespace
       if (wd.render_ctx) backend->update_dpi(wd.render_ctx, dpi);
     }
 
-    // Pre-show attribute-driven size constraints.
+    // Pre-show attribute-driven size constraints + window icon.
     if (wd.attrs) {
       int min_w = wd.attrs->get_int(NEUI_ATTR_MIN_WIDTH,  0);
       int min_h = wd.attrs->get_int(NEUI_ATTR_MIN_HEIGHT, 0);
@@ -1526,6 +1545,8 @@ namespace
       int max_h = wd.attrs->get_int(NEUI_ATTR_MAX_HEIGHT, 0);
       if (min_w || min_h || max_w || max_h)
         platform_apply_size_constraints(lw, min_w, min_h, max_w, max_h);
+      const char* icon = wd.attrs->get_string(NEUI_ATTR_ICON_PATH);
+      if (icon && *icon) platform_set_window_icon(wd, icon);
     }
 
     if (is_appwindow) { ++g_appwindow_count; lw->counted = true; }
@@ -1820,6 +1841,11 @@ namespace
 
     g_clipboard.init(g_display);
     g_xa.intern(g_display);
+
+    // System dark/light tracking via the XDG portal (no-op without libdbus-1).
+    // Runs before any Session is created so the first frame's frozen palette
+    // already reflects the system color-scheme.
+    neui_detail::ensure_theme_provider_linux();
   }
 
   neui_render_backend_t* platform_get_backend()
@@ -1901,6 +1927,7 @@ namespace
       lw->last_tick_ms = now;
       if (lw->toast_anim) lw->needs_paint = true;
       step_scroll_bounce(lw);   // advance any GRID/SECTION spring-back
+      neui_detail::theme_dbus_dispatch();   // pick up system dark/light changes
     }
     if (lw->needs_paint) paint_window(lw);
     XFlush(lw->dpy);
@@ -2039,12 +2066,16 @@ namespace
       fd_set rfds; FD_ZERO(&rfds); FD_SET(xfd, &rfds);
       int maxfd = xfd;
       if (g_timerfd >= 0) { FD_SET(g_timerfd, &rfds); if (g_timerfd > maxfd) maxfd = g_timerfd; }
+      int dfd = neui_detail::theme_dbus_fd();   // -1 without libdbus / no bus
+      if (dfd >= 0) { FD_SET(dfd, &rfds); if (dfd > maxfd) maxfd = dfd; }
       int r = select(maxfd + 1, &rfds, nullptr, nullptr, nullptr);
       if (r < 0) { if (errno == EINTR) continue; break; }
       if (g_timerfd >= 0 && FD_ISSET(g_timerfd, &rfds)) {
         uint64_t exp = 0; ssize_t rd = read(g_timerfd, &exp, sizeof(exp)); (void)rd;
         tick_animations();
       }
+      if (dfd >= 0 && FD_ISSET(dfd, &rfds))
+        neui_detail::theme_dbus_dispatch();   // -> SettingChanged -> repaint
       // Readable X fd is handled by drain_events() at the top of the loop.
     }
     return true;
@@ -2110,7 +2141,49 @@ namespace
   void  platform_menubar_set_item_shortcut(void* /*hmenu*/, uint32_t /*cmd*/,
                                             uint32_t /*mods*/, uint32_t /*key*/)        {}
 
-  void platform_set_window_icon(WidgetData& /*wd*/, const char* /*path*/) {}
+  void platform_set_window_icon(WidgetData& wd, const char* path_utf8)
+  {
+    if (!wd.native_handle) return;   // applied from create_frame once the window exists
+    auto* lw = static_cast<LinuxWindow*>(wd.native_handle);
+    Atom prop = XInternAtom(lw->dpy, "_NET_WM_ICON", False);
+    if (prop == None) return;
+
+    // Empty path clears the icon.
+    if (!path_utf8 || !*path_utf8) {
+      XDeleteProperty(lw->dpy, lw->win, prop);
+      XFlush(lw->dpy);
+      return;
+    }
+
+    uint32_t w = 0, h = 0;
+    uint8_t* px = platform_load_image(path_utf8, &w, &h);   // BGRA8 premultiplied
+    if (!px) return;
+    if (w == 0 || h == 0) { platform_free_image(px); return; }
+
+    // _NET_WM_ICON is an array of CARD32 [w, h, then w*h pixels in 0xAARRGGBB],
+    // format 32 (Xlib widens to `long` on LP64). The loader gives premultiplied
+    // BGRA; un-premultiply back to straight ARGB so the WM doesn't darken
+    // anti-aliased edges. A BGRA byte quad reads as 0xAARRGGBB little-endian.
+    std::vector<long> data;
+    data.reserve(2 + static_cast<size_t>(w) * h);
+    data.push_back(static_cast<long>(w));
+    data.push_back(static_cast<long>(h));
+    for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i) {
+      uint32_t b = px[i * 4 + 0], g = px[i * 4 + 1], r = px[i * 4 + 2], a = px[i * 4 + 3];
+      if (a > 0 && a < 255) {     // un-premultiply
+        r = std::min<uint32_t>(255, (r * 255 + a / 2) / a);
+        g = std::min<uint32_t>(255, (g * 255 + a / 2) / a);
+        b = std::min<uint32_t>(255, (b * 255 + a / 2) / a);
+      }
+      data.push_back(static_cast<long>((a << 24) | (r << 16) | (g << 8) | b));
+    }
+    platform_free_image(px);
+
+    XChangeProperty(lw->dpy, lw->win, prop, XA_CARDINAL, 32, PropModeReplace,
+                    reinterpret_cast<unsigned char*>(data.data()),
+                    static_cast<int>(data.size()));
+    XFlush(lw->dpy);
+  }
 
   void platform_apply_size_constraints(void* native_handle,
                                         int min_w, int min_h, int max_w, int max_h)
@@ -2151,6 +2224,10 @@ namespace
   { return g_clipboard.set_text(utf8, length); }
   int  platform_clipboard_get_text(char* buf, int buflen)
   { return g_clipboard.get_text(buf, buflen); }
+  void platform_clipboard_set_primary(const char* utf8, uint32_t length)
+  { g_clipboard.set_primary_text(utf8, length); }
+  int  platform_clipboard_get_primary(char* buf, int buflen)
+  { return g_clipboard.get_primary_text(buf, buflen); }
   bool platform_clipboard_has_text()
   { return g_clipboard.has_text(); }
   bool platform_clipboard_write_item(const neui_detail::DataItem& item)

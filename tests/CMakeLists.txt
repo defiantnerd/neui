@@ -74,6 +74,15 @@ if(UNIX AND NOT APPLE)
   target_link_libraries(neui_clipboard_targets_smoke PRIVATE
     ${X11_LIBRARIES} Threads::Threads)
 
+  # INCR chunked-transfer round-trip (two ClipboardX11 instances over a ~1 MB
+  # payload). Needs a live X display; built but not ctest-registered.
+  add_executable(neui_incr_smoke incr_smoke.cpp)
+  target_include_directories(neui_incr_smoke PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/hosts/shared)
+  target_compile_features(neui_incr_smoke PRIVATE cxx_std_17)
+  target_link_libraries(neui_incr_smoke PRIVATE ${X11_LIBRARIES} Threads::Threads)
+
   # Message-box harness (drives modal boxes from a background thread). Needs a
   # live X display; built but not ctest-registered.
   add_executable(neui_notify_smoke notify_smoke.cpp)
