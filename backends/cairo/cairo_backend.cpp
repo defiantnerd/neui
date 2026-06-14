@@ -451,17 +451,40 @@ namespace neui_cairo_backend
 
     if (!apply_font(st, font_size)) { cairo_restore(st->cr); return; }
 
+    // Split on '\n' (tolerating CRLF) so embedded newlines render as multiple
+    // lines, matching the DirectWrite backend (which breaks on '\n'). The
+    // common single-line case yields one entry and behaves as before. cairo's
+    // show_text itself does not interpret '\n', so we lay the lines out here.
+    std::vector<std::string> lines;
+    for (const char* start = text, *p = text;; ++p) {
+      if (*p == '\n' || *p == '\0') {
+        size_t len = static_cast<size_t>(p - start);
+        if (len && start[len - 1] == '\r') --len;   // strip CR of a CRLF
+        lines.emplace_back(start, len);
+        if (*p == '\0') break;
+        start = p + 1;
+      }
+    }
+
     cairo_font_extents_t fe;
     cairo_font_extents(st->cr, &fe);
-    double line_h    = fe.ascent + fe.descent;
-    double text_top  = y + (h - line_h) * 0.5;
+    double line_h   = fe.ascent + fe.descent;
+    double block_h  = line_h * static_cast<double>(lines.size());
+    // Vertically centre the whole line block within the rect (one line ==
+    // the previous single-line centring).
+    double text_top = y + (h - block_h) * 0.5;
     if (text_top < y) text_top = y;
     double baseline_y = text_top + fe.ascent;
 
     double rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     cairo_set_source_rgba(st->cr, rgba[0], rgba[1], rgba[2], rgba[3]);
-    cairo_move_to(st->cr, x, baseline_y);
-    cairo_show_text(st->cr, text);
+    for (const auto& ln : lines) {
+      if (!ln.empty()) {
+        cairo_move_to(st->cr, x, baseline_y);
+        cairo_show_text(st->cr, ln.c_str());
+      }
+      baseline_y += line_h;
+    }
 
     cairo_restore(st->cr);
   }

@@ -49,6 +49,21 @@ elseif(UNIX)
     ${CAIRO_LIBRARIES}
     ${FONTCONFIG_LIBRARIES}
     Freetype::Freetype)
+
+  # XInput2 smooth scroll is an optional enhancement: if libXi (dev) is present
+  # the host mines XI2 scroll valuators for pixel-precise / kinetic scrolling;
+  # otherwise it falls back to classic core Button 4-7 stepped scrolling. Build
+  # never hard-depends on libXi-dev.
+  pkg_check_modules(XI xi)
+  if(XI_FOUND)
+    target_compile_definitions(neui-xplhost PRIVATE NEUI_HAS_XI2=1)
+    target_include_directories(neui-xplhost PRIVATE ${XI_INCLUDE_DIRS})
+    target_link_libraries(neui-xplhost PRIVATE ${XI_LIBRARIES})
+    message(STATUS "neui: XInput2 smooth scroll enabled (libXi found)")
+  else()
+    message(STATUS "neui: libXi not found - XInput2 smooth scroll disabled "
+                   "(core Button 4-7 stepped scroll fallback). Install libxi-dev to enable.")
+  endif()
 else()
   target_sources(neui-xplhost PRIVATE platform_null.cpp)
   target_link_libraries(neui-xplhost PRIVATE neui-backend-null)

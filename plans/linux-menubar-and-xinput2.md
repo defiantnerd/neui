@@ -95,7 +95,46 @@ built-but-not-ctest-registered since it needs a live display.
 
 ---
 
-## 2. XInput2 smooth scroll (GRID + SECTION kinetics)
+## 2. XInput2 smooth scroll (GRID + SECTION kinetics) — ✅ SHIPPED (2026-06-14)
+
+Implemented as designed. Summary of what landed in `platform_linux.cpp`:
+- **Optional build dependency**: CMake `pkg_check_modules(XI xi)` defines
+  `NEUI_HAS_XI2` + links libXi when present; otherwise the whole XI2 block
+  compiles out and only the classic core Button 4-7 stepped path is built (so
+  `libxi-dev` is not a hard build dependency). CLAUDE.md build deps updated.
+- **Setup**: `ensure_xi2` negotiates XI2 ≥ 2.0 per connection (opcode is
+  server-global); `xi2_select_window` selects `XI_Motion` (`XIAllMasterDevices`)
+  on every frame window in `create_frame` — standalone and embedded (own `dpy`).
+- **Extraction**: `XI_Motion` arrives as a `GenericEvent` cookie, handled at the
+  top of `dispatch_x_event` (before the `xany.window` lookup, since cookies
+  carry none) with `XGetEventData`/`XFreeEventData` bracketing.
+  `handle_xi2_scroll` looks up the device's `XIScrollClassInfo` (cached lazily by
+  device id), diffs each scroll valuator against its last value
+  (`(value-last)/increment`) into wheel notches (sign-flipped to the neui
+  convention: +dv up, +dh left).
+- **Routing** (`feed_scroll`) mirrors `platform_win32`'s WM_MOUSEWHEEL: combo
+  overlay first, then GRID-smooth / SECTION kinetics fed pixel-precise
+  (`grid_scroll_wheel` / `section_kinetic_wheel_linux` → `section_scroll_wheel_kinetic`),
+  else a classic line-quantised `MOUSE_WHEEL` for stepped surfaces via a
+  fractional notch accumulator (`scroll_v_accum`/`scroll_h_accum`) so sub-notch
+  trackpad deltas still eventually emit whole lines.
+- **Spring-back**: per-window `bouncing_grid_index` / `bouncing_section_index`;
+  `any_window_animating` + `tick_animations` + `step_scroll_bounce` extend the
+  toast-only 16 ms timerfd heartbeat to run `grid_scroll_bounce_step` /
+  `section_scroll_bounce_step` (also stepped in `platform_embed_pump_and_tick`
+  for embedded mode), arming/disarming the timer around active bounces.
+- **Fallback / default**: legacy core Button 4-7 stay active and are suppressed
+  only after the first real XI2 scroll (`g_xi2_scroll_seen`) — so a server /
+  XWayland setup without scroll valuators degrades cleanly to stepped scroll and
+  never double-counts. `g_xi2_scroll_seen` also flips the `PLATFORM` kinetics
+  default (`grid_smooth_enabled` / `scroll_kinetics_smooth_enabled`
+  `platform_default_smooth`) to SMOOTH on Linux once XI2 is confirmed.
+
+Verification is hardware-dependent (precise touchpad / hi-res wheel) per the
+notes below; the no-XI2 fallback build is verified warning-clean, and direction
+signs are noted for a one-line flip if a device scrolls inverted.
+
+Original design notes (kept for reference):
 
 **Why it's needed:** GRID/SECTION inertial smooth-scroll + elastic rubber-band is
 wired on Win32/macOS but not Linux. Today Linux wheel input arrives as classic

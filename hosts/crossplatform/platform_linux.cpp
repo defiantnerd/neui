@@ -39,6 +39,9 @@
 #include <X11/Xatom.h>
 #include <X11/Xresource.h>
 #include <X11/cursorfont.h>
+#ifdef NEUI_HAS_XI2
+#include <X11/extensions/XInput2.h>   // XI2 smooth-scroll valuators (optional)
+#endif
 
 #include <sys/select.h>
 #include <sys/timerfd.h>
@@ -99,6 +102,20 @@ namespace
     uint32_t     dpi          = 96;
     bool         needs_paint  = false;
     bool         toast_anim   = false;
+    // Modal blocking: set while a modal child dialog is up (X11 has no native
+    // per-window input disable, so dispatch_x_event swallows input to a
+    // disabled window). See platform_set_window_enabled.
+    bool         input_disabled = false;
+    // SMOOTH-scroll spring-back tracking (mirrors platform_win32's per-frame
+    // bouncing_*_index): at most one grid + one section bounce in flight per
+    // window; the 16 ms heartbeat steps them. 0 = none.
+    uint32_t     bouncing_grid_index    = 0;
+    uint32_t     bouncing_section_index = 0;
+    // Fractional XI2 wheel-notch accumulators for the classic int-line path
+    // (combo / listbox / stepped surfaces): smooth devices deliver sub-notch
+    // deltas, so lines are emitted only once a whole notch has accrued.
+    double       scroll_v_accum = 0.0;
+    double       scroll_h_accum = 0.0;
     // Set when a left-press was consumed by the in-frame menubar, so the
     // matching release is swallowed (it must not reach a widget under the
     // now-closed dropdown).
@@ -117,6 +134,94 @@ namespace
     auto it = g_windows.find(w);
     return it == g_windows.end() ? nullptr : it->second;
   }
+
+  // ---- XInput2 smooth scroll ------------------------------------------------
+  // Modern X servers expose wheel + trackpad scrolling as XI2 "scroll-class"
+  // valuators delivered inside XI_Motion events (pixel-precise, fractional),
+  // alongside legacy core Button 4-7 for back-compat. We select XI_Motion per
+  // frame window, diff the valuator values into wheel notches, and feed the
+  // shared kinetics (the same integrators win32/macOS use). The legacy core
+  // buttons are suppressed only AFTER the first XI2 scroll actually arrives
+  // (g_xi2_scroll_seen) - so if a server / XWayland setup never delivers scroll
+  // valuators, the core Button 4-7 stepped fallback keeps working unchanged.
+#ifdef NEUI_HAS_XI2
+  int  g_xi2_opcode      = -1;     // major opcode of XInputExtension, -1 = absent
+  bool g_xi2_scroll_seen = false;  // a nonzero XI2 scroll delta has arrived
+  std::unordered_map<Display*, bool> g_xi2_inited;   // version negotiated per connection
+
+  // One scroll axis on a device: which valuator carries it + its per-unit
+  // increment (value change for one wheel notch; may be fractional/negative).
+  struct ScrollValuator { int number = 0; bool horizontal = false; double increment = 0.0; };
+  // deviceid -> its scroll valuators (queried lazily, server-global ids).
+  std::unordered_map<int, std::vector<ScrollValuator>> g_xi2_scroll_classes;
+  // (deviceid<<32 | valuator) -> last seen absolute value, for delta diffing.
+  std::unordered_map<uint64_t, double> g_xi2_last_value;
+
+  // One wheel notch scrolls this many lines (no Linux SPI_GETWHEELSCROLLLINES
+  // analogue; matches the Win32 default so the feel is consistent).
+  static constexpr int LINUX_WHEEL_LINES = 3;
+
+  // Negotiate XI2 (>= 2.0) on a connection once. The major opcode is
+  // server-global, so g_xi2_opcode is shared across the standalone + any
+  // embedded connections; version negotiation is per-connection (cached).
+  bool ensure_xi2(Display* dpy)
+  {
+    if (!dpy) return false;
+    auto it = g_xi2_inited.find(dpy);
+    if (it != g_xi2_inited.end()) return it->second && g_xi2_opcode >= 0;
+    bool ok = false;
+    int opcode = 0, ev = 0, err = 0;
+    if (XQueryExtension(dpy, "XInputExtension", &opcode, &ev, &err)) {
+      int major = 2, minor = 2;
+      if (XIQueryVersion(dpy, &major, &minor) == Success && major >= 2) {
+        g_xi2_opcode = opcode;
+        ok = true;
+      }
+    }
+    g_xi2_inited[dpy] = ok;
+    return ok;
+  }
+
+  // Ask the server to deliver XI_Motion (which carries scroll-class valuators)
+  // for this window. Core button/motion selection is unaffected - we keep
+  // using core MotionNotify for hover/drag and only mine XI_Motion for scroll.
+  void xi2_select_window(Display* dpy, Window win)
+  {
+    if (!ensure_xi2(dpy)) return;
+    unsigned char mask[XIMaskLen(XI_LASTEVENT)] = { 0 };
+    XISetMask(mask, XI_Motion);
+    XIEventMask em;
+    em.deviceid = XIAllMasterDevices;
+    em.mask_len = sizeof(mask);
+    em.mask     = mask;
+    XISelectEvents(dpy, win, &em, 1);
+  }
+
+  // Lazily fetch (and cache) the scroll-class valuators of a device. Server
+  // device ids are global, so the cache is keyed by id alone.
+  const std::vector<ScrollValuator>& xi2_scroll_classes(Display* dpy, int deviceid)
+  {
+    auto it = g_xi2_scroll_classes.find(deviceid);
+    if (it != g_xi2_scroll_classes.end()) return it->second;
+    std::vector<ScrollValuator> out;
+    int n = 0;
+    XIDeviceInfo* info = XIQueryDevice(dpy, deviceid, &n);
+    if (info) {
+      for (int i = 0; i < n; ++i)
+        for (int c = 0; c < info[i].num_classes; ++c) {
+          if (info[i].classes[c]->type != XIScrollClass) continue;
+          auto* sc = reinterpret_cast<XIScrollClassInfo*>(info[i].classes[c]);
+          ScrollValuator sv;
+          sv.number     = sc->number;
+          sv.horizontal = (sc->scroll_type == XIScrollTypeHorizontal);
+          sv.increment  = sc->increment;
+          out.push_back(sv);
+        }
+      XIFreeDeviceInfo(info);
+    }
+    return g_xi2_scroll_classes.emplace(deviceid, std::move(out)).first->second;
+  }
+#endif  // NEUI_HAS_XI2
 
   // ---- Small helpers --------------------------------------------------------
 
@@ -198,8 +303,48 @@ namespace
   bool any_window_animating()
   {
     for (auto& kv : g_windows)
-      if (kv.second->toast_anim) return true;
+      if (kv.second->toast_anim ||
+          kv.second->bouncing_grid_index || kv.second->bouncing_section_index)
+        return true;
     return false;
+  }
+
+  // Advance any in-flight GRID / SECTION spring-back for this window by one
+  // 16 ms step (the SMOOTH-scroll twin of paint_toast's self-advancing tick).
+  // Clears the bounce slot once the integrator settles; marks needs_paint
+  // while animating. Mirrors platform_win32's WM_TIMER bounce handlers.
+  void step_scroll_bounce(LinuxWindow* lw)
+  {
+    using namespace neui_detail;
+    Session* s = lw->session;
+    if (lw->bouncing_grid_index) {
+      auto* hw = s->get_widget(lw->bouncing_grid_index);
+      GridModel* model = hw ? hw->grid_model_ptr() : nullptr;
+      if (!model) {
+        lw->bouncing_grid_index = 0;
+      } else {
+        auto cfg = grid_read_config(hw->attrs.get());
+        GridViewport vp = grid_compute_viewport(*model, hw->width, hw->height,
+                                                 cfg.row_h, cfg.header_h);
+        bool more = grid_scroll_bounce_step(*model, vp, cfg.row_h);
+        lw->needs_paint = true;
+        if (!more) lw->bouncing_grid_index = 0;
+      }
+    }
+    if (lw->bouncing_section_index) {
+      auto* sw = s->get_widget(lw->bouncing_section_index);
+      SectionScrollState* st = sw ? sw->scroll_state_ptr() : nullptr;
+      const SectionLayout* L = sw ? sw->section_layout_ptr() : nullptr;
+      if (!st || !L) {
+        lw->bouncing_section_index = 0;
+      } else {
+        bool more_v = section_scroll_bounce_step(*st, *L, false);
+        bool more_h = section_scroll_bounce_step(*st, *L, true);
+        lw->needs_paint = true;
+        sw->notify_scroll_changed();
+        if (!more_v && !more_h) lw->bouncing_section_index = 0;
+      }
+    }
   }
 
   // ---- Painting -------------------------------------------------------------
@@ -226,8 +371,14 @@ namespace
 
   void tick_animations()
   {
-    for (auto& kv : g_windows)
+    for (auto& kv : g_windows) {
       if (kv.second->toast_anim) kv.second->needs_paint = true;
+      step_scroll_bounce(kv.second);
+    }
+    // Once nothing is animating, drop back to a blocking select() (no 60 Hz
+    // wakeups). Toast start/stop also touch arm_timer; this catches the
+    // bounce-settled case.
+    if (!any_window_animating()) arm_timer(false);
   }
 
   // ---- Window teardown ------------------------------------------------------
@@ -325,7 +476,17 @@ namespace
   {
     Session* s = lw->session;
     float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
-    if (be.button >= 4 && be.button <= 7) { dispatch_wheel(lw, be, scale); return; }
+    // Wheel (legacy core Button 4-7): the stepped fallback. Once XI2 scroll has
+    // proven it delivers on this server, the same physical scroll also arrives
+    // as XI2 valuators, so drop the legacy buttons to avoid double-counting.
+    if (be.button >= 4 && be.button <= 7) {
+#ifdef NEUI_HAS_XI2
+      if (!g_xi2_scroll_seen) dispatch_wheel(lw, be, scale);
+#else
+      dispatch_wheel(lw, be, scale);
+#endif
+      return;
+    }
 
     float lx = be.x / scale, ly = be.y / scale;
 
@@ -887,13 +1048,246 @@ namespace
     XFlush(g_display);
   }
 
+  // ---- XI2 scroll routing ---------------------------------------------------
+#ifdef NEUI_HAS_XI2
+
+  // Nearest scrolling-SECTION ancestor of `hit` (or `hit` itself). 0 = none.
+  // Mirrors platform_win32::find_scrolling_section.
+  uint32_t find_scrolling_section_linux(Session* s, uint32_t hit)
+  {
+    auto* hw = s->get_widget(hit);
+    if (hw && hw->scroll_state_ptr()) return hit;
+    for (uint32_t p : s->_widgets.get_all_parents(hit)) {
+      auto* pw = s->get_widget(p);
+      if (pw && pw->scroll_state_ptr()) return p;
+    }
+    return 0;
+  }
+
+  // Pull whole wheel lines out of a fractional notch accumulator (truncates
+  // toward zero; keeps the remainder for the next sub-notch event).
+  int take_lines(double& accum, double notches)
+  {
+    accum += notches;
+    int lines = (int)accum;   // toward zero
+    accum -= lines;
+    return lines;
+  }
+
+  // Feed a precise wheel delta into a scrolling SECTION's per-axis kinetics -
+  // the Linux twin of section_kinetic_wheel_w32 (same shared math + tuning).
+  // dv/dh are logical px in the kinetics' sign convention (positive dv = up,
+  // positive dh = left). Starts the spring-back heartbeat on overscroll.
+  void section_kinetic_wheel_linux(LinuxWindow* lw, uint32_t sec_idx,
+                                   double dv, double dh)
+  {
+    using namespace neui_detail;
+    auto* sw = lw->session->get_widget(sec_idx);
+    SectionScrollState* st = sw ? sw->scroll_state_ptr() : nullptr;
+    const SectionLayout* L = sw ? sw->section_layout_ptr() : nullptr;
+    if (!st || !L) return;
+
+    bool has_v = section_axis_has_v(st->axis);
+    bool has_h = section_axis_has_h(st->axis);
+    // A horizontal-only section absorbs a pure vertical wheel (classic mice
+    // have no H axis); a vertical-only section ignores explicit H intent.
+    if (!has_v && has_h && dh == 0.0 && dv != 0.0) { dh = dv; dv = 0.0; }
+
+    int  mode   = section_read_kinetics_mode(sw->attrs.get());
+    bool smooth = scroll_kinetics_smooth_enabled(mode,
+                    /*platform_default_smooth=*/g_xi2_scroll_seen);
+
+    bool changed = false, start_bounce = false;
+    if (smooth) {
+      ScrollWheelAction av{}, ah{};
+      if (has_v && dv != 0.0) {
+        ScrollWheelInput in; in.precise = true; in.delta_px = dv;
+        av = section_scroll_wheel_kinetic(*st, *L, in, false);
+      }
+      if (has_h && dh != 0.0) {
+        ScrollWheelInput in; in.precise = true; in.delta_px = dh;
+        ah = section_scroll_wheel_kinetic(*st, *L, in, true);
+      }
+      changed      = av.changed      || ah.changed;
+      start_bounce = av.start_bounce || ah.start_bounce;
+    } else {
+      if (has_v && dv != 0.0 && section_scroll_step_px(*st, *L, dv, false)) changed = true;
+      if (has_h && dh != 0.0 && section_scroll_step_px(*st, *L, dh, true))  changed = true;
+    }
+    if (changed) { lw->needs_paint = true; sw->notify_scroll_changed(); }
+    if (start_bounce) { lw->bouncing_section_index = sec_idx; arm_timer(true); }
+  }
+
+  // Route an accumulated wheel delta (in notches; +dv = up, +dh = left) at
+  // logical (lx, ly). Mirrors platform_win32's WM_MOUSEWHEEL routing: combo
+  // overlay first, then GRID-smooth / SECTION kinetics (pixel-precise), else a
+  // classic line-quantised MOUSE_WHEEL event for stepped surfaces.
+  void feed_scroll(LinuxWindow* lw, float lx, float ly, double dv, double dh)
+  {
+    using namespace neui_detail;
+    Session* s = lw->session;
+    int vline = take_lines(lw->scroll_v_accum, dv);
+    int hline = take_lines(lw->scroll_h_accum, dh);
+
+    // Combo overlay intercepts vertical wheel over its drop area.
+    if (s->_open_combo && vline != 0 && s->handle_combo_wheel(lx, ly, vline)) return;
+
+    uint32_t hit = s->widget_at(lx, ly, lw->widget_index);
+    if (hit == 0) return;
+    auto* hw = s->get_widget(hit);
+    if (!hw) return;
+
+    // GRID + SMOOTH: feed the pixel-precise delta into the shared kinetics.
+    if (GridModel* model = hw->grid_model_ptr()) {
+      auto cfg = grid_read_config(hw->attrs.get());
+      if (grid_smooth_enabled(cfg, /*platform_default_smooth=*/g_xi2_scroll_seen)) {
+        GridViewport vp = grid_compute_viewport(*model, hw->width, hw->height,
+                                                 cfg.row_h, cfg.header_h);
+        GridWheelInput in;
+        in.precise  = true;
+        in.delta_px = dv * (double)LINUX_WHEEL_LINES * (double)cfg.row_h;
+        GridWheelAction act = grid_scroll_wheel(*model, vp, cfg.row_h, in);
+        if (act.changed) lw->needs_paint = true;
+        if (act.start_bounce) { lw->bouncing_grid_index = hit; arm_timer(true); }
+        return;
+      }
+      // STEPPED grid: fall through to the classic line path below.
+    }
+
+    // Scrolling SECTION: widgets below get first refusal via a bounded bubble
+    // (classic lines); when nothing consumes, the section eats it via kinetics.
+    uint32_t sec_idx = find_scrolling_section_linux(s, hit);
+    if (sec_idx != 0) {
+      if (hit != sec_idx && (vline != 0 || hline != 0)) {
+        neui_event_t ev = {};
+        ev.type          = NEUI_EVENT_MOUSE_WHEEL;
+        ev.data.wheel.x  = (int)lx;
+        ev.data.wheel.y  = (int)ly;
+        if (vline != 0) {
+          ev.data.wheel.delta = vline; ev.data.wheel.is_horizontal = 0;
+          if (s->dispatch_wheel_event(hit, &ev, sec_idx)) return;
+        }
+        if (hline != 0) {
+          ev.data.wheel.delta = hline; ev.data.wheel.is_horizontal = 1;
+          if (s->dispatch_wheel_event(hit, &ev, sec_idx)) return;
+        }
+      }
+      double pv = dv * (double)LINUX_WHEEL_LINES * SECTION_WHEEL_LINE_PX;
+      double ph = dh * (double)LINUX_WHEEL_LINES * SECTION_WHEEL_LINE_PX;
+      section_kinetic_wheel_linux(lw, sec_idx, pv, ph);
+      return;
+    }
+
+    // Classic line-quantised path (listbox / treeview / multiline / custom).
+    if (vline != 0) {
+      neui_event_t ev = {};
+      ev.type = NEUI_EVENT_MOUSE_WHEEL;
+      ev.data.wheel.x = (int)lx; ev.data.wheel.y = (int)ly;
+      ev.data.wheel.delta = vline; ev.data.wheel.is_horizontal = 0;
+      s->dispatch_wheel_event(hit, &ev);
+    }
+    if (hline != 0) {
+      neui_event_t ev = {};
+      ev.type = NEUI_EVENT_MOUSE_WHEEL;
+      ev.data.wheel.x = (int)lx; ev.data.wheel.y = (int)ly;
+      ev.data.wheel.delta = hline; ev.data.wheel.is_horizontal = 1;
+      s->dispatch_wheel_event(hit, &ev);
+    }
+  }
+
+  // Extract scroll-valuator deltas from an XI_Motion event and route them.
+  void handle_xi2_scroll(LinuxWindow* lw, XIDeviceEvent* de)
+  {
+    const auto& classes = xi2_scroll_classes(de->display, de->deviceid);
+    if (classes.empty()) return;
+
+    double dv = 0.0, dh = 0.0;   // notches: +dv = up, +dh = left
+    const double* vals = de->valuators.values;
+    int idx = 0;
+    for (int v = 0; v < de->valuators.mask_len * 8; ++v) {
+      if (!XIMaskIsSet(de->valuators.mask, v)) continue;
+      double value = vals[idx++];
+      for (const auto& sv : classes) {
+        if (sv.number != v || sv.increment == 0.0) continue;
+        uint64_t key = ((uint64_t)de->deviceid << 32) | (uint32_t)v;
+        auto lit = g_xi2_last_value.find(key);
+        if (lit != g_xi2_last_value.end()) {
+          // units > 0 = scroll down / right (server convention); flip to the
+          // neui notch convention (+dv up, +dh left, matching core Button 4/6).
+          double units = (value - lit->second) / sv.increment;
+          if (sv.horizontal) dh -= units; else dv -= units;
+        }
+        g_xi2_last_value[key] = value;
+        break;
+      }
+    }
+    if (dv == 0.0 && dh == 0.0) return;
+    g_xi2_scroll_seen = true;   // XI2 scroll works here -> suppress core Button 4-7
+
+    float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    feed_scroll(lw, de->event_x / scale, de->event_y / scale, dv, dh);
+  }
+
+  // Unpack an XI2 GenericEvent cookie and dispatch XI_Motion scroll. Returns
+  // true if the event was an XI2 event we own (so the caller stops).
+  bool handle_xi2_event(XEvent& ev)
+  {
+    if (g_xi2_opcode < 0 || ev.xcookie.extension != g_xi2_opcode) return false;
+    if (!XGetEventData(ev.xcookie.display, &ev.xcookie)) return true;
+    if (ev.xcookie.evtype == XI_Motion) {
+      auto* de = static_cast<XIDeviceEvent*>(ev.xcookie.data);
+      LinuxWindow* lw = find_window(de->event);
+      if (lw && !lw->input_disabled) handle_xi2_scroll(lw, de);
+    }
+    XFreeEventData(ev.xcookie.display, &ev.xcookie);
+    return true;
+  }
+#endif  // NEUI_HAS_XI2
+
+  // A modal child dialog is blocking this owner: raise + focus it so a click
+  // on the disabled owner surfaces what's in the way (X11 has no native modal).
+  void raise_modal_child(LinuxWindow* owner)
+  {
+    Session* s = owner->session;
+    if (!s) return;
+    for (auto& kv : g_windows) {
+      LinuxWindow* lw = kv.second;
+      if (lw == owner || lw->session != s) continue;
+      auto* wd = s->get_widget(lw->widget_index);
+      if (wd && wd->is_dialog() && wd->owner_index == owner->widget_index) {
+        XRaiseWindow(lw->dpy, lw->win);
+        XSetInputFocus(lw->dpy, lw->win, RevertToParent, CurrentTime);
+      }
+    }
+  }
+
   void dispatch_x_event(XEvent& ev)
   {
     if (XFilterEvent(&ev, None)) return;   // let the IME consume composition keys
+#ifdef NEUI_HAS_XI2
+    // XI2 scroll arrives as a GenericEvent cookie - it carries no xany.window,
+    // so resolve + dispatch it before the window lookup below.
+    if (ev.type == GenericEvent && handle_xi2_event(ev)) return;
+#endif
     if (g_clipboard.handle_event(ev)) return;  // CLIPBOARD selection events
     LinuxWindow* lw = find_window(ev.xany.window);
     if (!lw) return;
     Session* s = lw->session;
+
+    // Modal block: swallow all input destined for a disabled owner window
+    // (a modal child is up). A press surfaces the blocker; everything else
+    // is dropped. Non-input events (paint / resize / focus / WM messages)
+    // still flow so the owner keeps rendering underneath.
+    if (lw->input_disabled) {
+      switch (ev.type) {
+        case ButtonPress:   raise_modal_child(lw); return;
+        case ButtonRelease:
+        case MotionNotify:
+        case KeyPress:
+        case KeyRelease:    return;
+        default: break;
+      }
+    }
 
     switch (ev.type) {
       case Expose:
@@ -1008,6 +1402,12 @@ namespace
                                CWEventMask | CWBackPixmap | CWBitGravity, &swa);
     if (!win) return;
 
+#ifdef NEUI_HAS_XI2
+    // Request XI2 smooth-scroll valuators for this window (no-op if XI2 is
+    // unavailable; on the embedded path `dpy` is the DAW's own connection).
+    xi2_select_window(dpy, win);
+#endif
+
     if (borderless && g_motif_hints != None) {
       // 5 longs: flags, functions, decorations, input_mode, status.
       long hints[5] = { 1L << 1 /*MWM_HINTS_DECORATIONS*/, 0, 0, 0, 0 };
@@ -1020,8 +1420,18 @@ namespace
     if (!borderless && g_wm_delete != None)
       XSetWMProtocols(dpy, win, &g_wm_delete, 1);
 
-    if (owner_lw && owner_lw->win)
+    if (owner_lw && owner_lw->win) {
       XSetTransientForHint(dpy, win, owner_lw->win);
+      // Mark owned dialogs _NET_WM_STATE_MODAL so a cooperative WM reinforces
+      // the software input-block (focus/stacking); same hint the message box
+      // uses. The actual input blocking is done in dispatch_x_event since not
+      // every WM honours the modal state.
+      Atom st = XInternAtom(dpy, "_NET_WM_STATE", False);
+      Atom md = XInternAtom(dpy, "_NET_WM_STATE_MODAL", False);
+      if (st != None && md != None)
+        XChangeProperty(dpy, win, st, XA_ATOM, 32, PropModeReplace,
+                        reinterpret_cast<unsigned char*>(&md), 1);
+    }
 
     if (!wd.text.empty())
       set_window_title(dpy, win, wd.text.c_str());
@@ -1449,6 +1859,7 @@ namespace
     if (now - lw->last_tick_ms >= 16) {
       lw->last_tick_ms = now;
       if (lw->toast_anim) lw->needs_paint = true;
+      step_scroll_bounce(lw);   // advance any GRID/SECTION spring-back
     }
     if (lw->needs_paint) paint_window(lw);
     XFlush(lw->dpy);
@@ -1458,9 +1869,29 @@ namespace
   {
     if (!wd.native_handle) return;
     auto* lw = static_cast<LinuxWindow*>(wd.native_handle);
+    Session* s = lw->session;
+
+    // Modal dialog teardown (mirror platform_win32's WM_DESTROY path): clear
+    // the pump flag so platform_run_modal_until in widget_show unwinds, and
+    // re-enable + raise the owner so input returns there. Must run BEFORE the
+    // widget is freed (destroy_recursive removes it right after this), while
+    // owner_index + the FrameWidget are still valid.
+    if (s && wd.is_dialog() && wd.owner_index != 0 &&
+        s->_widgets.exists(wd.owner_index)) {
+      if (auto* fw = dynamic_cast<FrameWidget*>(&wd))
+        fw->modal_pump_active = false;
+      auto& owner = s->_widgets[wd.owner_index];
+      if (owner.native_handle) {
+        platform_set_window_enabled(owner.native_handle, true);
+        auto* ow = static_cast<LinuxWindow*>(owner.native_handle);
+        XRaiseWindow(ow->dpy, ow->win);
+        XSetInputFocus(ow->dpy, ow->win, RevertToParent, CurrentTime);
+      }
+    }
+
     auto* backend = platform_get_backend();
     if (wd.render_ctx && backend) {
-      if (lw->session) lw->session->_asset_manager.release_context(wd.render_ctx, backend);
+      if (s) s->_asset_manager.release_context(wd.render_ctx, backend);
       backend->destroy_context(wd.render_ctx);
       wd.render_ctx = nullptr;
     }
@@ -1489,11 +1920,15 @@ namespace
     XFlush(lw->dpy);
   }
 
-  void platform_set_window_enabled(void* /*native_handle*/, bool /*enabled*/)
+  void platform_set_window_enabled(void* native_handle, bool enabled)
   {
-    // X11 has no per-window input disable; modal blocking relies on the
-    // nested pump in platform_run_modal_until keeping the dialog on top.
-    // Full owner input-block is deferred (Phase 4).
+    // X11 has no native per-window input disable, so we flag the window and
+    // swallow its input in dispatch_x_event (+ the XI2 scroll path) while a
+    // modal child is up. Clearing the flag restores normal input. The
+    // dialog is also marked _NET_WM_STATE_MODAL (create_frame) so a
+    // cooperative WM reinforces focus/stacking.
+    if (!native_handle) return;
+    static_cast<LinuxWindow*>(native_handle)->input_disabled = !enabled;
   }
 
   void platform_activate_window(void* native_handle)
