@@ -70,6 +70,11 @@ namespace
   int      g_timerfd          = -1;
   XIM      g_xim              = nullptr;
   bool     g_quit             = false;
+  // Active neui-drawn modal message-box window (on g_display), 0 if none. A
+  // click on the input-blocked owner re-raises it so a click-to-raise WM can't
+  // bury the modal behind its parent. (DIALOG modals use raise_modal_child
+  // instead, since they're real widgets in the tree.)
+  Window   g_modal_box_win    = 0;
 
   Atom g_wm_delete    = None;   // WM_DELETE_WINDOW
   Atom g_wm_protocols = None;
@@ -604,6 +609,12 @@ namespace
   void do_motion(LinuxWindow* lw, float lx, float ly, unsigned int state)
   {
     Session* s = lw->session;
+    // A left-button drag is in progress whenever there's a pressed widget (set
+    // from the core ButtonPress, cleared on release). XI_Motion's de->buttons
+    // isn't reliably populated, so fold that in - otherwise the move carries no
+    // Button1Mask and drag-driven widgets (SLIDER / KNOB) see it as a hover and
+    // end the drag. Harmless on the core path (the bit is already set there).
+    if (s->_pressed_widget != 0) state |= Button1Mask;
     if (s->_popup_active) { s->handle_popup_hover(lx, ly); return; }
     if (s->_menu_open) {
       if (s->handle_menubar_hover(lw->widget_index, lx, ly)) return;
@@ -1279,11 +1290,14 @@ namespace
         g_xi2_motion_seen = true;
         if (!lw->input_disabled) {
           handle_xi2_scroll(lw, de);
-          unsigned int state = static_cast<unsigned int>(de->mods.effective);
-          if (de->buttons.mask_len > 0 && XIMaskIsSet(de->buttons.mask, 1))
-            state |= Button1Mask;
-          float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
-          do_motion(lw, de->event_x / scale, de->event_y / scale, state);
+          // Hover only. While a button is held the core implicit grab delivers
+          // the drag as core MotionNotify (handled above), so skip XI motion
+          // then to avoid double-dispatching the move.
+          if (lw->session->_pressed_widget == 0) {
+            unsigned int state = static_cast<unsigned int>(de->mods.effective);
+            float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+            do_motion(lw, de->event_x / scale, de->event_y / scale, state);
+          }
         }
       }
     }
@@ -1328,7 +1342,16 @@ namespace
     // still flow so the owner keeps rendering underneath.
     if (lw->input_disabled) {
       switch (ev.type) {
-        case ButtonPress:   raise_modal_child(lw); return;
+        case ButtonPress:
+          // Surface whatever modal is blocking this owner: a DIALOG child, or
+          // a neui-drawn message box (re-raise + refocus so a click-to-raise WM
+          // can't leave it buried behind the parent).
+          raise_modal_child(lw);
+          if (g_modal_box_win) {
+            XRaiseWindow(g_display, g_modal_box_win);
+            XSetInputFocus(g_display, g_modal_box_win, RevertToParent, CurrentTime);
+          }
+          return;
         case ButtonRelease:
         case MotionNotify:
         case KeyPress:
@@ -1373,11 +1396,16 @@ namespace
       case ButtonPress:   dispatch_button_press(lw, ev.xbutton);   break;
       case ButtonRelease: dispatch_button_release(lw, ev.xbutton); break;
       case MotionNotify:
-        // Once XI_Motion is driving (XI2 active), it has replaced core motion;
-        // skip the core event to avoid double-dispatch. Without XI2 this is the
-        // only motion source.
+        // Once XI_Motion is driving (XI2 active) it replaces core motion for
+        // hover, so skip the duplicate core event. BUT a core ButtonPress
+        // establishes an implicit CORE grab that delivers MotionNotify (not
+        // XI_Motion) for the drag - so still process core motion whenever a
+        // mouse button is held, else drags (SLIDER / KNOB / text select) get no
+        // motion at all. Without XI2 this is the only motion source.
 #ifdef NEUI_HAS_XI2
-        if (!g_xi2_motion_seen) dispatch_motion(lw, ev.xmotion);
+        if (!g_xi2_motion_seen ||
+            (ev.xmotion.state & (Button1Mask | Button2Mask | Button3Mask)))
+          dispatch_motion(lw, ev.xmotion);
 #else
         dispatch_motion(lw, ev.xmotion);
 #endif
@@ -1749,6 +1777,15 @@ namespace
 
     XMapRaised(d, win);
 
+    // Modal: block input to the owner while the box is up. dispatch_x_event
+    // swallows input for an input_disabled window (the non-box events routed
+    // through it at the top of the loop). Save/restore so a message box opened
+    // over an already-modal dialog leaves the owner blocked on return.
+    bool prev_disabled = owner ? owner->input_disabled : false;
+    if (owner) owner->input_disabled = true;
+    Window prev_box = g_modal_box_win;   // re-raise target (supports nesting)
+    g_modal_box_win = win;
+
     while (!done) {
       if (need_paint) { render(); need_paint = false; }
       flush_pending_paints();      // keep other neui windows alive behind the modal
@@ -1804,6 +1841,8 @@ namespace
       }
     }
 
+    if (owner) owner->input_disabled = prev_disabled;
+    g_modal_box_win = prev_box;
     backend->destroy_context(ctx);
     XDestroyWindow(d, win);
     XSync(d, False);
