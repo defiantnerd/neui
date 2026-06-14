@@ -356,7 +356,12 @@ namespace neui_detail
       if (XGetWindowProperty(_dpy, _owner, prop, 0, longs ? longs : 1, False,
                              AnyPropertyType, &type, &fmt, &nitems, &after,
                              &data) == Success && data) {
-        size_t bytes = static_cast<size_t>(nitems) * (fmt / 8);
+        // Xlib widens format-32 properties to the C `long` type, which is 8
+        // bytes on LP64 (not 4). Copying nitems*(fmt/8) would take only half
+        // the buffer for a format-32 reply (e.g. the TARGETS atom list),
+        // silently truncating it. Use sizeof(long) as the unit for fmt==32.
+        size_t unit  = (fmt == 32) ? sizeof(long) : static_cast<size_t>(fmt / 8);
+        size_t bytes = static_cast<size_t>(nitems) * unit;
         out.assign(data, data + bytes);
         XFree(data);
         XDeleteProperty(_dpy, _owner, prop);

@@ -414,11 +414,10 @@ namespace neui_cairo_backend
     double rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     cairo_set_source_rgba(st->cr, rgba[0], rgba[1], rgba[2], rgba[3]);
     cairo_set_line_width(st->cr, stroke_width);
-    // Inset the stroke rect by half the line width so the 1px outline lands
-    // fully inside (x,y,w,h) instead of straddling the edge - matches how the
-    // d2d/cg backends visually render widget focus outlines.
-    double hw = stroke_width * 0.5;
-    cairo_rectangle(st->cr, x + hw, y + hw, w - stroke_width, h - stroke_width);
+    // Stroke the exact rect, centered on the edge - matches d2d
+    // (DrawRectangle(x,y,x+w,y+h)) and cg (CGContextStrokeRect(x,y,w,h)), so a
+    // 1px border/outline lands identically across all three backends.
+    cairo_rectangle(st->cr, x, y, w, h);
     cairo_stroke(st->cr);
   }
 

@@ -47,4 +47,41 @@ if(UNIX AND NOT APPLE)
     ${CMAKE_SOURCE_DIR}/hosts/shared)
   target_compile_features(neui_embed_smoke PRIVATE cxx_std_17)
   target_link_libraries(neui_embed_smoke PRIVATE neui neui-xplhost neui-backend-cairo)
+
+  # XDND drag-source harness (internal-drag path). Needs a live X display AND
+  # warps the pointer, so it is built but not ctest-registered; run
+  # ./tests/neui_dnd_source_smoke manually.
+  find_package(Threads REQUIRED)
+  add_executable(neui_dnd_source_smoke dnd_source_smoke.cpp)
+  target_include_directories(neui_dnd_source_smoke PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/hosts/crossplatform
+    ${CMAKE_SOURCE_DIR}/hosts/shared)
+  target_compile_features(neui_dnd_source_smoke PRIVATE cxx_std_17)
+  target_link_libraries(neui_dnd_source_smoke PRIVATE
+    neui neui-xplhost neui-backend-cairo Threads::Threads)
+
+  # Clipboard TARGETS regression (LP64 format-32 property read). Stands up a
+  # foreign CLIPBOARD owner on a second X connection; needs a live X display,
+  # so it is built but not ctest-registered. Header-only (clipboard_linux.h),
+  # links no host/backend.
+  add_executable(neui_clipboard_targets_smoke clipboard_targets_smoke.cpp)
+  target_include_directories(neui_clipboard_targets_smoke PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/hosts/shared)
+  target_compile_features(neui_clipboard_targets_smoke PRIVATE cxx_std_17)
+  find_package(X11 REQUIRED)
+  target_link_libraries(neui_clipboard_targets_smoke PRIVATE
+    ${X11_LIBRARIES} Threads::Threads)
+
+  # Message-box harness (drives modal boxes from a background thread). Needs a
+  # live X display; built but not ctest-registered.
+  add_executable(neui_notify_smoke notify_smoke.cpp)
+  target_include_directories(neui_notify_smoke PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/hosts/crossplatform
+    ${CMAKE_SOURCE_DIR}/hosts/shared)
+  target_compile_features(neui_notify_smoke PRIVATE cxx_std_17)
+  target_link_libraries(neui_notify_smoke PRIVATE
+    neui neui-xplhost neui-backend-cairo Threads::Threads)
 endif()

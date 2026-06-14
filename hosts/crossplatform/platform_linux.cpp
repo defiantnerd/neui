@@ -21,8 +21,12 @@
 #include <neui/neui.h>
 
 #include "../shared/clipboard_item.h"
+#include "../shared/dnd_modifier_suggest.h"   // dnd_suggest_action
 #include "../shared/linux/keys_linux.h"
 #include "../shared/linux/clipboard_linux.h"
+#include "../shared/linux/dnd_linux.h"
+#include "../shared/linux/message_box_linux.h"
+#include "../shared/theme_palette.h"
 #include "../../backends/cairo/cairo_backend.h"
 
 // This TU emits the single stb_image implementation for the Linux host.
@@ -40,10 +44,13 @@
 #include <unistd.h>
 #include <time.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -160,12 +167,28 @@ namespace
   {
     if (g_timerfd >= 0) return;
     g_timerfd = timerfd_create(CLOCK_MONOTONIC, 0);
+    // Created disarmed: arm_timer() turns the 16 ms heartbeat on only while an
+    // animation (a toast) is actually running, so an idle window blocks in
+    // select() on the X fd alone instead of waking 60x/s for nothing.
+  }
+
+  // Arm / disarm the 16 ms animation heartbeat. it_value == 0 disarms.
+  void arm_timer(bool on)
+  {
     if (g_timerfd < 0) return;
-    struct itimerspec its;
-    its.it_interval.tv_sec  = 0;
-    its.it_interval.tv_nsec = 16 * 1000 * 1000;  // 16 ms
-    its.it_value = its.it_interval;
+    struct itimerspec its; std::memset(&its, 0, sizeof its);
+    if (on) {
+      its.it_interval.tv_nsec = 16 * 1000 * 1000;  // 16 ms
+      its.it_value = its.it_interval;
+    }
     timerfd_settime(g_timerfd, 0, &its, nullptr);
+  }
+
+  bool any_window_animating()
+  {
+    for (auto& kv : g_windows)
+      if (kv.second->toast_anim) return true;
+    return false;
   }
 
   // ---- Painting -------------------------------------------------------------
@@ -470,6 +493,365 @@ namespace
     s->dispatch_event(&ev);
   }
 
+  // ---- XDND drop-target receiver --------------------------------------------
+  neui_detail::XdndAtoms g_xa;
+  struct DropTarget { void* session = nullptr; uint32_t frame_id = 0; uint32_t dpi = 96;
+                      Display* dpy = nullptr; };
+  std::unordered_map<Window, DropTarget> g_drop_targets;
+
+  // Active incoming drag (XDND is strictly one drag at a time per display).
+  struct {
+    Window   source  = 0;
+    Window   target  = 0;        // our registered window
+    bool     entered = false;
+    int      last_lx = 0, last_ly = 0;   // logical, frame-local
+    uint32_t last_action = 0;            // neui action from the last Position
+    std::vector<Atom>        atoms;
+    std::vector<std::string> mimes;
+    std::vector<const char*> ptrs;       // point into `mimes`
+  } g_xdrag;
+
+  void xdnd_reset_drag()
+  {
+    g_xdrag.source = 0; g_xdrag.target = 0; g_xdrag.entered = false;
+    g_xdrag.atoms.clear(); g_xdrag.mimes.clear(); g_xdrag.ptrs.clear();
+  }
+
+  void xdnd_register(Display* dpy, Window win, void* session, uint32_t frame_id, uint32_t dpi)
+  {
+    long ver = neui_detail::kXdndVersion;
+    XChangeProperty(dpy, win, g_xa.aware, XA_ATOM, 32, PropModeReplace,
+                    reinterpret_cast<unsigned char*>(&ver), 1);
+    g_drop_targets[win] = DropTarget{session, frame_id, dpi, dpy};
+  }
+  void xdnd_unregister(Window win)
+  {
+    auto it = g_drop_targets.find(win);
+    if (it != g_drop_targets.end()) {
+      XDeleteProperty(it->second.dpy ? it->second.dpy : g_display, win, g_xa.aware);
+      g_drop_targets.erase(it);
+    }
+  }
+
+  // Synchronous XdndSelection conversion for a drop (same pump shape as the
+  // clipboard read): convert into our recv property on target_win, wait for
+  // SelectionNotify, read the bytes. Leaves unrelated events queued.
+  bool xdnd_read_selection(Display* dpy, Window target_win, Atom target_atom, Time t,
+                           std::vector<uint8_t>& out)
+  {
+    out.clear();
+    XDeleteProperty(dpy, target_win, g_xa.recv_prop);
+    XConvertSelection(dpy, g_xa.selection, target_atom, g_xa.recv_prop,
+                      target_win, t);
+    XFlush(dpy);
+    struct timespec start; clock_gettime(CLOCK_MONOTONIC, &start);
+    for (;;) {
+      XEvent ev;
+      if (XCheckTypedWindowEvent(dpy, target_win, SelectionNotify, &ev)) {
+        if (ev.xselection.property == None) return false;
+        Atom type = None; int fmt = 0; unsigned long n = 0, after = 0;
+        unsigned char* data = nullptr;
+        if (XGetWindowProperty(dpy, target_win, g_xa.recv_prop, 0, 0, False,
+                               AnyPropertyType, &type, &fmt, &n, &after, &data) != Success)
+          return false;
+        if (data) { XFree(data); data = nullptr; }
+        if (type == g_xa.incr) {          // chunked transfer - unsupported
+          XDeleteProperty(dpy, target_win, g_xa.recv_prop);
+          return false;
+        }
+        long longs = ((long)after + 3) / 4;
+        if (XGetWindowProperty(dpy, target_win, g_xa.recv_prop, 0,
+                               longs ? longs : 1, False, AnyPropertyType,
+                               &type, &fmt, &n, &after, &data) == Success && data) {
+          size_t unit = (fmt == 32) ? sizeof(long) : static_cast<size_t>(fmt / 8);
+          out.assign(data, data + static_cast<size_t>(n) * unit);
+          XFree(data);
+        }
+        XDeleteProperty(dpy, target_win, g_xa.recv_prop);
+        return !out.empty();
+      }
+      struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+      long ms = (now.tv_sec - start.tv_sec) * 1000 +
+                (now.tv_nsec - start.tv_nsec) / 1000000;
+      if (ms >= 2000) return false;
+      usleep(2000);
+    }
+  }
+
+  void xdnd_send_status(Display* dpy, Window source, Window target, bool accept, Atom action)
+  {
+    XClientMessageEvent m; std::memset(&m, 0, sizeof(m));
+    m.type = ClientMessage; m.display = dpy; m.window = source;
+    m.message_type = g_xa.status; m.format = 32;
+    m.data.l[0] = (long)target;
+    m.data.l[1] = (accept ? 1L : 0L) | 2L;   // bit0 = accept, bit1 = send all positions
+    m.data.l[4] = accept ? (long)action : (long)None;
+    XSendEvent(dpy, source, False, NoEventMask, reinterpret_cast<XEvent*>(&m));
+    XFlush(dpy);
+  }
+  void xdnd_send_finished(Display* dpy, Window source, Window target, bool accept, Atom action)
+  {
+    XClientMessageEvent m; std::memset(&m, 0, sizeof(m));
+    m.type = ClientMessage; m.display = dpy; m.window = source;
+    m.message_type = g_xa.finished; m.format = 32;
+    m.data.l[0] = (long)target;
+    m.data.l[1] = accept ? 1L : 0L;
+    m.data.l[2] = accept ? (long)action : (long)None;
+    XSendEvent(dpy, source, False, NoEventMask, reinterpret_cast<XEvent*>(&m));
+    XFlush(dpy);
+  }
+
+  // Returns true if the message was an XDND target message (and was handled).
+  bool xdnd_handle_client_message(XClientMessageEvent& e)
+  {
+    Atom mt = e.message_type;
+    if (mt != g_xa.enter && mt != g_xa.position &&
+        mt != g_xa.leave && mt != g_xa.drop)
+      return false;
+
+    auto dit = g_drop_targets.find(e.window);
+    if (dit == g_drop_targets.end()) return true;   // not one of our targets
+    DropTarget& dt = dit->second;
+    auto* s = static_cast<Session*>(dt.session);
+    uint32_t frame_idx = dt.frame_id & 0xFFFFu;
+    float scale = dt.dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    // The drag arrived on the display this window lives on (g_display for a
+    // standalone window, the DAW's connection for an embedded one). Reading the
+    // selection / answering on g_display would silently fail for embedded plugins.
+    Display* dpy = dt.dpy ? dt.dpy : g_display;
+
+    if (mt == g_xa.enter) {
+      xdnd_reset_drag();
+      g_xdrag.source = (Window)e.data.l[0];
+      g_xdrag.target = e.window;
+      bool more = (e.data.l[1] & 1L) != 0;   // > 3 types -> read XdndTypeList
+      std::vector<Atom> raw;
+      if (more) {
+        Atom type = None; int fmt = 0; unsigned long n = 0, after = 0;
+        unsigned char* data = nullptr;
+        if (XGetWindowProperty(dpy, g_xdrag.source, g_xa.type_list, 0, 256,
+                               False, XA_ATOM, &type, &fmt, &n, &after, &data) == Success
+            && data) {
+          Atom* a = reinterpret_cast<Atom*>(data);
+          raw.assign(a, a + n);
+          XFree(data);
+        }
+      } else {
+        for (int i = 2; i <= 4; ++i)
+          if (e.data.l[i]) raw.push_back((Atom)e.data.l[i]);
+      }
+      for (Atom a : raw) {
+        std::string mime = neui_detail::xdnd_atom_to_mime(dpy, a, g_xa);
+        if (mime.empty()) continue;
+        g_xdrag.atoms.push_back(a);
+        g_xdrag.mimes.push_back(std::move(mime));
+      }
+      for (auto& m : g_xdrag.mimes) g_xdrag.ptrs.push_back(m.c_str());
+      // XDND has no coords in Enter; ENTER is dispatched on the first Position.
+      return true;
+    }
+
+    if (mt == g_xa.position) {
+      Window src = (Window)e.data.l[0];
+      int rx = (int)((e.data.l[2] >> 16) & 0xFFFF);
+      int ry = (int)(e.data.l[2] & 0xFFFF);
+      uint32_t suggested = neui_detail::xdnd_action_to_neui(g_xa, (Atom)e.data.l[4]);
+      g_xdrag.last_action = suggested;
+
+      int lx = 0, ly = 0; Window child;
+      XTranslateCoordinates(dpy, DefaultRootWindow(dpy), e.window,
+                            rx, ry, &lx, &ly, &child);
+      g_xdrag.last_lx = (int)(lx / scale);
+      g_xdrag.last_ly = (int)(ly / scale);
+
+      const char* const* fmts = g_xdrag.ptrs.empty() ? nullptr : g_xdrag.ptrs.data();
+      uint32_t count = (uint32_t)g_xdrag.ptrs.size();
+      uint32_t accepted;
+      if (!g_xdrag.entered) {
+        accepted = s->dispatch_dnd_enter(frame_idx, g_xdrag.last_lx, g_xdrag.last_ly,
+                                         fmts, count, suggested, 0);
+        g_xdrag.entered = true;
+      } else {
+        accepted = s->dispatch_dnd_move(frame_idx, g_xdrag.last_lx, g_xdrag.last_ly,
+                                        fmts, count, suggested, 0);
+      }
+      xdnd_send_status(dpy, src, e.window, accepted != 0,
+                       neui_detail::xdnd_neui_to_action(g_xa, accepted));
+      return true;
+    }
+
+    if (mt == g_xa.leave) {
+      if (g_xdrag.entered) s->dispatch_dnd_leave();
+      xdnd_reset_drag();
+      return true;
+    }
+
+    // XdndDrop
+    Window src = (Window)e.data.l[0];
+    Time   t   = (Time)e.data.l[2];
+    // A compliant source always sends at least one XdndPosition before the
+    // drop; if it didn't (no ENTER dispatched, coords still 0,0), refuse rather
+    // than synthesize a phantom drop at the origin with a NONE action.
+    if (!g_xdrag.entered) {
+      xdnd_send_finished(dpy, src, e.window, false, None);
+      xdnd_reset_drag();
+      return true;
+    }
+    neui_detail::DataItem item;
+    for (size_t i = 0; i < g_xdrag.atoms.size(); ++i) {
+      std::vector<uint8_t> bytes;
+      if (xdnd_read_selection(dpy, e.window, g_xdrag.atoms[i], t, bytes) && !bytes.empty())
+        item.set_format(g_xdrag.mimes[i], bytes.data(), (uint32_t)bytes.size());
+    }
+    const char* const* fmts = g_xdrag.ptrs.empty() ? nullptr : g_xdrag.ptrs.data();
+    uint32_t count = (uint32_t)g_xdrag.ptrs.size();
+    uint32_t accepted = s->dispatch_dnd_drop(frame_idx, g_xdrag.last_lx, g_xdrag.last_ly,
+                                             fmts, count, g_xdrag.last_action, 0, &item);
+    xdnd_send_finished(dpy, src, e.window, accepted != 0,
+                       neui_detail::xdnd_neui_to_action(g_xa, accepted));
+    xdnd_reset_drag();
+    return true;
+  }
+
+  // ---- XDND drag-source helpers ---------------------------------------------
+
+  // Heap struct returned by platform_make_drag_preview; consumed by begin_drag.
+  struct DragPreview {
+    std::vector<uint8_t> bgra;            // BGRA8 premultiplied (== cairo ARGB32 LE)
+    uint32_t w_px = 0, h_px = 0;
+    float    scale = 1.0f;
+  };
+
+  // Swallow transient BadWindow/BadMatch while probing other apps' windows
+  // during a drag (a window can vanish mid-drag; the default handler aborts).
+  int drag_xerror(Display*, XErrorEvent*) { return 0; }
+
+  // Process-wide error handler. The normal event loop touches foreign windows
+  // too - e.g. an XdndEnter names a source window we then XGetWindowProperty,
+  // and that source can crash/close between the message and our read. Xlib's
+  // default handler calls exit() on any unhandled error, which would take down
+  // the whole process (and the host DAW when embedded). Swallow the transient
+  // resource-race codes; surface anything genuinely unexpected on stderr but
+  // keep running rather than abort.
+  int neui_xerror(Display* d, XErrorEvent* e)
+  {
+    switch (e->error_code) {
+      case BadWindow:
+      case BadDrawable:
+      case BadMatch:
+      case BadValue:
+      case BadAtom:
+        return 0;   // foreign-window / stale-resource race - ignore
+      default: {
+        char buf[256]; buf[0] = 0;
+        if (d) XGetErrorText(d, e->error_code, buf, (int)sizeof buf);
+        std::fprintf(stderr, "[neui] X error %d (%s), request %d.%d\n",
+                     e->error_code, buf, e->request_code, e->minor_code);
+        return 0;   // do not abort
+      }
+    }
+  }
+
+  void xdnd_send(Window to, Atom mt, long l0, long l1, long l2, long l3, long l4)
+  {
+    XClientMessageEvent m; std::memset(&m, 0, sizeof m);
+    m.type = ClientMessage; m.display = g_display; m.window = to;
+    m.message_type = mt; m.format = 32;
+    m.data.l[0] = l0; m.data.l[1] = l1; m.data.l[2] = l2; m.data.l[3] = l3; m.data.l[4] = l4;
+    XSendEvent(g_display, to, False, NoEventMask, reinterpret_cast<XEvent*>(&m));
+    XFlush(g_display);
+  }
+
+  bool xdnd_has_aware(Window w, long* ver)
+  {
+    Atom t = None; int f = 0; unsigned long n = 0, a = 0; unsigned char* data = nullptr;
+    bool ok = false;
+    if (XGetWindowProperty(g_display, w, g_xa.aware, 0, 1, False, AnyPropertyType,
+                           &t, &f, &n, &a, &data) == Success && data) {
+      if (n > 0) { if (ver) *ver = *reinterpret_cast<long*>(data); ok = true; }
+      XFree(data);
+    }
+    return ok;
+  }
+
+  // Descend the pointer chain from `start`; return the deepest XdndAware window.
+  Window xdnd_choose_aware(Window start, int rx, int ry, long* out_ver)
+  {
+    Window root = DefaultRootWindow(g_display);
+    Window w = start, target = None; long ver = 0;
+    for (int depth = 0; depth < 24; ++depth) {
+      long v = 0;
+      if (xdnd_has_aware(w, &v)) { target = w; ver = v; }
+      Window child = None; int cx = 0, cy = 0;
+      if (!XTranslateCoordinates(g_display, root, w, rx, ry, &cx, &cy, &child)) break;
+      if (child == None) break;
+      w = child;
+    }
+    if (out_ver) *out_ver = ver;
+    return target;
+  }
+
+  // Topmost mapped toplevel under (rx,ry) excluding `exclude` (our preview).
+  // Fills *out_rect with its root-relative geometry so a caller can cache the
+  // result and skip this full XQueryTree scan (one round-trip per toplevel)
+  // while the pointer stays inside that rect. None if no toplevel covers it.
+  Window xdnd_topmost_at(int rx, int ry, Window exclude, XRectangle* out_rect)
+  {
+    if (out_rect) *out_rect = XRectangle{0, 0, 0, 0};
+    Window root = DefaultRootWindow(g_display);
+    Window rr, parent, *kids = nullptr; unsigned int n = 0;
+    if (!XQueryTree(g_display, root, &rr, &parent, &kids, &n)) return None;
+    Window found = None;
+    for (int i = (int)n - 1; i >= 0; --i) {     // top-to-bottom
+      Window w = kids[i];
+      if (w == exclude) continue;
+      XWindowAttributes at;
+      if (!XGetWindowAttributes(g_display, w, &at)) continue;
+      if (at.map_state != IsViewable) continue;
+      if (rx < at.x || ry < at.y || rx >= at.x + at.width || ry >= at.y + at.height) continue;
+      found = w;
+      if (out_rect) *out_rect = XRectangle{(short)at.x, (short)at.y,
+                                           (unsigned short)at.width, (unsigned short)at.height};
+      break;                                    // occluding window decided
+    }
+    if (kids) XFree(kids);
+    return found;
+  }
+
+  // Topmost-toplevel scan + deepest-aware descent are kept as the two separate
+  // helpers above (xdnd_topmost_at + xdnd_choose_aware) so the drag spin can
+  // cache the expensive scan and re-run only the cheap descent per motion.
+
+  // Serve a SelectionRequest for the drag's XdndSelection from `item`.
+  void xdnd_serve_source_selection(XSelectionRequestEvent& r, neui_detail::DataItem* item,
+                                   const std::vector<Atom>& offered)
+  {
+    static Atom a_targets = XInternAtom(g_display, "TARGETS", False);
+    XSelectionEvent se; std::memset(&se, 0, sizeof se);
+    se.type = SelectionNotify; se.display = g_display; se.requestor = r.requestor;
+    se.selection = r.selection; se.target = r.target; se.time = r.time; se.property = None;
+    Atom prop = r.property ? r.property : r.target;
+
+    if (r.target == a_targets) {
+      std::vector<Atom> t = offered; t.push_back(a_targets);
+      XChangeProperty(g_display, r.requestor, prop, XA_ATOM, 32, PropModeReplace,
+                      reinterpret_cast<unsigned char*>(t.data()), (int)t.size());
+      se.property = prop;
+    } else {
+      std::string mime = neui_detail::xdnd_atom_to_mime(g_display, r.target, g_xa);
+      if (!mime.empty() && item->has_format(mime)) {
+        int nb = item->get_format(mime, nullptr, 0);
+        std::vector<uint8_t> bytes(nb > 0 ? nb : 0);
+        if (nb > 0) item->get_format(mime, bytes.data(), nb);
+        XChangeProperty(g_display, r.requestor, prop, r.target, 8, PropModeReplace,
+                        bytes.data(), (int)bytes.size());
+        se.property = prop;
+      }
+    }
+    XSendEvent(g_display, r.requestor, False, NoEventMask, reinterpret_cast<XEvent*>(&se));
+    XFlush(g_display);
+  }
+
   void dispatch_x_event(XEvent& ev)
   {
     if (XFilterEvent(&ev, None)) return;   // let the IME consume composition keys
@@ -519,6 +901,7 @@ namespace
       case LeaveNotify: s->set_hovered(0); break;
 
       case ClientMessage:
+        if (xdnd_handle_client_message(ev.xclient)) break;   // XDND target messages
         if (ev.xclient.message_type == g_wm_protocols &&
             static_cast<Atom>(ev.xclient.data.l[0]) == g_wm_delete)
           handle_close(lw);
@@ -658,6 +1041,269 @@ namespace
     if (is_appwindow) { ++g_appwindow_count; lw->counted = true; }
   }
 
+  // ---- Message box (neui-drawn modal; X11 has no native one). ---------------
+
+  int run_message_box(LinuxWindow* owner, const char* text, const char* caption,
+                      uint32_t flags)
+  {
+    if (!g_display) return 0;
+    Display* d = g_display;
+    auto* backend = platform_get_backend();
+    if (!backend) return 0;
+
+    neui_detail::MsgBoxSpec spec = neui_detail::msgbox_parse(flags);
+
+    int     scr   = DefaultScreen(d);
+    Window  root  = RootWindow(d, scr);
+    Visual* vis   = DefaultVisual(d, scr);
+    int     depth = DefaultDepth(d, scr);
+    uint32_t dpi  = owner ? owner->dpi : query_display_dpi(d);
+    float   scale = dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+
+    // Scope the palette to the owner's session so dark/light + accent match.
+    neui_detail::ScopedPaletteOverride scope(
+      (owner && owner->session) ? owner->session->effective_palette_ptr() : nullptr);
+    auto C = [](neui_detail::ColorRole r) {
+      return neui_detail::current_palette().colors[(size_t)r];
+    };
+    auto shade = [](uint32_t c, int dlt) -> uint32_t {
+      auto cl = [](int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); };
+      int a = (c >> 24) & 0xFF, r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+      return ((uint32_t)a << 24) | (cl(r + dlt) << 16) | (cl(g + dlt) << 8) | cl(b + dlt);
+    };
+
+    // Offscreen ctx for text measurement during layout (logical px).
+    neui_render_ctx_t mctx = backend->create_offscreen_context(8, 8, 1.0f);
+    auto meas = [&](const char* s, float sz, int weight) -> int {
+      if (!mctx || !s || !*s) return 0;
+      if (weight) backend->push_font(mctx, "", weight);
+      int w = (int)backend->measure_text(mctx, s, -1, sz);
+      if (weight) backend->pop_font(mctx);
+      return w;
+    };
+
+    // Word-wrap UTF-8 `s` to maxw logical px (honours embedded '\n').
+    const float SZ_TXT = 13.0f, SZ_CAP = 14.0f;
+    const int   LH = 18, LH_CAP = 20, WRAP = 360;
+    auto wrap = [&](const char* s, float sz, int weight, int maxw,
+                    std::vector<std::string>& out) {
+      if (!s || !*s) return;
+      std::string cur, word;
+      auto flush_word = [&]() {
+        if (word.empty()) return;
+        std::string trial = cur.empty() ? word : cur + " " + word;
+        if (cur.empty() || meas(trial.c_str(), sz, weight) <= maxw) cur = trial;
+        else { out.push_back(cur); cur = word; }
+        word.clear();
+      };
+      for (const char* p = s;; ++p) {
+        char c = *p;
+        if (c == '\n' || c == 0) { flush_word(); out.push_back(cur); cur.clear();
+                                   if (c == 0) break; }
+        else if (c == ' ') flush_word();
+        else word += c;
+      }
+    };
+
+    std::vector<std::string> cap_lines, txt_lines;
+    wrap(caption, SZ_CAP, 700, WRAP, cap_lines);
+    wrap(text,    SZ_TXT, 0,   WRAP, txt_lines);
+
+    // Layout (logical px).
+    const int PAD = 18, GAP = 12, BTN_H = 28, BTN_GAP = 8, BTN_MINW = 84, ICON = 32;
+    int text_w = 0;
+    for (auto& l : cap_lines) text_w = std::max(text_w, meas(l.c_str(), SZ_CAP, 700));
+    for (auto& l : txt_lines) text_w = std::max(text_w, meas(l.c_str(), SZ_TXT, 0));
+    int content_h = (int)cap_lines.size() * LH_CAP + (int)txt_lines.size() * LH;
+    if (!cap_lines.empty() && !txt_lines.empty()) content_h += 6;
+
+    int bw[3] = {0,0,0}, total_b = 0;
+    for (int i = 0; i < spec.count; ++i) {
+      bw[i] = std::max(BTN_MINW, meas(spec.btn[i].label, SZ_TXT, 0) + 24);
+      total_b += bw[i] + (i ? BTN_GAP : 0);
+    }
+    int icon_w   = spec.icon ? ICON + GAP : 0;
+    int left_h   = std::max(content_h, spec.icon ? ICON : 0);
+    int win_w = PAD * 2 + std::max(icon_w + text_w, total_b);
+    int win_h = PAD * 2 + left_h + GAP + BTN_H;
+    backend->destroy_context(mctx); mctx = nullptr;
+
+    int btn_y  = win_h - PAD - BTN_H;
+    int btn_x0 = win_w - PAD - total_b;
+    int bx[3] = {0,0,0};
+    for (int i = 0, cx = btn_x0; i < spec.count; ++i) { bx[i] = cx; cx += bw[i] + BTN_GAP; }
+    auto hit_button = [&](int lx, int ly) -> int {
+      if (ly < btn_y || ly >= btn_y + BTN_H) return -1;
+      for (int i = 0; i < spec.count; ++i)
+        if (lx >= bx[i] && lx < bx[i] + bw[i]) return i;
+      return -1;
+    };
+
+    // Centre over the owner (or the screen).
+    int ox = 0, oy = 0; unsigned ow = DisplayWidth(d, scr), oh = DisplayHeight(d, scr);
+    if (owner) {
+      Window ch; XTranslateCoordinates(d, owner->win, root, 0, 0, &ox, &oy, &ch);
+      XWindowAttributes oa;
+      if (XGetWindowAttributes(d, owner->win, &oa)) { ow = oa.width; oh = oa.height; }
+    }
+    int wpx = (int)(win_w * scale + 0.5f), hpx = (int)(win_h * scale + 0.5f);
+    int x = ox + ((int)ow - wpx) / 2, y = oy + ((int)oh - hpx) / 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+
+    XSetWindowAttributes swa; std::memset(&swa, 0, sizeof swa);
+    swa.background_pixmap = None; swa.bit_gravity = NorthWestGravity;
+    swa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
+                     PointerMotionMask | KeyPressMask | StructureNotifyMask;
+    Window win = XCreateWindow(d, root, x, y, wpx, hpx, 0, depth, InputOutput, vis,
+                               CWBackPixmap | CWEventMask | CWBitGravity, &swa);
+    if (!win) return 0;
+    if (caption && *caption) set_window_title(d, win, caption);
+    if (owner) XSetTransientForHint(d, win, owner->win);
+    if (g_wm_delete != None) XSetWMProtocols(d, win, &g_wm_delete, 1);
+    {  // mark modal so the WM blocks the owner
+      Atom st = XInternAtom(d, "_NET_WM_STATE", False);
+      Atom md = XInternAtom(d, "_NET_WM_STATE_MODAL", False);
+      if (st != None && md != None)
+        XChangeProperty(d, win, st, XA_ATOM, 32, PropModeReplace,
+                        reinterpret_cast<unsigned char*>(&md), 1);
+    }
+    if (XSizeHints* sh = XAllocSizeHints()) {  // fixed size
+      sh->flags = PMinSize | PMaxSize | USPosition;
+      sh->min_width = sh->max_width = wpx;
+      sh->min_height = sh->max_height = hpx;
+      sh->x = x; sh->y = y;
+      XSetWMNormalHints(d, win, sh); XFree(sh);
+    }
+
+    neui_cairo_backend::LinuxNativeSurface ns;
+    ns.dpy = d; ns.win = win; ns.visual = vis; ns.depth = depth;
+    neui_render_ctx_t ctx = backend->create_context(&ns, (uint32_t)wpx, (uint32_t)hpx);
+    if (!ctx) { XDestroyWindow(d, win); return 0; }
+    backend->update_dpi(ctx, dpi);
+
+    int  hover = -1, pressed = -1, result = 0;
+    bool done = false, need_paint = true, focused = false;
+    // Swallow transient X errors (e.g. focusing a not-yet-viewable window).
+    int (*old_err)(Display*, XErrorEvent*) = XSetErrorHandler(drag_xerror);
+
+    auto render = [&]() {
+      backend->begin_frame(ctx, C(neui_detail::ColorRole::frame_bg));
+      if (spec.icon) {
+        uint32_t icol; const char* glyph;
+        switch (spec.icon) {
+          case NEUI_MB_ICONERROR:       icol = 0xFFD13438; glyph = "\xC3\x97"; break; // ×
+          case NEUI_MB_ICONWARNING:     icol = 0xFFF7630C; glyph = "!";        break;
+          case NEUI_MB_ICONQUESTION:    icol = 0xFF0078D4; glyph = "?";        break;
+          default: /* INFORMATION */    icol = 0xFF0078D4; glyph = "i";        break;
+        }
+        int cx = PAD + ICON / 2, cy = PAD + ICON / 2, rr = ICON / 2;
+        backend->begin_path(ctx);
+        backend->arc(ctx, (float)cx, (float)cy, (float)rr, 0.0f, 6.2831853f);
+        backend->close_path(ctx);
+        backend->fill_path(ctx, icol);
+        backend->push_font(ctx, "", 700);
+        int gw = (int)backend->measure_text(ctx, glyph, -1, 18.0f);
+        backend->draw_text(ctx, cx - gw / 2, PAD, gw + 4, ICON, glyph, 18.0f, 0xFFFFFFFF);
+        backend->pop_font(ctx);
+      }
+      int tx = PAD + (spec.icon ? ICON + GAP : 0);
+      int ty = PAD;
+      backend->push_font(ctx, "", 700);
+      for (auto& l : cap_lines) {
+        backend->draw_text(ctx, tx, ty, win_w - tx - PAD, LH_CAP, l.c_str(), SZ_CAP,
+                           C(neui_detail::ColorRole::text_primary));
+        ty += LH_CAP;
+      }
+      backend->pop_font(ctx);
+      if (!cap_lines.empty() && !txt_lines.empty()) ty += 6;
+      for (auto& l : txt_lines) {
+        backend->draw_text(ctx, tx, ty, win_w - tx - PAD, LH, l.c_str(), SZ_TXT,
+                           C(neui_detail::ColorRole::text_primary));
+        ty += LH;
+      }
+      for (int i = 0; i < spec.count; ++i) {
+        uint32_t fill = C(neui_detail::ColorRole::control_bg);
+        if (pressed == i)     fill = shade(fill, -18);
+        else if (hover == i)  fill = shade(fill, +14);
+        backend->fill_rect(ctx, (float)bx[i], (float)btn_y, (float)bw[i], (float)BTN_H, fill);
+        bool def = (i == spec.def_index);
+        backend->draw_rect(ctx, (float)bx[i], (float)btn_y, (float)bw[i], (float)BTN_H,
+                           def ? 2.0f : 1.0f,
+                           def ? C(neui_detail::ColorRole::accent)
+                               : C(neui_detail::ColorRole::border));
+        int lw = (int)backend->measure_text(ctx, spec.btn[i].label, -1, SZ_TXT);
+        backend->draw_text(ctx, bx[i] + (bw[i] - lw) / 2, btn_y, lw + 4, BTN_H,
+                           spec.btn[i].label, SZ_TXT,
+                           C(neui_detail::ColorRole::text_primary));
+      }
+      backend->end_frame(ctx);
+    };
+
+    XMapRaised(d, win);
+
+    while (!done) {
+      if (need_paint) { render(); need_paint = false; }
+      flush_pending_paints();      // keep other neui windows alive behind the modal
+      XFlush(d);
+      XEvent e; XNextEvent(d, &e);
+      if (e.xany.window != win) { dispatch_x_event(e); continue; }
+      switch (e.type) {
+        case Expose:
+          if (e.xexpose.count == 0) {
+            need_paint = true;
+            // Window is viewable now -> safe to take keyboard focus.
+            if (!focused) { XSetInputFocus(d, win, RevertToParent, CurrentTime); focused = true; }
+          }
+          break;
+        case ConfigureNotify:
+          backend->resize(ctx, e.xconfigure.width, e.xconfigure.height);
+          need_paint = true; break;
+        case MotionNotify: {
+          int h = hit_button((int)(e.xmotion.x / scale), (int)(e.xmotion.y / scale));
+          if (h != hover) { hover = h; need_paint = true; }
+          break;
+        }
+        case ButtonPress:
+          if (e.xbutton.button == Button1) {
+            pressed = hit_button((int)(e.xbutton.x / scale), (int)(e.xbutton.y / scale));
+            need_paint = true;
+          }
+          break;
+        case ButtonRelease:
+          if (e.xbutton.button == Button1) {
+            int h = hit_button((int)(e.xbutton.x / scale), (int)(e.xbutton.y / scale));
+            if (h >= 0 && h == pressed) { result = spec.btn[h].id; done = true; }
+            pressed = -1; need_paint = true;
+          }
+          break;
+        case KeyPress: {
+          KeySym ks = XLookupKeysym(&e.xkey, 0);
+          if (ks == XK_Return || ks == XK_KP_Enter) {
+            result = spec.btn[spec.def_index].id; done = true;
+          } else if (ks == XK_Escape && spec.cancel_index >= 0) {
+            result = spec.btn[spec.cancel_index].id; done = true;
+          }
+          break;
+        }
+        case ClientMessage:
+          if (e.xclient.message_type == g_wm_protocols &&
+              (Atom)e.xclient.data.l[0] == g_wm_delete) {
+            result = spec.cancel_index >= 0 ? spec.btn[spec.cancel_index].id : 0;
+            done = true;
+          }
+          break;
+        default: break;
+      }
+    }
+
+    backend->destroy_context(ctx);
+    XDestroyWindow(d, win);
+    XSync(d, False);
+    XSetErrorHandler(old_err);
+    return result;
+  }
+
 } // namespace
 
 // ===========================================================================
@@ -671,6 +1317,7 @@ namespace
 
     XInitThreads();
     XrmInitialize();
+    XSetErrorHandler(neui_xerror);   // keep foreign-window races from aborting us
     g_display = XOpenDisplay(nullptr);
     if (!g_display) return;   // no DISPLAY - degrade to a no-window null-ish host
 
@@ -686,6 +1333,7 @@ namespace
     g_xim = XOpenIM(g_display, nullptr, nullptr, nullptr);
 
     g_clipboard.init(g_display);
+    g_xa.intern(g_display);
   }
 
   neui_render_backend_t* platform_get_backend()
@@ -745,6 +1393,20 @@ namespace
       XEvent ev;
       XNextEvent(lw->dpy, &ev);
       dispatch_x_event(ev);
+    }
+    // The CLIPBOARD owner window lives on g_display (selections are X-server
+    // global, so it serves the same server the embedded window is on). In
+    // embedded mode the DAW only pumps lw->dpy, so g_display's queue - where
+    // other apps' SelectionRequests for our owned clipboard arrive - would
+    // never be serviced. Drain its clipboard events here so a plugin that
+    // copied data can still answer pastes. Non-clipboard g_display events have
+    // no registered window in embedded mode and are dropped by dispatch_x_event.
+    if (g_display && g_display != lw->dpy) {
+      while (XPending(g_display)) {
+        XEvent ev;
+        XNextEvent(g_display, &ev);
+        dispatch_x_event(ev);
+      }
     }
     // At most one animation tick per ~16 ms (the host calls this on its own
     // cadence; gate so a fast host doesn't over-advance toast/spring-back).
@@ -975,19 +1637,259 @@ namespace
   bool platform_clipboard_read_item(neui_detail::DataItem& item)
   { return g_clipboard.read_item(item); }
 
-  // ---- DnD: XDND is deferred. -----------------------------------------------
+  // ---- Drag & drop: XDND drop-target (receive). Drag-source still deferred. -
 
-  bool platform_dnd_register_window(void* /*native_handle*/, void* /*session_ptr*/,
-                                     uint32_t /*frame_widget_id*/)            { return false; }
-  void platform_dnd_unregister_window(void* /*native_handle*/)                {}
-  uint32_t platform_dnd_begin_drag(void* /*native_handle*/,
-                                     neui_detail::DataItem* /*item*/,
-                                     uint32_t /*allowed_actions*/,
-                                     void* /*preview_native*/,
-                                     int /*hot_x*/, int /*hot_y*/)            { return 0;     }
-  void*    platform_make_drag_preview(const uint8_t* /*bgra_premul*/,
-                                       uint32_t /*w_px*/, uint32_t /*h_px*/,
-                                       float /*scale*/)                       { return nullptr; }
+  bool platform_dnd_register_window(void* native_handle, void* session_ptr,
+                                     uint32_t frame_widget_id)
+  {
+    if (!native_handle || !g_display) return false;
+    auto* lw = static_cast<LinuxWindow*>(native_handle);
+    xdnd_register(lw->dpy ? lw->dpy : g_display, lw->win, session_ptr, frame_widget_id, lw->dpi);
+    return true;
+  }
+  void platform_dnd_unregister_window(void* native_handle)
+  {
+    if (!native_handle || !g_display) return;
+    auto* lw = static_cast<LinuxWindow*>(native_handle);
+    xdnd_unregister(lw->win);
+  }
+  void* platform_make_drag_preview(const uint8_t* bgra_premul,
+                                    uint32_t w_px, uint32_t h_px, float scale)
+  {
+    if (!bgra_premul || w_px == 0 || h_px == 0) return nullptr;
+    auto* p = new DragPreview();
+    p->bgra.assign(bgra_premul, bgra_premul + static_cast<size_t>(w_px) * h_px * 4);
+    p->w_px = w_px; p->h_px = h_px; p->scale = scale > 0.0f ? scale : 1.0f;
+    return p;   // consumed by platform_dnd_begin_drag
+  }
+
+  // Blocking XDND drag-source spin. Returns the negotiated neui_dnd_action_t
+  // (0 = cancelled). Foreign targets go through the XDND ClientMessage
+  // handshake; our own windows (internal drags) dispatch Session::dispatch_dnd_*
+  // directly, passing the DataItem straight through (no X selection round-trip,
+  // which would self-deadlock against this very spin).
+  uint32_t platform_dnd_begin_drag(void* native_handle, neui_detail::DataItem* item,
+                                   uint32_t allowed_actions, void* preview_native,
+                                   int hot_x, int hot_y)
+  {
+    std::unique_ptr<DragPreview> preview(static_cast<DragPreview*>(preview_native));
+    if (!native_handle || !item || !g_display) return 0;
+    Display* d = g_display;
+    auto* lw = static_cast<LinuxWindow*>(native_handle);
+    Window   src  = lw->win;
+    Window   root = DefaultRootWindow(d);
+    if (allowed_actions == 0)
+      allowed_actions = NEUI_DND_ACTION_COPY | NEUI_DND_ACTION_MOVE;
+
+    // Offered target atoms + the MIME list (for internal dispatch).
+    std::vector<Atom>        offered;
+    std::vector<std::string> mimes;
+    auto add_atom = [&](Atom a) {
+      for (Atom x : offered) if (x == a) return;
+      offered.push_back(a);
+    };
+    item->for_each_mime([&](const std::string& mime) {
+      mimes.push_back(mime);
+      if (mime == "text/plain;charset=utf-8" || mime == "text/plain") {
+        add_atom(g_xa.utf8);
+        add_atom(XA_STRING);
+        add_atom(XInternAtom(d, "text/plain;charset=utf-8", False));
+      } else {
+        add_atom(XInternAtom(d, mime.c_str(), False));
+      }
+    });
+    std::vector<const char*> mptrs;
+    for (auto& m : mimes) mptrs.push_back(m.c_str());
+    const char* const* fmts = mptrs.empty() ? nullptr : mptrs.data();
+    uint32_t fcount = (uint32_t)mptrs.size();
+
+    XSetSelectionOwner(d, g_xa.selection, src, CurrentTime);
+    if (offered.size() > 3)
+      XChangeProperty(d, src, g_xa.type_list, XA_ATOM, 32, PropModeReplace,
+                      reinterpret_cast<unsigned char*>(offered.data()), (int)offered.size());
+
+    // Grab on the root window (always viewable; the source frame can be
+    // momentarily non-viewable during WM reparenting). owner_events=False
+    // routes every pointer event to us in root coordinates regardless.
+    if (XGrabPointer(d, root, False,
+          ButtonReleaseMask | ButtonMotionMask | PointerMotionMask,
+          GrabModeAsync, GrabModeAsync, None, None, CurrentTime) != GrabSuccess)
+      return 0;
+    XGrabKeyboard(d, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+
+    int (*old_err)(Display*, XErrorEvent*) = XSetErrorHandler(drag_xerror);
+
+    // Preview hot-spot (physical px) + follow window.
+    int hx = (hot_x < 0) ? (int)(preview ? preview->w_px / 2 : 0)
+                         : (int)(hot_x * (preview ? preview->scale : 1.0f));
+    int hy = (hot_y < 0) ? (int)(preview ? preview->h_px / 2 : 0)
+                         : (int)(hot_y * (preview ? preview->scale : 1.0f));
+    Window  pvwin = None; GC pvgc = nullptr; XImage* pvimg = nullptr;
+    if (preview) {
+      int scr = DefaultScreen(d);
+      XSetWindowAttributes swa; std::memset(&swa, 0, sizeof swa);
+      swa.override_redirect = True; swa.save_under = True; swa.background_pixmap = None;
+      pvwin = XCreateWindow(d, root, 0, 0, preview->w_px, preview->h_px, 0,
+                            DefaultDepth(d, scr), InputOutput, DefaultVisual(d, scr),
+                            CWOverrideRedirect | CWSaveUnder | CWBackPixmap, &swa);
+      pvgc  = XCreateGC(d, pvwin, 0, nullptr);
+      pvimg = XCreateImage(d, DefaultVisual(d, scr), DefaultDepth(d, scr), ZPixmap, 0,
+                           reinterpret_cast<char*>(preview->bgra.data()),
+                           preview->w_px, preview->h_px, 32, (int)preview->w_px * 4);
+      XMapRaised(d, pvwin);
+    }
+    auto put_preview = [&](int rx, int ry) {
+      if (!pvwin) return;
+      XMoveWindow(d, pvwin, rx - hx, ry - hy);
+      if (pvimg) XPutImage(d, pvwin, pvgc, pvimg, 0, 0, 0, 0, preview->w_px, preview->h_px);
+    };
+
+    // Drag state.
+    Window   cur = None; bool cur_internal = false, cur_entered = false;
+    Session* cs = nullptr; uint32_t cframe = 0, cdpi = 96; long cver = 5;
+    bool     accept = false; uint32_t neg_action = 0;
+    bool     dropped = false, finished = false; uint32_t result = 0;
+
+    {  // prime preview at the current pointer
+      Window rr, ch; int rx, ry, wx, wy; unsigned mask;
+      XQueryPointer(d, root, &rr, &ch, &rx, &ry, &wx, &wy, &mask);
+      put_preview(rx, ry);
+    }
+
+    struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+    struct timespec t_drop = {0, 0}; bool waiting_finish = false;
+
+    // Cache the topmost toplevel under the pointer + its rect, so a stream of
+    // motion events inside the same window skips the full XQueryTree scan
+    // (dozens of round-trips on a busy desktop). The cheap aware-descent still
+    // runs every motion, so sub-window targeting stays correct.
+    Window    top_cache = None; XRectangle top_rect{0, 0, 0, 0}; bool top_valid = false;
+
+    while (!finished) {
+      if (XPending(d)) {
+        XEvent e; XNextEvent(d, &e);
+
+        if (e.type == MotionNotify) {
+          int rx = e.xmotion.x_root, ry = e.xmotion.y_root;
+          uint32_t proposed = neui_detail::dnd_suggest_action(
+            allowed_actions, e.xmotion.state & ControlMask, e.xmotion.state & ShiftMask);
+          put_preview(rx, ry);
+          if (waiting_finish) continue;
+
+          long ver = 5;
+          Window top;
+          if (top_valid && rx >= top_rect.x && ry >= top_rect.y &&
+              rx < top_rect.x + top_rect.width && ry < top_rect.y + top_rect.height) {
+            top = top_cache;                          // still inside the cached toplevel
+          } else {
+            top = xdnd_topmost_at(rx, ry, pvwin, &top_rect);
+            top_cache = top; top_valid = (top != None);
+          }
+          Window tw = (top == None) ? None : xdnd_choose_aware(top, rx, ry, &ver);
+          bool tw_internal = (tw != None) && (g_drop_targets.count(tw) > 0);
+          if (tw != cur) {
+            if (cur_internal && cs) cs->dispatch_dnd_leave();
+            else if (cur != None && !cur_internal) xdnd_send(cur, g_xa.leave, (long)src, 0, 0, 0, 0);
+            cur = tw; cur_internal = tw_internal; cur_entered = false;
+            accept = false; neg_action = 0;
+            if (tw_internal) {
+              auto& dt = g_drop_targets[tw];
+              cs = static_cast<Session*>(dt.session); cframe = dt.frame_id & 0xFFFFu; cdpi = dt.dpi;
+            } else if (tw != None) {
+              cver = ver;
+              long l1 = ((long)neui_detail::kXdndVersion << 24) | (offered.size() > 3 ? 1L : 0L);
+              xdnd_send(tw, g_xa.enter, (long)src, l1,
+                        offered.size() > 0 ? (long)offered[0] : 0,
+                        offered.size() > 1 ? (long)offered[1] : 0,
+                        offered.size() > 2 ? (long)offered[2] : 0);
+            }
+          }
+          if (cur_internal && cs) {
+            int lx, ly; Window ch; XTranslateCoordinates(d, root, cur, rx, ry, &lx, &ly, &ch);
+            float sc = cdpi / 96.0f; if (sc <= 0.0f) sc = 1.0f;
+            int llx = (int)(lx / sc), lly = (int)(ly / sc);
+            uint32_t a = cur_entered
+              ? cs->dispatch_dnd_move (cframe, llx, lly, fmts, fcount, proposed, 0)
+              : cs->dispatch_dnd_enter(cframe, llx, lly, fmts, fcount, proposed, 0);
+            cur_entered = true; accept = a != 0; neg_action = a;
+          } else if (cur != None) {
+            xdnd_send(cur, g_xa.position, (long)src, 0,
+                      ((long)rx << 16) | (ry & 0xFFFF), CurrentTime,
+                      (long)neui_detail::xdnd_neui_to_action(g_xa, proposed));
+          }
+        }
+        else if (e.type == ButtonRelease && e.xbutton.button == Button1) {
+          int rx = e.xbutton.x_root, ry = e.xbutton.y_root;
+          uint32_t proposed = neui_detail::dnd_suggest_action(
+            allowed_actions, e.xbutton.state & ControlMask, e.xbutton.state & ShiftMask);
+          if (cur_internal && cs && accept) {
+            int lx, ly; Window ch; XTranslateCoordinates(d, root, cur, rx, ry, &lx, &ly, &ch);
+            float sc = cdpi / 96.0f; if (sc <= 0.0f) sc = 1.0f;
+            result = cs->dispatch_dnd_drop(cframe, (int)(lx / sc), (int)(ly / sc),
+                                           fmts, fcount, proposed, 0, item);
+            finished = true;
+          } else if (cur != None && !cur_internal && accept) {
+            xdnd_send(cur, g_xa.drop, (long)src, 0, CurrentTime, 0, 0);
+            dropped = true; waiting_finish = true;
+            clock_gettime(CLOCK_MONOTONIC, &t_drop);
+          } else {
+            if (cur != None && !cur_internal) xdnd_send(cur, g_xa.leave, (long)src, 0, 0, 0, 0);
+            result = 0; finished = true;
+          }
+        }
+        else if (e.type == KeyPress) {
+          if (XLookupKeysym(&e.xkey, 0) == XK_Escape) {
+            if (cur != None && !cur_internal) xdnd_send(cur, g_xa.leave, (long)src, 0, 0, 0, 0);
+            result = 0; finished = true;
+          }
+        }
+        else if (e.type == SelectionRequest && e.xselectionrequest.owner == src) {
+          xdnd_serve_source_selection(e.xselectionrequest, item, offered);
+        }
+        else if (e.type == ClientMessage && e.xclient.window == src &&
+                 e.xclient.message_type == g_xa.status) {
+          // data.l[0] = the target that sent this status. Ignore a late status
+          // from a target we've already left, or it would set a stale accept
+          // and we'd drop on a window that never agreed to it.
+          if ((Window)e.xclient.data.l[0] == cur) {
+            accept = (e.xclient.data.l[1] & 1) != 0;
+            neg_action = neui_detail::xdnd_action_to_neui(g_xa, (Atom)e.xclient.data.l[4]);
+          }
+        }
+        else if (e.type == ClientMessage && e.xclient.window == src &&
+                 e.xclient.message_type == g_xa.finished) {
+          bool acc = (cver >= 5) ? ((e.xclient.data.l[1] & 1) != 0) : true;
+          Atom aa  = (Atom)e.xclient.data.l[2];
+          result = acc ? (aa ? neui_detail::xdnd_action_to_neui(g_xa, aa) : neg_action) : 0;
+          finished = true;
+        }
+        else {
+          dispatch_x_event(e);   // exposes / resizes keep windows painting
+        }
+      } else {
+        usleep(2000);
+      }
+
+      struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+      long ms = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000;
+      if (ms > 60000) { result = dropped ? neg_action : 0; finished = true; }
+      if (waiting_finish) {
+        long dms = (now.tv_sec - t_drop.tv_sec) * 1000 + (now.tv_nsec - t_drop.tv_nsec) / 1000000;
+        if (dms > 4000) { result = neg_action; finished = true; }  // assume accepted
+      }
+    }
+
+    XUngrabPointer(d, CurrentTime);
+    XUngrabKeyboard(d, CurrentTime);
+    if (pvwin) {
+      if (pvimg) { pvimg->data = nullptr; XDestroyImage(pvimg); }  // data owned by `preview`
+      if (pvgc) XFreeGC(d, pvgc);
+      XDestroyWindow(d, pvwin);
+    }
+    XSync(d, False);
+    XSetErrorHandler(old_err);
+    return result;
+  }
 
   void platform_set_cursor(int /*kind*/) {}   // per-window cursor deferred (Phase 4)
 
@@ -995,11 +1897,14 @@ namespace
   {
     if (!native_handle) return;
     static_cast<LinuxWindow*>(native_handle)->toast_anim = true;
+    ensure_timerfd();
+    arm_timer(true);   // turn the heartbeat on for the duration of the toast
   }
   void platform_stop_toast_animation(void* native_handle)
   {
     if (!native_handle) return;
     static_cast<LinuxWindow*>(native_handle)->toast_anim = false;
+    if (!any_window_animating()) arm_timer(false);   // back to idle: no wakeups
   }
 
   uint64_t platform_now_ms()
@@ -1010,7 +1915,10 @@ namespace
            static_cast<uint64_t>(ts.tv_nsec) / 1000000ull;
   }
 
-  int platform_message_box(void* /*native_handle*/, const char* /*text*/,
-                           const char* /*caption*/, uint32_t /*flags*/)       { return 0; }
+  int platform_message_box(void* native_handle, const char* text,
+                           const char* caption, uint32_t flags)
+  {
+    return run_message_box(static_cast<LinuxWindow*>(native_handle), text, caption, flags);
+  }
 
 } // namespace xpl_host
