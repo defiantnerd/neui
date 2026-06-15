@@ -17,10 +17,10 @@ namespace neui_detail
   template <typename F>
   inline void argb_unpack(uint32_t argb, F out[4], float alpha_mul = 1.0f)
   {
-    out[0] = static_cast<F>(((argb >> 16) & 0xFF) / 255.0f);              // R
-    out[1] = static_cast<F>(((argb >>  8) & 0xFF) / 255.0f);              // G
-    out[2] = static_cast<F>(( argb        & 0xFF) / 255.0f);              // B
-    out[3] = static_cast<F>(((argb >> 24) & 0xFF) / 255.0f * alpha_mul);  // A
+    out[0] = static_cast<F>(static_cast<float>((argb >> 16) & 0xFF) / 255.0f);              // R
+    out[1] = static_cast<F>(static_cast<float>((argb >>  8) & 0xFF) / 255.0f);              // G
+    out[2] = static_cast<F>(static_cast<float>( argb        & 0xFF) / 255.0f);              // B
+    out[3] = static_cast<F>(static_cast<float>((argb >> 24) & 0xFF) / 255.0f * alpha_mul);  // A
   }
 
   // Cumulative-opacity stack semantics (renderer.h push_alpha/pop_alpha):

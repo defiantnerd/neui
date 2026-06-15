@@ -455,7 +455,7 @@ namespace
   void dispatch_wheel(LinuxWindow* lw, XButtonEvent& be, float scale)
   {
     Session* s = lw->session;
-    float lx = be.x / scale, ly = be.y / scale;
+    float lx = static_cast<float>(be.x) / scale, ly = static_cast<float>(be.y) / scale;
     int  delta = 0;
     bool horizontal = false;
     switch (be.button) {
@@ -484,7 +484,7 @@ namespace
   void dispatch_button_press(LinuxWindow* lw, XButtonEvent& be)
   {
     Session* s = lw->session;
-    float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
     // Wheel (legacy core Button 4-7): the stepped fallback. Once XI2 scroll has
     // proven it delivers on this server, the same physical scroll also arrives
     // as XI2 valuators, so drop the legacy buttons to avoid double-counting.
@@ -497,7 +497,7 @@ namespace
       return;
     }
 
-    float lx = be.x / scale, ly = be.y / scale;
+    float lx = static_cast<float>(be.x) / scale, ly = static_cast<float>(be.y) / scale;
 
     if (be.button == 1) {
       // Overlay pre-checks (mirror macOS mouseDown: order).
@@ -563,8 +563,8 @@ namespace
   {
     if (be.button >= 4 && be.button <= 7) return;  // wheel: press carried it
     Session* s = lw->session;
-    float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
-    float lx = be.x / scale, ly = be.y / scale;
+    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float lx = static_cast<float>(be.x) / scale, ly = static_cast<float>(be.y) / scale;
 
     if (be.button == 1) {
       if (lw->swallow_release) { lw->swallow_release = false; return; }
@@ -635,8 +635,8 @@ namespace
 
   void dispatch_motion(LinuxWindow* lw, XMotionEvent& me)
   {
-    float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
-    do_motion(lw, me.x / scale, me.y / scale, me.state);
+    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    do_motion(lw, static_cast<float>(me.x) / scale, static_cast<float>(me.y) / scale, me.state);
   }
 
   void dispatch_key_press(LinuxWindow* lw, XKeyEvent& ke)
@@ -855,7 +855,7 @@ namespace
     DropTarget& dt = dit->second;
     auto* s = static_cast<Session*>(dt.session);
     uint32_t frame_idx = dt.frame_id & 0xFFFFu;
-    float scale = dt.dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float scale = static_cast<float>(dt.dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
     // The drag arrived on the display this window lives on (g_display for a
     // standalone window, the DAW's connection for an embedded one). Reading the
     // selection / answering on g_display would silently fail for embedded plugins.
@@ -902,8 +902,8 @@ namespace
       int lx = 0, ly = 0; Window child;
       XTranslateCoordinates(dpy, DefaultRootWindow(dpy), e.window,
                             rx, ry, &lx, &ly, &child);
-      g_xdrag.last_lx = (int)(lx / scale);
-      g_xdrag.last_ly = (int)(ly / scale);
+      g_xdrag.last_lx = (int)(static_cast<float>(lx) / scale);
+      g_xdrag.last_ly = (int)(static_cast<float>(ly) / scale);
 
       const char* const* fmts = g_xdrag.ptrs.empty() ? nullptr : g_xdrag.ptrs.data();
       uint32_t count = (uint32_t)g_xdrag.ptrs.size();
@@ -1082,7 +1082,7 @@ namespace
       std::string mime = neui_detail::xdnd_atom_to_mime(g_display, r.target, g_xa);
       if (!mime.empty() && item->has_format(mime)) {
         int nb = item->get_format(mime, nullptr, 0);
-        std::vector<uint8_t> bytes(nb > 0 ? nb : 0);
+        std::vector<uint8_t> bytes(static_cast<size_t>(nb > 0 ? nb : 0));
         if (nb > 0) item->get_format(mime, bytes.data(), nb);
         XChangeProperty(g_display, r.requestor, prop, r.target, 8, PropModeReplace,
                         bytes.data(), (int)bytes.size());
@@ -1269,8 +1269,8 @@ namespace
     if (dv == 0.0 && dh == 0.0) return;
     g_xi2_scroll_seen = true;   // XI2 scroll works here -> suppress core Button 4-7
 
-    float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
-    feed_scroll(lw, de->event_x / scale, de->event_y / scale, dv, dh);
+    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    feed_scroll(lw, static_cast<float>(de->event_x) / scale, static_cast<float>(de->event_y) / scale, dv, dh);
   }
 
   // Unpack an XI2 GenericEvent cookie and dispatch XI_Motion scroll. Returns
@@ -1295,8 +1295,8 @@ namespace
           // then to avoid double-dispatching the move.
           if (lw->session->_pressed_widget == 0) {
             unsigned int state = static_cast<unsigned int>(de->mods.effective);
-            float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
-            do_motion(lw, de->event_x / scale, de->event_y / scale, state);
+            float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+            do_motion(lw, static_cast<float>(de->event_x) / scale, static_cast<float>(de->event_y) / scale, state);
           }
         }
       }
@@ -1371,9 +1371,9 @@ namespace
         s->resize_render_ctx(lw->widget_index, wphys, hphys);
         auto* wd = s->get_widget(lw->widget_index);
         if (wd) {
-          float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
-          int wlog = static_cast<int>(wphys / scale + 0.5f);
-          int hlog = static_cast<int>(hphys / scale + 0.5f);
+          float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+          int wlog = static_cast<int>(static_cast<float>(wphys) / scale + 0.5f);
+          int hlog = static_cast<int>(static_cast<float>(hphys) / scale + 0.5f);
           if (wd->width != wlog || wd->height != hlog) {
             wd->width  = wlog;
             wd->height = hlog;
@@ -1467,7 +1467,7 @@ namespace
     int      depth = DefaultDepth(dpy, scr);
 
     uint32_t dpi   = query_display_dpi(dpy);
-    float    scale = dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float    scale = static_cast<float>(dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
     int w_phys = static_cast<int>(static_cast<float>(wd.width)  * scale + 0.5f); if (w_phys < 1) w_phys = 1;
     int h_phys = static_cast<int>(static_cast<float>(wd.height) * scale + 0.5f); if (h_phys < 1) h_phys = 1;
     int x_phys = static_cast<int>(static_cast<float>(wd.x) * scale + 0.5f);
@@ -1485,7 +1485,8 @@ namespace
     swa.background_pixmap = None;
     swa.bit_gravity       = NorthWestGravity;
 
-    Window win = XCreateWindow(dpy, root, x_phys, y_phys, w_phys, h_phys, 0,
+    Window win = XCreateWindow(dpy, root, x_phys, y_phys,
+                               static_cast<unsigned int>(w_phys), static_cast<unsigned int>(h_phys), 0,
                                depth, InputOutput, vis,
                                CWEventMask | CWBackPixmap | CWBitGravity, &swa);
     if (!win) return;
@@ -1597,7 +1598,7 @@ namespace
     Visual* vis   = DefaultVisual(d, scr);
     int     depth = DefaultDepth(d, scr);
     uint32_t dpi  = owner ? owner->dpi : query_display_dpi(d);
-    float   scale = dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float   scale = static_cast<float>(dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
 
     // Scope the palette to the owner's session so dark/light + accent match.
     neui_detail::ScopedPaletteOverride scope(
@@ -1675,11 +1676,12 @@ namespace
     };
 
     // Centre over the owner (or the screen).
-    int ox = 0, oy = 0; unsigned ow = DisplayWidth(d, scr), oh = DisplayHeight(d, scr);
+    int ox = 0, oy = 0;
+    unsigned ow = static_cast<unsigned>(DisplayWidth(d, scr)), oh = static_cast<unsigned>(DisplayHeight(d, scr));
     if (owner) {
       Window ch; XTranslateCoordinates(d, owner->win, root, 0, 0, &ox, &oy, &ch);
       XWindowAttributes oa;
-      if (XGetWindowAttributes(d, owner->win, &oa)) { ow = oa.width; oh = oa.height; }
+      if (XGetWindowAttributes(d, owner->win, &oa)) { ow = static_cast<unsigned>(oa.width); oh = static_cast<unsigned>(oa.height); }
     }
     int wpx = (int)(static_cast<float>(win_w) * scale + 0.5f), hpx = (int)(static_cast<float>(win_h) * scale + 0.5f);
     int x = ox + ((int)ow - wpx) / 2, y = oy + ((int)oh - hpx) / 2;
@@ -1690,7 +1692,7 @@ namespace
     swa.background_pixmap = None; swa.bit_gravity = NorthWestGravity;
     swa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
                      PointerMotionMask | KeyPressMask | StructureNotifyMask;
-    Window win = XCreateWindow(d, root, x, y, wpx, hpx, 0, depth, InputOutput, vis,
+    Window win = XCreateWindow(d, root, x, y, static_cast<unsigned int>(wpx), static_cast<unsigned int>(hpx), 0, depth, InputOutput, vis,
                                CWBackPixmap | CWEventMask | CWBitGravity, &swa);
     if (!win) return 0;
     if (caption && *caption) set_window_title(d, win, caption);
@@ -1739,21 +1741,21 @@ namespace
         backend->fill_path(ctx, icol);
         backend->push_font(ctx, "", 700);
         int gw = (int)backend->measure_text(ctx, glyph, -1, 18.0f);
-        backend->draw_text(ctx, cx - gw / 2, PAD, gw + 4, ICON, glyph, 18.0f, 0xFFFFFFFF);
+        backend->draw_text(ctx, (float)(cx - gw / 2), (float)PAD, (float)(gw + 4), (float)ICON, glyph, 18.0f, 0xFFFFFFFF);
         backend->pop_font(ctx);
       }
       int tx = PAD + (spec.icon ? ICON + GAP : 0);
       int ty = PAD;
       backend->push_font(ctx, "", 700);
       for (auto& l : cap_lines) {
-        backend->draw_text(ctx, tx, ty, win_w - tx - PAD, LH_CAP, l.c_str(), SZ_CAP,
+        backend->draw_text(ctx, (float)tx, (float)ty, (float)(win_w - tx - PAD), (float)LH_CAP, l.c_str(), SZ_CAP,
                            C(neui_detail::ColorRole::text_primary));
         ty += LH_CAP;
       }
       backend->pop_font(ctx);
       if (!cap_lines.empty() && !txt_lines.empty()) ty += 6;
       for (auto& l : txt_lines) {
-        backend->draw_text(ctx, tx, ty, win_w - tx - PAD, LH, l.c_str(), SZ_TXT,
+        backend->draw_text(ctx, (float)tx, (float)ty, (float)(win_w - tx - PAD), (float)LH, l.c_str(), SZ_TXT,
                            C(neui_detail::ColorRole::text_primary));
         ty += LH;
       }
@@ -1768,7 +1770,7 @@ namespace
                            def ? C(neui_detail::ColorRole::accent)
                                : C(neui_detail::ColorRole::border));
         int lw = (int)backend->measure_text(ctx, spec.btn[i].label, -1, SZ_TXT);
-        backend->draw_text(ctx, bx[i] + (bw[i] - lw) / 2, btn_y, lw + 4, BTN_H,
+        backend->draw_text(ctx, (float)(bx[i] + (bw[i] - lw) / 2), (float)btn_y, (float)(lw + 4), (float)BTN_H,
                            spec.btn[i].label, SZ_TXT,
                            C(neui_detail::ColorRole::text_primary));
       }
@@ -1801,22 +1803,22 @@ namespace
           }
           break;
         case ConfigureNotify:
-          backend->resize(ctx, e.xconfigure.width, e.xconfigure.height);
+          backend->resize(ctx, static_cast<uint32_t>(e.xconfigure.width), static_cast<uint32_t>(e.xconfigure.height));
           need_paint = true; break;
         case MotionNotify: {
-          int h = hit_button((int)(e.xmotion.x / scale), (int)(e.xmotion.y / scale));
+          int h = hit_button((int)(static_cast<float>(e.xmotion.x) / scale), (int)(static_cast<float>(e.xmotion.y) / scale));
           if (h != hover) { hover = h; need_paint = true; }
           break;
         }
         case ButtonPress:
           if (e.xbutton.button == Button1) {
-            pressed = hit_button((int)(e.xbutton.x / scale), (int)(e.xbutton.y / scale));
+            pressed = hit_button((int)(static_cast<float>(e.xbutton.x) / scale), (int)(static_cast<float>(e.xbutton.y) / scale));
             need_paint = true;
           }
           break;
         case ButtonRelease:
           if (e.xbutton.button == Button1) {
-            int h = hit_button((int)(e.xbutton.x / scale), (int)(e.xbutton.y / scale));
+            int h = hit_button((int)(static_cast<float>(e.xbutton.x) / scale), (int)(static_cast<float>(e.xbutton.y) / scale));
             if (h >= 0 && h == pressed) { result = spec.btn[h].id; done = true; }
             pressed = -1; need_paint = true;
           }
@@ -2060,7 +2062,7 @@ namespace
   {
     if (!native_handle) return;
     auto* lw = static_cast<LinuxWindow*>(native_handle);
-    float scale = (dpi ? dpi : lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float scale = static_cast<float>(dpi ? dpi : lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
     XMoveResizeWindow(lw->dpy, lw->win,
                       static_cast<int>(static_cast<float>(x) * scale + 0.5f),
                       static_cast<int>(static_cast<float>(y) * scale + 0.5f),
@@ -2080,7 +2082,7 @@ namespace
   {
     if (!native_handle) return 1.0f;
     auto* lw = static_cast<LinuxWindow*>(native_handle);
-    float s = lw->dpi / 96.0f;
+    float s = static_cast<float>(lw->dpi) / 96.0f;
     return s > 0.0f ? s : 1.0f;
   }
 
@@ -2229,7 +2231,7 @@ namespace
   {
     if (!native_handle) return;
     auto* lw = static_cast<LinuxWindow*>(native_handle);
-    float scale = lw->dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
     XSizeHints* sh = XAllocSizeHints();
     if (!sh) return;
     sh->flags = 0;
@@ -2358,9 +2360,9 @@ namespace
 
     // Preview hot-spot (physical px) + follow window.
     int hx = (hot_x < 0) ? (int)(preview ? preview->w_px / 2 : 0)
-                         : (int)(hot_x * (preview ? preview->scale : 1.0f));
+                         : (int)(static_cast<float>(hot_x) * (preview ? preview->scale : 1.0f));
     int hy = (hot_y < 0) ? (int)(preview ? preview->h_px / 2 : 0)
-                         : (int)(hot_y * (preview ? preview->scale : 1.0f));
+                         : (int)(static_cast<float>(hot_y) * (preview ? preview->scale : 1.0f));
     Window  pvwin = None; GC pvgc = nullptr; XImage* pvimg = nullptr;
     if (preview) {
       int scr = DefaultScreen(d);
@@ -2370,7 +2372,7 @@ namespace
                             DefaultDepth(d, scr), InputOutput, DefaultVisual(d, scr),
                             CWOverrideRedirect | CWSaveUnder | CWBackPixmap, &swa);
       pvgc  = XCreateGC(d, pvwin, 0, nullptr);
-      pvimg = XCreateImage(d, DefaultVisual(d, scr), DefaultDepth(d, scr), ZPixmap, 0,
+      pvimg = XCreateImage(d, DefaultVisual(d, scr), static_cast<unsigned int>(DefaultDepth(d, scr)), ZPixmap, 0,
                            reinterpret_cast<char*>(preview->bgra.data()),
                            preview->w_px, preview->h_px, 32, (int)preview->w_px * 4);
       XMapRaised(d, pvwin);
@@ -2443,8 +2445,8 @@ namespace
           }
           if (cur_internal && cs) {
             int lx, ly; Window ch; XTranslateCoordinates(d, root, cur, rx, ry, &lx, &ly, &ch);
-            float sc = cdpi / 96.0f; if (sc <= 0.0f) sc = 1.0f;
-            int llx = (int)(lx / sc), lly = (int)(ly / sc);
+            float sc = static_cast<float>(cdpi) / 96.0f; if (sc <= 0.0f) sc = 1.0f;
+            int llx = (int)(static_cast<float>(lx) / sc), lly = (int)(static_cast<float>(ly) / sc);
             uint32_t a = cur_entered
               ? cs->dispatch_dnd_move (cframe, llx, lly, fmts, fcount, proposed, 0)
               : cs->dispatch_dnd_enter(cframe, llx, lly, fmts, fcount, proposed, 0);
@@ -2461,8 +2463,8 @@ namespace
             allowed_actions, e.xbutton.state & ControlMask, e.xbutton.state & ShiftMask);
           if (cur_internal && cs && accept) {
             int lx, ly; Window ch; XTranslateCoordinates(d, root, cur, rx, ry, &lx, &ly, &ch);
-            float sc = cdpi / 96.0f; if (sc <= 0.0f) sc = 1.0f;
-            result = cs->dispatch_dnd_drop(cframe, (int)(lx / sc), (int)(ly / sc),
+            float sc = static_cast<float>(cdpi) / 96.0f; if (sc <= 0.0f) sc = 1.0f;
+            result = cs->dispatch_dnd_drop(cframe, (int)(static_cast<float>(lx) / sc), (int)(static_cast<float>(ly) / sc),
                                            fmts, fcount, proposed, 0, item);
             finished = true;
           } else if (cur != None && !cur_internal && accept) {

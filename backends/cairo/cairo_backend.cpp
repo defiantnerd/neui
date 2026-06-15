@@ -217,7 +217,7 @@ namespace neui_cairo_backend
     // --- Try MIT-SHM (zero-copy: cairo renders straight into the shm buffer).
     if (st->dpy && XShmQueryExtension(st->dpy)) {
       std::memset(&st->shm, 0, sizeof(st->shm));
-      st->ximage = XShmCreateImage(st->dpy, st->visual, st->depth, ZPixmap,
+      st->ximage = XShmCreateImage(st->dpy, st->visual, static_cast<unsigned int>(st->depth), ZPixmap,
                                    nullptr, &st->shm, st->w_px, st->h_px);
       if (st->ximage) {
         // Honour cairo's stride for the shm allocation so the surface and
@@ -279,7 +279,7 @@ namespace neui_cairo_backend
     st->cr = cairo_create(st->surface);
     if (st->dpy) {
       unsigned char* data = cairo_image_surface_get_data(st->surface);
-      st->ximage = XCreateImage(st->dpy, st->visual, st->depth, ZPixmap, 0,
+      st->ximage = XCreateImage(st->dpy, st->visual, static_cast<unsigned int>(st->depth), ZPixmap, 0,
                                 reinterpret_cast<char*>(data),
                                 st->w_px, st->h_px, 32, stride);
     }

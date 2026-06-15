@@ -38,7 +38,11 @@ elseif(UNIX)
   find_package(Freetype REQUIRED)
 
   target_sources(neui-xplhost PRIVATE platform_linux.cpp)
-  target_include_directories(neui-xplhost PRIVATE
+  # Third-party headers (vendored stb + Cairo/X11 system libs) are marked
+  # SYSTEM so their own -Wconversion / -Wsign-conversion noise stays out of
+  # consumer builds that compile neui under stricter flags than neui itself
+  # uses. stb_image.h in particular emits hundreds of conversion warnings.
+  target_include_directories(neui-xplhost SYSTEM PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/stb
     ${CAIRO_INCLUDE_DIRS}
     ${X11_INCLUDE_DIR})

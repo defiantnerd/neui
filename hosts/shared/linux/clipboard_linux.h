@@ -125,7 +125,7 @@ namespace neui_detail
       if (buf && buflen > 0) {
         int copy = (buflen - 1 < static_cast<int>(bytes.size()))
                      ? buflen - 1 : static_cast<int>(bytes.size());
-        if (copy > 0) std::memcpy(buf, bytes.data(), copy);
+        if (copy > 0) std::memcpy(buf, bytes.data(), static_cast<size_t>(copy));
         buf[copy] = '\0';
       }
       return need;
