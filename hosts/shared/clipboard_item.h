@@ -63,7 +63,7 @@ namespace neui_detail
       int n = static_cast<int>(it->second.bytes.size());
       if (buf && buflen > 0) {
         int copy = (buflen < n) ? buflen : n;
-        std::memcpy(buf, it->second.bytes.data(), copy);
+        std::memcpy(buf, it->second.bytes.data(), static_cast<size_t>(copy));
       }
       return n;
     }

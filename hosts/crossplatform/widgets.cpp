@@ -480,7 +480,7 @@ namespace xpl_host
     int need = static_cast<int>(text.size()) + 1;
     if (buf && buflen > 0) {
       int copy = std::min(buflen - 1, static_cast<int>(text.size()));
-      memcpy(buf, text.c_str(), copy);
+      memcpy(buf, text.c_str(), static_cast<size_t>(copy));
       buf[copy] = '\0';
     }
     return need;
@@ -950,7 +950,7 @@ namespace xpl_host
     int need = static_cast<int>(text.size()) + 1;
     if (buf && buflen > 0) {
       int copy = std::min(buflen - 1, static_cast<int>(text.size()));
-      memcpy(buf, text.c_str(), copy);
+      memcpy(buf, text.c_str(), static_cast<size_t>(copy));
       buf[copy] = '\0';
     }
     return need;
@@ -1203,7 +1203,7 @@ namespace xpl_host
     int need = static_cast<int>(text->size()) + 1;
     if (buf && buflen > 0) {
       int copy = std::min(buflen - 1, static_cast<int>(text->size()));
-      memcpy(buf, text->c_str(), copy);
+      memcpy(buf, text->c_str(), static_cast<size_t>(copy));
       buf[copy] = '\0';
     }
     return need;

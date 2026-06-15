@@ -123,8 +123,8 @@ namespace xpl_host
     // event coords). Default: full bounding rect using the cached absolute
     // position. Override to restrict (e.g. ComboBox top bar only).
     virtual bool hit_test(float px, float py) const {
-      return px >= abs_x && px < abs_x + width &&
-             py >= abs_y && py < abs_y + height;
+      return px >= static_cast<float>(abs_x) && px < static_cast<float>(abs_x + width) &&
+             py >= static_cast<float>(abs_y) && py < static_cast<float>(abs_y + height);
     }
 
     // Called before this widget is removed from the tree.

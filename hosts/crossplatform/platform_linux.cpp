@@ -1468,10 +1468,10 @@ namespace
 
     uint32_t dpi   = query_display_dpi(dpy);
     float    scale = dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
-    int w_phys = static_cast<int>(wd.width  * scale + 0.5f); if (w_phys < 1) w_phys = 1;
-    int h_phys = static_cast<int>(wd.height * scale + 0.5f); if (h_phys < 1) h_phys = 1;
-    int x_phys = static_cast<int>(wd.x * scale + 0.5f);
-    int y_phys = static_cast<int>(wd.y * scale + 0.5f);
+    int w_phys = static_cast<int>(static_cast<float>(wd.width)  * scale + 0.5f); if (w_phys < 1) w_phys = 1;
+    int h_phys = static_cast<int>(static_cast<float>(wd.height) * scale + 0.5f); if (h_phys < 1) h_phys = 1;
+    int x_phys = static_cast<int>(static_cast<float>(wd.x) * scale + 0.5f);
+    int y_phys = static_cast<int>(static_cast<float>(wd.y) * scale + 0.5f);
 
     XSetWindowAttributes swa;
     std::memset(&swa, 0, sizeof(swa));
@@ -1681,7 +1681,7 @@ namespace
       XWindowAttributes oa;
       if (XGetWindowAttributes(d, owner->win, &oa)) { ow = oa.width; oh = oa.height; }
     }
-    int wpx = (int)(win_w * scale + 0.5f), hpx = (int)(win_h * scale + 0.5f);
+    int wpx = (int)(static_cast<float>(win_w) * scale + 0.5f), hpx = (int)(static_cast<float>(win_h) * scale + 0.5f);
     int x = ox + ((int)ow - wpx) / 2, y = oy + ((int)oh - hpx) / 2;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
@@ -2062,10 +2062,10 @@ namespace
     auto* lw = static_cast<LinuxWindow*>(native_handle);
     float scale = (dpi ? dpi : lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
     XMoveResizeWindow(lw->dpy, lw->win,
-                      static_cast<int>(x * scale + 0.5f),
-                      static_cast<int>(y * scale + 0.5f),
-                      static_cast<unsigned int>(w * scale + 0.5f),
-                      static_cast<unsigned int>(h * scale + 0.5f));
+                      static_cast<int>(static_cast<float>(x) * scale + 0.5f),
+                      static_cast<int>(static_cast<float>(y) * scale + 0.5f),
+                      static_cast<unsigned int>(static_cast<float>(w) * scale + 0.5f),
+                      static_cast<unsigned int>(static_cast<float>(h) * scale + 0.5f));
     XFlush(lw->dpy);
   }
 
@@ -2235,13 +2235,13 @@ namespace
     sh->flags = 0;
     if (min_w > 0 || min_h > 0) {
       sh->flags |= PMinSize;
-      sh->min_width  = min_w > 0 ? static_cast<int>(min_w * scale + 0.5f) : 0;
-      sh->min_height = min_h > 0 ? static_cast<int>(min_h * scale + 0.5f) : 0;
+      sh->min_width  = min_w > 0 ? static_cast<int>(static_cast<float>(min_w) * scale + 0.5f) : 0;
+      sh->min_height = min_h > 0 ? static_cast<int>(static_cast<float>(min_h) * scale + 0.5f) : 0;
     }
     if (max_w > 0 || max_h > 0) {
       sh->flags |= PMaxSize;
-      sh->max_width  = max_w > 0 ? static_cast<int>(max_w * scale + 0.5f) : 32767;
-      sh->max_height = max_h > 0 ? static_cast<int>(max_h * scale + 0.5f) : 32767;
+      sh->max_width  = max_w > 0 ? static_cast<int>(static_cast<float>(max_w) * scale + 0.5f) : 32767;
+      sh->max_height = max_h > 0 ? static_cast<int>(static_cast<float>(max_h) * scale + 0.5f) : 32767;
     }
     if (sh->flags) XSetWMNormalHints(lw->dpy, lw->win, sh);
     XFree(sh);

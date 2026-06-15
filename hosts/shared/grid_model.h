@@ -283,7 +283,7 @@ namespace neui_detail
     int x = 0;
     int n = (int)m.columns.size();
     if (col > n) col = n;
-    for (int i = 0; i < col; ++i) x += m.columns[i].width;
+    for (int i = 0; i < col; ++i) x += m.columns[static_cast<size_t>(i)].width;
     return x;
   }
 
@@ -291,7 +291,7 @@ namespace neui_detail
   inline int grid_column_min_width(const GridModel& m, int col, int grid_default)
   {
     if (col < 0 || col >= (int)m.columns.size()) return grid_default;
-    int mw = m.columns[col].min_width;
+    int mw = m.columns[static_cast<size_t>(col)].min_width;
     return (mw > 0) ? mw : grid_default;
   }
 
@@ -428,7 +428,7 @@ namespace neui_detail
       int n = (int)m.columns.size();
       int x_running = -m.scroll_offset_x;
       for (int i = 0; i < n; ++i) {
-        x_running += m.columns[i].width;
+        x_running += m.columns[static_cast<size_t>(i)].width;
         int divider_screen_x = x_running;
         if (divider_screen_x >= vp.body_w + GRID_COLUMN_RESIZE_HIT_PX) break;
         if (lx >= divider_screen_x - GRID_COLUMN_RESIZE_HIT_PX &&
@@ -441,11 +441,11 @@ namespace neui_detail
       // Determine which column the cursor sits over (informational).
       int xr = -m.scroll_offset_x;
       for (int i = 0; i < n; ++i) {
-        if (lx >= xr && lx < xr + m.columns[i].width) {
+        if (lx >= xr && lx < xr + m.columns[static_cast<size_t>(i)].width) {
           hit.col = i;
           break;
         }
-        xr += m.columns[i].width;
+        xr += m.columns[static_cast<size_t>(i)].width;
       }
       hit.region = GridHitRegion::Header;
       return hit;
@@ -479,8 +479,8 @@ namespace neui_detail
       int xr = -m.scroll_offset_x;
       int col = -1;
       for (int i = 0; i < n; ++i) {
-        if (lx >= xr && lx < xr + m.columns[i].width) { col = i; break; }
-        xr += m.columns[i].width;
+        if (lx >= xr && lx < xr + m.columns[static_cast<size_t>(i)].width) { col = i; break; }
+        xr += m.columns[static_cast<size_t>(i)].width;
       }
       if (col < 0) {
         // Cursor is past the last column - still inside the body but no cell.
@@ -551,7 +551,7 @@ namespace neui_detail
     grid_ensure_row_visible(m, vp, row_h, row);
     if (col < 0 || col >= (int)m.columns.size()) return;
     int left_in_content = grid_column_left(m, col);
-    int right_in_content = left_in_content + m.columns[col].width;
+    int right_in_content = left_in_content + m.columns[static_cast<size_t>(col)].width;
     if (left_in_content < m.scroll_offset_x)
       m.scroll_offset_x = left_in_content;
     else if (right_in_content > m.scroll_offset_x + vp.body_w)

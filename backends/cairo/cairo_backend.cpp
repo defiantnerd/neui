@@ -244,7 +244,7 @@ namespace neui_cairo_backend
             if (attached && !g_shm_attach_failed) {
               st->surface = cairo_image_surface_create_for_data(
                 reinterpret_cast<unsigned char*>(st->shm.shmaddr),
-                CAIRO_FORMAT_ARGB32, st->w_px, st->h_px, stride);
+                CAIRO_FORMAT_ARGB32, static_cast<int>(st->w_px), static_cast<int>(st->h_px), stride);
               if (cairo_surface_status(st->surface) == CAIRO_STATUS_SUCCESS) {
                 st->use_shm = true;
                 st->cr = cairo_create(st->surface);
@@ -275,7 +275,7 @@ namespace neui_cairo_backend
     //     XPutImage. (Remote display, denied SHM, or no MIT-SHM.)
     st->use_shm = false;
     st->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
-                                             st->w_px, st->h_px);
+                                             static_cast<int>(st->w_px), static_cast<int>(st->h_px));
     st->cr = cairo_create(st->surface);
     if (st->dpy) {
       unsigned char* data = cairo_image_surface_get_data(st->surface);
@@ -552,11 +552,11 @@ namespace neui_cairo_backend
     // is tightly packed width_px*4.
     const size_t src_row = static_cast<size_t>(width_px) * 4u;
     for (uint32_t row = 0; row < height_px; ++row)
-      std::memcpy(owned + static_cast<size_t>(row) * stride,
+      std::memcpy(owned + static_cast<size_t>(row) * static_cast<size_t>(stride),
                   bgra_pixels + static_cast<size_t>(row) * src_row, src_row);
 
     cairo_surface_t* surf = cairo_image_surface_create_for_data(
-      owned, CAIRO_FORMAT_ARGB32, width_px, height_px, stride);
+      owned, CAIRO_FORMAT_ARGB32, static_cast<int>(width_px), static_cast<int>(height_px), stride);
     if (cairo_surface_status(surf) != CAIRO_STATUS_SUCCESS) {
       cairo_surface_destroy(surf);
       std::free(owned);
@@ -770,7 +770,7 @@ namespace neui_cairo_backend
     st->h_px  = height_px;
     st->scale = scale;
     st->dpi   = static_cast<uint32_t>(scale * 96.0f + 0.5f);
-    st->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width_px, height_px);
+    st->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, static_cast<int>(width_px), static_cast<int>(height_px));
     if (cairo_surface_status(st->surface) != CAIRO_STATUS_SUCCESS) {
       cairo_surface_destroy(st->surface);
       delete st;
@@ -791,7 +791,7 @@ namespace neui_cairo_backend
     const size_t row  = static_cast<size_t>(st->w_px) * 4u;  // tight output rows
     for (uint32_t y = 0; y < st->h_px; ++y)
       std::memcpy(out_bgra + static_cast<size_t>(y) * row,
-                  data + static_cast<size_t>(y) * stride, row);
+                  data + static_cast<size_t>(y) * static_cast<size_t>(stride), row);
     return true;
   }
 

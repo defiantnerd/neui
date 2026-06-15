@@ -30,6 +30,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -299,7 +300,7 @@ namespace neui_detail
       const char* keys[2] = { "text/plain;charset=utf-8", "text/plain" };
       for (const char* k : keys) {
         int n = d.get_format(k, nullptr, 0);
-        if (n > 0) { out.resize(n); d.get_format(k, out.data(), n); return true; }
+        if (n > 0) { out.resize(static_cast<size_t>(n)); d.get_format(k, out.data(), n); return true; }
       }
       return false;
     }
@@ -307,7 +308,7 @@ namespace neui_detail
     {
       std::vector<uint8_t> v;
       int n = d.get_format(mime, nullptr, 0);
-      if (n > 0) { v.resize(n); d.get_format(mime, v.data(), n); }
+      if (n > 0) { v.resize(static_cast<size_t>(n)); d.get_format(mime, v.data(), n); }
       return v;
     }
     // CLIPBOARD convenience wrappers (kept for the existing call sites).
@@ -415,7 +416,7 @@ namespace neui_detail
           // Terminating empty chunk sent: stop watching this requestor (unless
           // another transfer to the same window is still live) and retire.
           Window req = s.requestor;
-          _incr_sends.erase(_incr_sends.begin() + i);
+          _incr_sends.erase(_incr_sends.begin() + static_cast<std::ptrdiff_t>(i));
           bool still = false;
           for (auto& o : _incr_sends) if (o.requestor == req) { still = true; break; }
           if (!still) XSelectInput(_dpy, req, NoEventMask);

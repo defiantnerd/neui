@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -230,7 +231,7 @@ namespace neui_detail
     auto& v = theme_listener_entries();
     for (size_t i = 0; i < v.size(); ++i) {
       if (v[i].handle == handle) {
-        v.erase(v.begin() + i);
+        v.erase(v.begin() + static_cast<std::ptrdiff_t>(i));
         return;
       }
     }
@@ -254,7 +255,7 @@ namespace neui_detail
   inline uint32_t shade(uint32_t argb, int delta)
   {
     auto clamp = [](int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); };
-    uint8_t a = (argb >> 24) & 0xFF;
+    uint8_t a = static_cast<uint8_t>((argb >> 24) & 0xFF);
     int     r = (argb >> 16) & 0xFF;
     int     g = (argb >>  8) & 0xFF;
     int     b = (argb      ) & 0xFF;

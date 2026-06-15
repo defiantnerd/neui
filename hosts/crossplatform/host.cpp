@@ -80,9 +80,9 @@ namespace xpl_host
 
     int run_start = 0;
     while (run_start < n) {
-      uint8_t a = attrs[run_start];
+      uint8_t a = attrs[static_cast<size_t>(run_start)];
       int run_end = run_start + 1;
-      while (run_end < n && attrs[run_end] == a) ++run_end;
+      while (run_end < n && attrs[static_cast<size_t>(run_end)] == a) ++run_end;
 
       float x0 = x_origin + backend->measure_text(ctx, comp_text.c_str(),
                                                   run_start, font_size);
@@ -1305,7 +1305,7 @@ namespace xpl_host
       return true;
 
     case COMP_UPDATE:
-      composition_text.assign(utf8 ? utf8 : "", byte_len > 0 ? byte_len : 0);
+      composition_text.assign(utf8 ? utf8 : "", static_cast<size_t>(byte_len > 0 ? byte_len : 0));
       composition_caret = caret_byte;
       if (composition_caret < 0) composition_caret = 0;
       if (composition_caret > static_cast<int>(composition_text.size()))
@@ -1330,7 +1330,7 @@ namespace xpl_host
                    neui_detail::EditHistory::Typing, has_sel);
       neui_detail::te_erase_selection(text, cursor_pos, sel_anchor);
       if (utf8 && byte_len > 0) {
-        text.insert(cursor_pos, utf8, byte_len);
+        text.insert(static_cast<size_t>(cursor_pos), utf8, static_cast<size_t>(byte_len));
         cursor_pos += byte_len;
         sel_anchor  = cursor_pos;
       }
@@ -2014,7 +2014,7 @@ namespace xpl_host
 
     int cur = -1;
     for (int i = 0; i < static_cast<int>(stops.size()); ++i) {
-      if (stops[i] == _focused_widget) { cur = i; break; }
+      if (stops[static_cast<size_t>(i)] == _focused_widget) { cur = i; break; }
     }
 
     int next;
@@ -2026,7 +2026,7 @@ namespace xpl_host
              % static_cast<int>(stops.size());
     }
 
-    set_focus(stops[next]);
+    set_focus(stops[static_cast<size_t>(next)]);
   }
 
   // -------------------------------------------------------------------------
@@ -3061,7 +3061,7 @@ namespace xpl_host
           uint32_t scroll_range = n - static_cast<uint32_t>(full_vis);
           int delta_y = event->data.mouse.y - sb_drag_start_y;
           int new_off = static_cast<int>(sb_drag_start_offset)
-                      + static_cast<int>(delta_y * static_cast<float>(scroll_range)
+                      + static_cast<int>(static_cast<float>(delta_y) * static_cast<float>(scroll_range)
                                          / movable + 0.5f);
           if (new_off < 0) new_off = 0;
           if (static_cast<uint32_t>(new_off) > scroll_range)
@@ -3161,8 +3161,8 @@ namespace xpl_host
     // Only the collapsed bar is interactive (the client lays out just the
     // collapsed control; the drop list is an overlay it never sized for).
     // Bounds are in frame-local coords (same space as px/py).
-    return px >= abs_x && px < abs_x + width &&
-           py >= abs_y && py < abs_y + static_cast<float>(collapsed_h());
+    return px >= static_cast<float>(abs_x) && px < static_cast<float>(abs_x + width) &&
+           py >= static_cast<float>(abs_y) && py < static_cast<float>(abs_y) + static_cast<float>(collapsed_h());
   }
 
   int ComboBoxWidget::collapsed_h() const
@@ -3464,8 +3464,8 @@ namespace xpl_host
     if (!_popup_active) return false;
     int width = popup_total_width(_backend, nullptr, _popup_items);
     int height = popup_total_height(_popup_items);
-    if (lx < _popup_x_abs || lx >= _popup_x_abs + width ||
-        ly < _popup_y_abs || ly >= _popup_y_abs + height) {
+    if (lx < static_cast<float>(_popup_x_abs) || lx >= static_cast<float>(_popup_x_abs + width) ||
+        ly < static_cast<float>(_popup_y_abs) || ly >= static_cast<float>(_popup_y_abs + height)) {
       // click outside -> dismiss
       _popup_picked = 0;
       _popup_active = false;
@@ -3498,8 +3498,8 @@ namespace xpl_host
     if (!_popup_active) return false;
     int width  = popup_total_width(_backend, nullptr, _popup_items);
     int height = popup_total_height(_popup_items);
-    if (lx < _popup_x_abs || lx >= _popup_x_abs + width ||
-        ly < _popup_y_abs || ly >= _popup_y_abs + height) {
+    if (lx < static_cast<float>(_popup_x_abs) || lx >= static_cast<float>(_popup_x_abs + width) ||
+        ly < static_cast<float>(_popup_y_abs) || ly >= static_cast<float>(_popup_y_abs + height)) {
       if (_popup_hover != -1) {
         _popup_hover = -1;
         void* frame = nullptr;
@@ -3566,7 +3566,7 @@ namespace xpl_host
       for (int safety = 0; safety < n; ++safety) {
         if (next < 1) next = n;
         if (next > n) next = 1;
-        if (!popup_item_is_separator(_popup_items[next - 1])) break;
+        if (!popup_item_is_separator(_popup_items[static_cast<size_t>(next - 1)])) break;
         next += dir;
       }
       _popup_hover = next;
@@ -4169,7 +4169,7 @@ namespace xpl_host
         if (ly < ry || ly >= ry + (float)r.h) continue;
         if (r.separator) return true;
         std::vector<uint32_t> newpath(_menu_path.begin(),
-                                      _menu_path.begin() + (level + 1));
+                                      _menu_path.begin() + static_cast<std::ptrdiff_t>(level + 1));
         if (r.submenu && r.enabled) newpath.push_back(r.item_id);
         bool changed = (newpath != _menu_path) || (_menu_hover_item != r.item_id);
         _menu_path       = std::move(newpath);
@@ -4258,17 +4258,17 @@ namespace xpl_host
       if (rows.empty()) return;
       int cur = -1;
       for (int i = 0; i < (int)rows.size(); ++i)
-        if (rows[i] == _menu_hover_item) { cur = i; break; }
+        if (rows[static_cast<size_t>(i)] == _menu_hover_item) { cur = i; break; }
       int n = (int)rows.size();
       int next = (cur < 0) ? (dir > 0 ? 0 : n - 1) : (((cur + dir) % n) + n) % n;
       // skip disabled
       for (int guard = 0; guard < n; ++guard) {
-        uint32_t cand = rows[next];
+        uint32_t cand = rows[static_cast<size_t>(next)];
         bool ok = menu_item_has_children(mb, cand) || menu_item_enabled(mb, cand);
         if (ok) break;
         next = ((next + dir) % n + n) % n;
       }
-      _menu_hover_item = rows[next];
+      _menu_hover_item = rows[static_cast<size_t>(next)];
       invalidate();
     };
 
@@ -4284,10 +4284,10 @@ namespace xpl_host
         // move to previous top-level menu
         int cur = -1;
         for (int i = 0; i < (int)tops.size(); ++i)
-          if (!_menu_path.empty() && tops[i] == _menu_path[0]) { cur = i; break; }
+          if (!_menu_path.empty() && tops[static_cast<size_t>(i)] == _menu_path[0]) { cur = i; break; }
         if (!tops.empty()) {
           int prev = (cur <= 0) ? (int)tops.size() - 1 : cur - 1;
-          _menu_path = { tops[prev] }; _menu_hover_item = tops[prev]; invalidate();
+          _menu_path = { tops[static_cast<size_t>(prev)] }; _menu_hover_item = tops[static_cast<size_t>(prev)]; invalidate();
         }
       }
       return true;
@@ -4302,10 +4302,10 @@ namespace xpl_host
       } else {
         int cur = -1;
         for (int i = 0; i < (int)tops.size(); ++i)
-          if (!_menu_path.empty() && tops[i] == _menu_path[0]) { cur = i; break; }
+          if (!_menu_path.empty() && tops[static_cast<size_t>(i)] == _menu_path[0]) { cur = i; break; }
         if (!tops.empty()) {
           int nxt = (cur < 0) ? 0 : (cur + 1) % (int)tops.size();
-          _menu_path = { tops[nxt] }; _menu_hover_item = tops[nxt]; invalidate();
+          _menu_path = { tops[static_cast<size_t>(nxt)] }; _menu_hover_item = tops[static_cast<size_t>(nxt)]; invalidate();
         }
       }
       return true;
@@ -4764,7 +4764,7 @@ namespace xpl_host
       uint32_t range  = n - static_cast<uint32_t>(full_vis);
       int delta_y     = static_cast<int>(ly) - _combo_sb_drag_start_y;
       int new_off     = static_cast<int>(_combo_sb_drag_start_off)
-                      + static_cast<int>(delta_y * static_cast<float>(range)
+                      + static_cast<int>(static_cast<float>(delta_y) * static_cast<float>(range)
                                          / movable + 0.5f);
       if (new_off < 0) new_off = 0;
       if (static_cast<uint32_t>(new_off) > range) new_off = static_cast<int>(range);
@@ -4827,7 +4827,7 @@ namespace xpl_host
     std::vector<int> starts;
     starts.push_back(0);
     for (int i = 0; i < static_cast<int>(s.size()); ++i) {
-      if (s[i] == '\n') starts.push_back(i + 1);
+      if (s[static_cast<size_t>(i)] == '\n') starts.push_back(i + 1);
     }
     return starts;
   }
@@ -4839,7 +4839,7 @@ namespace xpl_host
     int lo = 0, hi = static_cast<int>(starts.size()) - 1;
     while (lo < hi) {
       int mid = (lo + hi + 1) >> 1;
-      if (starts[mid] <= pos) lo = mid; else hi = mid - 1;
+      if (starts[static_cast<size_t>(mid)] <= pos) lo = mid; else hi = mid - 1;
     }
     return lo;
   }
@@ -4854,7 +4854,7 @@ namespace xpl_host
                           int line)
   {
     if (line + 1 < static_cast<int>(starts.size())) {
-      int ns = starts[line + 1];
+      int ns = starts[static_cast<size_t>(line + 1)];
       return (ns > 0 && s[static_cast<size_t>(ns) - 1] == '\n') ? ns - 1 : ns;
     }
     return static_cast<int>(s.size());
@@ -4879,7 +4879,7 @@ namespace xpl_host
     int line = ml_line_from_pos(starts, ml.cursor_pos);
     int vis  = ml_visible_lines(ml.height);
     if (line < static_cast<int>(ml.scroll_offset))
-      ml.scroll_offset = line;
+      ml.scroll_offset = static_cast<uint32_t>(line);
     else if (line >= static_cast<int>(ml.scroll_offset) + vis)
       ml.scroll_offset = static_cast<uint32_t>(line - vis + 1);
   }
@@ -4950,7 +4950,7 @@ namespace xpl_host
     for (int i = 0; i < max_visible; ++i) {
       int line = static_cast<int>(scroll_offset) + i;
       if (line >= static_cast<int>(n_lines)) break;
-      int ls = starts[line];
+      int ls = starts[static_cast<size_t>(line)];
       int le = ml_line_end(text, starts, line);
       int ve = vis_end_of(ls, le);   // last char we shape/draw on this line
 
@@ -4997,8 +4997,8 @@ namespace xpl_host
                     ? ml_line_end(text, starts, line) : cursor_pos;
       if (line >= static_cast<int>(scroll_offset) &&
           line <  static_cast<int>(scroll_offset) + vis &&
-          cursor_pos <= vis_end_of(starts[line], cl_le)) {
-        int   ls   = starts[line];
+          cursor_pos <= vis_end_of(starts[static_cast<size_t>(line)], cl_le)) {
+        int   ls   = starts[static_cast<size_t>(line)];
         float col  = backend->measure_text(ctx, text.c_str() + ls,
                                             cursor_pos - ls, ef.size);
         float cx   = fx + static_cast<float>(ML_PAD_X) + col;
@@ -5061,7 +5061,7 @@ namespace xpl_host
         !ml.session->_backend->measure_text)
       return 0.0f;
     int line = ml_line_from_pos(starts, pos);
-    int ls   = starts[line];
+    int ls   = starts[static_cast<size_t>(line)];
     // Any render context from an ancestor frame works.
     neui_render_ctx_t ctx = nullptr;
     for (uint32_t p : ml.session->_widgets.get_all_parents(ml.index)) {
@@ -5088,7 +5088,7 @@ namespace xpl_host
   {
     if (!ml.session || !ml.session->_backend ||
         !ml.session->_backend->measure_text)
-      return starts[line];
+      return starts[static_cast<size_t>(line)];
     neui_render_ctx_t ctx = nullptr;
     for (uint32_t p : ml.session->_widgets.get_all_parents(ml.index)) {
       if (p == 0) continue;
@@ -5097,11 +5097,11 @@ namespace xpl_host
         if (ctx) break;
       }
     }
-    if (!ctx) return starts[line];
+    if (!ctx) return starts[static_cast<size_t>(line)];
 
     auto ef = neui_detail::read_widget_font(ml.attrs.get(), ML_FONT_SIZE);
     neui_detail::push_widget_font(ml.session->_backend, ctx, ef);
-    int ls  = starts[line];
+    int ls  = starts[static_cast<size_t>(line)];
     int le  = ml_line_end(ml.text, starts, line);
 
     // Midpoint-snap col_px to the nearest character boundary on [ls, le].
@@ -5229,14 +5229,14 @@ namespace xpl_host
     starts.push_back(0);
     if (!ctx || !ml.session || !ml.session->_backend ||
         !ml.session->_backend->measure_text || avail_w <= 1.0f) {
-      for (int i = 0; i < n; ++i) if (s[i] == '\n') starts.push_back(i + 1);
+      for (int i = 0; i < n; ++i) if (s[static_cast<size_t>(i)] == '\n') starts.push_back(i + 1);
       return starts;
     }
     neui_detail::push_widget_font(ml.session->_backend, ctx, ef);
     int ls = 0;
     while (true) {
       int le = ls;
-      while (le < n && s[le] != '\n') ++le;
+      while (le < n && s[static_cast<size_t>(le)] != '\n') ++le;
       int vs = ls;
       while (vs < le) {
         int b = ml_fit_chars_end(ml, ctx, ef, vs, le, avail_w);
@@ -5342,7 +5342,7 @@ namespace xpl_host
     case NEUI_KEY_HOME: {
       history.reset_action();
       if (ctrl) cursor_pos = 0;
-      else      cursor_pos = starts[ml_line_from_pos(starts, cursor_pos)];
+      else      cursor_pos = starts[static_cast<size_t>(ml_line_from_pos(starts, cursor_pos))];
       if (!shift) sel_anchor = cursor_pos;
       ml_scroll_to_cursor(*this, starts); repaint(); return true;
     }
@@ -5507,7 +5507,7 @@ namespace xpl_host
     if (line < static_cast<int>(scroll_offset) ||
         line >= static_cast<int>(scroll_offset) + vis)
       return false;
-    int   ls  = starts[line];
+    int   ls  = starts[static_cast<size_t>(line)];
     auto ef = neui_detail::read_widget_font(attrs.get(), ML_FONT_SIZE);
     neui_detail::push_widget_font(backend, ctx, ef);
     float col = backend->measure_text(ctx, text.c_str() + ls,
@@ -5544,7 +5544,7 @@ namespace xpl_host
       return true;
 
     case COMP_UPDATE:
-      composition_text.assign(utf8 ? utf8 : "", byte_len > 0 ? byte_len : 0);
+      composition_text.assign(utf8 ? utf8 : "", static_cast<size_t>(byte_len > 0 ? byte_len : 0));
       composition_caret = caret_byte;
       if (composition_caret < 0) composition_caret = 0;
       if (composition_caret > static_cast<int>(composition_text.size()))
@@ -5563,7 +5563,7 @@ namespace xpl_host
                    neui_detail::EditHistory::Typing, has_sel);
       neui_detail::te_erase_selection(text, cursor_pos, sel_anchor);
       if (utf8 && byte_len > 0) {
-        text.insert(cursor_pos, utf8, byte_len);
+        text.insert(static_cast<size_t>(cursor_pos), utf8, static_cast<size_t>(byte_len));
         cursor_pos += byte_len;
         sel_anchor  = cursor_pos;
       }
@@ -5651,7 +5651,7 @@ namespace xpl_host
           uint32_t range = n_lines - static_cast<uint32_t>(vis);
           int delta_y = event->data.mouse.y - sb_drag_start_y;
           int new_off = static_cast<int>(sb_drag_start_offset)
-                      + static_cast<int>(delta_y * static_cast<float>(range)
+                      + static_cast<int>(static_cast<float>(delta_y) * static_cast<float>(range)
                                          / movable + 0.5f);
           if (new_off < 0) new_off = 0;
           if (static_cast<uint32_t>(new_off) > range) new_off = static_cast<int>(range);
@@ -5932,7 +5932,7 @@ namespace xpl_host
     int i = from + direction;
     int n = static_cast<int>(rows.size());
     while (i >= 0 && i < n) {
-      if (tv_item_enabled(tv, rows[i].id)) return i;
+      if (tv_item_enabled(tv, rows[static_cast<size_t>(i)].id)) return i;
       i += direction;
     }
     return -1;
@@ -5961,24 +5961,24 @@ namespace xpl_host
       // Find the next enabled row above the current selection.
       int target = (cur < 0) ? tv_next_enabled_row(*this, rows, -1, +1)
                               : tv_next_enabled_row(*this, rows, cur, -1);
-      if (target >= 0) selected_tree_item = rows[target].id;
+      if (target >= 0) selected_tree_item = rows[static_cast<size_t>(target)].id;
       break;
     }
     case NEUI_KEY_DOWN: {
       int target = (cur < 0) ? tv_next_enabled_row(*this, rows, -1, +1)
                               : tv_next_enabled_row(*this, rows, cur, +1);
-      if (target >= 0) selected_tree_item = rows[target].id;
+      if (target >= 0) selected_tree_item = rows[static_cast<size_t>(target)].id;
       break;
     }
     case NEUI_KEY_HOME: {
       int target = tv_next_enabled_row(*this, rows, -1, +1);
-      if (target >= 0) selected_tree_item = rows[target].id;
+      if (target >= 0) selected_tree_item = rows[static_cast<size_t>(target)].id;
       break;
     }
     case NEUI_KEY_END: {
       int target = tv_next_enabled_row(*this, rows,
                                         static_cast<int>(rows.size()), -1);
-      if (target >= 0) selected_tree_item = rows[target].id;
+      if (target >= 0) selected_tree_item = rows[static_cast<size_t>(target)].id;
       break;
     }
     case NEUI_KEY_LEFT: {
@@ -6000,20 +6000,20 @@ namespace xpl_host
       if (cur < 0) return false;
       auto it = tree_items.find(selected_tree_item);
       if (it == tree_items.end()) return false;
-      if (rows[cur].has_children) {
+      if (rows[static_cast<size_t>(cur)].has_children) {
         if (!it->second.expanded) {
           it->second.expanded = true;
         } else {
           // Already expanded -> move to first enabled child.
           if (cur + 1 < static_cast<int>(rows.size()) &&
-              rows[cur + 1].depth > rows[cur].depth) {
-            int target = tv_item_enabled(*this, rows[cur + 1].id)
+              rows[static_cast<size_t>(cur + 1)].depth > rows[static_cast<size_t>(cur)].depth) {
+            int target = tv_item_enabled(*this, rows[static_cast<size_t>(cur + 1)].id)
                            ? cur + 1
                            : tv_next_enabled_row(*this, rows, cur + 1, +1);
             // Only accept the target if it's still under our subtree.
             if (target >= 0 && target < static_cast<int>(rows.size()) &&
-                rows[target].depth > rows[cur].depth)
-              selected_tree_item = rows[target].id;
+                rows[static_cast<size_t>(target)].depth > rows[static_cast<size_t>(cur)].depth)
+              selected_tree_item = rows[static_cast<size_t>(target)].id;
           }
         }
       }
@@ -6029,7 +6029,7 @@ namespace xpl_host
       if (!tv_item_enabled(*this, selected_tree_item)) return true;
       // Enter/Space toggles expansion on items with children and always fires ACTIVATED.
       auto it = tree_items.find(selected_tree_item);
-      if (it != tree_items.end() && rows[cur].has_children)
+      if (it != tree_items.end() && rows[static_cast<size_t>(cur)].has_children)
         it->second.expanded = !it->second.expanded;
       if (session) {
         neui_event_t ev = {};
@@ -6095,7 +6095,7 @@ namespace xpl_host
           uint32_t range = n - static_cast<uint32_t>(full_vis);
           int delta_y = event->data.mouse.y - sb_drag_start_y;
           int new_off = static_cast<int>(sb_drag_start_offset)
-                      + static_cast<int>(delta_y * static_cast<float>(range)
+                      + static_cast<int>(static_cast<float>(delta_y) * static_cast<float>(range)
                                          / movable + 0.5f);
           if (new_off < 0) new_off = 0;
           if (static_cast<uint32_t>(new_off) > range) new_off = static_cast<int>(range);
