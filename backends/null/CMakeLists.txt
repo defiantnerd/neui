@@ -5,6 +5,6 @@ if(NOT WIN32)
 
   target_include_directories(neui-backend-null
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-    PUBLIC  ${CMAKE_SOURCE_DIR}/include
+    PUBLIC  ${PROJECT_SOURCE_DIR}/include
   )
 endif()

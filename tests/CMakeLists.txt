@@ -20,8 +20,8 @@ add_executable(neui_tests
   test_clipboard_item.cpp)
 
 target_include_directories(neui_tests PRIVATE
-  ${CMAKE_SOURCE_DIR}/include
-  ${CMAKE_SOURCE_DIR}/hosts/shared)
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/hosts/shared)
 
 target_compile_features(neui_tests PRIVATE cxx_std_17)
 
@@ -32,7 +32,7 @@ add_test(NAME neui_tests COMMAND neui_tests)
 # platforms where that backend is built.
 if(UNIX AND NOT APPLE)
   add_executable(neui_cairo_smoke cairo_backend_smoke.cpp)
-  target_include_directories(neui_cairo_smoke PRIVATE ${CMAKE_SOURCE_DIR}/include)
+  target_include_directories(neui_cairo_smoke PRIVATE ${PROJECT_SOURCE_DIR}/include)
   target_compile_features(neui_cairo_smoke PRIVATE cxx_std_17)
   target_link_libraries(neui_cairo_smoke PRIVATE neui-backend-cairo)
   add_test(NAME neui_cairo_smoke COMMAND neui_cairo_smoke)
@@ -42,9 +42,9 @@ if(UNIX AND NOT APPLE)
   # run ./tests/neui_embed_smoke manually on an X desktop.
   add_executable(neui_embed_smoke embed_smoke.cpp)
   target_include_directories(neui_embed_smoke PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/hosts/crossplatform
-    ${CMAKE_SOURCE_DIR}/hosts/shared)
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/hosts/crossplatform
+    ${PROJECT_SOURCE_DIR}/hosts/shared)
   target_compile_features(neui_embed_smoke PRIVATE cxx_std_17)
   target_link_libraries(neui_embed_smoke PRIVATE neui neui-xplhost neui-backend-cairo)
 
@@ -54,9 +54,9 @@ if(UNIX AND NOT APPLE)
   find_package(Threads REQUIRED)
   add_executable(neui_dnd_source_smoke dnd_source_smoke.cpp)
   target_include_directories(neui_dnd_source_smoke PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/hosts/crossplatform
-    ${CMAKE_SOURCE_DIR}/hosts/shared)
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/hosts/crossplatform
+    ${PROJECT_SOURCE_DIR}/hosts/shared)
   target_compile_features(neui_dnd_source_smoke PRIVATE cxx_std_17)
   target_link_libraries(neui_dnd_source_smoke PRIVATE
     neui neui-xplhost neui-backend-cairo Threads::Threads)
@@ -67,8 +67,8 @@ if(UNIX AND NOT APPLE)
   # links no host/backend.
   add_executable(neui_clipboard_targets_smoke clipboard_targets_smoke.cpp)
   target_include_directories(neui_clipboard_targets_smoke PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/hosts/shared)
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/hosts/shared)
   target_compile_features(neui_clipboard_targets_smoke PRIVATE cxx_std_17)
   find_package(X11 REQUIRED)
   target_link_libraries(neui_clipboard_targets_smoke PRIVATE
@@ -78,8 +78,8 @@ if(UNIX AND NOT APPLE)
   # payload). Needs a live X display; built but not ctest-registered.
   add_executable(neui_incr_smoke incr_smoke.cpp)
   target_include_directories(neui_incr_smoke PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/hosts/shared)
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/hosts/shared)
   target_compile_features(neui_incr_smoke PRIVATE cxx_std_17)
   target_link_libraries(neui_incr_smoke PRIVATE ${X11_LIBRARIES} Threads::Threads)
 
@@ -87,9 +87,9 @@ if(UNIX AND NOT APPLE)
   # live X display; built but not ctest-registered.
   add_executable(neui_notify_smoke notify_smoke.cpp)
   target_include_directories(neui_notify_smoke PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/hosts/crossplatform
-    ${CMAKE_SOURCE_DIR}/hosts/shared)
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/hosts/crossplatform
+    ${PROJECT_SOURCE_DIR}/hosts/shared)
   target_compile_features(neui_notify_smoke PRIVATE cxx_std_17)
   target_link_libraries(neui_notify_smoke PRIVATE
     neui neui-xplhost neui-backend-cairo Threads::Threads)
@@ -99,9 +99,9 @@ if(UNIX AND NOT APPLE)
   # WM; built but not ctest-registered. Run ./tests/neui_menubar_smoke.
   add_executable(neui_menubar_smoke menubar_smoke.cpp)
   target_include_directories(neui_menubar_smoke PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/hosts/crossplatform
-    ${CMAKE_SOURCE_DIR}/hosts/shared)
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/hosts/crossplatform
+    ${PROJECT_SOURCE_DIR}/hosts/shared)
   target_compile_features(neui_menubar_smoke PRIVATE cxx_std_17)
   target_link_libraries(neui_menubar_smoke PRIVATE
     neui neui-xplhost neui-backend-cairo Threads::Threads)

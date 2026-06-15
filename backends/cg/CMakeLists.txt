@@ -14,7 +14,7 @@ set_source_files_properties(cg_backend.mm PROPERTIES
 
 target_include_directories(neui-backend-cg
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-  PUBLIC  ${CMAKE_SOURCE_DIR}/include
+  PUBLIC  ${PROJECT_SOURCE_DIR}/include
 )
 
 target_link_libraries(neui-backend-cg PRIVATE

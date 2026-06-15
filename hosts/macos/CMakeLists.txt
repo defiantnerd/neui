@@ -22,8 +22,8 @@ set_source_files_properties(host.mm widgets.mm window.mm PROPERTIES
 
 target_include_directories(neui-macoshost
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-          ${CMAKE_SOURCE_DIR}/hosts/shared
-  PUBLIC  ${CMAKE_SOURCE_DIR}/include
+          ${PROJECT_SOURCE_DIR}/hosts/shared
+  PUBLIC  ${PROJECT_SOURCE_DIR}/include
 )
 
 target_link_libraries(neui-macoshost PRIVATE

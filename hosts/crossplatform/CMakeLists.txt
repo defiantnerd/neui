@@ -8,8 +8,8 @@ add_library(neui-xplhost
 
 target_include_directories(neui-xplhost
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-          ${CMAKE_SOURCE_DIR}/hosts/shared
-  PUBLIC  ${CMAKE_SOURCE_DIR}/include
+          ${PROJECT_SOURCE_DIR}/hosts/shared
+  PUBLIC  ${PROJECT_SOURCE_DIR}/include
 )
 
 target_link_libraries(neui-xplhost PRIVATE neui)
@@ -39,7 +39,7 @@ elseif(UNIX)
 
   target_sources(neui-xplhost PRIVATE platform_linux.cpp)
   target_include_directories(neui-xplhost PRIVATE
-    ${CMAKE_SOURCE_DIR}/third_party/stb
+    ${PROJECT_SOURCE_DIR}/third_party/stb
     ${CAIRO_INCLUDE_DIRS}
     ${X11_INCLUDE_DIR})
   target_link_libraries(neui-xplhost PRIVATE

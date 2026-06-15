@@ -19,7 +19,7 @@ add_library(neui-backend-cairo cairo_backend.cpp)
 # lib (e.g. the offscreen smoke test) inherit them at final link.
 target_include_directories(neui-backend-cairo
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-  PUBLIC  ${CMAKE_SOURCE_DIR}/include
+  PUBLIC  ${PROJECT_SOURCE_DIR}/include
           ${CAIRO_INCLUDE_DIRS}
           ${FONTCONFIG_INCLUDE_DIRS}
           ${X11_INCLUDE_DIR}

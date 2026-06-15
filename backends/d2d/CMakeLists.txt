@@ -5,7 +5,7 @@ if(WIN32)
 
   target_include_directories(neui-backend-d2d
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-    PUBLIC  ${CMAKE_SOURCE_DIR}/include
+    PUBLIC  ${PROJECT_SOURCE_DIR}/include
   )
 
   target_link_libraries(neui-backend-d2d PRIVATE d2d1)
