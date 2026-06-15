@@ -8,6 +8,7 @@
 #include "../shared/behavior_runtime.h"
 #include "../shared/grid_model.h"
 #include "../shared/widget_section_scroll.h"
+#include "../shared/widget_tabview.h"
 #include "asset_manager_macos.h"
 
 #include <memory>
@@ -146,6 +147,17 @@ namespace macos_host
     // non-scrolling sections (and every non-SECTION widget). Mirror of the
     // win32 host's section_body_hwnd.
     void*                                            section_body_view = nullptr;
+
+    // TABVIEW (NEUI_W_TABVIEW) state. Mirror of the xpl host's TabViewWidget.
+    // `tab_selected` is the active tab index (clamped to the page count each
+    // paint); `tab_chips` caches the most recent chip layout so mouseDown can
+    // hit-test it; `tab_edge` is the resolved strip edge from
+    // NEUI_ATTR_TAB_POSITION. A TABPAGE is a chip-less SECTION (it reuses the
+    // section_* machinery + carries section_scroll_state / section_body_view);
+    // the parent TABVIEW paints the chip strip + shows/hides pages.
+    int                              tab_selected = 0;
+    std::vector<neui_detail::TabChip> tab_chips;
+    neui_detail::TabEdge             tab_edge = neui_detail::TabEdge::Top;
   };
 
   class Session

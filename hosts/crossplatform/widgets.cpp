@@ -151,6 +151,10 @@ namespace xpl_host
       return std::make_unique<CustomDrawWidget>();
     if (!strcmp(type, NEUI_W_GRID))
       return std::make_unique<GridWidget>();
+    if (!strcmp(type, NEUI_W_TABVIEW))
+      return std::make_unique<TabViewWidget>();
+    if (!strcmp(type, NEUI_W_TABPAGE))
+      return std::make_unique<TabPageWidget>();
     return std::make_unique<WidgetData>(); // fallback for unknown types
   }
 
@@ -196,7 +200,8 @@ namespace xpl_host
                      !strcmp(type, NEUI_W_SLIDER)     ||
                      !strcmp(type, NEUI_W_KNOB)       ||
                      !strcmp(type, NEUI_W_CUSTOMDRAW) ||
-                     !strcmp(type, NEUI_W_GRID);
+                     !strcmp(type, NEUI_W_GRID)        ||
+                     !strcmp(type, NEUI_W_TABVIEW);
 
     obj->emit_events = !strcmp(type, NEUI_W_BUTTON)    ||
                        !strcmp(type, NEUI_W_INPUTBOX)   ||
@@ -209,7 +214,8 @@ namespace xpl_host
                        !strcmp(type, NEUI_W_SLIDER)     ||
                        !strcmp(type, NEUI_W_KNOB)       ||
                        !strcmp(type, NEUI_W_CUSTOMDRAW) ||
-                       !strcmp(type, NEUI_W_GRID);
+                       !strcmp(type, NEUI_W_GRID)        ||
+                       !strcmp(type, NEUI_W_TABVIEW);
 
     uint32_t idx = s->_widgets.add_child(parent_idx, std::move(obj));
     if (idx == 0) return { UINT32_MAX };
@@ -1719,6 +1725,79 @@ namespace xpl_host
     scroll_set,
     scroll_get,
     scroll_ensure_visible,
+  };
+
+  // ---------------------------------------------------------------------------
+  // Tabs API (NEUI_API_TABS) - selection control over a TABVIEW. Tabs are the
+  // TABVIEW's NEUI_W_TABPAGE children in creation order.
+  // ---------------------------------------------------------------------------
+
+  static TabViewWidget* tabview_from(neui_session_t session, neui_widget_t widget,
+                                     Session** out_s)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (out_s) *out_s = s;
+    if (!s) return nullptr;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return nullptr;
+    return dynamic_cast<TabViewWidget*>(&s->_widgets[idx]);
+  }
+
+  static uint32_t NEUI_ABI tabs_count(neui_session_t session, neui_widget_t widget)
+  {
+    auto* tv = tabview_from(session, widget, nullptr);
+    if (!tv) return 0;
+    std::vector<uint32_t> pages; tv->collect_pages(pages);
+    return static_cast<uint32_t>(pages.size());
+  }
+
+  static uint32_t NEUI_ABI tabs_get_selected(neui_session_t session, neui_widget_t widget)
+  {
+    auto* tv = tabview_from(session, widget, nullptr);
+    if (!tv) return NEUI_ITEM_NONE;
+    std::vector<uint32_t> pages; tv->collect_pages(pages);
+    if (pages.empty()) return NEUI_ITEM_NONE;
+    return static_cast<uint32_t>(tv->selected);
+  }
+
+  static void NEUI_ABI tabs_set_selected(neui_session_t session, neui_widget_t widget,
+                                         uint32_t index)
+  {
+    auto* tv = tabview_from(session, widget, nullptr);
+    if (!tv) return;
+    tv->select_tab(static_cast<int>(index));
+  }
+
+  static neui_widget_t NEUI_ABI tabs_get_page(neui_session_t session,
+                                              neui_widget_t widget, uint32_t index)
+  {
+    Session* s = nullptr;
+    auto* tv = tabview_from(session, widget, &s);
+    if (!tv || !s) return { UINT32_MAX };
+    std::vector<uint32_t> pages; tv->collect_pages(pages);
+    if (index >= pages.size()) return { UINT32_MAX };
+    return IndexToWidget(s->_session_id, pages[index]);
+  }
+
+  static uint32_t NEUI_ABI tabs_get_index(neui_session_t session, neui_widget_t widget,
+                                          neui_widget_t page)
+  {
+    auto* tv = tabview_from(session, widget, nullptr);
+    if (!tv) return NEUI_ITEM_NONE;
+    uint32_t page_idx = WidgetToIndex(page);
+    std::vector<uint32_t> pages; tv->collect_pages(pages);
+    for (uint32_t i = 0; i < pages.size(); ++i)
+      if (pages[i] == page_idx) return i;
+    return NEUI_ITEM_NONE;
+  }
+
+  neui_tabs_api_t tabs_api = {
+    NEUI_VERSION,
+    tabs_count,
+    tabs_get_selected,
+    tabs_set_selected,
+    tabs_get_page,
+    tabs_get_index,
   };
 
   // ---------------------------------------------------------------------------

@@ -107,7 +107,12 @@ namespace macos_host
       !strcmp(type, NEUI_W_SLIDER)   ||
       !strcmp(type, NEUI_W_KNOB)     ||
       !strcmp(type, NEUI_W_CUSTOMDRAW)||
-      !strcmp(type, NEUI_W_GRID));
+      !strcmp(type, NEUI_W_GRID)     ||
+      // TABVIEW emits NEUI_EVENT_TAB_* on chip clicks; its painted view runs
+      // the hit-test itself (gated on `enabled`), but keep parity with the
+      // other interactive types. TABPAGE is a chip-less SECTION - non-emit
+      // like SECTION; its scroll input is gated on section_scroll_state.
+      !strcmp(type, NEUI_W_TABVIEW));
 
     // Implicit type variants: CHECKBOX3 = CHECKBOX + tristate=1; MULTILINE
     // = INPUTBOX + multiline=1. Same shape as win32 / xpl.
@@ -184,6 +189,32 @@ namespace macos_host
   void section_reposition_children_macos(WidgetData& sec);
   void section_notify_scroll_changed_macos(WidgetData& wd);
 
+  // TABVIEW helpers (defined in window.mm). The TABS API + the attr setters
+  // for chip-style changes call them.
+  void tabview_collect_pages_macos(WidgetData& tv, std::vector<uint32_t>& out);
+  void tabview_select_macos(WidgetData& tv, int new_index);
+  void tabview_apply_page_geometry_macos(WidgetData& tv);
+
+  // A TABPAGE is a chip-less SECTION (mirrors window.mm::is_section_like): the
+  // section attr handlers treat both alike. Kept local to this TU.
+  static inline bool is_section_like_w(const char* type)
+  {
+    return type && (!strcmp(type, NEUI_W_SECTION) ||
+                    !strcmp(type, NEUI_W_TABPAGE));
+  }
+  // The TABVIEW parent of `wd` if `wd` is a TABPAGE, else nullptr. Used to
+  // repaint the chip strip when a page's tab label / chip colours change.
+  static inline WidgetData* tabview_parent_of_page(WidgetData& wd)
+  {
+    if (!wd.session || !wd.type || strcmp(wd.type, NEUI_W_TABPAGE) != 0)
+      return nullptr;
+    uint32_t pidx = wd.session->_widgets.get_parent(wd.index);
+    if (!pidx || !wd.session->_widgets.exists(pidx)) return nullptr;
+    auto& pw = wd.session->_widgets[pidx];
+    if (pw.type && !strcmp(pw.type, NEUI_W_TABVIEW)) return &pw;
+    return nullptr;
+  }
+
   // True for the three font attribute keys. Used by the attr setters to
   // re-apply the native font + repaint painted text on a live change.
   static inline bool is_font_attr(const char* key)
@@ -248,7 +279,26 @@ namespace macos_host
       w.image_asset_owned = false;
     }
 
+    // A destroyed TABPAGE drops a tab: re-flow the parent TABVIEW (the
+    // selected index may now be out of range) + repaint its chip strip after
+    // the slot is freed below.
+    uint32_t tabview_parent = 0;
+    if (w.type && !strcmp(w.type, NEUI_W_TABPAGE)) {
+      uint32_t pidx = _widgets.get_parent(index);
+      if (pidx && _widgets.exists(pidx)) {
+        auto& pw = _widgets[pidx];
+        if (pw.type && !strcmp(pw.type, NEUI_W_TABVIEW))
+          tabview_parent = pidx;
+      }
+    }
+
     _widgets.remove(index);
+
+    if (tabview_parent && _widgets.exists(tabview_parent)) {
+      auto& tv = _widgets[tabview_parent];
+      tabview_apply_page_geometry_macos(tv);
+      mark_widget_dirty_for_paint(tv);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -400,6 +450,8 @@ namespace macos_host
       // SECTION: text is the title chip - repaint so it picks up the change.
       if (wd.type && !strcmp(wd.type, NEUI_W_SECTION))
         mark_widget_dirty_for_paint(wd);
+      // TABPAGE: text is the tab label - repaint the parent TABVIEW strip.
+      if (auto* tv = tabview_parent_of_page(wd)) mark_widget_dirty_for_paint(*tv);
     }
   }
   static int  NEUI_ABI w_get_text(neui_session_t session, neui_widget_t widget, char* buf, int buflen)
@@ -1281,17 +1333,34 @@ namespace macos_host
         wd.compound_asset.id != asset_none.id) {
       mark_widget_dirty_for_paint(wd);
     }
-    // SECTION: NEUI_ATTR_BACKGROUND drives the body fill colour.
-    if (wd.type && !strcmp(wd.type, NEUI_W_SECTION) &&
-        !strcmp(key, NEUI_ATTR_BACKGROUND)) {
+    // SECTION / TABPAGE: NEUI_ATTR_BACKGROUND drives the body fill colour.
+    if (is_section_like_w(wd.type) && !strcmp(key, NEUI_ATTR_BACKGROUND)) {
       mark_widget_dirty_for_paint(wd);
+      // The active page's background also drives the TABVIEW body fill +
+      // active-chip colour, so repaint the parent strip too.
+      if (auto* tv = tabview_parent_of_page(wd)) mark_widget_dirty_for_paint(*tv);
     }
-    // SECTION content extent override: rebuild layout + reposition children
-    // so the scrollbar reflects the new content size.
-    if (wd.type && !strcmp(wd.type, NEUI_W_SECTION) &&
+    // SECTION / TABPAGE content extent override: rebuild layout + reposition
+    // children so the scrollbar reflects the new content size.
+    if (is_section_like_w(wd.type) &&
         (!strcmp(key, NEUI_ATTR_CONTENT_WIDTH) ||
          !strcmp(key, NEUI_ATTR_CONTENT_HEIGHT))) {
       section_apply_layout_changes_macos(wd);
+    }
+    // TABPAGE chip colours -> repaint the parent TABVIEW's strip.
+    if (wd.type && !strcmp(wd.type, NEUI_W_TABPAGE) &&
+        (!strcmp(key, NEUI_ATTR_TAB_CHIP_BG_COLOR) ||
+         !strcmp(key, NEUI_ATTR_TAB_CHIP_TEXT_COLOR))) {
+      if (auto* tv = tabview_parent_of_page(wd)) mark_widget_dirty_for_paint(*tv);
+    }
+    // TABVIEW style attrs (strip size, border) -> re-flow + repaint.
+    if (wd.type && !strcmp(wd.type, NEUI_W_TABVIEW) &&
+        (!strcmp(key, NEUI_ATTR_TAB_STRIP_SIZE) ||
+         !strcmp(key, NEUI_ATTR_TAB_BORDER_COLOR) ||
+         !strcmp(key, NEUI_ATTR_TAB_BORDER_WIDTH) ||
+         !strcmp(key, NEUI_ATTR_BACKGROUND))) {
+      tabview_apply_page_geometry_macos(wd);
+      mark_widget_dirty_for_paint(wd);
     }
     // NEUI_ATTR_FONT_WEIGHT: re-apply native control font + repaint painted text.
     if (is_font_attr(key)) { apply_font_native_macos(wd); mark_widget_dirty_for_paint(wd); }
@@ -1325,7 +1394,7 @@ namespace macos_host
     // shared paint_section helper reads it each draw. align="none" /
     // empty band swap changes band_h -> layout rebuild + reposition
     // children. NEUI_ATTR_BACKGROUND is handled in a_set_int.
-    if (wd.type && !strcmp(wd.type, NEUI_W_SECTION) &&
+    if (is_section_like_w(wd.type) &&
         !strcmp(key, NEUI_ATTR_ALIGN_TEXT)) {
       // A chip may have just appeared (align none -> left/center/right) on a
       // non-scrolling section: create the body view + reparent children so
@@ -1339,7 +1408,7 @@ namespace macos_host
     // layout + reposition children. The painted view's scrollWheel: /
     // mouseDown: routes through SectionScrollState's nullable pointer
     // so the live opt-in / opt-out works without view recreation.
-    if (wd.type && !strcmp(wd.type, NEUI_W_SECTION) &&
+    if (is_section_like_w(wd.type) &&
         !strcmp(key, NEUI_ATTR_SCROLL_MODE)) {
       section_refresh_scroll_state_macos(wd);
       // The inner body view is created the first time a section becomes
@@ -1363,6 +1432,13 @@ namespace macos_host
         st.kinetic_over_v = st.kinetic_over_h = false;
       }
       section_apply_layout_changes_macos(wd);
+    }
+    // TABVIEW: NEUI_ATTR_TAB_POSITION changes the strip edge + content body
+    // rect, so re-flow the pages + repaint the strip.
+    if (wd.type && !strcmp(wd.type, NEUI_W_TABVIEW) &&
+        !strcmp(key, NEUI_ATTR_TAB_POSITION)) {
+      tabview_apply_page_geometry_macos(wd);
+      mark_widget_dirty_for_paint(wd);
     }
     // NEUI_ATTR_FONT_FAMILY: re-apply native control font + repaint painted text.
     if (is_font_attr(key)) { apply_font_native_macos(wd); mark_widget_dirty_for_paint(wd); }
@@ -1890,6 +1966,85 @@ namespace macos_host
     scroll_set,
     scroll_get,
     scroll_ensure_visible,
+  };
+
+  // -------------------------------------------------------------------------
+  // Tabs API (NEUI_API_TABS) - selection control over a TABVIEW. Tabs are the
+  // TABVIEW's NEUI_W_TABPAGE children in creation order. Mirror of the xpl
+  // host's tabview_from + the 5 thin methods.
+
+  // Resolve `widget` to a TABVIEW WidgetData* (valid, this session, type
+  // TABVIEW) or nullptr.
+  static WidgetData* tabview_from_macos(neui_session_t session,
+                                        neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return nullptr;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return nullptr;
+    auto& wd = s->_widgets[idx];
+    if (!wd.type || strcmp(wd.type, NEUI_W_TABVIEW) != 0) return nullptr;
+    return &wd;
+  }
+
+  static uint32_t NEUI_ABI tabs_count(neui_session_t session, neui_widget_t tabview)
+  {
+    WidgetData* tv = tabview_from_macos(session, tabview);
+    if (!tv) return 0;
+    std::vector<uint32_t> pages; tabview_collect_pages_macos(*tv, pages);
+    return (uint32_t)pages.size();
+  }
+
+  static uint32_t NEUI_ABI tabs_get_selected(neui_session_t session,
+                                             neui_widget_t tabview)
+  {
+    WidgetData* tv = tabview_from_macos(session, tabview);
+    if (!tv) return NEUI_ITEM_NONE;
+    std::vector<uint32_t> pages; tabview_collect_pages_macos(*tv, pages);
+    if (pages.empty()) return NEUI_ITEM_NONE;
+    int sel = tv->tab_selected;
+    if (sel < 0) sel = 0;
+    if (sel >= (int)pages.size()) sel = (int)pages.size() - 1;
+    return (uint32_t)sel;
+  }
+
+  static void NEUI_ABI tabs_set_selected(neui_session_t session,
+                                         neui_widget_t tabview, uint32_t index)
+  {
+    WidgetData* tv = tabview_from_macos(session, tabview);
+    if (!tv) return;
+    tabview_select_macos(*tv, (int)index);
+  }
+
+  static neui_widget_t NEUI_ABI tabs_get_page(neui_session_t session,
+                                              neui_widget_t tabview, uint32_t index)
+  {
+    WidgetData* tv = tabview_from_macos(session, tabview);
+    if (!tv) return widget_none;
+    std::vector<uint32_t> pages; tabview_collect_pages_macos(*tv, pages);
+    if (index >= pages.size()) return widget_none;
+    return neui_widget_t{ tv->session->_widgets[pages[index]].widget_id };
+  }
+
+  static uint32_t NEUI_ABI tabs_get_index(neui_session_t session,
+                                          neui_widget_t tabview, neui_widget_t page)
+  {
+    WidgetData* tv = tabview_from_macos(session, tabview);
+    if (!tv) return NEUI_ITEM_NONE;
+    std::vector<uint32_t> pages; tabview_collect_pages_macos(*tv, pages);
+    for (uint32_t i = 0; i < pages.size(); ++i)
+      if (tv->session->_widgets[pages[i]].widget_id == page.id)
+        return i;
+    return NEUI_ITEM_NONE;
+  }
+
+  neui_tabs_api_t tabs_api = {
+    NEUI_VERSION,
+    tabs_count,
+    tabs_get_selected,
+    tabs_set_selected,
+    tabs_get_page,
+    tabs_get_index,
   };
 
   // Asset API. Session-scoped slot table backing the public
