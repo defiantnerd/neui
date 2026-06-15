@@ -14,11 +14,11 @@ This includes using fonts, colors and sizes that are defined from the target sys
 
 ## targets
 
-* windows
-* macOS
-* linux (not implemented yet)
+* windows (implemented)
+* macOS (implemented)
+* linux (implemented, X11 + Cairo via the crossplatform host)
 * crossplatform for all of the above
-* embedded
+* embedded (DAW plugin windows, X11 host run-loop integration on linux)
 
 ## how to use
 
@@ -86,6 +86,20 @@ Since all access is provided via one symbol, this can either be a dynamically lo
 Access to the lib is provided over one single symbol that provides access to all further features, structured in a modular way.
 For simple applications you just need a few lines to present and interact with the UI system, but you can also access clipboard,
 graphics, content etc.
+
+## tests and examples
+
+The repo ships a header-only unit suite (`neui_tests`, run via `ctest`) and a set
+of example programs (`neui_example`, `readme_example`, and others).
+
+These are built only when neui is the top-level CMake project. When you pull neui
+into your own build with `add_subdirectory()`, both default to off so your tree
+stays lean. Flip them on explicitly if you need them:
+
+```
+-DNEUI_BUILD_TESTS=ON
+-DNEUI_BUILD_EXAMPLES=ON
+```
 
 ## license
 
