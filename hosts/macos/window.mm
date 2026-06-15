@@ -2182,13 +2182,13 @@ static float neui_snap_to_steps(float v, int steps)
   if (wants_knob) {
     auto* wd = macos_host::widget_for_id(widget_id);
     if (wd && !wd->enabled) return;  // disabled knob ignores the wheel
-    // Match the xpl host's wheel-up = decrease convention (audio-plugin feel).
+    // Match the xpl host's wheel-up = increase convention (matches the slider).
     bool fine = (event.modifierFlags & NSEventModifierFlagShift) != 0;
     int steps = [self knobSteps];
     float magnitude = (steps >= 2)
       ? (1.0f / (float)(steps - 1))
       : (fine ? 0.01f : 0.05f);
-    float sign = (ticks > 0) ? -1.0f : 1.0f;
+    float sign = (ticks > 0) ? 1.0f : -1.0f;
     int   mag_ticks = (ticks > 0) ? ticks : -ticks;
     [self setKnobValueFromUser:[self knobValue]
                                 + sign * magnitude * (float)mag_ticks];

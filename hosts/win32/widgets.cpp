@@ -544,10 +544,10 @@ namespace win32_host
     if (msg == WM_MOUSEWHEEL) {
       short delta = static_cast<short>(HIWORD(wParam));
       bool fine = (LOWORD(wParam) & MK_SHIFT) != 0;
-      // Wheel up DECREASES knob value, wheel down INCREASES - matches
-      // audio-plugin convention.
+      // Wheel up INCREASES knob value, wheel down DECREASES - matching the
+      // SLIDER and the natural scroll direction.
       float step = nudge_delta_w32(wd, 1, fine ? 0.01f : 0.05f) *
-                   (delta > 0 ? -1.0f : 1.0f);
+                   (delta > 0 ? 1.0f : -1.0f);
       widget_set_value_user_w32(wd, widget_get_value_w32(wd) + step);
       return;
     }

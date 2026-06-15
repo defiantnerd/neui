@@ -2728,11 +2728,11 @@ namespace xpl_host
     if (event->type == NEUI_EVENT_MOUSE_WHEEL) {
       int delta = event->data.wheel.delta;
       bool fine = (event->data.mouse.buttonmap & NEUI_MK_SHIFT) != 0;
-      // Wheel up DECREASES knob value, wheel down INCREASES - matches
-      // audio-plugin convention (scroll-up "lifts" away from you, value
-      // drops; scroll-down "pulls" toward you, value rises).
+      // Wheel up INCREASES knob value, wheel down DECREASES - matching the
+      // SLIDER and the natural scroll direction (delta > 0 == scroll up on
+      // every platform).
       float step = nudge_delta(*this, 1, fine ? 0.01f : 0.05f) *
-                   (delta > 0 ? -1.0f : 1.0f);
+                   (delta > 0 ? 1.0f : -1.0f);
       widget_set_value_user(*this, widget_get_value(*this) + step);
       repaint();
       return true;
