@@ -21,6 +21,7 @@
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_compound.h"
 #include "../shared/widget_paint_section.h"
+#include "../shared/widget_paint_tabview.h"
 #include "../shared/widget_paint_grid.h"
 #include "../shared/painter.h"
 #include "../../backends/cg/cg_backend.h"
@@ -56,6 +57,40 @@
 // references it before the definition appears.
 namespace macos_host {
   WidgetData* widget_for_id(uint32_t widget_id, Session** out_session = nullptr);
+
+  // A TABPAGE is a chip-less SECTION: it reuses ALL the section_* machinery
+  // (scroll state, inner body view, child clipping, kinetics). Every site
+  // that early-outs on `strcmp(type, NEUI_W_SECTION)` instead tests this so
+  // pages get the same body/scroll/clip treatment as sections. The chip is
+  // suppressed by section_effective_text_macos / _align_macos returning
+  // ""/"none" for a TABPAGE, so band_h == 0 and the body fills the whole rect.
+  inline bool is_section_like(const char* type)
+  {
+    return type && (!strcmp(type, NEUI_W_SECTION) ||
+                    !strcmp(type, NEUI_W_TABPAGE));
+  }
+  // The header-chip text the SECTION paint band should use. Empty for a
+  // TABPAGE (its `text` is the tab label drawn by the parent TABVIEW, not a
+  // section header chip). Mirror of xpl TabPageWidget::section_header_text.
+  inline const char* section_effective_text_macos(const WidgetData& wd)
+  {
+    if (wd.type && !strcmp(wd.type, NEUI_W_TABPAGE)) return "";
+    return wd.text.c_str();
+  }
+  // The chip alignment the SECTION band should use. "none" for a TABPAGE so
+  // band_h collapses to 0 + the body fills the rect. Mirror of xpl
+  // TabPageWidget::section_header_align.
+  inline const char* section_effective_align_macos(const WidgetData& wd)
+  {
+    if (wd.type && !strcmp(wd.type, NEUI_W_TABPAGE)) return "none";
+    return wd.attrs ? wd.attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
+  }
+
+  // TABVIEW helpers (defined further down). The painted view's drawRect: /
+  // mouseDown: reference them before the definitions appear.
+  void tabview_collect_pages_macos(WidgetData& tv, std::vector<uint32_t>& out);
+  void tabview_select_macos(WidgetData& tv, int new_index);
+  void tabview_apply_page_geometry_macos(WidgetData& tv);
 
   // GRID in-place editor character input (defined further down inside the
   // namespace). The keyDown: implementation references it before the
@@ -1206,7 +1241,8 @@ static float neui_snap_to_steps(float v, int steps)
   auto* wd = macos_host::widget_for_id(widget_id);
   if (!wd || !wd->type) return NO;
   return !strcmp(wd->type, NEUI_W_CUSTOMDRAW) ||
-         !strcmp(wd->type, NEUI_W_GRID);
+         !strcmp(wd->type, NEUI_W_GRID)       ||
+         !strcmp(wd->type, NEUI_W_TABVIEW);
 }
 
 // GRID commits an open in-place cell editor on focus loss so Tab /
@@ -1261,6 +1297,20 @@ static float neui_snap_to_steps(float v, int steps)
         macos_host::grid_painted_char_macos(*wd, cp);
       }
     }
+    return;
+  }
+  // TABVIEW: Left/Up = previous tab, Right/Down = next. Mirror of the win32
+  // host's painted_msg_tabview_w32 WM_KEYDOWN branch + the xpl host's
+  // TabViewWidget::on_keydown.
+  if (wd && sess && wd->enabled && wd->type && !strcmp(wd->type, NEUI_W_TABVIEW)) {
+    uint32_t kc = neui_detail::mac_keycode_to_neui(event.keyCode);
+    if (kc == NEUI_KEY_LEFT || kc == NEUI_KEY_UP) {
+      macos_host::tabview_select_macos(*wd, wd->tab_selected - 1); return;
+    }
+    if (kc == NEUI_KEY_RIGHT || kc == NEUI_KEY_DOWN) {
+      macos_host::tabview_select_macos(*wd, wd->tab_selected + 1); return;
+    }
+    [super keyDown:event];
     return;
   }
   bool cd = wd && sess && wd->emit_events && wd->type
@@ -1354,11 +1404,16 @@ static float neui_snap_to_steps(float v, int steps)
   // Clear with the panel-bg colour matching the rest of the window. Same
   // approach as the xpl host's paint_frame. SECTION uses a transparent
   // clear so the un-painted header band shows the parent's pixels.
-  bool is_section = wd->type && !strcmp(wd->type, NEUI_W_SECTION);
-  uint32_t clear = is_section
+  bool is_section = macos_host::is_section_like(wd->type);
+  bool is_tabview = wd->type && !strcmp(wd->type, NEUI_W_TABVIEW);
+  // SECTION / TABPAGE / TABVIEW clear transparent so the shared paint helper
+  // (which leaves the chip-band / strip-gutter area unpainted) shows the
+  // parent's pixels through; other painted widgets clear to panel_bg / an
+  // explicit NEUI_ATTR_BACKGROUND.
+  uint32_t clear = (is_section || is_tabview)
     ? 0x00000000
     : neui_detail::color(neui_detail::ColorRole::panel_bg);
-  if (!is_section && wd->attrs && wd->attrs->has(NEUI_ATTR_BACKGROUND))
+  if (!is_section && !is_tabview && wd->attrs && wd->attrs->has(NEUI_ATTR_BACKGROUND))
     clear = (uint32_t)wd->attrs->get_int(NEUI_ATTR_BACKGROUND, 0);
   backend->begin_frame(render_ctx, clear);
 
@@ -1500,11 +1555,13 @@ static float neui_snap_to_steps(float v, int steps)
     // invisible against the NSWindow background. Detect that and shade
     // down instead so the section reads as a depressed panel.
     uint32_t bg = macos_host::section_resolve_bg_argb(*wd);
-    const char* align = wd->attrs ? wd->attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
+    // A TABPAGE is a chip-less section: section_effective_*_macos return
+    // ""/"none" so paint_section fills the whole rect with no header band.
+    const char* align = macos_host::section_effective_align_macos(*wd);
     uint32_t text_argb = neui_detail::color(neui_detail::ColorRole::text_primary);
     neui_detail::paint_section(backend, render_ctx,
                                  0.0f, 0.0f, (float)sz.width, (float)sz.height,
-                                 wd->text.c_str(),
+                                 macos_host::section_effective_text_macos(*wd),
                                  bg, align, text_argb,
                                  wd->attrs.get());
 
@@ -1525,6 +1582,100 @@ static float neui_snap_to_steps(float v, int steps)
                                               *wd->section_scroll_state,
                                               sep, track, thumb);
     }
+  } else if (is_tabview) {
+    // TABVIEW: chip strip + body fill + tab-outline border, then size the
+    // selected page to the body rect + hide the others. Mirror of the xpl
+    // host's TabViewWidget::paint.
+    using neui_detail::ColorRole;
+
+    const char* pos = wd->attrs ? wd->attrs->get_string(NEUI_ATTR_TAB_POSITION) : nullptr;
+    auto tp = neui_detail::parse_tab_position(pos);
+    wd->tab_edge = tp.edge;
+
+    std::vector<uint32_t> pages;
+    macos_host::tabview_collect_pages_macos(*wd, pages);
+    int count = (int)pages.size();
+    if (wd->tab_selected >= count) wd->tab_selected = count > 0 ? count - 1 : 0;
+    if (wd->tab_selected < 0)      wd->tab_selected = 0;
+
+    // Measure each page's tab label (chip widths + auto vertical strip) +
+    // collect per-chip colours / labels.
+    neui_detail::EffectiveFont ef =
+      neui_detail::read_widget_font(wd->attrs.get(), neui_detail::TAB_CHIP_FONT);
+    std::vector<float>       widths(count, 0.0f);
+    std::vector<std::string> label_store(count);
+    std::vector<const char*> labels(count, "");
+    std::vector<uint32_t>    chip_bg(count, 0), chip_text(count, 0);
+    if (backend->measure_text) neui_detail::push_widget_font(backend, render_ctx, ef);
+    for (int i = 0; i < count; ++i) {
+      auto& pw = sess->_widgets[pages[i]];
+      label_store[i] = pw.text;
+      labels[i]      = label_store[i].c_str();
+      if (backend->measure_text)
+        widths[i] = backend->measure_text(render_ctx, labels[i], -1, ef.size);
+      if (pw.attrs) {
+        chip_bg[i]   = (uint32_t)pw.attrs->get_int(NEUI_ATTR_TAB_CHIP_BG_COLOR, 0);
+        chip_text[i] = (uint32_t)pw.attrs->get_int(NEUI_ATTR_TAB_CHIP_TEXT_COLOR, 0);
+      }
+    }
+    if (backend->measure_text) neui_detail::pop_widget_font(backend, render_ctx, ef);
+
+    float explicit_strip = wd->attrs
+                    ? (float)wd->attrs->get_int(NEUI_ATTR_TAB_STRIP_SIZE, 0) : 0.0f;
+    float strip = neui_detail::tab_resolve_strip_size(tp.edge, explicit_strip,
+                                                      widths.data(), count);
+    neui_detail::TabViewLayout L =
+      neui_detail::compute_tabview_layout((float)sz.width, (float)sz.height,
+                                           tp.edge, strip);
+
+    wd->tab_chips.assign(count, neui_detail::TabChip{});
+    if (count > 0 && tp.edge != neui_detail::TabEdge::None)
+      neui_detail::layout_tab_chips(L, tp.edge, tp.align, widths.data(),
+                                     count, wd->tab_chips.data());
+
+    // Body background: active page's NEUI_ATTR_BACKGROUND, else the tabview's,
+    // else a panel shade. The strip area beside the chips stays transparent
+    // unless NEUI_ATTR_TAB_STRIP_BG_COLOR is set (no whole-rect fill).
+    uint32_t body_bg = neui_detail::shade(neui_detail::color(ColorRole::frame_bg),
+                                           neui_detail::SECTION_BG_LIFT);
+    if (wd->attrs && wd->attrs->has(NEUI_ATTR_BACKGROUND))
+      body_bg = (uint32_t)wd->attrs->get_int(NEUI_ATTR_BACKGROUND, 0);
+    if (count > 0) {
+      auto& ap = sess->_widgets[pages[wd->tab_selected]];
+      if (ap.attrs && ap.attrs->has(NEUI_ATTR_BACKGROUND))
+        body_bg = (uint32_t)ap.attrs->get_int(NEUI_ATTR_BACKGROUND, 0);
+    }
+    uint32_t inactive     = neui_detail::shade(body_bg, -18);
+    uint32_t default_text = neui_detail::color(ColorRole::text_primary);
+    uint32_t content_border = (wd->attrs && wd->attrs->has(NEUI_ATTR_TAB_BORDER_COLOR))
+                        ? (uint32_t)wd->attrs->get_int(NEUI_ATTR_TAB_BORDER_COLOR, 0) : 0;
+    float border_w = wd->attrs
+                       ? (float)wd->attrs->get_int(NEUI_ATTR_TAB_BORDER_WIDTH, 0) : 0.0f;
+    if (border_w <= 0.0f) border_w = 1.0f;
+    uint32_t sep_color = content_border ? content_border
+                                        : neui_detail::color(ColorRole::border);
+    uint32_t strip_bg = (wd->attrs && wd->attrs->has(NEUI_ATTR_TAB_STRIP_BG_COLOR))
+                        ? (uint32_t)wd->attrs->get_int(NEUI_ATTR_TAB_STRIP_BG_COLOR, 0) : 0;
+    float chip_radius = wd->attrs
+                          ? (float)wd->attrs->get_int(NEUI_ATTR_TAB_CHIP_RADIUS, 0) : 0.0f;
+
+    neui_detail::paint_tabview(backend, render_ctx,
+                                0.0f, 0.0f, (float)sz.width, (float)sz.height,
+                                L, tp.edge, wd->tab_chips.data(), count,
+                                wd->tab_selected, -1,
+                                labels.data(), chip_bg.data(), chip_text.data(),
+                                body_bg, default_text, inactive,
+                                sep_color, border_w, strip_bg, content_border,
+                                chip_radius, wd->attrs.get());
+
+    // Cache the content rect so page geometry (incl. auto vertical strip)
+    // stays consistent outside paint, then size the selected page + show it.
+    wd->section_last_layout = neui_detail::SectionLayout{};
+    wd->section_last_layout.body_x = (int)L.body_x;
+    wd->section_last_layout.body_y = (int)L.body_y;
+    wd->section_last_layout.body_w = (int)L.body_w;
+    wd->section_last_layout.body_h = (int)L.body_h;
+    macos_host::tabview_apply_page_geometry_macos(*wd);
   }
 
   if (dim_disabled) backend->pop_alpha(render_ctx);
@@ -1687,13 +1838,41 @@ static float neui_snap_to_steps(float v, int steps)
 {
   auto* wd = macos_host::widget_for_id(widget_id);
   if (!wd || !wd->type) return nullptr;
-  if (strcmp(wd->type, NEUI_W_SECTION) != 0) return nullptr;
+  if (!macos_host::is_section_like(wd->type)) return nullptr;
   if (!wd->section_scroll_state) return nullptr;
+  return wd;
+}
+
+// Resolve the TABVIEW WidgetData for this painted view, or nullptr. Used by
+// mouseDown to hit-test the chip strip.
+- (macos_host::WidgetData*)tabviewInputWidget
+{
+  auto* wd = macos_host::widget_for_id(widget_id);
+  if (!wd || !wd->enabled || !wd->type) return nullptr;
+  if (strcmp(wd->type, NEUI_W_TABVIEW) != 0) return nullptr;
   return wd;
 }
 
 - (void)mouseDown:(NSEvent*)event
 {
+  // TABVIEW chip click. Hit-test the cached chip rects in widget-local
+  // logical px; a hit selects that tab (fires deselect/select, swaps pages).
+  if (auto* tv = [self tabviewInputWidget]) {
+    NSPoint p = [self localPoint:event];
+    int hit = neui_detail::tabview_chip_hit(tv->tab_chips.data(),
+                                             (int)tv->tab_chips.size(),
+                                             (float)p.x, (float)p.y);
+    if (hit >= 0) {
+      // Grab keyboard focus so the Left/Up/Right/Down tab nav routes to
+      // keyDown: (NSView doesn't auto-focus on click), matching win32's
+      // SetFocus-on-chip-click + the xpl host's focusable TABVIEW.
+      [self.window makeFirstResponder:self];
+      macos_host::tabview_select_macos(*tv, hit);
+      return;
+    }
+    [super mouseDown:event];
+    return;
+  }
   // SECTION scrollbar drag start. Hit-test the scrollbar gutters in
   // widget-local logical px; if the click lands in one, latch a drag.
   if (auto* sec_wd = [self sectionInputWidget]) {
@@ -2131,7 +2310,7 @@ static float neui_snap_to_steps(float v, int steps)
   macos_host::WidgetData* sec_wd = nullptr;
   if (!wants_knob && !wants_grid) {
     auto* wd = macos_host::widget_for_id(widget_id);
-    if (wd && wd->type && !strcmp(wd->type, NEUI_W_SECTION)
+    if (wd && macos_host::is_section_like(wd->type)
         && wd->section_scroll_state)
       sec_wd = wd;
   }
@@ -3264,9 +3443,14 @@ namespace macos_host
         backend->resize(pv->render_ctx, (uint32_t)wd.width, (uint32_t)wd.height);
       [pv setNeedsDisplay:YES];
     }
-    // Section self-resize: rebuild layout + reposition own children.
-    if (wd.type && !strcmp(wd.type, NEUI_W_SECTION))
+    // Section / page self-resize: rebuild layout + reposition own children.
+    if (is_section_like(wd.type))
       section_apply_layout_changes_macos(wd);
+    // TABVIEW self-resize: re-flow the chip strip + re-size the selected page
+    // to the new content body rect (a setNeedsDisplay drives the paint pass,
+    // which calls tabview_apply_page_geometry_macos).
+    else if (wd.type && !strcmp(wd.type, NEUI_W_TABVIEW))
+      mark_widget_dirty_for_paint(wd);
   }
 
   // -------------------------------------------------------------------------
@@ -3297,7 +3481,7 @@ namespace macos_host
 
   void section_refresh_scroll_state_macos(WidgetData& wd)
   {
-    if (!wd.type || strcmp(wd.type, NEUI_W_SECTION) != 0) return;
+    if (!is_section_like(wd.type)) return;
     const char* mode = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_SCROLL_MODE) : nullptr;
     auto axis = neui_detail::parse_section_scroll_mode(mode);
     if (axis == neui_detail::SectionScrollAxis::None) {
@@ -3362,11 +3546,9 @@ namespace macos_host
     bool scrolling = (sec.section_scroll_state != nullptr);
     int band_h = 0;
     if (!scrolling) {
-      const char* align = sec.attrs
-                            ? sec.attrs->get_string(NEUI_ATTR_ALIGN_TEXT)
-                            : nullptr;
-      band_h = neui_detail::section_band_h_for(sec.text.c_str(),
-                                                 sec.height, align);
+      band_h = neui_detail::section_band_h_for(section_effective_text_macos(sec),
+                                                 sec.height,
+                                                 section_effective_align_macos(sec));
     }
     if (!scrolling && band_h <= 0) return;
     section_create_body_view_macos(sec);
@@ -3420,8 +3602,9 @@ namespace macos_host
   void section_compute_layout_macos(WidgetData& wd)
   {
     if (!wd.session) return;
-    const char* align = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
-    int band_h = neui_detail::section_band_h_for(wd.text.c_str(), wd.height, align);
+    int band_h = neui_detail::section_band_h_for(section_effective_text_macos(wd),
+                                                  wd.height,
+                                                  section_effective_align_macos(wd));
     int initial_body_w = wd.width;
     int initial_body_h = wd.height - band_h;
     if (initial_body_h < 0) initial_body_h = 0;
@@ -3474,8 +3657,7 @@ namespace macos_host
 
   void section_apply_layout_changes_macos(WidgetData& sec)
   {
-    if (!sec.native_control || !sec.type ||
-        strcmp(sec.type, NEUI_W_SECTION) != 0) return;
+    if (!sec.native_control || !is_section_like(sec.type)) return;
     section_compute_layout_macos(sec);
     // Resize the inner body view to the recomputed body rect before
     // repositioning children (whose frames are body-view-local). The body
@@ -3491,6 +3673,119 @@ namespace macos_host
     }
     section_reposition_children_macos(sec);
     mark_widget_dirty_for_paint(sec);
+  }
+
+  // -------------------------------------------------------------------------
+  // TABVIEW runtime helpers. The geometry math lives in
+  // hosts/shared/widget_tabview.h; here the macOS host enumerates the TABPAGE
+  // children, sizes the selected page's NSView to the content body rect,
+  // toggles page visibility, and fires the deselect/select events. Mirror of
+  // the xpl host's TabViewWidget::collect_pages / apply_page_geometry /
+  // select_tab.
+
+  // Collect the TABVIEW's NEUI_W_TABPAGE child indices in creation (tab) order.
+  void tabview_collect_pages_macos(WidgetData& tv, std::vector<uint32_t>& out)
+  {
+    out.clear();
+    if (!tv.session) return;
+    uint32_t c = tv.session->_widgets.child(tv.index);
+    while (c != 0) {
+      if (tv.session->_widgets.exists(c)) {
+        auto& cw = tv.session->_widgets[c];
+        if (cw.type && !strcmp(cw.type, NEUI_W_TABPAGE))
+          out.push_back(c);
+      }
+      c = tv.session->_widgets.next(c);
+    }
+  }
+
+  // Size the active page to the tabview's content body rect (from the most
+  // recent NEUI_ATTR_TAB_POSITION / _STRIP_SIZE) + show it; hide the rest.
+  // A page fills the body and its own children are body-relative (chip-less
+  // section, body_y == 0). Reads NEUI_ATTR_TAB_POSITION fresh so a geometry
+  // re-apply between paints (e.g. a new page added post-show) stays correct.
+  void tabview_apply_page_geometry_macos(WidgetData& tv)
+  {
+    if (!tv.session) return;
+    std::vector<uint32_t> pages;
+    tabview_collect_pages_macos(tv, pages);
+    int count = (int)pages.size();
+    if (count == 0) return;
+    if (tv.tab_selected < 0)      tv.tab_selected = 0;
+    if (tv.tab_selected >= count) tv.tab_selected = count - 1;
+
+    // Use the content rect cached by the last paint (it accounts for the
+    // auto vertical strip width, which needs label measurement). Before the
+    // first paint it is zero - fall back to a no-strip layout so the page is
+    // sized sensibly until the first paint corrects it.
+    neui_detail::SectionLayout L = tv.section_last_layout;
+    if (L.body_w <= 0 && L.body_h <= 0) {
+      const char* pos = tv.attrs ? tv.attrs->get_string(NEUI_ATTR_TAB_POSITION) : nullptr;
+      auto tp = neui_detail::parse_tab_position(pos);
+      float strip = tv.attrs ? (float)tv.attrs->get_int(NEUI_ATTR_TAB_STRIP_SIZE, 0) : 0.0f;
+      neui_detail::TabViewLayout tl =
+        neui_detail::compute_tabview_layout((float)tv.width, (float)tv.height, tp.edge, strip);
+      L.body_x = (int)tl.body_x; L.body_y = (int)tl.body_y;
+      L.body_w = (int)tl.body_w; L.body_h = (int)tl.body_h;
+    }
+
+    for (int i = 0; i < count; ++i) {
+      auto& pw = tv.session->_widgets[pages[i]];
+      bool active = (i == tv.tab_selected);
+      pw.x = (int)L.body_x;
+      pw.y = (int)L.body_y;
+      pw.width  = (int)L.body_w;
+      pw.height = (int)L.body_h;
+      pw.visible = active;
+      if (pw.native_control) {
+        id obj = (__bridge id)pw.native_control;
+        if ([obj isKindOfClass:[NSView class]]) {
+          NSView* v = (NSView*)obj;
+          [v setFrame:NSMakeRect(pw.x, pw.y, pw.width, pw.height)];
+          [v setHidden:!active];
+        }
+      }
+      // The page's own body view + children re-flow to the new size.
+      section_apply_layout_changes_macos(pw);
+    }
+  }
+
+  // Switch the active tab. If the selection actually changes, fire
+  // NEUI_EVENT_TAB_DESELECTED (old) then _SELECTED (new) BEFORE swapping page
+  // visibility + repainting, so a client handler can update the incoming
+  // page's widgets first. Mirror of xpl TabViewWidget::select_tab.
+  void tabview_select_macos(WidgetData& tv, int ni)
+  {
+    if (!tv.session) return;
+    std::vector<uint32_t> pages;
+    tabview_collect_pages_macos(tv, pages);
+    int count = (int)pages.size();
+    if (count == 0) return;
+    if (ni < 0)      ni = 0;
+    if (ni >= count) ni = count - 1;
+    if (ni == tv.tab_selected) return;
+    int old = tv.tab_selected;
+
+    if (old >= 0 && old < count) {
+      neui_event_t ev{};
+      ev.type               = NEUI_EVENT_TAB_DESELECTED;
+      ev.data.tab.widget.id = tv.widget_id;
+      ev.data.tab.tab_index = (uint32_t)old;
+      ev.data.tab.page.id   = tv.session->_widgets[pages[old]].widget_id;
+      tv.session->dispatch_event(&ev);
+    }
+    {
+      neui_event_t ev{};
+      ev.type               = NEUI_EVENT_TAB_SELECTED;
+      ev.data.tab.widget.id = tv.widget_id;
+      ev.data.tab.tab_index = (uint32_t)ni;
+      ev.data.tab.page.id   = tv.session->_widgets[pages[ni]].widget_id;
+      tv.session->dispatch_event(&ev);
+    }
+
+    tv.tab_selected = ni;
+    tabview_apply_page_geometry_macos(tv);
+    mark_widget_dirty_for_paint(tv);
   }
 
   // Step the SECTION's per-axis spring-back kinetics one frame. Returns
@@ -3839,23 +4134,26 @@ namespace macos_host
             || !strcmp(w.type, NEUI_W_KNOB)
             || !strcmp(w.type, NEUI_W_CUSTOMDRAW)
             || !strcmp(w.type, NEUI_W_GRID)
-            || !strcmp(w.type, NEUI_W_SECTION)) {
-      // SECTION uses a painted view for the body fill + title chip; child
-      // widgets nest into it via the recursive descendant walker (see
-      // create_descendants_native). For scrolling sections (NEUI_ATTR_SCROLL_MODE
-      // != "none") the painted view also intercepts wheel / mouse for
-      // scrollbar drag + kinetics; non-scrolling sections stay pointer-
-      // pass-through.
+            || !strcmp(w.type, NEUI_W_TABVIEW)
+            || is_section_like(w.type)) {
+      // SECTION / TABPAGE use a painted view for the body fill + title chip;
+      // child widgets nest into it via the recursive descendant walker (see
+      // create_descendants_native). For scrolling sections/pages
+      // (NEUI_ATTR_SCROLL_MODE != "none") the painted view also intercepts
+      // wheel / mouse for scrollbar drag + kinetics; non-scrolling stay
+      // pointer-pass-through. TABVIEW is a painted container that draws the
+      // chip strip + shows the selected page.
       NEUINativePaintedView* v = create_painted_view(w);
       [parent_content addSubview:v];
       w.native_control = (__bridge_retained void*)v;
-      if (!strcmp(w.type, NEUI_W_SECTION)) {
-        // A SECTION always clips its children to its bounds, matching the
-        // win32 host (HWND parenting clips child windows inherently). NSView
-        // does NOT clip subviews by default, so without this a non-scrolling
-        // section - or one just switched to scroll_mode="none" - lets
-        // overflowing children spill outside the section rect. Scrolling
-        // sections additionally clip to the body via the inner body view.
+      if (is_section_like(w.type)) {
+        // A SECTION / TABPAGE always clips its children to its bounds,
+        // matching the win32 host (HWND parenting clips child windows
+        // inherently). NSView does NOT clip subviews by default, so without
+        // this a non-scrolling section - or one just switched to
+        // scroll_mode="none" - lets overflowing children spill outside the
+        // section rect. Scrolling sections additionally clip to the body via
+        // the inner body view.
         v.wantsLayer = YES;
         v.layer.masksToBounds = YES;
         section_refresh_scroll_state_macos(w);
@@ -3863,8 +4161,14 @@ namespace macos_host
         // so children sit + clip below the band, matching the body-relative
         // child-coordinate contract. Created here, before
         // create_descendants_native descends into the children and parents
-        // them to the body via section_child_container_macos.
+        // them to the body via section_child_container_macos. (A TABPAGE is
+        // chip-less, so it only gets the body view when it scrolls.)
         section_ensure_body_view_macos(w);
+      } else if (!strcmp(w.type, NEUI_W_TABVIEW)) {
+        // TABVIEW clips its (TABPAGE) children to its bounds; the selected
+        // page is positioned to the content body rect each paint.
+        v.wantsLayer = YES;
+        v.layer.masksToBounds = YES;
       }
     }
 
@@ -3889,7 +4193,12 @@ namespace macos_host
   // parent's compound layer stack but don't get z-interleaved with it.
   static bool widget_is_native_container(const WidgetData& w)
   {
-    return w.type && !strcmp(w.type, NEUI_W_SECTION);
+    // SECTION + TABPAGE (a chip-less section) nest their content children;
+    // TABVIEW nests its TABPAGE children. For TABVIEW / a chip-less,
+    // non-scrolling TABPAGE there is no inner body view, so
+    // section_child_container_macos falls back to the painted view itself.
+    return is_section_like(w.type) ||
+           (w.type && !strcmp(w.type, NEUI_W_TABVIEW));
   }
 
   // After a frame is created, walk every descendant and instantiate its
@@ -4034,8 +4343,15 @@ namespace macos_host
     uint32_t pidx = s->_widgets.get_parent(idx);
     if (pidx && s->_widgets.exists(pidx)) {
       auto& pw = s->_widgets[pidx];
-      if (pw.type && !strcmp(pw.type, NEUI_W_SECTION) && pw.section_scroll_state)
+      if (is_section_like(pw.type) && pw.section_scroll_state)
         section_apply_layout_changes_macos(pw);
+      // A TABPAGE added to an already-shown TABVIEW needs the tabview's chip
+      // strip re-flowed + its page geometry re-applied (hide the new page if
+      // it isn't selected). Repaint drives tabview_apply_page_geometry_macos.
+      else if (pw.type && !strcmp(pw.type, NEUI_W_TABVIEW)) {
+        tabview_apply_page_geometry_macos(pw);
+        mark_widget_dirty_for_paint(pw);
+      }
     }
     // Join the frame's Tab / Shift-Tab key-view loop if the new widget is a
     // tab stop. Gate on tab_stop_view_macos so non-focusable additions

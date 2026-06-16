@@ -274,6 +274,55 @@ extern "C" {
 // per WM_MOUSEMOVE; changes mid-drag apply on the next drag.
 #define NEUI_ATTR_KNOB_MODE "neui.attr.knob_mode"
 
+// string: tab-strip position for a TABVIEW. Encodes the edge plus the
+// alignment of the chips along that edge. One of:
+//   "top-left" / "top-center" / "top-right"
+//   "bottom-left" / "bottom-center" / "bottom-right"
+//   "left-top" / "left-center" / "left-bottom"
+//   "right-top" / "right-center" / "right-bottom"
+//   "none"  - no chip strip; pages are switched via NEUI_API_TABS only and
+//             the active page fills the whole widget rect.
+// For top / bottom edges the second token is the horizontal alignment; for
+// left / right edges it is the vertical alignment. Default (unset) is
+// "top-left". Live - re-laid out on the next paint.
+#define NEUI_ATTR_TAB_POSITION "neui.attr.tab_position"
+
+// int (logical px): thickness of a TABVIEW chip strip - the band height for
+// top / bottom edges, the band width for left / right edges. 0 / unset uses
+// the host default (28). Live.
+#define NEUI_ATTR_TAB_STRIP_SIZE "neui.attr.tab_strip_size"
+
+// int (ARGB): colour of the optional border that follows the TABVIEW tab
+// outline (around the content body, notched up around the active chip).
+// 0 / unset = no border drawn. Live.
+#define NEUI_ATTR_TAB_BORDER_COLOR "neui.attr.tab_border_color"
+
+// int (logical px): stroke width of the NEUI_ATTR_TAB_BORDER_COLOR outline.
+// 0 / unset uses the host default (1). Live.
+#define NEUI_ATTR_TAB_BORDER_WIDTH "neui.attr.tab_border_width"
+
+// int (ARGB): per-chip background colour, read from the owning TABPAGE.
+// 0 / unset = host default (the active chip uses the page/body background so
+// it reads as connected to the content; inactive chips use a shaded fill).
+// Live.
+#define NEUI_ATTR_TAB_CHIP_BG_COLOR "neui.attr.tab_chip_bg_color"
+
+// int (ARGB): per-chip label colour, read from the owning TABPAGE.
+// 0 / unset = the theme text_primary role. Live.
+#define NEUI_ATTR_TAB_CHIP_TEXT_COLOR "neui.attr.tab_chip_text_color"
+
+// int (logical px): corner radius for the TABVIEW chips. The two OUTER
+// corners (away from the content body) are rounded by this amount; the
+// body-edge corners stay square so the chip meets the content cleanly.
+// 0 / unset = square chips. Clamped to half the chip's smaller dimension. Live.
+#define NEUI_ATTR_TAB_CHIP_RADIUS "neui.attr.tab_chip_radius"
+
+// int (ARGB): fill colour for the strip area BESIDE the chips (the part of
+// the tab band not covered by a chip). 0 / unset = spared (not filled, so
+// the widget background / nothing shows there). Set it to paint a solid tab
+// band behind the chips. Live.
+#define NEUI_ATTR_TAB_STRIP_BG_COLOR "neui.attr.tab_strip_bg_color"
+
 // ---- Live parameter slots (drive rendering of SLIDER, KNOB, future
 // value-bearing widgets). Float, normalized to [0..1]; out-of-range
 // values are clamped on set. Programmatic set does NOT fire

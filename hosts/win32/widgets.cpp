@@ -20,6 +20,7 @@
 #include "../shared/shortcut_format.h"
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_section.h"
+#include "../shared/widget_paint_tabview.h"
 #include "../shared/widget_paint_grid.h"
 #include "../shared/theme_palette.h"
 #include "../shared/painter.h"
@@ -72,6 +73,63 @@ namespace win32_host
   static void section_refresh_scroll_state_w32(WidgetData& wd);
   static void section_reposition_children_w32(WidgetData& sec);
   static void section_external_commit_w32(WidgetData& sec, int nx, int ny);
+
+  // A TABPAGE is a chip-less SECTION: it reuses ALL the section_* machinery
+  // (scroll state, inner body HWND, child clipping, kinetics). Every site
+  // that early-outs on strcmp(type, NEUI_W_SECTION) instead tests this so
+  // pages get the same body/scroll/clip treatment as sections. Mirror of the
+  // macOS host's is_section_like.
+  static inline bool is_section_like_w32(const char* type)
+  {
+    return type && (!strcmp(type, NEUI_W_SECTION) ||
+                    !strcmp(type, NEUI_W_TABPAGE));
+  }
+  // The header-chip text the SECTION paint band / window region should use.
+  // Empty for a TABPAGE (its `text` is the tab label drawn by the parent
+  // TABVIEW, not a section header chip). Mirror of the macOS host's
+  // section_effective_text_macos.
+  static inline const char* section_effective_text_w32(const WidgetData& wd)
+  {
+    if (wd.type && !strcmp(wd.type, NEUI_W_TABPAGE)) return "";
+    return wd.text.c_str();
+  }
+  // The chip alignment the SECTION band should use. "none" for a TABPAGE so
+  // band_h collapses to 0 + the body fills the whole rect.
+  static inline const char* section_effective_align_w32(const WidgetData& wd)
+  {
+    if (wd.type && !strcmp(wd.type, NEUI_W_TABPAGE)) return "none";
+    return wd.attrs ? wd.attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
+  }
+
+  // TABVIEW painted-widget hooks + runtime. Defined just before
+  // CreateChildHwnd; forward-declared so the section helpers / attr setters /
+  // create paths above can reference them. tabview_relayout_w32 is non-static
+  // so window.cpp's WM_SIZE handler can call it on a frame resize.
+  static void paint_tabview_w32(neui_render_backend_t* backend,
+                                 neui_render_ctx_t      ctx,
+                                 float w, float h,
+                                 WidgetData&            wd,
+                                 bool                   focused);
+  static void painted_msg_tabview_w32(WidgetData& wd, UINT msg,
+                                       WPARAM wParam, LPARAM lParam);
+  static void tabview_collect_pages_w32(WidgetData& tv, std::vector<uint32_t>& out);
+  static void tabview_apply_page_geometry_w32(WidgetData& tv);
+  static void tabview_apply_region_w32(WidgetData& tv);
+  static void tabview_select_w32(WidgetData& tv, int new_index);
+  void        tabview_relayout_w32(WidgetData& tv);
+  // The parent TABVIEW of `wd` if `wd` is one of its TABPAGE children, else
+  // nullptr. Used to repaint / re-flow the strip when a page's tab label,
+  // chip colours, or background change.
+  static inline WidgetData* tabview_parent_of_page_w32(WidgetData& wd)
+  {
+    if (!wd.session || !wd.type || strcmp(wd.type, NEUI_W_TABPAGE) != 0)
+      return nullptr;
+    uint32_t pidx = wd.session->_widgets.get_parent(wd.index);
+    if (!pidx || !wd.session->_widgets.exists(pidx)) return nullptr;
+    auto& pw = wd.session->_widgets[pidx];
+    if (pw.type && !strcmp(pw.type, NEUI_W_TABVIEW)) return &pw;
+    return nullptr;
+  }
   // Timer ID for the scrolling-SECTION spring-back animation on win32
   // native. Per-section: SetTimer is installed on the SECTION's own HWND
   // (unlike xpl where it lives on the frame), so the timer id can stay a
@@ -1071,7 +1129,7 @@ namespace win32_host
   // to call repeatedly. Matches the xpl host's SectionWidget::refresh_scroll_state.
   static void section_refresh_scroll_state_w32(WidgetData& wd)
   {
-    if (!wd.type || strcmp(wd.type, NEUI_W_SECTION) != 0) return;
+    if (!is_section_like_w32(wd.type)) return;
     const char* mode = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_SCROLL_MODE) : nullptr;
     auto axis = neui_detail::parse_section_scroll_mode(mode);
     if (axis == neui_detail::SectionScrollAxis::None) {
@@ -1091,8 +1149,9 @@ namespace win32_host
   static void section_compute_layout_w32(WidgetData& wd)
   {
     if (!wd.session) return;
-    const char* align = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
-    int band_h = neui_detail::section_band_h_for(wd.text.c_str(), wd.height, align);
+    const char* align = section_effective_align_w32(wd);
+    int band_h = neui_detail::section_band_h_for(section_effective_text_w32(wd),
+                                                  wd.height, align);
     int initial_body_w = wd.width;
     int initial_body_h = wd.height - band_h;
     if (initial_body_h < 0) initial_body_h = 0;
@@ -1283,7 +1342,7 @@ namespace win32_host
   // underneath keeps its last frame.
   void section_apply_layout_changes_w32(WidgetData& wd)
   {
-    if (!wd.hwnd || !wd.type || strcmp(wd.type, NEUI_W_SECTION) != 0) return;
+    if (!wd.hwnd || !is_section_like_w32(wd.type)) return;
     section_compute_layout_w32(wd);
     if (wd.section_body_hwnd) {
       UINT dpi = wd.session ? wd.session->get_dpi_for_widget(wd.index) : 96;
@@ -1314,9 +1373,11 @@ namespace win32_host
                     neui_detail::SECTION_BG_LIFT);
     if (wd.attrs && wd.attrs->has(NEUI_ATTR_BACKGROUND))
       bg = static_cast<uint32_t>(wd.attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
-    const char* align = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
+    // A TABPAGE is a chip-less section: section_effective_*_w32 return
+    // ""/"none" so paint_section fills the whole rect with no header band.
+    const char* align = section_effective_align_w32(wd);
     neui_detail::paint_section(backend, ctx, 0.0f, 0.0f, w, h,
-                                wd.text.c_str(), bg, align,
+                                section_effective_text_w32(wd), bg, align,
                                 neui_detail::color(ColorRole::text_primary),
                                 wd.attrs.get());
 
@@ -1558,16 +1619,17 @@ namespace win32_host
       return;
     }
 
-    const char* align = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
-    if (wd.text.empty() || neui_detail::section_align_is_none(align)) {
-      // No band reserved - full rect.
+    const char* align       = section_effective_align_w32(wd);
+    const char* region_text = section_effective_text_w32(wd);
+    if (!region_text[0] || neui_detail::section_align_is_none(align)) {
+      // No band reserved - full rect (a TABPAGE always lands here).
       SetWindowRgn(wd.hwnd, CreateRectRgn(0, 0, phys_w, phys_h), FALSE);
       return;
     }
 
     auto* backend = neui_d2d_backend::get_backend();
     float tw = (backend && backend->measure_text)
-                 ? backend->measure_text(nullptr, wd.text.c_str(), -1,
+                 ? backend->measure_text(nullptr, region_text, -1,
                                           neui_detail::SECTION_LABEL_FONT)
                  : 0.0f;
     auto chip = neui_detail::section_chip_rect(
@@ -1611,6 +1673,392 @@ namespace win32_host
       MapWindowPoints(HWND_DESKTOP, parent,
                       reinterpret_cast<POINT*>(&sec_rect), 2);
       InvalidateRect(parent, &sec_rect, TRUE);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // TABVIEW runtime. The geometry math lives in hosts/shared/widget_tabview.h;
+  // here the win32 host enumerates the TABPAGE children, lays out the chip
+  // strip (label widths measured via the d2d backend's null-ctx path, exactly
+  // like apply_section_region_w32), sizes the selected page's HWND to the
+  // content body rect, toggles page visibility, and fires the deselect/select
+  // events. Mirror of the xpl host's TabViewWidget + the macOS host's
+  // tabview_*_macos helpers.
+
+  // Collect the TABVIEW's NEUI_W_TABPAGE child indices in creation (tab) order.
+  static void tabview_collect_pages_w32(WidgetData& tv, std::vector<uint32_t>& out)
+  {
+    out.clear();
+    if (!tv.session) return;
+    uint32_t c = tv.session->_widgets.child(tv.index);
+    while (c != 0) {
+      if (tv.session->_widgets.exists(c)) {
+        auto& cw = tv.session->_widgets[c];
+        if (cw.type && !strcmp(cw.type, NEUI_W_TABPAGE))
+          out.push_back(c);
+      }
+      c = tv.session->_widgets.next(c);
+    }
+  }
+
+  // Re-measure labels, resolve the strip edge / size, lay out the chips into
+  // wd.tab_chips, and cache the content body rect in wd.section_last_layout.
+  // Pure state - no GDI, no child HWND moves - so it is safe to call from
+  // paint as well as the relayout triggers. Returns the full TabViewLayout
+  // (the shared paint helper needs the strip rect too, which the cached
+  // SectionLayout does not carry).
+  static neui_detail::TabViewLayout tabview_recompute_layout_w32(WidgetData& wd)
+  {
+    using namespace neui_detail;
+    TabViewLayout L{};
+    if (!wd.session) return L;
+
+    const char* pos = wd.attrs ? wd.attrs->get_string(NEUI_ATTR_TAB_POSITION) : nullptr;
+    TabPosition tp = parse_tab_position(pos);
+    wd.tab_edge = tp.edge;
+
+    std::vector<uint32_t> pages;
+    tabview_collect_pages_w32(wd, pages);
+    int count = static_cast<int>(pages.size());
+    if (wd.tab_selected >= count) wd.tab_selected = count > 0 ? count - 1 : 0;
+    if (wd.tab_selected < 0)      wd.tab_selected = 0;
+
+    EffectiveFont ef = read_widget_font(wd.attrs.get(), TAB_CHIP_FONT);
+    auto* backend = neui_d2d_backend::get_backend();
+    std::vector<float> widths(count, 0.0f);
+    for (int i = 0; i < count; ++i) {
+      auto& pw = wd.session->_widgets[pages[i]];
+      if (backend && backend->measure_text)
+        widths[i] = backend->measure_text(nullptr, pw.text.c_str(), -1, ef.size);
+    }
+
+    float explicit_strip = wd.attrs
+                  ? static_cast<float>(wd.attrs->get_int(NEUI_ATTR_TAB_STRIP_SIZE, 0)) : 0.0f;
+    float strip = tab_resolve_strip_size(tp.edge, explicit_strip, widths.data(), count);
+    L = compute_tabview_layout(static_cast<float>(wd.width),
+                                static_cast<float>(wd.height), tp.edge, strip);
+
+    wd.tab_chips.assign(count, TabChip{});
+    if (count > 0 && tp.edge != TabEdge::None)
+      layout_tab_chips(L, tp.edge, tp.align, widths.data(), count, wd.tab_chips.data());
+
+    wd.section_last_layout = SectionLayout{};
+    wd.section_last_layout.body_x = static_cast<int>(L.body_x);
+    wd.section_last_layout.body_y = static_cast<int>(L.body_y);
+    wd.section_last_layout.body_w = static_cast<int>(L.body_w);
+    wd.section_last_layout.body_h = static_cast<int>(L.body_h);
+    return L;
+  }
+
+  // Per-side inset (logical px) the opaque page HWND is shrunk by inside the
+  // content body, so the lines the TABVIEW paints at the body perimeter stay
+  // visible around the page: the strip<->body baseline (always drawn) on the
+  // strip side, and the optional content border (NEUI_ATTR_TAB_BORDER_COLOR)
+  // on the three far sides. (xpl / macOS paint the page in the same surface,
+  // so they don't need this; the win32 page is a separate opaque child HWND
+  // that would otherwise cover those lines.)
+  static void tabview_page_insets_w32(WidgetData& tv, int& top, int& left,
+                                       int& bottom, int& right)
+  {
+    top = left = bottom = right = 0;
+    bool has_border = tv.attrs && tv.attrs->has(NEUI_ATTR_TAB_BORDER_COLOR) &&
+                      tv.attrs->get_int(NEUI_ATTR_TAB_BORDER_COLOR, 0) != 0;
+    float bw = tv.attrs ? static_cast<float>(tv.attrs->get_int(NEUI_ATTR_TAB_BORDER_WIDTH, 0)) : 0.0f;
+    int line = bw > 0.0f ? static_cast<int>(bw + 0.5f) : 1;
+    if (line < 1) line = 1;
+    int strip_in = line;                  // baseline is always drawn
+    int far_in   = has_border ? line : 0; // content border only when set
+    switch (tv.tab_edge) {
+      case neui_detail::TabEdge::Top:    top = strip_in; left = far_in; right = far_in; bottom = far_in; break;
+      case neui_detail::TabEdge::Bottom: bottom = strip_in; left = far_in; right = far_in; top = far_in; break;
+      case neui_detail::TabEdge::Left:   left = strip_in; top = far_in; bottom = far_in; right = far_in; break;
+      case neui_detail::TabEdge::Right:  right = strip_in; top = far_in; bottom = far_in; left = far_in; break;
+      default:                           top = left = bottom = right = far_in; break; // None
+    }
+  }
+
+  // Size each TABPAGE HWND to the cached content body rect (minus the border
+  // insets), show the selected one + hide the rest, and re-flow each page's
+  // own body / children. Uses the body rect from the most recent recompute
+  // (section_last_layout).
+  static void tabview_apply_page_geometry_w32(WidgetData& tv)
+  {
+    if (!tv.session) return;
+    std::vector<uint32_t> pages;
+    tabview_collect_pages_w32(tv, pages);
+    int count = static_cast<int>(pages.size());
+    if (count == 0) return;
+    if (tv.tab_selected < 0)      tv.tab_selected = 0;
+    if (tv.tab_selected >= count) tv.tab_selected = count - 1;
+
+    const auto& L = tv.section_last_layout;
+    int it = 0, il = 0, ib = 0, ir = 0;
+    tabview_page_insets_w32(tv, it, il, ib, ir);
+    int px = L.body_x + il;
+    int py = L.body_y + it;
+    int pw_ = L.body_w - il - ir; if (pw_ < 0) pw_ = 0;
+    int ph_ = L.body_h - it - ib; if (ph_ < 0) ph_ = 0;
+
+    UINT dpi = tv.session->get_dpi_for_widget(tv.index);
+    if (dpi == 0) dpi = 96;
+    for (int i = 0; i < count; ++i) {
+      auto& pg = tv.session->_widgets[pages[i]];
+      bool active = (i == tv.tab_selected);
+      pg.x = px; pg.y = py;
+      pg.width  = pw_;
+      pg.height = ph_;
+      pg.visible = active;
+      if (pg.hwnd) {
+        // Active page sits at the content body rect, topmost among the
+        // sibling pages, shown; inactive pages go to the bottom + hidden.
+        SetWindowPos(pg.hwnd, active ? HWND_TOP : HWND_BOTTOM,
+          LogicalToPhysical(pg.x, dpi), LogicalToPhysical(pg.y, dpi),
+          LogicalToPhysical(pg.width  > 0 ? pg.width  : 1, dpi),
+          LogicalToPhysical(pg.height > 0 ? pg.height : 1, dpi),
+          SWP_NOACTIVATE);
+        ShowWindow(pg.hwnd, active ? SW_SHOWNA : SW_HIDE);
+        // Re-flow the page's own body view + children to the new size (it is
+        // a chip-less section). SetWindowPos fires WM_SIZE only when the size
+        // changed; call explicitly so same-size repositions still re-flow.
+        section_apply_layout_changes_w32(pg);
+      }
+    }
+
+    // Erase the just-hidden page's leftover pixels. Hiding a page only
+    // invalidates that page's own (now-hidden) ancestor chain, so the child
+    // HWNDs we just hid (labels, and especially a scrolling page's
+    // WS_EX_COMPOSITED body HWND + its rows) leave their last-rendered pixels
+    // in the top-level window's shared redirection surface at the old body
+    // position. Invalidating the tabview or the active page alone does NOT
+    // reliably overwrite them (the only thing that did was a window resize).
+    // So replicate a resize's repaint: ask the ROOT window to synchronously
+    // redraw the tabview's screen rect with RDW_ALLCHILDREN, which repaints
+    // every window intersecting that rect (tabview + the now-visible page +
+    // its children) bottom-to-top, laying fresh opaque pixels over the stale
+    // ones. Not re-entrant - painting never calls back into selection.
+    if (tv.hwnd) {
+      HWND root = GetAncestor(tv.hwnd, GA_ROOT);
+      RECT tr; GetWindowRect(tv.hwnd, &tr);
+      if (root) {
+        MapWindowPoints(HWND_DESKTOP, root, reinterpret_cast<POINT*>(&tr), 2);
+        RedrawWindow(root, &tr, nullptr,
+                     RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+      } else {
+        RedrawWindow(tv.hwnd, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+      }
+    }
+  }
+
+  // Set the TABVIEW's window region to (content body rect U each chip rect),
+  // in physical px, so the strip gutter beside the chips is truly transparent
+  // (the parent frame shows through) - exactly the technique
+  // apply_section_region_w32 uses for the SECTION title band. Recomputed from
+  // the cached layout + chips on every relayout (NOT from paint, so the
+  // parent-invalidate below can't storm). For TabEdge::None the region is the
+  // full rect.
+  static void tabview_apply_region_w32(WidgetData& tv)
+  {
+    if (!tv.hwnd) return;
+    UINT dpi = tv.session ? tv.session->get_dpi_for_widget(tv.index) : 96;
+    if (dpi == 0) dpi = 96;
+    int phys_w = LogicalToPhysical(tv.width, dpi);
+    int phys_h = LogicalToPhysical(tv.height, dpi);
+    if (phys_w <= 0 || phys_h <= 0) { SetWindowRgn(tv.hwnd, nullptr, FALSE); return; }
+
+    if (tv.tab_edge == neui_detail::TabEdge::None || tv.tab_chips.empty()) {
+      SetWindowRgn(tv.hwnd, CreateRectRgn(0, 0, phys_w, phys_h), FALSE);
+      return;
+    }
+
+    const auto& L = tv.section_last_layout;
+    auto clampw = [&](int v){ return v < 0 ? 0 : (v > phys_w ? phys_w : v); };
+    auto clamph = [&](int v){ return v < 0 ? 0 : (v > phys_h ? phys_h : v); };
+    // The baseline + content-box edge that paint_tabview strokes sit ON the
+    // body's strip-facing boundary, spanning the FULL strip width (skipping
+    // only the active chip). Where a chip covers that span the line is inside
+    // the region, but in the empty gutter beside the chips it lands just
+    // outside the body rect and gets clipped (the missing line left of a
+    // right-aligned active chip). Grow the body rect by the line width toward
+    // the strip so that boundary line is always included.
+    float bw = tv.attrs ? static_cast<float>(tv.attrs->get_int(NEUI_ATTR_TAB_BORDER_WIDTH, 0)) : 0.0f;
+    int line = bw > 0.0f ? static_cast<int>(bw + 0.5f) : 1;
+    if (line < 1) line = 1;
+    int bx0 = L.body_x, by0 = L.body_y;
+    int bx1 = L.body_x + L.body_w, by1 = L.body_y + L.body_h;
+    switch (tv.tab_edge) {
+      case neui_detail::TabEdge::Top:    by0 -= line; break; // strip above body
+      case neui_detail::TabEdge::Bottom: by1 += line; break; // strip below body
+      case neui_detail::TabEdge::Left:   bx0 -= line; break;
+      case neui_detail::TabEdge::Right:  bx1 += line; break;
+      default: break;
+    }
+    HRGN rgn = CreateRectRgn(clampw(LogicalToPhysical(bx0, dpi)),
+                             clamph(LogicalToPhysical(by0, dpi)),
+                             clampw(LogicalToPhysical(bx1, dpi)),
+                             clamph(LogicalToPhysical(by1, dpi)));
+    for (const auto& c : tv.tab_chips) {
+      int cx0 = clampw(LogicalToPhysical(static_cast<int>(c.x + 0.5f), dpi));
+      int cy0 = clamph(LogicalToPhysical(static_cast<int>(c.y + 0.5f), dpi));
+      int cx1 = clampw(LogicalToPhysical(static_cast<int>(c.x + c.w + 0.5f), dpi));
+      int cy1 = clamph(LogicalToPhysical(static_cast<int>(c.y + c.h + 0.5f), dpi));
+      HRGN cr = CreateRectRgn(cx0, cy0, cx1, cy1);
+      CombineRgn(rgn, rgn, cr, RGN_OR);
+      DeleteObject(cr);
+    }
+    SetWindowRgn(tv.hwnd, rgn, FALSE);  // takes ownership of rgn
+
+    // The region may have shrunk (e.g. position flipped from a wide top strip
+    // to a narrow side strip); the parent doesn't auto-repaint pixels the
+    // child just stopped covering. Invalidate the parent across the widget's
+    // full bounds - WS_CLIPCHILDREN clips the parent's paint to the area
+    // outside the new region, so only newly-exposed pixels repaint.
+    if (HWND parent = GetParent(tv.hwnd)) {
+      RECT wr; GetWindowRect(tv.hwnd, &wr);
+      MapWindowPoints(HWND_DESKTOP, parent, reinterpret_cast<POINT*>(&wr), 2);
+      InvalidateRect(parent, &wr, TRUE);
+    }
+  }
+
+  // Switch the active tab. If the selection actually changes, fire
+  // NEUI_EVENT_TAB_DESELECTED (old) then _SELECTED (new) BEFORE swapping page
+  // visibility + repainting, so a client handler can update the incoming
+  // page's widgets first. Mirror of xpl TabViewWidget::select_tab.
+  static void tabview_select_w32(WidgetData& tv, int ni)
+  {
+    if (!tv.session) return;
+    std::vector<uint32_t> pages;
+    tabview_collect_pages_w32(tv, pages);
+    int count = static_cast<int>(pages.size());
+    if (count == 0) return;
+    if (ni < 0)      ni = 0;
+    if (ni >= count) ni = count - 1;
+    if (ni == tv.tab_selected) return;
+    int old = tv.tab_selected;
+
+    if (old >= 0 && old < count) {
+      neui_event_t ev{};
+      ev.type               = NEUI_EVENT_TAB_DESELECTED;
+      ev.data.tab.widget.id = tv.widget_id;
+      ev.data.tab.tab_index = static_cast<uint32_t>(old);
+      ev.data.tab.page.id   = tv.session->_widgets[pages[old]].widget_id;
+      tv.session->dispatch_event(&ev);
+    }
+    {
+      neui_event_t ev{};
+      ev.type               = NEUI_EVENT_TAB_SELECTED;
+      ev.data.tab.widget.id = tv.widget_id;
+      ev.data.tab.tab_index = static_cast<uint32_t>(ni);
+      ev.data.tab.page.id   = tv.session->_widgets[pages[ni]].widget_id;
+      tv.session->dispatch_event(&ev);
+    }
+
+    tv.tab_selected = ni;
+    tabview_apply_page_geometry_w32(tv);
+    if (tv.hwnd) InvalidateRect(tv.hwnd, nullptr, FALSE);
+  }
+
+  // Full re-flow: recompute the strip layout, re-size / re-show the pages,
+  // repaint the strip. Called from create_child_windows (after the pages
+  // exist), the frame WM_SIZE handler, DPI cascade, the TABVIEW / TABPAGE
+  // attr setters, set_text on a page, and page add / destroy.
+  void tabview_relayout_w32(WidgetData& tv)
+  {
+    if (!tv.session || !tv.hwnd) return;
+    tabview_recompute_layout_w32(tv);
+    // Set the new window region BEFORE repainting. A position change moves
+    // the body rect (and the region) a lot; apply_page_geometry ends with a
+    // synchronous full repaint, so the region must already be the new one or
+    // the active page paints under the stale region + lands outside it (the
+    // page came up empty after a position change).
+    tabview_apply_region_w32(tv);
+    tabview_apply_page_geometry_w32(tv);
+  }
+
+  static void paint_tabview_w32(neui_render_backend_t* backend,
+                                 neui_render_ctx_t      ctx,
+                                 float w, float h,
+                                 WidgetData&            wd,
+                                 bool                   /*focused*/)
+  {
+    using namespace neui_detail;
+    if (!wd.session) return;
+
+    TabViewLayout L = tabview_recompute_layout_w32(wd);
+
+    std::vector<uint32_t> pages;
+    tabview_collect_pages_w32(wd, pages);
+    int count = static_cast<int>(pages.size());
+
+    std::vector<const char*> labels(count, "");
+    std::vector<uint32_t>    chip_bg(count, 0), chip_text(count, 0);
+    for (int i = 0; i < count; ++i) {
+      auto& pw = wd.session->_widgets[pages[i]];
+      labels[i] = pw.text.c_str();
+      if (pw.attrs) {
+        chip_bg[i]   = static_cast<uint32_t>(pw.attrs->get_int(NEUI_ATTR_TAB_CHIP_BG_COLOR, 0));
+        chip_text[i] = static_cast<uint32_t>(pw.attrs->get_int(NEUI_ATTR_TAB_CHIP_TEXT_COLOR, 0));
+      }
+    }
+
+    // Body background: active page's NEUI_ATTR_BACKGROUND, else the tabview's,
+    // else a panel shade (matches xpl / macOS).
+    uint32_t body_bg = shade(color(ColorRole::frame_bg), SECTION_BG_LIFT);
+    if (wd.attrs && wd.attrs->has(NEUI_ATTR_BACKGROUND))
+      body_bg = static_cast<uint32_t>(wd.attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
+    if (count > 0) {
+      auto& ap = wd.session->_widgets[pages[wd.tab_selected]];
+      if (ap.attrs && ap.attrs->has(NEUI_ATTR_BACKGROUND))
+        body_bg = static_cast<uint32_t>(ap.attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
+    }
+    uint32_t inactive     = shade(body_bg, -18);
+    uint32_t default_text = color(ColorRole::text_primary);
+    uint32_t content_border = (wd.attrs && wd.attrs->has(NEUI_ATTR_TAB_BORDER_COLOR))
+                      ? static_cast<uint32_t>(wd.attrs->get_int(NEUI_ATTR_TAB_BORDER_COLOR, 0)) : 0;
+    float border_w = wd.attrs
+                       ? static_cast<float>(wd.attrs->get_int(NEUI_ATTR_TAB_BORDER_WIDTH, 0)) : 0.0f;
+    if (border_w <= 0.0f) border_w = 1.0f;
+    uint32_t sep_color = content_border ? content_border : color(ColorRole::border);
+    uint32_t strip_bg = (wd.attrs && wd.attrs->has(NEUI_ATTR_TAB_STRIP_BG_COLOR))
+                      ? static_cast<uint32_t>(wd.attrs->get_int(NEUI_ATTR_TAB_STRIP_BG_COLOR, 0)) : 0;
+    float chip_radius = wd.attrs
+                          ? static_cast<float>(wd.attrs->get_int(NEUI_ATTR_TAB_CHIP_RADIUS, 0)) : 0.0f;
+
+    // The strip gutter beside the chips is left unpainted by paint_tabview;
+    // the TABVIEW's window region (tabview_apply_region_w32) clips the HWND
+    // to (body U chips) so that gutter is transparent and the parent frame
+    // shows through, matching xpl / macOS + the SECTION title band.
+    paint_tabview(backend, ctx, 0.0f, 0.0f, w, h, L, wd.tab_edge,
+                   wd.tab_chips.data(), count, wd.tab_selected, -1,
+                   labels.data(), chip_bg.data(), chip_text.data(),
+                   body_bg, default_text, inactive,
+                   sep_color, border_w, strip_bg, content_border,
+                   chip_radius, wd.attrs.get());
+  }
+
+  static void painted_msg_tabview_w32(WidgetData& wd, UINT msg,
+                                       WPARAM wParam, LPARAM lParam)
+  {
+    if (!wd.enabled) return;
+    if (msg == WM_LBUTTONDOWN) {
+      UINT dpi = wd.session ? wd.session->get_dpi_for_widget(wd.index) : 96;
+      if (dpi == 0) dpi = 96;
+      float lx = static_cast<float>(GET_X_LPARAM(lParam)) * 96.0f / static_cast<float>(dpi);
+      float ly = static_cast<float>(GET_Y_LPARAM(lParam)) * 96.0f / static_cast<float>(dpi);
+      int hit = neui_detail::tabview_chip_hit(wd.tab_chips.data(),
+                                              static_cast<int>(wd.tab_chips.size()), lx, ly);
+      if (hit >= 0) {
+        if (wd.hwnd) SetFocus(wd.hwnd);   // so the arrow keys reach this widget
+        tabview_select_w32(wd, hit);
+      }
+      return;
+    }
+    if (msg == WM_KEYDOWN) {
+      if (wParam == VK_LEFT || wParam == VK_UP)
+        tabview_select_w32(wd, wd.tab_selected - 1);
+      else if (wParam == VK_RIGHT || wParam == VK_DOWN)
+        tabview_select_w32(wd, wd.tab_selected + 1);
+      return;
     }
   }
 
@@ -1720,6 +2168,31 @@ namespace win32_host
       return hwnd;
     }
 
+    // TABVIEW: shared painted-class HWND drawing the chip strip + body. Its
+    // TABPAGE children HWND-parent to it; paint_tabview_w32 lays out the
+    // chips and tabview_relayout_w32 (run from create_child_windows once the
+    // pages exist) sizes the selected page to the content body + hides the
+    // rest. WS_TABSTOP so arrow-key tab nav works; WS_CLIPCHILDREN so the
+    // body fill doesn't flicker under the page HWNDs.
+    if (!strcmp(wd.type, NEUI_W_TABVIEW)) {
+      DWORD style = WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+      if (wd.visible) style |= WS_VISIBLE;
+      wd.paint_fn       = &paint_tabview_w32;
+      wd.painted_msg_fn = &painted_msg_tabview_w32;
+      wd.emit_events    = true;
+      HWND hwnd = CreateWindowExW(0, L"neui.painted", L"", style,
+        LogicalToPhysical(wd.x, parent_dpi),
+        LogicalToPhysical(wd.y, parent_dpi),
+        LogicalToPhysical(wd.width, parent_dpi),
+        LogicalToPhysical(wd.height, parent_dpi),
+        parent_hwnd,
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(wd.index)),
+        get_hinstance(),
+        &wd);
+      if (hwnd) wd.hwnd = hwnd;
+      return hwnd;
+    }
+
     // Section: non-interactive painted container by default; opts into
     // scrolling when NEUI_ATTR_SCROLL_MODE != "none". In that case an
     // inner "neui.sectionbody" HWND is created at the body rect; the
@@ -1728,7 +2201,10 @@ namespace win32_host
     // any per-child window regions. WS_CLIPCHILDREN on the section makes
     // its own paint skip the body HWND's pixels (we paint chip +
     // scrollbar; body_hwnd paints the body fill).
-    if (!strcmp(wd.type, NEUI_W_SECTION)) {
+    // A TABPAGE is a chip-less SECTION and rides this exact path (its
+    // effective chip text/align resolve to ""/"none", so band_h == 0 and
+    // the body fills the rect).
+    if (is_section_like_w32(wd.type)) {
       // Refresh the scroll state from any attrs the client set pre-show
       // so we know whether to opt into the scrolling code path.
       section_refresh_scroll_state_w32(wd);
@@ -1955,13 +2431,17 @@ namespace win32_host
           auto* backend = neui_d2d_backend::get_backend();
           if (backend && backend->update_dpi && wd.paint_ctx)
             backend->update_dpi(wd.paint_ctx, new_dpi);
-          // Section: window region was computed in old physical px;
-          // recompute against the new DPI. Also resize the inner body
+          // Section / TABPAGE: window region was computed in old physical
+          // px; recompute against the new DPI. Also resize the inner body
           // HWND so its client rect tracks the body rect at the new DPI.
-          if (wd.type && !strcmp(wd.type, NEUI_W_SECTION)) {
+          if (is_section_like_w32(wd.type)) {
             apply_section_region_w32(wd);
             section_apply_layout_changes_w32(wd);
           }
+          // TABVIEW: re-flow the chip strip + re-size the selected page at
+          // the new DPI.
+          if (wd.type && !strcmp(wd.type, NEUI_W_TABVIEW))
+            tabview_relayout_w32(wd);
           // Image: re-pick the @Nx asset variant if the new DPI scale
           // crosses a boundary (no-op for client-owned assets).
           if (wd.type && !strcmp(wd.type, NEUI_W_IMAGE))
@@ -2101,10 +2581,15 @@ namespace win32_host
     // creates children at their raw (x, y) - correct for non-scrolling
     // sections, but a scrolling section needs the body / scroll offsets
     // applied and the chip + scrollbar areas masked out.
-    if (parent_wd.type && !strcmp(parent_wd.type, NEUI_W_SECTION) &&
+    if (parent_wd.type && is_section_like_w32(parent_wd.type) &&
         parent_wd.section_scroll_state) {
       section_apply_layout_changes_w32(parent_wd);
     }
+    // TABVIEW: every TABPAGE child HWND (and their descendants) now exists -
+    // lay out the chip strip, size the selected page to the content body
+    // rect + hide the rest.
+    if (parent_wd.type && !strcmp(parent_wd.type, NEUI_W_TABVIEW))
+      tabview_relayout_w32(parent_wd);
   }
 
   neui_widget_t Session::widget_create(neui_widget_t parent, const char* type, int x, int y, int width, int height, void* userdata)
@@ -2131,7 +2616,8 @@ namespace win32_host
                                         !strcmp(type, NEUI_W_SLIDER)     ||
                                         !strcmp(type, NEUI_W_KNOB)       ||
                                         !strcmp(type, NEUI_W_CUSTOMDRAW) ||
-                                        !strcmp(type, NEUI_W_GRID));
+                                        !strcmp(type, NEUI_W_GRID)       ||
+                                        !strcmp(type, NEUI_W_TABVIEW));
     widget_data->userdata    = userdata;
     widget_data->session     = this;
     widget_data->session_id  = _session_id;
@@ -2179,7 +2665,7 @@ namespace win32_host
         HWND child_parent_hwnd = section_child_parent_hwnd_w32(parent_wd);
         w.hwnd = CreateChildHwnd(w, child_parent_hwnd, parent_dpi);
         if (w.hwnd && parent_wd.type &&
-            !strcmp(parent_wd.type, NEUI_W_SECTION) &&
+            is_section_like_w32(parent_wd.type) &&
             parent_wd.section_scroll_state) {
           section_compute_layout_w32(parent_wd);
           int off_x = 0, off_y = 0;
@@ -2194,6 +2680,14 @@ namespace win32_host
           // content -> thinner thumb).
           InvalidateRect(parent_wd.hwnd, nullptr, FALSE);
         }
+        // A TABPAGE added to an already-shown TABVIEW: re-flow the strip +
+        // re-apply page geometry (the new page must be sized to the body and
+        // hidden unless it is the selected one). The page's own children get
+        // created by the create_child_windows pass that the public API runs
+        // after widget_create returns.
+        else if (w.hwnd && parent_wd.type &&
+                 !strcmp(parent_wd.type, NEUI_W_TABVIEW))
+          tabview_relayout_w32(parent_wd);
       }
     }
     return widget;
@@ -2276,7 +2770,23 @@ namespace win32_host
       DestroyAcceleratorTable(w.native_accel);
       w.native_accel = nullptr;
     }
+
+    // A destroyed TABPAGE drops a tab: capture the parent TABVIEW so we can
+    // re-flow its strip + page geometry after the slot is freed (the
+    // selected index may now be out of range).
+    uint32_t tabview_parent = 0;
+    if (w.type && !strcmp(w.type, NEUI_W_TABPAGE)) {
+      uint32_t pidx = _widgets.get_parent(index);
+      if (pidx && _widgets.exists(pidx)) {
+        auto& pw = _widgets[pidx];
+        if (pw.type && !strcmp(pw.type, NEUI_W_TABVIEW)) tabview_parent = pidx;
+      }
+    }
+
     _widgets.remove(index);
+
+    if (tabview_parent && _widgets.exists(tabview_parent))
+      tabview_relayout_w32(_widgets[tabview_parent]);
   }
 
   void Session::widget_show(neui_widget_t widget)
@@ -2323,6 +2833,26 @@ namespace win32_host
       int show_y_phys = LogicalToPhysical(w.y, initial_dpi);
       int show_w_phys = LogicalToPhysical(w.width,  initial_dpi);
       int show_h_phys = LogicalToPhysical(w.height, initial_dpi);
+
+      // neui's create() width/height specify the CLIENT (content) area - the
+      // same contract as the macOS host (initWithContentRect:) and what
+      // get_client_rect reports back. Win32's CreateWindowEx takes the OUTER
+      // window size, so grow the requested client rect by the non-client
+      // frame (title bar, resize borders, and the menu-bar row when this frame
+      // carries a menubar) via AdjustWindowRectExForDpi. Without this the
+      // usable client would be ~30-50 px shorter and a few px narrower than
+      // asked for, clipping any widget a client laid out flush to the right /
+      // bottom edge (e.g. a status bar pinned near the window height).
+      {
+        bool has_menu = false;
+        for (uint32_t ci = _widgets.child(index); ci != 0; ci = _widgets.next(ci))
+          if (_widgets.exists(ci) && _widgets[ci].hmenu != nullptr) { has_menu = true; break; }
+        RECT wr = { 0, 0, show_w_phys, show_h_phys };
+        AdjustWindowRectExForDpi(&wr, style, has_menu ? TRUE : FALSE, ex_style, initial_dpi);
+        show_w_phys = wr.right - wr.left;
+        show_h_phys = wr.bottom - wr.top;
+      }
+
       if (is_dialog && owner_hwnd && w.x == 0 && w.y == 0) {
         RECT or_rc;
         if (GetWindowRect(owner_hwnd, &or_rc)) {
@@ -2471,13 +3001,17 @@ namespace win32_host
         }
       }
       if (w.hwnd) InvalidateRect(w.hwnd, nullptr, FALSE);
-    } else if (w.type && !strcmp(w.type, NEUI_W_SECTION)) {
+    } else if (w.type && is_section_like_w32(w.type)) {
       // Section: text is the header title; chip width and the window
-      // region both depend on it. Rebuild + repaint.
+      // region both depend on it. Rebuild + repaint. (A TABPAGE resolves to
+      // a chip-less full-rect region here.)
       if (w.hwnd) {
         apply_section_region_w32(w);
         InvalidateRect(w.hwnd, nullptr, FALSE);
       }
+      // A TABPAGE's text is the tab label drawn by the parent TABVIEW - the
+      // chip widths change, so re-flow the strip.
+      if (auto* tv = tabview_parent_of_page_w32(w)) tabview_relayout_w32(*tv);
     } else {
       // Apply immediately if the HWND already exists; otherwise stored for deferred creation
       ApplyText(w.hwnd, w.text);
@@ -2940,6 +3474,84 @@ namespace win32_host
     scroll_set,
     scroll_get,
     scroll_ensure_visible,
+  };
+
+  // ---------------------------------------------------------------------------
+  // Tabs API (NEUI_API_TABS) - selection control over a TABVIEW. Tabs are the
+  // TABVIEW's NEUI_W_TABPAGE children in creation order. Mirror of the xpl /
+  // macOS hosts' tabview_from + the 5 thin methods.
+  // ---------------------------------------------------------------------------
+
+  // Resolve `widget` to a TABVIEW WidgetData* (valid, this session, type
+  // TABVIEW) or nullptr.
+  static WidgetData* tabview_from_w32(neui_session_t session, neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return nullptr;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return nullptr;
+    auto& wd = s->_widgets[idx];
+    if (!wd.type || strcmp(wd.type, NEUI_W_TABVIEW) != 0) return nullptr;
+    return &wd;
+  }
+
+  static uint32_t NEUI_ABI tabs_count(neui_session_t session, neui_widget_t tabview)
+  {
+    WidgetData* tv = tabview_from_w32(session, tabview);
+    if (!tv) return 0;
+    std::vector<uint32_t> pages; tabview_collect_pages_w32(*tv, pages);
+    return static_cast<uint32_t>(pages.size());
+  }
+
+  static uint32_t NEUI_ABI tabs_get_selected(neui_session_t session, neui_widget_t tabview)
+  {
+    WidgetData* tv = tabview_from_w32(session, tabview);
+    if (!tv) return NEUI_ITEM_NONE;
+    std::vector<uint32_t> pages; tabview_collect_pages_w32(*tv, pages);
+    if (pages.empty()) return NEUI_ITEM_NONE;
+    int sel = tv->tab_selected;
+    if (sel < 0) sel = 0;
+    if (sel >= static_cast<int>(pages.size())) sel = static_cast<int>(pages.size()) - 1;
+    return static_cast<uint32_t>(sel);
+  }
+
+  static void NEUI_ABI tabs_set_selected(neui_session_t session, neui_widget_t tabview,
+                                         uint32_t index)
+  {
+    WidgetData* tv = tabview_from_w32(session, tabview);
+    if (!tv) return;
+    tabview_select_w32(*tv, static_cast<int>(index));
+  }
+
+  static neui_widget_t NEUI_ABI tabs_get_page(neui_session_t session,
+                                              neui_widget_t tabview, uint32_t index)
+  {
+    WidgetData* tv = tabview_from_w32(session, tabview);
+    if (!tv) return widget_none;
+    std::vector<uint32_t> pages; tabview_collect_pages_w32(*tv, pages);
+    if (index >= pages.size()) return widget_none;
+    return IndexToWidget(tv->session->session_id(), pages[index]);
+  }
+
+  static uint32_t NEUI_ABI tabs_get_index(neui_session_t session, neui_widget_t tabview,
+                                          neui_widget_t page)
+  {
+    WidgetData* tv = tabview_from_w32(session, tabview);
+    if (!tv) return NEUI_ITEM_NONE;
+    uint32_t page_idx = WidgetToIndex(page);
+    std::vector<uint32_t> pages; tabview_collect_pages_w32(*tv, pages);
+    for (uint32_t i = 0; i < pages.size(); ++i)
+      if (pages[i] == page_idx) return i;
+    return NEUI_ITEM_NONE;
+  }
+
+  neui_tabs_api_t tabs_api = {
+    NEUI_VERSION,
+    tabs_count,
+    tabs_get_selected,
+    tabs_set_selected,
+    tabs_get_page,
+    tabs_get_index,
   };
 
   // ---------------------------------------------------------------------------
@@ -4118,12 +4730,32 @@ namespace win32_host
         w->compound_asset.id != asset_none.id) {
       InvalidateRect(w->hwnd, nullptr, FALSE);
     }
-    // SECTION content extent override: recompute layout + reposition
-    // children so the scrollbar reflects the new content size.
-    if (w->type && !strcmp(w->type, NEUI_W_SECTION) &&
+    // SECTION / TABPAGE content extent override: recompute layout +
+    // reposition children so the scrollbar reflects the new content size.
+    if (is_section_like_w32(w->type) &&
         (!strcmp(key, NEUI_ATTR_CONTENT_WIDTH) ||
          !strcmp(key, NEUI_ATTR_CONTENT_HEIGHT))) {
       section_apply_layout_changes_w32(*w);
+    }
+    // TABPAGE chip colours / background -> repaint the page + re-flow the
+    // parent TABVIEW strip (the active page's bg drives the tabview body
+    // fill + active-chip colour).
+    if (w->type && !strcmp(w->type, NEUI_W_TABPAGE) &&
+        (!strcmp(key, NEUI_ATTR_TAB_CHIP_BG_COLOR) ||
+         !strcmp(key, NEUI_ATTR_TAB_CHIP_TEXT_COLOR) ||
+         !strcmp(key, NEUI_ATTR_BACKGROUND))) {
+      if (w->hwnd) InvalidateRect(w->hwnd, nullptr, FALSE);
+      if (auto* tv = tabview_parent_of_page_w32(*w)) tabview_relayout_w32(*tv);
+    }
+    // TABVIEW style attrs -> re-flow the strip + repaint.
+    if (w->hwnd && w->type && !strcmp(w->type, NEUI_W_TABVIEW) &&
+        (!strcmp(key, NEUI_ATTR_TAB_STRIP_SIZE)     ||
+         !strcmp(key, NEUI_ATTR_TAB_BORDER_COLOR)   ||
+         !strcmp(key, NEUI_ATTR_TAB_BORDER_WIDTH)   ||
+         !strcmp(key, NEUI_ATTR_TAB_CHIP_RADIUS)    ||
+         !strcmp(key, NEUI_ATTR_TAB_STRIP_BG_COLOR) ||
+         !strcmp(key, NEUI_ATTR_BACKGROUND))) {
+      tabview_relayout_w32(*w);
     }
     return 1;
   }
@@ -4163,9 +4795,10 @@ namespace win32_host
       // align="none" / non-empty band swap changes band_h -> layout.
       section_apply_layout_changes_w32(*w);
     }
-    // Section scroll-mode change: allocate / drop scroll state, switch
-    // the painted_msg_fn hook, and reset the scroll offset.
-    if (w->hwnd && w->type && !strcmp(w->type, NEUI_W_SECTION) &&
+    // Section / TABPAGE scroll-mode change: allocate / drop scroll state,
+    // switch the painted_msg_fn hook, and reset the scroll offset. A TABPAGE
+    // is a chip-less section and opts into scrolling the same way.
+    if (w->hwnd && is_section_like_w32(w->type) &&
         !strcmp(key, NEUI_ATTR_SCROLL_MODE)) {
       section_refresh_scroll_state_w32(*w);
       bool now_scrolling = (w->section_scroll_state != nullptr);
@@ -4200,6 +4833,12 @@ namespace win32_host
         st.kinetic_over_v = st.kinetic_over_h = false;
       }
       section_apply_layout_changes_w32(*w);
+    }
+    // TABVIEW: NEUI_ATTR_TAB_POSITION changes the strip edge + content body
+    // rect, so re-flow the pages + repaint the strip.
+    if (w->hwnd && w->type && !strcmp(w->type, NEUI_W_TABVIEW) &&
+        !strcmp(key, NEUI_ATTR_TAB_POSITION)) {
+      tabview_relayout_w32(*w);
     }
     // CUSTOMDRAW + compound: any attr change can change a text-layer's
     // template resolution, so repaint.

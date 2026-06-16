@@ -25,6 +25,7 @@
 #include "d/theme.h"
 #include "d/grid.h"
 #include "d/scroll.h"
+#include "d/tabs.h"
 #include "d/notify.h"
 
 #ifdef __cplusplus

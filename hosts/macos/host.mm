@@ -28,6 +28,7 @@ namespace macos_host
   extern neui_grid_api_t      grid_api;
   extern neui_dnd_api_t       dnd_api;
   extern neui_scroll_api_t    scroll_api;
+  extern neui_tabs_api_t      tabs_api;
   extern neui_notify_api_t    notify_api;
 
   // -------------------------------------------------------------------------
@@ -279,6 +280,7 @@ namespace macos_host
     if (!strcmp(iface, NEUI_API_GRID))      return &grid_api;
     if (!strcmp(iface, NEUI_API_DND))       return &dnd_api;
     if (!strcmp(iface, NEUI_API_SCROLL))    return &scroll_api;
+    if (!strcmp(iface, NEUI_API_TABS))      return &tabs_api;
     if (!strcmp(iface, NEUI_API_NOTIFY))    return &notify_api;
     return nullptr;
   }

@@ -9,6 +9,7 @@
 #include "../shared/behavior_runtime.h"
 #include "../shared/grid_model.h"
 #include "../shared/widget_section_scroll.h"
+#include "../shared/widget_tabview.h"
 #include "asset_manager.h"
 
 #include <string>
@@ -304,6 +305,51 @@ namespace xpl_host
     // ensure_visible) can drive it without touching the protected
     // repaint() seam. Clamps to the current legal scroll range.
     void external_commit(int nx, int ny);
+  protected:
+    // Effective header chip text / alignment. TabPageWidget overrides these
+    // to suppress the chip entirely - a tab page is a chip-less scrolling
+    // section whose `text` is the tab label drawn by the parent TABVIEW, not
+    // a section header band.
+    virtual std::string section_header_text()  const { return text; }
+    virtual const char* section_header_align() const {
+      return attrs ? attrs->get_string(NEUI_ATTR_ALIGN_TEXT) : nullptr;
+    }
+  };
+
+  // TABPAGE - one tab's content container. A chip-less scrolling SECTION
+  // (its scroll body + child clipping + kinetics are entirely inherited);
+  // the `text` is the tab label the parent TABVIEW paints in the strip.
+  class TabPageWidget : public SectionWidget {
+  protected:
+    std::string section_header_text()  const override { return std::string(); }
+    const char* section_header_align() const override { return "none"; }
+  };
+
+  // TABVIEW - tabbed container. Draws the chip strip (one chip per TABPAGE
+  // child) + optional whole-area background + optional tab-outline border,
+  // shows the selected page (sized to the content body rect) and hides the
+  // rest, and fires NEUI_EVENT_TAB_DESELECTED / _SELECTED on every change.
+  // Exposes its content rect via section_layout_ptr so the shared paint walk
+  // offsets + clips the active page to the body automatically.
+  class TabViewWidget : public WidgetData {
+  public:
+    int selected = 0;
+    neui_detail::SectionLayout last_layout{};      // content rect (child positioning + clip)
+    std::vector<neui_detail::TabChip> chips;        // cached for hit-testing
+    neui_detail::TabEdge edge = neui_detail::TabEdge::Top;
+
+    void paint(neui_render_backend_t* backend, neui_render_ctx_t ctx, bool is_focused) override;
+    bool on_mouse_event(neui_event_t* event) override;
+    bool on_keydown(uint32_t keycode, uint32_t modifiers) override;
+    const neui_detail::SectionLayout* section_layout_ptr() const override { return &last_layout; }
+
+    // Collect the TABPAGE child indices in creation (tab) order.
+    void collect_pages(std::vector<uint32_t>& out) const;
+    // Switch selection; fires deselect(old) then select(new) BEFORE swapping
+    // page visibility + repaint, so client handlers update the new page first.
+    void select_tab(int new_index);
+    // Size the active page to the content body rect; toggle page visibility.
+    void apply_page_geometry();
   };
 
   // MULTILINE - multi-line text editor with caret + selection + vertical scroll.

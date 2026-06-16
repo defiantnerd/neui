@@ -29,6 +29,9 @@ namespace win32_host
   // region in physical pixels.
   void apply_section_region_w32(WidgetData& wd);
   void section_apply_layout_changes_w32(WidgetData& wd);
+  // Defined in widgets.cpp. Re-flows a TABVIEW's chip strip + re-sizes the
+  // selected page to the content body rect. Called here on WM_SIZE.
+  void tabview_relayout_w32(WidgetData& wd);
 }
 
 // DWMWA_USE_IMMERSIVE_DARK_MODE attribute id varies by Windows version.
@@ -265,9 +268,11 @@ namespace win32_host
       // must rebuild it before the next paint. Scrolling sections also
       // need their layout cache rebuilt + children repositioned (the
       // scroll position may now be out of range for the smaller body).
-      if (wd && wd->type && !strcmp(wd->type, NEUI_W_SECTION)) {
+      if (wd && wd->type &&
+          (!strcmp(wd->type, NEUI_W_SECTION) ||
+           !strcmp(wd->type, NEUI_W_TABPAGE))) {
         apply_section_region_w32(*wd);
-        // Scrolling sections also need their layout cache rebuilt +
+        // Scrolling sections / pages also need their layout cache rebuilt +
         // children repositioned (the scroll position may now be out of
         // range for the smaller body, and clamp runs in the layout
         // helper - children must reflect the new scroll before the next
@@ -275,6 +280,10 @@ namespace win32_host
         if (wd->section_scroll_state)
           section_apply_layout_changes_w32(*wd);
       }
+      // TABVIEW resize: re-flow the chip strip + re-size the selected page
+      // to the new content body rect.
+      if (wd && wd->type && !strcmp(wd->type, NEUI_W_TABVIEW))
+        tabview_relayout_w32(*wd);
       return 0;
     }
     case WM_ERASEBKGND:
@@ -435,7 +444,9 @@ namespace win32_host
       // that here so labels inside a section match the section's body
       // fill instead of falling back to DefWindowProc's system default
       // (which doesn't track the theme palette).
-      if (wd && wd->session && wd->type && !strcmp(wd->type, NEUI_W_SECTION)) {
+      if (wd && wd->session && wd->type &&
+          (!strcmp(wd->type, NEUI_W_SECTION) ||
+           !strcmp(wd->type, NEUI_W_TABPAGE))) {
         using neui_detail::ColorRole;
         neui_detail::ScopedPaletteOverride scope(
           wd->session->effective_palette_ptr());

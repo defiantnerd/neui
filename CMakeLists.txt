@@ -308,6 +308,31 @@ if(APPLE)
   target_link_libraries(neui_section_scroll_example PRIVATE neui-macoshost)
 endif()
 
+# Tabbed-view example: NEUI_W_TABVIEW / NEUI_W_TABPAGE - all 13 chip
+# positions, scrolling page, per-chip colours, background + tab-outline
+# border, and tab select/deselect events.
+if(MSVC)
+  add_executable(neui_tabview_example WIN32
+    examples/tabview_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_tabview_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_tabview_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_tabview_example WIN32 examples/tabview_example.cpp)
+elseif(APPLE)
+  add_executable(neui_tabview_example MACOSX_BUNDLE examples/tabview_example.cpp)
+else()
+  add_executable(neui_tabview_example examples/tabview_example.cpp)
+endif()
+target_link_libraries(neui_tabview_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_tabview_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_tabview_example PRIVATE neui-macoshost)
+endif()
+
 # Minimal README example - input + button + label echo. Pure C; mirrors the
 # code block in README.md verbatim. Useful as a smoke test that the public
 # C API stays usable from a one-file client.

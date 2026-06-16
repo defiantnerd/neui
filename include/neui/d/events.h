@@ -31,6 +31,7 @@ extern "C" {
 #define DEF_TREE_EVENT(x)   (((x)<<16) | 0x0005)
 #define DEF_GRID_EVENT(x)   (((x)<<16) | 0x0006)
 #define DEF_DND_EVENT(x)    (((x)<<16) | 0x0007)
+#define DEF_TAB_EVENT(x)    (((x)<<16) | 0x0008)
 
   typedef enum neui_event_type
   {
@@ -81,9 +82,13 @@ extern "C" {
     NEUI_EVENT_DND_LEAVE                = DEF_DND_EVENT(3),  // cursor left a drop-target widget (or drag cancelled)
     NEUI_EVENT_DND_DROP                 = DEF_DND_EVENT(4),  // payload released over a drop-target widget
 
+    NEUI_EVENT_TAB_DESELECTED           = DEF_TAB_EVENT(1),  // tabview: outgoing tab, fired before the page swap / repaint
+    NEUI_EVENT_TAB_SELECTED             = DEF_TAB_EVENT(2),  // tabview: incoming tab, fired before the page swap / repaint
+
     NEUI_EVENT_CUSTOM                   = 0x1ffff,
   } neui_event_type_t;
 
+#undef DEF_TAB_EVENT
 #undef DEF_DND_EVENT
 #undef DEF_GRID_EVENT
 #undef DEF_TREE_EVENT
@@ -310,6 +315,20 @@ extern "C" {
     int           dir;       // neui_grid_sort_dir_t
   } neui_event_grid_sort_t;
 
+  // Tabbed-view selection event. Fires on every tab change (mouse click,
+  // keyboard, or programmatic tabs_api->set_selected): NEUI_EVENT_TAB_DESELECTED
+  // for the outgoing tab, then NEUI_EVENT_TAB_SELECTED for the incoming one.
+  // Both fire synchronously BEFORE the framework swaps page visibility and
+  // invalidates, so a client handler can update the incoming page's widgets
+  // before the user sees them. `widget` is the TABVIEW; `tab_index` is the
+  // affected tab (0-based); `page` is the affected TABPAGE widget.
+  typedef struct neui_event_tab
+  {
+    neui_widget_t widget;
+    uint32_t      tab_index;
+    neui_widget_t page;
+  } neui_event_tab_t;
+
   // Forward-declarations for the curated paint surface. Clients that
   // handle NEUI_EVENT_WIDGET_PAINT include <neui/d/painter.h> (or just
   // <neui/neui.h>) to call painter_api->* functions on the handle.
@@ -362,6 +381,7 @@ extern "C" {
       neui_event_grid_sort_t          grid_sort;
       neui_event_dnd_t                dnd;
       neui_event_scroll_t             scroll;
+      neui_event_tab_t                tab;
     } data;
 
     // more event data can be added here
