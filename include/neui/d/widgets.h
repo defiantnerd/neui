@@ -24,6 +24,21 @@ typedef struct neui_widget_api {
   // relative to the parent's top-left (top-level children of a frame are
   // therefore frame-local). (width, height) are the widget's size in
   // logical pixels.
+  //
+  // For a top-level frame (APPWINDOW / PLUGWINDOW / DIALOG) (width, height)
+  // is the CLIENT (content) area - the space your child widgets lay out in -
+  // NOT the outer window including title bar / borders / menu. All hosts
+  // honour this: a frame created at 720x480 gives a 720x480 usable client,
+  // and get_client_rect / a child at (0,0)..(width,height) map into it.
+  //
+  // LAYOUT TIP (avoid edge clipping): a child is only fully visible when
+  // x + width <= parent client width AND y + height <= parent client height.
+  // Leave a margin (~8-12 px) between your widgets and the right / bottom
+  // client edges rather than placing them flush at the edge - a widget at
+  // x + width == client width has zero breathing room and reads as cramped
+  // (and any rounding / scrollbar can clip it). When a frame may carry a
+  // menubar, lay out against get_client_rect (which excludes an in-frame
+  // menubar band) instead of the create() height.
   neui_widget_t      (NEUI_ABI *create)(neui_session_t session, neui_widget_t parent, const char* type, int x, int y, int width, int height, void* userdata);
   void               (NEUI_ABI *destroy)(neui_session_t session, neui_widget_t widget);
   void               (NEUI_ABI *show)(neui_session_t session, neui_widget_t widget);

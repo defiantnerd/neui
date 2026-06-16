@@ -9,6 +9,7 @@
 #include "../shared/grid_model.h"
 #include "../shared/edit_history.h"
 #include "../shared/widget_section_scroll.h"
+#include "../shared/widget_tabview.h"
 #include "asset_manager_w32.h"
 #include <memory>
 #include <string>
@@ -234,6 +235,19 @@ namespace win32_host {
     // scrollbar drag, and kinetics.
     std::unique_ptr<neui_detail::SectionScrollState> section_scroll_state;
     neui_detail::SectionLayout                       section_last_layout{};
+
+    // TABVIEW (NEUI_W_TABVIEW) state. Mirror of the xpl host's TabViewWidget
+    // / the macOS host's tab_* members. `tab_selected` is the active tab
+    // index (clamped to the page count on every relayout); `tab_chips` caches
+    // the most recent chip layout so the painted-msg hook can hit-test clicks;
+    // `tab_edge` is the resolved strip edge from NEUI_ATTR_TAB_POSITION. The
+    // content body rect is cached in section_last_layout (shared with the
+    // SECTION machinery). A TABPAGE is a chip-less SECTION - it reuses the
+    // section_* fields above; the parent TABVIEW paints the chip strip +
+    // shows/hides pages.
+    int                               tab_selected = 0;
+    std::vector<neui_detail::TabChip> tab_chips;
+    neui_detail::TabEdge              tab_edge = neui_detail::TabEdge::Top;
 
     // SECTION scrolling inner body HWND. Created alongside scroll_state;
     // hosts the section's tree-children (they HWND-parent here, not to

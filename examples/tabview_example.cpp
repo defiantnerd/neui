@@ -15,8 +15,8 @@
 //     TAB_SELECTED handler updates a label INSIDE the incoming page to prove
 //     the event fires before the page is shown.
 //
-// Picks the default host (native on Win32 + macOS, xpl on Linux). Set
-// NEUI_FORCE_XPL_HOST=1 in the environment to pin to the crossplatform host.
+// Picks the default host (native on Win32 + macOS, xpl on Linux / null).
+// Edit ACTIVE_HOST below to pin to the crossplatform host on any platform.
 
 #include "neui/neui.h"
 #include <stdio.h>
@@ -29,6 +29,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #endif
+
+// Host to create the session on. nullptr = the first registered host (native
+// on Win32 / macOS, xpl on Linux / null). Set to "neui.host.crossplatform"
+// to pin to the crossplatform host on any platform.
+#define ACTIVE_HOST nullptr
 
 static void dbglog(const char* fmt, ...)
 {
@@ -88,7 +93,10 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
   AppState* a = static_cast<AppState*>(token);
   switch (event->type) {
     case NEUI_EVENT_APP_QUIT:
-      return false;
+      // Return true to ALLOW the window to close (the win32 host treats the
+      // onevent return as "allow close"; returning false vetoes it). Every
+      // other example does the same.
+      return true;
 
     case NEUI_EVENT_TREE_ITEM_ACTIVATED: {
       void* ud = a->tree ? a->tree->get_userdata(a->session, event->data.tree.widget,
@@ -191,11 +199,7 @@ int main(int /*argc*/, char* /*argv*/[])
 {
   neui_init();
 
-  const char* host_id = nullptr;
-  const char* force = getenv("NEUI_FORCE_XPL_HOST");
-  if (force && force[0] == '1') host_id = "neui.host.crossplatform";
-
-  neui_api_t* host = neui_get_api(host_id);
+  neui_api_t* host = neui_get_api(ACTIVE_HOST);
   if (!host) host = neui_get_api(nullptr);
   if (!host) { dbglog("[tabview_example] no host\n"); return 1; }
 
