@@ -1241,7 +1241,8 @@ static float neui_snap_to_steps(float v, int steps)
   auto* wd = macos_host::widget_for_id(widget_id);
   if (!wd || !wd->type) return NO;
   return !strcmp(wd->type, NEUI_W_CUSTOMDRAW) ||
-         !strcmp(wd->type, NEUI_W_GRID);
+         !strcmp(wd->type, NEUI_W_GRID)       ||
+         !strcmp(wd->type, NEUI_W_TABVIEW);
 }
 
 // GRID commits an open in-place cell editor on focus loss so Tab /
@@ -1296,6 +1297,20 @@ static float neui_snap_to_steps(float v, int steps)
         macos_host::grid_painted_char_macos(*wd, cp);
       }
     }
+    return;
+  }
+  // TABVIEW: Left/Up = previous tab, Right/Down = next. Mirror of the win32
+  // host's painted_msg_tabview_w32 WM_KEYDOWN branch + the xpl host's
+  // TabViewWidget::on_keydown.
+  if (wd && sess && wd->enabled && wd->type && !strcmp(wd->type, NEUI_W_TABVIEW)) {
+    uint32_t kc = neui_detail::mac_keycode_to_neui(event.keyCode);
+    if (kc == NEUI_KEY_LEFT || kc == NEUI_KEY_UP) {
+      macos_host::tabview_select_macos(*wd, wd->tab_selected - 1); return;
+    }
+    if (kc == NEUI_KEY_RIGHT || kc == NEUI_KEY_DOWN) {
+      macos_host::tabview_select_macos(*wd, wd->tab_selected + 1); return;
+    }
+    [super keyDown:event];
     return;
   }
   bool cd = wd && sess && wd->emit_events && wd->type
@@ -1847,7 +1862,14 @@ static float neui_snap_to_steps(float v, int steps)
     int hit = neui_detail::tabview_chip_hit(tv->tab_chips.data(),
                                              (int)tv->tab_chips.size(),
                                              (float)p.x, (float)p.y);
-    if (hit >= 0) { macos_host::tabview_select_macos(*tv, hit); return; }
+    if (hit >= 0) {
+      // Grab keyboard focus so the Left/Up/Right/Down tab nav routes to
+      // keyDown: (NSView doesn't auto-focus on click), matching win32's
+      // SetFocus-on-chip-click + the xpl host's focusable TABVIEW.
+      [self.window makeFirstResponder:self];
+      macos_host::tabview_select_macos(*tv, hit);
+      return;
+    }
     [super mouseDown:event];
     return;
   }

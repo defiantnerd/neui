@@ -1353,11 +1353,16 @@ namespace macos_host
          !strcmp(key, NEUI_ATTR_TAB_CHIP_TEXT_COLOR))) {
       if (auto* tv = tabview_parent_of_page(wd)) mark_widget_dirty_for_paint(*tv);
     }
-    // TABVIEW style attrs (strip size, border) -> re-flow + repaint.
+    // TABVIEW style attrs (strip size, border, chip radius, strip bg) ->
+    // re-flow + repaint. (TAB_CHIP_RADIUS / TAB_STRIP_BG_COLOR don't change
+    // the body rect, but they alter the painted strip, so a repaint is still
+    // needed to apply them live - matching win32.)
     if (wd.type && !strcmp(wd.type, NEUI_W_TABVIEW) &&
         (!strcmp(key, NEUI_ATTR_TAB_STRIP_SIZE) ||
          !strcmp(key, NEUI_ATTR_TAB_BORDER_COLOR) ||
          !strcmp(key, NEUI_ATTR_TAB_BORDER_WIDTH) ||
+         !strcmp(key, NEUI_ATTR_TAB_CHIP_RADIUS) ||
+         !strcmp(key, NEUI_ATTR_TAB_STRIP_BG_COLOR) ||
          !strcmp(key, NEUI_ATTR_BACKGROUND))) {
       tabview_apply_page_geometry_macos(wd);
       mark_widget_dirty_for_paint(wd);
