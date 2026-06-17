@@ -10,6 +10,7 @@
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_section.h"
 #include "../shared/widget_paint_tabview.h"
+#include "../shared/widget_tabview_host.h"
 #include "../shared/widget_paint_compound.h"
 #include "../shared/widget_paint_grid.h"
 #include "../shared/theme_palette.h"
@@ -1128,17 +1129,7 @@ namespace xpl_host
 
   void TabViewWidget::collect_pages(std::vector<uint32_t>& out) const
   {
-    out.clear();
-    if (!session) return;
-    uint32_t c = session->_widgets.child(index);
-    while (c != 0) {
-      if (session->_widgets.exists(c)) {
-        auto& cw = session->_widgets[c];
-        if (cw.type && !std::strcmp(cw.type, NEUI_W_TABPAGE))
-          out.push_back(c);
-      }
-      c = session->_widgets.next(c);
-    }
+    neui_detail::tabview_collect_pages(session, index, out);
   }
 
   void TabViewWidget::apply_page_geometry()
@@ -1150,52 +1141,55 @@ namespace xpl_host
     if (count == 0) return;
     if (selected < 0)        selected = 0;
     if (selected >= count)   selected = count - 1;
+    // Body rect from the last paint. Before the first paint it is zero - fall
+    // back to a no-label-measurement layout so a programmatic set_selected made
+    // before the first frame still sizes pages sensibly (the first paint then
+    // recomputes the exact body rect, incl. the vertical auto-strip, and
+    // re-applies). Mirrors the win32 + macOS hosts.
+    int body_w = last_layout.body_w;
+    int body_h = last_layout.body_h;
+    neui_detail::TabEdge edge_used = edge;
+    if (body_w <= 0 && body_h <= 0) {
+      const char* pos = attrs ? attrs->get_string(NEUI_ATTR_TAB_POSITION) : nullptr;
+      auto tp = neui_detail::parse_tab_position(pos);
+      edge_used = tp.edge;
+      float strip = attrs ? static_cast<float>(attrs->get_int(NEUI_ATTR_TAB_STRIP_SIZE, 0)) : 0.0f;
+      neui_detail::TabViewLayout tl = neui_detail::compute_tabview_layout(
+          static_cast<float>(width), static_cast<float>(height), tp.edge, strip);
+      body_w = static_cast<int>(tl.body_w);
+      body_h = static_cast<int>(tl.body_h);
+    }
+    // Carve the baseline / content-border insets out of the body so the page
+    // does not paint over the strip painter's lines - identical math to the
+    // win32 + macOS hosts (shared tabview_page_insets), so the page's usable
+    // client area is the same on every platform.
+    bool has_border = attrs && attrs->has(NEUI_ATTR_TAB_BORDER_COLOR) &&
+                      attrs->get_int(NEUI_ATTR_TAB_BORDER_COLOR, 0) != 0;
+    float bw = attrs ? static_cast<float>(attrs->get_int(NEUI_ATTR_TAB_BORDER_WIDTH, 0)) : 0.0f;
+    int it = 0, il = 0, ib = 0, ir = 0;
+    neui_detail::tabview_page_insets(edge_used, has_border, bw, it, il, ib, ir);
+    int pw_w = body_w - il - ir; if (pw_w < 0) pw_w = 0;
+    int pw_h = body_h - it - ib; if (pw_h < 0) pw_h = 0;
     for (int i = 0; i < count; ++i) {
       auto& pw = session->_widgets[pages[i]];
       // Pages sit at the content-body origin (the paint walk adds body_x/y
-      // from section_layout_ptr) and fill it; clipped to the body too.
-      pw.x = 0; pw.y = 0;
-      pw.width  = last_layout.body_w;
-      pw.height = last_layout.body_h;
+      // from section_layout_ptr), offset by the insets; clipped to the body.
+      pw.x = il; pw.y = it;
+      pw.width  = pw_w;
+      pw.height = pw_h;
       pw.visible = (i == selected);
     }
   }
 
   void TabViewWidget::select_tab(int ni)
   {
-    if (!session) return;
-    std::vector<uint32_t> pages;
-    collect_pages(pages);
-    int count = static_cast<int>(pages.size());
-    if (count == 0) return;
-    if (ni < 0)      ni = 0;
-    if (ni >= count) ni = count - 1;
-    if (ni == selected) return;
-    int old = selected;
-
-    // Fire deselect(old) then select(new) BEFORE swapping visibility +
-    // repaint, so a client handler can update the incoming page's widgets
-    // before they are painted.
-    if (old >= 0 && old < count) {
-      neui_event_t ev{};
-      ev.type                = NEUI_EVENT_TAB_DESELECTED;
-      ev.data.tab.widget.id  = widget_id;
-      ev.data.tab.tab_index  = static_cast<uint32_t>(old);
-      ev.data.tab.page.id    = session->_widgets[pages[old]].widget_id;
-      session->dispatch_event(&ev);
+    // Clamp + fire TAB_DESELECTED / TAB_SELECTED + re-resolve the selection,
+    // all in the shared helper; only swap page geometry + repaint when the
+    // selection actually changed.
+    if (neui_detail::tabview_commit_selection(session, widget_id, index, selected, ni)) {
+      apply_page_geometry();
+      repaint();
     }
-    {
-      neui_event_t ev{};
-      ev.type                = NEUI_EVENT_TAB_SELECTED;
-      ev.data.tab.widget.id  = widget_id;
-      ev.data.tab.tab_index  = static_cast<uint32_t>(ni);
-      ev.data.tab.page.id    = session->_widgets[pages[ni]].widget_id;
-      session->dispatch_event(&ev);
-    }
-
-    selected = ni;
-    apply_page_geometry();
-    repaint();
   }
 
   void TabViewWidget::paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
@@ -1214,74 +1208,67 @@ namespace xpl_host
     if (selected >= count) selected = count > 0 ? count - 1 : 0;
     if (selected < 0)      selected = 0;
 
-    // Measure each page's tab label (for chip widths + auto vertical strip).
+    // Collect labels + per-chip colours (cheap); the chip font drives the
+    // label measurement below.
     neui_detail::EffectiveFont ef =
       neui_detail::read_widget_font(attrs.get(), neui_detail::TAB_CHIP_FONT);
-    std::vector<float>       widths(count, 0.0f);
     std::vector<const char*> labels(count, "");
     std::vector<uint32_t>    chip_bg(count, 0), chip_text(count, 0);
-    if (backend->measure_text) neui_detail::push_widget_font(backend, ctx, ef);
     for (int i = 0; i < count; ++i) {
       auto& pw = session->_widgets[pages[i]];
       labels[i] = pw.text.c_str();
-      if (backend->measure_text)
-        widths[i] = backend->measure_text(ctx, labels[i], -1, ef.size);
       if (pw.attrs) {
         chip_bg[i]   = static_cast<uint32_t>(pw.attrs->get_int(NEUI_ATTR_TAB_CHIP_BG_COLOR, 0));
         chip_text[i] = static_cast<uint32_t>(pw.attrs->get_int(NEUI_ATTR_TAB_CHIP_TEXT_COLOR, 0));
       }
     }
-    if (backend->measure_text) neui_detail::pop_widget_font(backend, ctx, ef);
+
+    // Measure chip labels (for chip widths + the auto vertical strip) only when
+    // the label set or font changed - measure_text is comparatively expensive
+    // and this paints every frame. Cached widths are keyed by the shared
+    // tab_labels_signature.
+    uint64_t sig = neui_detail::tab_labels_signature(labels.data(), count,
+                       ef.family.c_str(), ef.weight, ef.size);
+    if (sig != label_sig || static_cast<int>(label_widths.size()) != count) {
+      label_widths.assign(count, 0.0f);
+      if (backend->measure_text) {
+        neui_detail::push_widget_font(backend, ctx, ef);
+        for (int i = 0; i < count; ++i)
+          label_widths[i] = backend->measure_text(ctx, labels[i], -1, ef.size);
+        neui_detail::pop_widget_font(backend, ctx, ef);
+      }
+      label_sig = sig;
+    }
+    const float* widths = label_widths.data();
 
     // Strip size: explicit attr wins; otherwise auto-fit vertical strips to
     // the widest label so left / right chip text is fully readable.
     float explicit_strip = attrs ? static_cast<float>(attrs->get_int(NEUI_ATTR_TAB_STRIP_SIZE, 0)) : 0.0f;
-    float strip = neui_detail::tab_resolve_strip_size(edge, explicit_strip, widths.data(), count);
+    float strip = neui_detail::tab_resolve_strip_size(edge, explicit_strip, widths, count);
     neui_detail::TabViewLayout L =
       neui_detail::compute_tabview_layout(static_cast<float>(width),
                                           static_cast<float>(height), edge, strip);
 
     chips.assign(count, neui_detail::TabChip{});
     if (count > 0 && edge != neui_detail::TabEdge::None)
-      neui_detail::layout_tab_chips(L, edge, tp.align, widths.data(), count, chips.data());
+      neui_detail::layout_tab_chips(L, edge, tp.align, widths, count, chips.data());
 
-    // Body background: the active page's NEUI_ATTR_BACKGROUND (so the active
-    // chip, painted with body_bg, reads as connected to its page), else the
-    // tabview's NEUI_ATTR_BACKGROUND, else a panel shade. The strip area
-    // beside the chips is NOT filled by this - it stays transparent unless
-    // NEUI_ATTR_TAB_STRIP_BG_COLOR is set.
-    uint32_t body_bg = neui_detail::shade(neui_detail::color(ColorRole::frame_bg),
-                                          neui_detail::SECTION_BG_LIFT);
-    if (attrs && attrs->has(NEUI_ATTR_BACKGROUND))
-      body_bg = static_cast<uint32_t>(attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
-    if (count > 0) {
-      auto& ap = session->_widgets[pages[selected]];
-      if (ap.attrs && ap.attrs->has(NEUI_ATTR_BACKGROUND))
-        body_bg = static_cast<uint32_t>(ap.attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
-    }
-    uint32_t inactive     = neui_detail::shade(body_bg, -18);
-    uint32_t default_text = neui_detail::color(ColorRole::text_primary);
-    // Content-box border (optional) + the separator/outline colour. The
-    // separator is always drawn (so the selected tab connects + the others
-    // are clearly separated): border colour if set, else the theme border.
-    uint32_t content_border = (attrs && attrs->has(NEUI_ATTR_TAB_BORDER_COLOR))
-                        ? static_cast<uint32_t>(attrs->get_int(NEUI_ATTR_TAB_BORDER_COLOR, 0)) : 0;
-    float border_w = attrs ? static_cast<float>(attrs->get_int(NEUI_ATTR_TAB_BORDER_WIDTH, 0)) : 0.0f;
-    if (border_w <= 0.0f) border_w = 1.0f;
-    uint32_t sep_color = content_border ? content_border
-                                        : neui_detail::color(ColorRole::border);
-    uint32_t strip_bg = (attrs && attrs->has(NEUI_ATTR_TAB_STRIP_BG_COLOR))
-                        ? static_cast<uint32_t>(attrs->get_int(NEUI_ATTR_TAB_STRIP_BG_COLOR, 0)) : 0;
-    float chip_radius = attrs ? static_cast<float>(attrs->get_int(NEUI_ATTR_TAB_CHIP_RADIUS, 0)) : 0.0f;
+    // Resolve the tabview chrome colours (shared with win32 / macOS). The
+    // active page's NEUI_ATTR_BACKGROUND drives body_bg so the active chip
+    // reads as connected to its page.
+    const neui_detail::AttrBag* active_attrs =
+      (count > 0) ? session->_widgets[pages[selected]].attrs.get() : nullptr;
+    neui_detail::TabPaintColors tc =
+      neui_detail::resolve_tab_paint_colors(attrs.get(), active_attrs);
 
     neui_detail::paint_tabview(backend, ctx,
                                static_cast<float>(x), static_cast<float>(y),
                                static_cast<float>(width), static_cast<float>(height),
-                               L, edge, chips.data(), count, selected, -1,
+                               L, edge, chips.data(), count, selected,
                                labels.data(), chip_bg.data(), chip_text.data(),
-                               body_bg, default_text, inactive,
-                               sep_color, border_w, strip_bg, content_border,
-                               chip_radius, attrs.get());
+                               tc.body_bg, tc.default_text, tc.inactive_chip_bg,
+                               tc.sep_color, tc.border_w, tc.strip_bg, tc.content_border,
+                               tc.chip_radius, attrs.get());
 
     // Cache the content rect so the paint walk offsets + clips the active
     // page to the body, and size the pages to it.

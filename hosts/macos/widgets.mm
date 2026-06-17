@@ -2018,7 +2018,11 @@ namespace macos_host
   {
     WidgetData* tv = tabview_from_macos(session, tabview);
     if (!tv) return;
-    tabview_select_macos(*tv, (int)index);
+    // Clamp huge / sentinel indices (e.g. NEUI_ITEM_NONE) to a representable
+    // int so the cast doesn't wrap negative - per the documented "clamped to
+    // [0, count)", an out-of-range index selects the LAST tab, not the first.
+    int ni = index > 0x7fffffffu ? 0x7fffffff : (int)index;
+    tabview_select_macos(*tv, ni);
   }
 
   static neui_widget_t NEUI_ABI tabs_get_page(neui_session_t session,

@@ -249,6 +249,21 @@ namespace xpl_host
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
 
+    // A destroyed TABPAGE drops a tab: capture the parent TABVIEW so we can
+    // re-flow its strip + page geometry after the slot is freed (the selected
+    // index may now be out of range). Mirrors the win32 host's widget_destroy.
+    uint32_t tabview_parent = 0;
+    {
+      auto& w = s->_widgets[idx];
+      if (w.type && !strcmp(w.type, NEUI_W_TABPAGE)) {
+        uint32_t pidx = s->_widgets.get_parent(idx);
+        if (pidx && s->_widgets.exists(pidx)) {
+          auto& pw = s->_widgets[pidx];
+          if (pw.type && !strcmp(pw.type, NEUI_W_TABVIEW)) tabview_parent = pidx;
+        }
+      }
+    }
+
     neui_widget_client_t* client_api = nullptr;
     void* token = s->get_token();
     {
@@ -261,6 +276,17 @@ namespace xpl_host
       }
     }
     destroy_recursive(s, idx, client_api, token);
+
+    // Re-clamp the selection + re-apply page visibility/geometry, then repaint
+    // the strip so the now-correct tab count is reflected immediately (matching
+    // the win32 / macOS hosts, which re-flow on every TABPAGE removal).
+    if (tabview_parent && s->_widgets.exists(tabview_parent)) {
+      if (auto* tv = dynamic_cast<TabViewWidget*>(&s->_widgets[tabview_parent])) {
+        tv->apply_page_geometry();
+        if (void* frame = s->find_parent_native_handle(tabview_parent))
+          platform_invalidate(frame);
+      }
+    }
   }
 
   static void NEUI_ABI w_show(neui_session_t session, neui_widget_t widget)
@@ -1757,7 +1783,14 @@ namespace xpl_host
     if (!tv) return NEUI_ITEM_NONE;
     std::vector<uint32_t> pages; tv->collect_pages(pages);
     if (pages.empty()) return NEUI_ITEM_NONE;
-    return static_cast<uint32_t>(tv->selected);
+    // Clamp defensively: tv->selected is normally re-clamped on select / paint /
+    // page-destroy, but a programmatic set_selected before the first paint can
+    // leave it out of range. Matches the win32 host's tabs_get_selected.
+    int sel = tv->selected;
+    int count = static_cast<int>(pages.size());
+    if (sel < 0)      sel = 0;
+    if (sel >= count) sel = count - 1;
+    return static_cast<uint32_t>(sel);
   }
 
   static void NEUI_ABI tabs_set_selected(neui_session_t session, neui_widget_t widget,
@@ -1765,7 +1798,11 @@ namespace xpl_host
   {
     auto* tv = tabview_from(session, widget, nullptr);
     if (!tv) return;
-    tv->select_tab(static_cast<int>(index));
+    // Clamp huge / sentinel indices (e.g. NEUI_ITEM_NONE) to a representable
+    // int so the cast doesn't wrap negative - per the documented "clamped to
+    // [0, count)", an out-of-range index selects the LAST tab, not the first.
+    int ni = index > 0x7fffffffu ? 0x7fffffff : static_cast<int>(index);
+    tv->select_tab(ni);
   }
 
   static neui_widget_t NEUI_ABI tabs_get_page(neui_session_t session,

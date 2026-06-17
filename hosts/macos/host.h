@@ -158,6 +158,13 @@ namespace macos_host
     int                              tab_selected = 0;
     std::vector<neui_detail::TabChip> tab_chips;
     neui_detail::TabEdge             tab_edge = neui_detail::TabEdge::Top;
+    std::vector<float>               tab_label_widths; // cached chip-label measurements
+    uint64_t                         tab_label_sig = 0; // signature the cache was measured at
+    // Last selection / page count that page geometry was applied for, so a
+    // plain repaint can skip the (subtree-reflowing) re-apply when nothing that
+    // affects page geometry changed.
+    int                              tab_applied_selected = -1;
+    int                              tab_applied_count    = -1;
   };
 
   class Session

@@ -248,6 +248,8 @@ namespace win32_host {
     int                               tab_selected = 0;
     std::vector<neui_detail::TabChip> tab_chips;
     neui_detail::TabEdge              tab_edge = neui_detail::TabEdge::Top;
+    std::vector<float>                tab_label_widths; // cached chip-label measurements
+    uint64_t                          tab_label_sig = 0; // signature the cache was measured at
 
     // SECTION scrolling inner body HWND. Created alongside scroll_state;
     // hosts the section's tree-children (they HWND-parent here, not to

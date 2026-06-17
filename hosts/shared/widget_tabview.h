@@ -21,7 +21,6 @@ namespace neui_detail
   inline constexpr float TAB_CHIP_GAP           = 2.0f;  // gap between adjacent chips
   inline constexpr float TAB_CHIP_FONT          = 12.0f; // chip label size
   inline constexpr float TAB_CHIP_MIN_W         = 28.0f; // min chip extent (horizontal)
-  inline constexpr float TAB_BORDER_WIDTH_DEFAULT = 1.0f;
 
   // Edge the chip strip sits on, and how the chips pack along that edge.
   enum class TabEdge  : uint8_t { Top, Bottom, Left, Right, None };
@@ -119,6 +118,58 @@ namespace neui_detail
     if (L.body_w < 0) L.body_w = 0;
     if (L.body_h < 0) L.body_h = 0;
     return L;
+  }
+
+  // Cheap content signature of the tab-strip label set + chip font. Hosts cache
+  // the measured chip-label widths keyed by this value so measure_text (which
+  // is comparatively expensive) runs only when something that affects the
+  // widths actually changes: a label's text, the tab count, or the chip font
+  // (family / weight / size). FNV-1a over those inputs; a stable signature ->
+  // reuse the cached widths, a changed one -> re-measure. font_size is
+  // quantised to 1/16 px so trivially-different floats don't force re-measures.
+  inline uint64_t tab_labels_signature(const char* const* labels, int count,
+                                       const char* font_family, int font_weight,
+                                       float font_size)
+  {
+    uint64_t h = 1469598103934665603ull; // FNV-1a offset basis
+    auto mix    = [&](uint8_t b)  { h ^= b; h *= 1099511628211ull; };
+    auto mix_u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) mix(static_cast<uint8_t>(v >> (i * 8))); };
+    mix_u32(static_cast<uint32_t>(count));
+    mix_u32(static_cast<uint32_t>(font_weight));
+    mix_u32(static_cast<uint32_t>(font_size * 16.0f + 0.5f));
+    for (const char* p = font_family ? font_family : ""; *p; ++p) mix(static_cast<uint8_t>(*p));
+    mix(0);
+    for (int i = 0; i < count; ++i) {
+      for (const char* p = (labels[i] ? labels[i] : ""); *p; ++p) mix(static_cast<uint8_t>(*p));
+      mix(0); // label separator so {"ab","c"} != {"a","bc"}
+    }
+    return h;
+  }
+
+  // Insets (logical px) carved out of the body rect for the active page so it
+  // does not paint over the lines the strip painter draws: the strip-edge
+  // baseline (always >= 1 px, painted on every host) plus the optional
+  // content-box border on the far sides (NEUI_ATTR_TAB_BORDER_COLOR). Shared so
+  // a page's usable client area is identical on win32 / macOS / crossplatform.
+  // `has_content_border` = a non-zero NEUI_ATTR_TAB_BORDER_COLOR is set;
+  // `border_width` = NEUI_ATTR_TAB_BORDER_WIDTH (0 -> 1 px default).
+  inline void tabview_page_insets(TabEdge edge, bool has_content_border,
+                                  float border_width,
+                                  int& top, int& left, int& bottom, int& right)
+  {
+    top = left = bottom = right = 0;
+    int line = border_width > 0.0f ? static_cast<int>(border_width + 0.5f) : 1;
+    if (line < 1) line = 1;
+    int strip_in = line;                          // baseline is always drawn
+    int far_in   = has_content_border ? line : 0; // content border only when set
+    switch (edge) {
+      case TabEdge::Top:    top = strip_in; left = far_in; right = far_in; bottom = far_in; break;
+      case TabEdge::Bottom: bottom = strip_in; left = far_in; right = far_in; top = far_in; break;
+      case TabEdge::Left:   left = strip_in; top = far_in; bottom = far_in; right = far_in; break;
+      case TabEdge::Right:  right = strip_in; top = far_in; bottom = far_in; left = far_in; break;
+      case TabEdge::None:
+      default:              top = left = bottom = right = far_in; break;
+    }
   }
 
   struct TabChip {

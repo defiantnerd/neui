@@ -6,6 +6,7 @@
 #include "widget_tabview.h"
 #include "widget_font.h"
 #include "theme_palette.h"
+#include "widget_paint_section.h"   // SECTION_BG_LIFT (tab body matches section lift)
 
 // Shared TABVIEW paint. Draws, in order:
 //   1. whole-area background (view_bg, optional)
@@ -29,6 +30,46 @@
 
 namespace neui_detail
 {
+  // Resolved tabview chrome colours (+ border / chip-radius geometry), fed to
+  // paint_tabview. Shared so all three hosts derive identical visuals.
+  struct TabPaintColors {
+    uint32_t body_bg;           // content-body fill + active-chip fill
+    uint32_t inactive_chip_bg;  // non-active chip fill
+    uint32_t default_text;      // chip label colour when no per-chip override
+    uint32_t sep_color;         // baseline + chip outline + content border
+    uint32_t strip_bg;          // strip-gutter fill (0 = transparent)
+    uint32_t content_border;    // content-box far-side border (0 = none)
+    float    border_w;          // stroke width (>= 1)
+    float    chip_radius;       // outer-corner radius
+  };
+
+  // Resolve the tabview chrome from the tabview's attrs + the active page's
+  // attrs. The active page's NEUI_ATTR_BACKGROUND wins for body_bg so the
+  // active chip (painted with body_bg) reads as connected to its page; else
+  // the tabview's NEUI_ATTR_BACKGROUND; else a panel shade. The separator is
+  // always drawn (border colour if set, else the theme border).
+  inline TabPaintColors resolve_tab_paint_colors(const AttrBag* tv_attrs,
+                                                 const AttrBag* active_page_attrs)
+  {
+    TabPaintColors c{};
+    c.body_bg = shade(color(ColorRole::frame_bg), SECTION_BG_LIFT);
+    if (tv_attrs && tv_attrs->has(NEUI_ATTR_BACKGROUND))
+      c.body_bg = static_cast<uint32_t>(tv_attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
+    if (active_page_attrs && active_page_attrs->has(NEUI_ATTR_BACKGROUND))
+      c.body_bg = static_cast<uint32_t>(active_page_attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
+    c.inactive_chip_bg = shade(c.body_bg, -18);
+    c.default_text     = color(ColorRole::text_primary);
+    c.content_border = (tv_attrs && tv_attrs->has(NEUI_ATTR_TAB_BORDER_COLOR))
+                         ? static_cast<uint32_t>(tv_attrs->get_int(NEUI_ATTR_TAB_BORDER_COLOR, 0)) : 0;
+    c.border_w = tv_attrs ? static_cast<float>(tv_attrs->get_int(NEUI_ATTR_TAB_BORDER_WIDTH, 0)) : 0.0f;
+    if (c.border_w <= 0.0f) c.border_w = 1.0f;
+    c.sep_color = c.content_border ? c.content_border : color(ColorRole::border);
+    c.strip_bg = (tv_attrs && tv_attrs->has(NEUI_ATTR_TAB_STRIP_BG_COLOR))
+                   ? static_cast<uint32_t>(tv_attrs->get_int(NEUI_ATTR_TAB_STRIP_BG_COLOR, 0)) : 0;
+    c.chip_radius = tv_attrs ? static_cast<float>(tv_attrs->get_int(NEUI_ATTR_TAB_CHIP_RADIUS, 0)) : 0.0f;
+    return c;
+  }
+
   // Build a chip outline path. The two corners on the OUTER edge (away from
   // the content body) are rounded by `r`; the body-edge corners stay square.
   // Arc sweeps are clockwise (Y-down), matching build_rounded_rect_path. The
@@ -173,7 +214,7 @@ namespace neui_detail
   inline void paint_tabview(neui_render_backend_t* backend, neui_render_ctx_t ctx,
                             float ox, float oy, float fw, float fh,
                             const TabViewLayout& L, TabEdge edge,
-                            const TabChip* chips, int count, int selected, int hover,
+                            const TabChip* chips, int count, int selected,
                             const char* const* labels,
                             const uint32_t* chip_bg, const uint32_t* chip_text,
                             uint32_t body_bg,
@@ -210,7 +251,6 @@ namespace neui_detail
       if (chip_bg && chip_bg[i] != 0)      fill = chip_bg[i];
       else if (active)                     fill = body_bg;
       else                                 fill = inactive_chip_bg;
-      if (!active && i == hover)           fill = shade(fill, +16);
 
       if (can_path && chip_radius > 0.0f) {
         tab_chip_path(backend, ctx, ox + c.x, oy + c.y, c.w, c.h, edge, chip_radius, true);

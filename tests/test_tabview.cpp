@@ -156,3 +156,31 @@ TEST_CASE("tabview_chip_hit: returns chip index under the point, -1 otherwise")
   // Far right past the last chip.
   CHECK_EQ(tabview_chip_hit(chips, 3, 399.0f, 14.0f), -1);
 }
+
+
+TEST_CASE("tab_labels_signature: stable for same inputs, changes on any input")
+{
+  const char* a[2] = { "One", "Two" };
+  uint64_t base = tab_labels_signature(a, 2, "", 0, TAB_CHIP_FONT);
+  // Same inputs -> same signature (so the width cache is reused).
+  CHECK_EQ(tab_labels_signature(a, 2, "", 0, TAB_CHIP_FONT), base);
+
+  // A changed label flips it (re-measure).
+  const char* a2[2] = { "One", "Three" };
+  CHECK(tab_labels_signature(a2, 2, "", 0, TAB_CHIP_FONT) != base);
+
+  // Count change flips it.
+  const char* a3[3] = { "One", "Two", "" };
+  CHECK(tab_labels_signature(a3, 3, "", 0, TAB_CHIP_FONT) != base);
+
+  // Font size / weight / family changes flip it.
+  CHECK(tab_labels_signature(a, 2, "", 0, TAB_CHIP_FONT + 1.0f) != base);
+  CHECK(tab_labels_signature(a, 2, "", 700, TAB_CHIP_FONT) != base);
+  CHECK(tab_labels_signature(a, 2, "Arial", 0, TAB_CHIP_FONT) != base);
+
+  // Boundary shift between labels is detected (separator in the hash).
+  const char* x[2] = { "ab", "c" };
+  const char* y[2] = { "a", "bc" };
+  CHECK(tab_labels_signature(x, 2, "", 0, TAB_CHIP_FONT) !=
+        tab_labels_signature(y, 2, "", 0, TAB_CHIP_FONT));
+}

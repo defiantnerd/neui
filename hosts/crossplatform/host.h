@@ -337,6 +337,8 @@ namespace xpl_host
     neui_detail::SectionLayout last_layout{};      // content rect (child positioning + clip)
     std::vector<neui_detail::TabChip> chips;        // cached for hit-testing
     neui_detail::TabEdge edge = neui_detail::TabEdge::Top;
+    std::vector<float> label_widths;                // cached chip-label measurements
+    uint64_t           label_sig = 0;               // signature the cache was measured at
 
     void paint(neui_render_backend_t* backend, neui_render_ctx_t ctx, bool is_focused) override;
     bool on_mouse_event(neui_event_t* event) override;
