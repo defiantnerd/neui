@@ -81,6 +81,18 @@ int main(void) {
 
 This source is wired up in CMake as `readme_example` so you can build + run it directly: `cmake --build out/build --config Debug --target readme_example`.
 
+To pull neui into your own project, drop it in (submodule / vendored copy) and `add_subdirectory()` it, then link the `neui` target - it carries the include paths and per-platform hosts/backends transitively:
+
+```cmake
+cmake_minimum_required(VERSION 3.15)
+project(my_app CXX)
+
+add_subdirectory(third_party/neui)   # tests + examples default off here
+
+add_executable(my_app main.c)
+target_link_libraries(my_app PRIVATE neui)
+```
+
 The C language is chosen for the interface, internal structures are C/C++ or Objective-C.
 Since all access is provided via one symbol, this can either be a dynamically loaded library or compiled statically.
 
