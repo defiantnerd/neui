@@ -17,6 +17,7 @@ This includes using fonts, colors and sizes that are defined from the target sys
 * windows (implemented)
 * macOS (implemented)
 * linux (implemented, X11 + Cairo via the crossplatform host)
+* iOS / iPadOS (implemented, native UIKit host + crossplatform host)
 * crossplatform for all of the above
 * embedded (DAW plugin windows, X11 host run-loop integration on linux)
 
