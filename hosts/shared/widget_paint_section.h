@@ -46,6 +46,16 @@ namespace neui_detail
   inline constexpr float SECTION_HEADER_H    = 22.0f;
   inline constexpr int   SECTION_BG_LIFT     = 24;   // shade delta over frame_bg
 
+  // Chip header band height, scaled by painted_ui_scale() so the band grows
+  // to fit the (scaled) chip label on iOS; identity (== SECTION_HEADER_H) on
+  // desktop. This is the single source of truth shared by the paint geometry
+  // (section_chip_rect) and the children body-offset (section_band_h_for) so
+  // they always agree.
+  inline float section_header_h()
+  {
+    return SECTION_HEADER_H * painted_ui_scale();
+  }
+
   struct SectionChip {
     float band_h;   // height of the header band
     float chip_x;   // left edge of the title chip
@@ -62,7 +72,8 @@ namespace neui_detail
                                        const char* align)
   {
     SectionChip c{};
-    c.band_h = (SECTION_HEADER_H < fh) ? SECTION_HEADER_H : fh;
+    const float header_h = section_header_h();
+    c.band_h = (header_h < fh) ? header_h : fh;
     c.chip_w = text_width + 2.0f * SECTION_LABEL_PAD_X;
     if (c.chip_w > fw) c.chip_w = fw;
     if (align && !std::strcmp(align, "left")) {

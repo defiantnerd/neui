@@ -61,6 +61,7 @@ extern "C" {
     NEUI_EVENT_WIDGET_PAINT             = DEF_WIDGET_EVENT(7),  // NEUI_W_CUSTOMDRAW: client draws via backend/ctx
     NEUI_EVENT_ATTR_CHANGED             = DEF_WIDGET_EVENT(8),  // behavior wrote an attr (user-driven)
     NEUI_EVENT_SCROLL_CHANGED           = DEF_WIDGET_EVENT(9),  // scrolling SECTION's offset moved
+    NEUI_EVENT_METRICS_CHANGED          = DEF_WIDGET_EVENT(0xA),// platform layout metrics changed (iOS Dynamic Type / rotation / safe-area)
 
     NEUI_EVENT_ITEM_SELECTED            = DEF_ITEM_EVENT(1),  // fired when selection changes in listbox/combobox
 
@@ -302,6 +303,20 @@ extern "C" {
     int           scroll_y;   // current vertical offset   (logical px)
   } neui_event_scroll_t;
 
+  // Platform layout metrics changed (NEUI_EVENT_METRICS_CHANGED). Fired when
+  // the values returned by the metrics API (NEUI_API_METRICS) change - on iOS
+  // when the Dynamic Type content-size category changes, or on rotation /
+  // safe-area change. Desktop hosts do not fire this today (metrics are
+  // static there). `widget` is the frame whose client should re-run its
+  // responsive layout; `ui_scale` is the new painted/text UI scale (the same
+  // value metrics_api->ui_scale returns), provided inline so a handler that
+  // only scales its own layout need not call back into the API.
+  typedef struct neui_event_metrics
+  {
+    neui_widget_t widget;     // the frame
+    float         ui_scale;   // new painted / text UI scale
+  } neui_event_metrics_t;
+
   // Grid sort-changed event - fires after a user-driven header click that
   // mutates the sort stack (or removes a level). Carries the column that
   // was clicked and its new direction in the stack; clients that need the
@@ -382,6 +397,7 @@ extern "C" {
       neui_event_dnd_t                dnd;
       neui_event_scroll_t             scroll;
       neui_event_tab_t                tab;
+      neui_event_metrics_t            metrics;
     } data;
 
     // more event data can be added here

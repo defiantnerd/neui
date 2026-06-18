@@ -121,6 +121,15 @@ typedef struct neui_dnd_api {
   // targets in this same session receive ENTER / MOVE / LEAVE / DROP
   // normally). Do not call begin_drag from inside a DnD dispatch -
   // returns NONE in that case.
+  //
+  // iOS DIVERGENCE: iOS cannot start a drag from arbitrary code - a UIDrag
+  // must originate from a UIDragInteraction delegate responding to the
+  // system long-press-drag gesture. So begin_drag (and begin_drag_with_
+  // preview) is a no-op on iOS that returns NEUI_DND_ACTION_NONE
+  // immediately. To make a widget draggable on iOS, attach a DRAG_SOURCE
+  // behavior asset (see d/behavior.h); the gesture-driven UIDragInteraction
+  // resolves its data item + allowed actions and runs the drag. (Same shape
+  // as the async message_box divergence.)
   neui_dnd_action_t (NEUI_ABI *begin_drag)(neui_session_t session,
                                             neui_widget_t source_widget,
                                             neui_data_item_t payload,

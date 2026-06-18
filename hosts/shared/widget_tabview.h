@@ -3,6 +3,8 @@
 #include <cstring>
 #include <cstdint>
 
+#include "widget_font.h"   // painted_ui_scale (iOS default-metric scaling)
+
 // Shared, host-neutral geometry for the tabbed view (NEUI_W_TABVIEW).
 // Pure logic - no backend, no widget tree - so the crossplatform, win32, and
 // macOS hosts all lay tabs out identically, and the Tier-1 unit suite can
@@ -21,6 +23,15 @@ namespace neui_detail
   inline constexpr float TAB_CHIP_GAP           = 2.0f;  // gap between adjacent chips
   inline constexpr float TAB_CHIP_FONT          = 12.0f; // chip label size
   inline constexpr float TAB_CHIP_MIN_W         = 28.0f; // min chip extent (horizontal)
+
+  // Default chip-strip thickness, scaled by painted_ui_scale() so the band
+  // grows to fit the (scaled) chip label on iOS; identity on desktop. Only
+  // the fallback default scales - an explicit NEUI_ATTR_TAB_STRIP_SIZE wins
+  // unscaled (see tab_resolve_strip_size).
+  inline float tab_strip_size_default()
+  {
+    return TAB_STRIP_SIZE_DEFAULT * painted_ui_scale();
+  }
 
   // Edge the chip strip sits on, and how the chips pack along that edge.
   enum class TabEdge  : uint8_t { Top, Bottom, Left, Right, None };
@@ -69,13 +80,14 @@ namespace neui_detail
                                       const float* text_widths, int count)
   {
     if (explicit_size > 0.0f) return explicit_size;
+    const float def = tab_strip_size_default();
     if (edge == TabEdge::Top || edge == TabEdge::Bottom || edge == TabEdge::None)
-      return TAB_STRIP_SIZE_DEFAULT;
+      return def;
     float widest = 0.0f;
     for (int i = 0; i < count; ++i)
       if (text_widths[i] > widest) widest = text_widths[i];
     float s = widest + 2.0f * TAB_CHIP_PAD_X;
-    return (s < TAB_STRIP_SIZE_DEFAULT) ? TAB_STRIP_SIZE_DEFAULT : s;
+    return (s < def) ? def : s;
   }
 
   struct TabViewLayout {
@@ -86,7 +98,7 @@ namespace neui_detail
   inline TabViewLayout compute_tabview_layout(float w, float h,
                                               TabEdge edge, float strip)
   {
-    if (strip <= 0.0f) strip = TAB_STRIP_SIZE_DEFAULT;
+    if (strip <= 0.0f) strip = tab_strip_size_default();
     TabViewLayout L{};
     switch (edge) {
       case TabEdge::Top:

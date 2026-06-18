@@ -1636,6 +1636,7 @@ namespace xpl_host
   // Native menu bar
 
   bool platform_menubar_in_frame() { return false; }   // Win32 uses a native HMENU
+  int  platform_frame_extra_top_inset(void* /*nh*/, bool /*has_menubar*/) { return 0; }
 
   void* platform_menubar_create(uint32_t /*menubar_widget_id*/)
   {

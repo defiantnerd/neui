@@ -15,6 +15,7 @@
 #include "scroll_kinetics.h"
 #include "scrollbar.h"
 #include "text_edit.h"
+#include "widget_font.h"   // scaled_painted_metric (iOS default-metric scaling)
 
 // Shared GRID widget state model. Header-only / inline so both the xpl
 // host and the native hosts can reuse the same data structures and
@@ -1068,13 +1069,18 @@ namespace neui_detail
   inline GridPaintConfig grid_read_config(const AttrBag* bag)
   {
     GridPaintConfig c;
-    c.row_h         = GRID_DEFAULT_ROW_H;
-    c.header_h      = GRID_DEFAULT_HEADER_H;
+    // Default row / header heights scale with painted_ui_scale() (identity on
+    // desktop; enlarged on iOS so the bigger default font fits). A client-set
+    // NEUI_ATTR_GRID_ROW_HEIGHT / _HEADER_HEIGHT below wins unscaled.
+    const int def_row_h    = scaled_painted_metric(GRID_DEFAULT_ROW_H);
+    const int def_header_h = scaled_painted_metric(GRID_DEFAULT_HEADER_H);
+    c.row_h         = def_row_h;
+    c.header_h      = def_header_h;
     c.col_min_w_def = GRID_DEFAULT_COLUMN_MIN_W;
     if (!bag) return c;
-    int rh = bag->get_int(NEUI_ATTR_GRID_ROW_HEIGHT, GRID_DEFAULT_ROW_H);
+    int rh = bag->get_int(NEUI_ATTR_GRID_ROW_HEIGHT, def_row_h);
     if (rh > 0) c.row_h = rh;
-    int hh = bag->get_int(NEUI_ATTR_GRID_HEADER_HEIGHT, GRID_DEFAULT_HEADER_H);
+    int hh = bag->get_int(NEUI_ATTR_GRID_HEADER_HEIGHT, def_header_h);
     if (hh >= 0) c.header_h = hh;
     int mw = bag->get_int(NEUI_ATTR_GRID_COLUMN_MIN_WIDTH_DEFAULT,
                           GRID_DEFAULT_COLUMN_MIN_W);

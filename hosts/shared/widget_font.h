@@ -25,6 +25,33 @@
 
 namespace neui_detail
 {
+  // Process-wide scale factor for the *default* text size + the default
+  // layout metrics (row / line / chip heights) of the host-painted widgets
+  // (GRID, SECTION chip, KNOB, TABVIEW chips, and the xpl-painted LISTBOX /
+  // COMBOBOX / TREEVIEW / MULTILINE). Defaults to 1.0 so desktop hosts are
+  // byte-for-byte unchanged. The iOS hosts set it once at init to
+  // [UIFont systemFontSize] / 12 (~1.42) so painted text matches native
+  // UIKit controls; desktop hosts never touch it.
+  //
+  // It scales DEFAULTS only - an explicit NEUI_ATTR_FONT_SIZE /
+  // NEUI_ATTR_GRID_ROW_HEIGHT / etc. from the client always wins (see
+  // read_widget_font + scaled_painted_metric below). Use the runtime global
+  // rather than a per-OS #ifdef so the shared headers stay portable.
+  inline float& painted_ui_scale()
+  {
+    static float s = 1.0f;
+    return s;
+  }
+
+  // Scale a default layout metric (logical px) by painted_ui_scale(), rounded
+  // to whole pixels. At scale 1.0 this is the identity (round(N * 1.0f) == N)
+  // so desktop metrics are unchanged; only applied where a hardcoded default
+  // is consumed as the fallback, never to a client-set value.
+  inline int scaled_painted_metric(int default_px)
+  {
+    return (int)(default_px * painted_ui_scale() + 0.5f);
+  }
+
   struct EffectiveFont
   {
     std::string family;   // empty = host default (Segoe UI on Win32/D2D)
@@ -47,7 +74,11 @@ namespace neui_detail
   inline EffectiveFont read_widget_font(const AttrBag* bag, float default_size)
   {
     EffectiveFont f;
-    f.size = default_size;
+    // Scale the hardcoded default by painted_ui_scale() (1.0 on desktop, so
+    // unchanged there; ~1.42 on iOS so painted text matches UIKit). An
+    // explicit NEUI_ATTR_FONT_SIZE below overrides this unscaled, so a
+    // client-set size always wins.
+    f.size = default_size * painted_ui_scale();
     if (!bag) return f;
 
     if (const char* fam = bag->get_string(NEUI_ATTR_FONT_FAMILY))

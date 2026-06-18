@@ -16,6 +16,7 @@
 #include "../shared/theme_palette.h"
 #include "../shared/painter.h"
 #include "../shared/widget_font.h"
+#include "../shared/metrics.h"
 #include "asset_manager.h"
 #ifdef _WIN32
 #include "../shared/win32/theme_provider_win32.h"
@@ -116,6 +117,15 @@ namespace xpl_host
   extern neui_tabs_api_t      tabs_api;
   extern neui_notify_api_t    notify_api;
 
+  // Resolve a Session* from a 1-based session id (the upper 16 bits of a
+  // widget id). Used by the iOS platform layer's NEUI_API_METRICS seam to walk
+  // back to a frame's WidgetData. Returns nullptr for an unknown id.
+  Session* session_by_id(uint32_t session_id)
+  {
+    if (session_id == 0 || session_id > sessions.size()) return nullptr;
+    return sessions[session_id - 1].get();
+  }
+
   // -------------------------------------------------------------------------
   // Session management
 
@@ -162,6 +172,7 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_SCROLL))    return &scroll_api;
     if (!strcmp(iface, NEUI_API_TABS))      return &tabs_api;
     if (!strcmp(iface, NEUI_API_NOTIFY))    return &notify_api;
+    if (!strcmp(iface, NEUI_API_METRICS))   return &neui_detail::k_metrics_api;
     return nullptr;
   }
 
@@ -194,6 +205,12 @@ namespace xpl_host
       return sessions[idx].get();
     return nullptr;
   }
+
+  // Number of session slots (including freed/null ones, so a caller iterating
+  // 1..session_count() via session_by_id must null-check each). Used by the iOS
+  // app-level menu-bar contribution to find the frontmost MENUBAR-bearing frame
+  // across every live session.
+  uint32_t session_count() { return (uint32_t)sessions.size(); }
 
   // -------------------------------------------------------------------------
   // Session implementation
@@ -621,6 +638,83 @@ namespace xpl_host
     _in_dnd_dispatch = false;
   }
 
+  // Resolve a widget's behavior asset (slot-vector lookup). Defined further
+  // down (resolve_widget_behavior); forward-declared here for the iOS
+  // drag-source resolution below.
+  static neui_detail::BehaviorAsset*
+  resolve_widget_behavior(Session* s, neui_asset_t a);
+
+  uint32_t Session::dnd_resolve_drag_source(uint32_t frame_widget_idx,
+                                             int frame_local_x, int frame_local_y,
+                                             neui_detail::DataItem* out_item,
+                                             uint32_t& out_allowed_actions)
+  {
+    // Deepest hit under the gesture point, then walk up the parent chain for
+    // the first widget carrying a DRAG_SOURCE behavior handler. (A child of a
+    // drag-source CUSTOMDRAW is unlikely, but the walk-up keeps parity with
+    // how the desktop hit region is anchored to the widget.)
+    uint32_t hit = widget_at(static_cast<float>(frame_local_x),
+                             static_cast<float>(frame_local_y),
+                             frame_widget_idx);
+    uint32_t cur = hit;
+    while (cur != 0 && cur != UINT32_MAX && _widgets.exists(cur)) {
+      auto& wd = _widgets[cur];
+      auto* ba = resolve_widget_behavior(this, wd.behavior_asset_id());
+      if (ba) {
+        auto* H = neui_detail::behavior_find_kind_any(
+            *ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+        if (H) {
+          // Resolve the DataItem id the client stashed in the widget's attr
+          // bag (drag_data_key), copy its formats into a transient store item
+          // the caller turns into an NSItemProvider.
+          neui_data_item_t src = neui_data_item_none;
+          if (wd.attrs && !H->drag_data_key.empty()) {
+            int v = wd.attrs->get_int(H->drag_data_key, 0);
+            if (v != 0) src.id = static_cast<uint32_t>(v);
+          }
+          if (src.id != 0 && out_item) {
+            if (auto* slot = _data_items.get(src.id)) {
+              slot->for_each_format([&](const std::string& mime,
+                                        const std::vector<uint8_t>& bytes) {
+                out_item->set_format(mime, bytes.data(),
+                                     static_cast<uint32_t>(bytes.size()));
+              });
+            }
+          }
+          out_allowed_actions = H->allowed_actions ? H->allowed_actions
+                                                    : (NEUI_DND_ACTION_COPY |
+                                                       NEUI_DND_ACTION_MOVE);
+          return cur;
+        }
+      }
+      cur = _widgets.get_parent(cur);
+    }
+    return 0;
+  }
+
+  void Session::dnd_report_drag_result(uint32_t widget_idx, uint32_t action)
+  {
+    if (!_widgets.exists(widget_idx)) return;
+    auto& wd = _widgets[widget_idx];
+    auto* ba = resolve_widget_behavior(this, wd.behavior_asset_id());
+    if (!ba) return;
+    auto* H = neui_detail::behavior_find_kind_any(
+        *ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+    if (!H || H->result_attr.empty()) return;
+    neui_detail::ensure_attrs(wd.attrs).set_int(H->result_attr,
+                                                static_cast<int>(action));
+    if (_client_widget_api && _client_widget_api->onevent) {
+      neui_event_t ev{};
+      ev.type                = NEUI_EVENT_ATTR_CHANGED;
+      ev.data.attr.widget.id = wd.widget_id;
+      ev.data.attr.attr_key  = H->result_attr.c_str();
+      ev.data.attr.value     = static_cast<float>(action);
+      _client_widget_api->onevent(_token, &ev);
+    }
+    void* frame = find_parent_native_handle(widget_idx);
+    if (frame) platform_invalidate(frame);
+  }
+
   // ENTER / re-target / MOVE / LEAVE / DROP state machine shared with the
   // native hosts (hosts/shared/dnd_dispatch.h); only the hit-test walker
   // and the event-send plumbing above stay xpl-local.
@@ -821,7 +915,7 @@ namespace xpl_host
   static int section_band_h(const std::string& text, int height, const char* align)
   {
     if (text.empty() || neui_detail::section_align_is_none(align)) return 0;
-    int bh = static_cast<int>(neui_detail::SECTION_HEADER_H);
+    int bh = static_cast<int>(neui_detail::section_header_h());
     if (bh > height) bh = height;
     return bh;
   }
@@ -3043,8 +3137,13 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // ListItemsWidget (LISTBOX) and ComboBoxWidget (COMBOBOX)
 
-  static constexpr int LIST_ITEM_H       = 18;
-  static constexpr int COMBO_COLLAPSED_H = 22;   // height of the collapsed combo bar
+  // Row / bar heights scale with painted_ui_scale() (identity on desktop,
+  // enlarged on iOS so the scaled default font fits). Accessors rather than
+  // constexpr so paint + hit-test always read the same scaled value. An
+  // explicit client font/size attr doesn't change these defaults - they are
+  // the painted layout grid these widgets always use.
+  static int LIST_ITEM_H()       { return neui_detail::scaled_painted_metric(18); }
+  static int COMBO_COLLAPSED_H() { return neui_detail::scaled_painted_metric(22); }   // collapsed combo bar
   static constexpr int SCROLLBAR_W       = 10;   // total width: 1px separator + 9px track
 
   // Scrollbar thumb geometry, computed identically by paint() and on_mouse_event().
@@ -3069,13 +3168,13 @@ namespace xpl_host
 
   int ListItemsWidget::visible_rows() const
   {
-    return height / LIST_ITEM_H;
+    return height / LIST_ITEM_H();
   }
 
   // Shared rendering helper for any scrollable item list.
   // fx/fy/fw/fh define the total rect (including scrollbar column when shown).
   // full_vis: floor-visible rows - used only for scrollbar sizing; pass
-  //           (int_height / LIST_ITEM_H) for listbox, max_drop_visible() for overlay.
+  //           (int_height / LIST_ITEM_H()) for listbox, max_drop_visible() for overlay.
   // scroll_offset is read-only here; callers own the value.
   // hover_row UINT32_MAX = no row hover; otherwise the unselected row gets a
   // subtle shaded background to indicate the mouse position.
@@ -3097,7 +3196,7 @@ namespace xpl_host
     backend->fill_rect(ctx, fx, fy, content_w, fh, bg_color);
 
     // Ceiling division: draw a partial row at the bottom if it fits.
-    int max_visible = (int_h + LIST_ITEM_H - 1) / LIST_ITEM_H;
+    int max_visible = (int_h + LIST_ITEM_H() - 1) / LIST_ITEM_H();
     if (max_visible < 1) max_visible = 1;
 
     using neui_detail::ColorRole;
@@ -3110,18 +3209,18 @@ namespace xpl_host
     for (int i = 0; i < max_visible; ++i) {
       uint32_t item_idx = scroll_offset + static_cast<uint32_t>(i);
       if (item_idx >= n) break;
-      float row_y = fy + static_cast<float>(i * LIST_ITEM_H);
+      float row_y = fy + static_cast<float>(i * LIST_ITEM_H());
       bool sel  = (item_idx == selected_item);
       bool hov  = (item_idx == hover_row) && !sel;
       if (sel)
         backend->fill_rect(ctx, fx + 1.0f, row_y, content_w - 2.0f,
-                           static_cast<float>(LIST_ITEM_H), accent_col);
+                           static_cast<float>(LIST_ITEM_H()), accent_col);
       else if (hov)
         backend->fill_rect(ctx, fx + 1.0f, row_y, content_w - 2.0f,
-                           static_cast<float>(LIST_ITEM_H), hover_col);
+                           static_cast<float>(LIST_ITEM_H()), hover_col);
       if (backend->draw_text)
         backend->draw_text(ctx, fx + 4.0f, row_y, content_w - 8.0f,
-                           static_cast<float>(LIST_ITEM_H),
+                           static_cast<float>(LIST_ITEM_H()),
                            items[item_idx].text.c_str(), text_size,
                            sel ? selected_text : normal_text);
     }
@@ -3163,7 +3262,7 @@ namespace xpl_host
         static_cast<float>(x), static_cast<float>(y),
         static_cast<float>(width), static_cast<float>(height),
         items, selected_item, scroll_offset,
-        height / LIST_ITEM_H, height,
+        height / LIST_ITEM_H(), height,
         neui_detail::color(ColorRole::control_bg), border_color,
         ef.size,
         hovered ? hover_row : UINT32_MAX);
@@ -3274,7 +3373,7 @@ namespace xpl_host
                      && rel_x >= 0
                      && (!show_sb || rel_x < width - SCROLLBAR_W);
       if (in_content && n > 0) {
-        uint32_t row = scroll_offset + static_cast<uint32_t>(rel_y / LIST_ITEM_H);
+        uint32_t row = scroll_offset + static_cast<uint32_t>(rel_y / LIST_ITEM_H());
         if (row < n) new_hover = row;
       }
       if (new_hover != hover_row) {
@@ -3320,7 +3419,7 @@ namespace xpl_host
 
     int rel_y = event->data.mouse.y - abs_y;
     if (rel_y < 0) return true;
-    uint32_t clicked = scroll_offset + static_cast<uint32_t>(rel_y / LIST_ITEM_H);
+    uint32_t clicked = scroll_offset + static_cast<uint32_t>(rel_y / LIST_ITEM_H());
     if (clicked >= n) return true;
     if (clicked == selected_item) return true;
 
@@ -3358,7 +3457,7 @@ namespace xpl_host
 
   int ComboBoxWidget::collapsed_h() const
   {
-    return height > 0 ? height : COMBO_COLLAPSED_H;
+    return height > 0 ? height : COMBO_COLLAPSED_H();
   }
 
   int ComboBoxWidget::max_drop_visible() const
@@ -3400,7 +3499,7 @@ namespace xpl_host
     OverlayRect g;
     int mdv = std::max(1, max_drop_visible());
     g.w = static_cast<float>(drop_width(backend));
-    g.h = static_cast<float>(mdv * LIST_ITEM_H);
+    g.h = static_cast<float>(mdv * LIST_ITEM_H());
     g.x = static_cast<float>(abs_x);
 
     float below_y = static_cast<float>(abs_y + collapsed_h());
@@ -3518,7 +3617,7 @@ namespace xpl_host
     neui_detail::push_widget_font(backend, ctx, ef);
     paint_scrollable_list(backend, ctx, ox, oy, ow, oh,
         items, highlight, scroll_offset,
-        mdv, mdv * LIST_ITEM_H,
+        mdv, mdv * LIST_ITEM_H(),
         neui_detail::color(neui_detail::ColorRole::control_bg_alt),
         neui_detail::color(neui_detail::ColorRole::border),
         ef.size);
@@ -3605,11 +3704,13 @@ namespace xpl_host
 
   // ---- Popup menu overlay --------------------------------------------------
 
-  // Layout constants for the popup menu overlay.
-  static constexpr int POPUP_ITEM_H   = 22;
+  // Layout constants for the popup menu overlay. Item height + label font
+  // scale with painted_ui_scale() so the menu text matches the rest of the
+  // (scaled) painted UI on iOS; identity on desktop.
+  static int POPUP_ITEM_H()  { return neui_detail::scaled_painted_metric(22); }
+  static int POPUP_FONT_PX() { return neui_detail::scaled_painted_metric(13); }
   static constexpr int POPUP_PAD_X    = 12;
   static constexpr int POPUP_PAD_Y    = 4;
-  static constexpr int POPUP_FONT_PX  = 13;
   static constexpr int POPUP_SEP_H    = 7;
   static constexpr int POPUP_MIN_W    = 140;
 
@@ -3620,7 +3721,7 @@ namespace xpl_host
 
   static int popup_item_height(const std::string& s)
   {
-    return popup_item_is_separator(s) ? POPUP_SEP_H : POPUP_ITEM_H;
+    return popup_item_is_separator(s) ? POPUP_SEP_H : POPUP_ITEM_H();
   }
 
   static int popup_total_height(const std::vector<std::string>& items)
@@ -3638,7 +3739,7 @@ namespace xpl_host
     if (backend && backend->measure_text) {
       for (auto& s : items) {
         if (popup_item_is_separator(s)) continue;
-        float w = backend->measure_text(ctx, s.c_str(), -1, (float)POPUP_FONT_PX);
+        float w = backend->measure_text(ctx, s.c_str(), -1, (float)POPUP_FONT_PX());
         if (w > maxw) maxw = w;
       }
     }
@@ -3810,7 +3911,7 @@ namespace xpl_host
       _backend->draw_text(ctx,
         fx + (float)POPUP_PAD_X, fy + (float)run_y,
         (float)w - (float)POPUP_PAD_X * 2.0f, (float)ih,
-        s.c_str(), (float)POPUP_FONT_PX,
+        s.c_str(), (float)POPUP_FONT_PX(),
         hovered ? neui_detail::color(ColorRole::accent_text)
                 : neui_detail::color(ColorRole::text_primary));
       run_y += ih;
@@ -4050,7 +4151,7 @@ namespace xpl_host
       int run = POPUP_PAD_Y;
       for (auto& r : col.rows) {
         r.y = run;
-        r.h = r.separator ? POPUP_SEP_H : POPUP_ITEM_H;
+        r.h = r.separator ? POPUP_SEP_H : POPUP_ITEM_H();
         run += r.h;
       }
       col.w = w;
@@ -4090,8 +4191,22 @@ namespace xpl_host
 
   int Session::frame_top_inset(uint32_t frame_index)
   {
-    if (!platform_menubar_in_frame()) return 0;
-    return frame_menubar(frame_index) ? MENUBAR_BAND_H : 0;
+    bool has_mb = frame_menubar(frame_index) != nullptr;
+    // In-frame band painter platforms (Linux/X11) reserve the band height for
+    // the host-drawn cascading menubar. Win32 / macOS / null return false here,
+    // so this contributes 0.
+    int inset = 0;
+    if (platform_menubar_in_frame())
+      inset = has_mb ? MENUBAR_BAND_H : 0;
+    // Additive per-platform extra inset. iOS reserves the status-bar/notch safe
+    // area (plus a hamburger band when the frame has a menubar) WITHOUT enabling
+    // the Linux band painter - paint_menubar stays gated on
+    // platform_menubar_in_frame() (false on iOS). 0 on every desktop platform,
+    // so Linux/Win32/macOS/null behaviour is unchanged.
+    void* nh = _widgets.exists(frame_index) ? _widgets[frame_index].native_handle
+                                            : nullptr;
+    inset += platform_frame_extra_top_inset(nh, has_mb);
+    return inset;
   }
 
   // The usable content area of a widget, in the widget's own coordinate space
@@ -4536,6 +4651,11 @@ namespace xpl_host
         if (it == mbp->menu_items.end()) continue;
         const auto& mi = it->second;
         if (mi.is_separator || mi.shortcut_key == NEUI_KEY_NONE) continue;
+        // A disabled item's accelerator must not fire (matches the menu-item
+        // gray-out and the native try_menubar_accel_ios `enabled` guard). On iOS
+        // the system menu bar now routes shortcut picks through here, so a
+        // disabled UIKeyCommand element would otherwise still dispatch.
+        if (!mi.enabled) continue;
         if (mi.shortcut_key == keycode && (mi.shortcut_mods & mask) == mods) {
           dispatch_menu_event(mi.cmd_id);
           return true;  // accelerator fired (consumed regardless of handler)
@@ -4866,7 +4986,7 @@ namespace xpl_host
       // Check scrollbar column first.
       if (lx >= ox + ow - static_cast<float>(SCROLLBAR_W) &&
           n > static_cast<uint32_t>(full_vis)) {
-        SbGeom   sb    = compute_sb(full_vis * LIST_ITEM_H, full_vis, n, cb->scroll_offset);
+        SbGeom   sb    = compute_sb(full_vis * LIST_ITEM_H(), full_vis, n, cb->scroll_offset);
         uint32_t range = n - static_cast<uint32_t>(full_vis);
         float    local_y = ly - oy - 1.0f;
 
@@ -4893,7 +5013,7 @@ namespace xpl_host
       int rel_y = static_cast<int>(ly - oy);
       uint32_t vis_scroll = cb->scroll_offset;
       if (vis_scroll >= n) vis_scroll = n - 1;
-      uint32_t clicked = vis_scroll + static_cast<uint32_t>(rel_y / LIST_ITEM_H);
+      uint32_t clicked = vis_scroll + static_cast<uint32_t>(rel_y / LIST_ITEM_H());
       if (clicked < n && clicked != cb->selected_item) {
         cb->selected_item = clicked;
         cb->text = cb->items[clicked].text;
@@ -4948,7 +5068,7 @@ namespace xpl_host
 
     int      full_vis = std::max(1, cb->max_drop_visible());
     uint32_t n        = static_cast<uint32_t>(cb->items.size());
-    SbGeom   sb       = compute_sb(full_vis * LIST_ITEM_H, full_vis, n,
+    SbGeom   sb       = compute_sb(full_vis * LIST_ITEM_H(), full_vis, n,
                                    _combo_sb_drag_start_off);
     float movable = sb.track_h - sb.thumb_h;
     if (movable > 0.0f) {
@@ -4989,7 +5109,7 @@ namespace xpl_host
 
     int rel_y = static_cast<int>(ly - oy);
     if (rel_y < 0) return true;
-    uint32_t row = cb->scroll_offset + static_cast<uint32_t>(rel_y / LIST_ITEM_H);
+    uint32_t row = cb->scroll_offset + static_cast<uint32_t>(rel_y / LIST_ITEM_H());
     if (row >= n) return true;
 
     if (cb->hover_item != row) {
@@ -5003,7 +5123,9 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // MultilineWidget - text editor with explicit newlines and vertical scroll
 
-  static constexpr int ML_LINE_H  = 18;
+  // Visual line height scales with painted_ui_scale() so the (scaled) default
+  // font fits; identity on desktop. Accessor so paint + hit-test agree.
+  static int ML_LINE_H()  { return neui_detail::scaled_painted_metric(18); }
   static constexpr int ML_PAD_X   = 4;
   static constexpr int ML_PAD_Y   = 2;
   static constexpr float ML_FONT_SIZE = 12.0f;
@@ -5060,7 +5182,7 @@ namespace xpl_host
   static int ml_visible_lines(int widget_h)
   {
     int avail = widget_h - 2 * ML_PAD_Y;
-    int n = avail / ML_LINE_H;
+    int n = avail / ML_LINE_H();
     return n > 0 ? n : 1;
   }
 
@@ -5113,7 +5235,7 @@ namespace xpl_host
     int sel_hi = neui_detail::te_sel_hi(cursor_pos, sel_anchor);
     bool has_sel = neui_detail::te_has_selection(cursor_pos, sel_anchor);
 
-    int max_visible = (static_cast<int>(fh) - 2 * ML_PAD_Y + ML_LINE_H - 1) / ML_LINE_H;
+    int max_visible = (static_cast<int>(fh) - 2 * ML_PAD_Y + ML_LINE_H() - 1) / ML_LINE_H();
     if (max_visible < 1) max_visible = 1;
 
     const float base_x  = fx + static_cast<float>(ML_PAD_X);
@@ -5145,8 +5267,8 @@ namespace xpl_host
       int le = ml_line_end(text, starts, line);
       int ve = vis_end_of(ls, le);   // last char we shape/draw on this line
 
-      float row_y   = fy + static_cast<float>(ML_PAD_Y + i * ML_LINE_H);
-      float row_h   = static_cast<float>(ML_LINE_H);
+      float row_y   = fy + static_cast<float>(ML_PAD_Y + i * ML_LINE_H());
+      float row_h   = static_cast<float>(ML_LINE_H());
 
       // Selection highlight for this line. Measure only within the visible
       // span; if the selection runs off the right edge fill to that edge
@@ -5194,7 +5316,7 @@ namespace xpl_host
                                             cursor_pos - ls, ef.size);
         float cx   = fx + static_cast<float>(ML_PAD_X) + col;
         float cy   = fy + static_cast<float>(ML_PAD_Y
-                     + (line - static_cast<int>(scroll_offset)) * ML_LINE_H);
+                     + (line - static_cast<int>(scroll_offset)) * ML_LINE_H());
         if (composing && !composition_text.empty() && backend->draw_text) {
           // Draw composition string at the caret position with per-clause
           // underlines. Suppress the regular caret while composing - the
@@ -5203,15 +5325,15 @@ namespace xpl_host
                                                static_cast<int>(composition_text.size()),
                                                ef.size);
           backend->draw_text(ctx, cx, cy, comp_w,
-                             static_cast<float>(ML_LINE_H),
+                             static_cast<float>(ML_LINE_H()),
                              composition_text.c_str(),
                              ef.size,
                              neui_detail::color(ColorRole::text_primary));
           paint_composition_underline(backend, ctx, cx,
-                                       cy + static_cast<float>(ML_LINE_H) - 2.0f,
+                                       cy + static_cast<float>(ML_LINE_H()) - 2.0f,
                                        composition_text, composition_attrs, ef.size);
         } else {
-          backend->fill_rect(ctx, cx, cy, 1.5f, static_cast<float>(ML_LINE_H),
+          backend->fill_rect(ctx, cx, cy, 1.5f, static_cast<float>(ML_LINE_H()),
                              neui_detail::color(ColorRole::text_primary));
         }
       }
@@ -5710,8 +5832,8 @@ namespace xpl_host
     neui_detail::pop_widget_font(backend, ctx, ef);
     if (out_x) *out_x = static_cast<float>(ML_PAD_X) + col;
     if (out_y) *out_y = static_cast<float>(ML_PAD_Y
-                          + (line - static_cast<int>(scroll_offset)) * ML_LINE_H);
-    if (out_h) *out_h = static_cast<float>(ML_LINE_H);
+                          + (line - static_cast<int>(scroll_offset)) * ML_LINE_H());
+    if (out_h) *out_h = static_cast<float>(ML_LINE_H());
     return true;
   }
 
@@ -5888,7 +6010,7 @@ namespace xpl_host
     if (is_down) history.reset_action();
 
     int rel_y = event->data.mouse.y - abs_y - ML_PAD_Y;
-    int row   = rel_y / ML_LINE_H;
+    int row   = rel_y / ML_LINE_H();
     if (row < 0) row = 0;
     int line = static_cast<int>(scroll_offset) + row;
     if (line >= static_cast<int>(n_lines))
@@ -5910,7 +6032,9 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // TreeviewWidget - hierarchical list with expand/collapse
 
-  static constexpr int TREE_ROW_H      = 20;
+  // Row height scales with painted_ui_scale() so the (scaled) default font
+  // fits; identity on desktop. Accessor so paint + hit-test agree.
+  static int TREE_ROW_H()      { return neui_detail::scaled_painted_metric(20); }
   static constexpr int TREE_INDENT     = 16;    // logical pixels per depth level
   static constexpr int TREE_CHEVRON_W  = 14;    // clickable disclosure area width
   static constexpr int TREE_LEFT_PAD   = 4;     // gutter before first level
@@ -5986,7 +6110,7 @@ namespace xpl_host
     float fw = static_cast<float>(width);
     float fh = static_cast<float>(height);
 
-    int full_vis = std::max(1, height / TREE_ROW_H);
+    int full_vis = std::max(1, height / TREE_ROW_H());
     bool show_sb = n > static_cast<uint32_t>(full_vis);
     float content_w = show_sb ? fw - static_cast<float>(SCROLLBAR_W) : fw;
 
@@ -6002,7 +6126,7 @@ namespace xpl_host
                         neui_detail::color(ColorRole::control_bg));
 
     // Visible rows (ceiling division so a partial trailing row is drawn).
-    int max_visible = (height + TREE_ROW_H - 1) / TREE_ROW_H;
+    int max_visible = (height + TREE_ROW_H() - 1) / TREE_ROW_H();
     if (max_visible < 1) max_visible = 1;
 
     auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
@@ -6016,8 +6140,8 @@ namespace xpl_host
       if (it == tree_items.end()) continue;
       const TreeItem& ti = it->second;
 
-      float row_y = fy + static_cast<float>(i * TREE_ROW_H);
-      float rowh  = static_cast<float>(TREE_ROW_H);
+      float row_y = fy + static_cast<float>(i * TREE_ROW_H());
+      float rowh  = static_cast<float>(TREE_ROW_H());
       float indent_px = static_cast<float>(TREE_LEFT_PAD + vr.depth * TREE_INDENT);
 
       bool sel = (vr.id == selected_tree_item);
@@ -6143,7 +6267,7 @@ namespace xpl_host
     auto rows = flatten_visible();
     if (rows.empty()) return false;
 
-    int full_vis = std::max(1, height / TREE_ROW_H);
+    int full_vis = std::max(1, height / TREE_ROW_H());
     int cur      = find_row(rows, selected_tree_item);
     uint32_t prev_sel = selected_tree_item;
 
@@ -6252,7 +6376,7 @@ namespace xpl_host
   {
     auto rows    = flatten_visible();
     uint32_t n   = static_cast<uint32_t>(rows.size());
-    int full_vis = std::max(1, height / TREE_ROW_H);
+    int full_vis = std::max(1, height / TREE_ROW_H());
     bool show_sb = n > static_cast<uint32_t>(full_vis);
 
     // ---- wheel ---------------------------------------------------------
@@ -6307,7 +6431,7 @@ namespace xpl_host
                      && rel_x >= 0
                      && (!show_sb || rel_x < width - SCROLLBAR_W);
       if (in_content && n > 0) {
-        uint32_t row = scroll_offset + static_cast<uint32_t>(rel_y / TREE_ROW_H);
+        uint32_t row = scroll_offset + static_cast<uint32_t>(rel_y / TREE_ROW_H());
         if (row < n) new_hover = row;
       }
       if (new_hover != hover_row) {
@@ -6346,7 +6470,7 @@ namespace xpl_host
     if (event->type == NEUI_EVENT_MOUSE_BUTTON_DBLCLICK) {
       int rel_y = event->data.mouse.y - abs_y;
       if (rel_y < 0) return false;
-      uint32_t row = scroll_offset + static_cast<uint32_t>(rel_y / TREE_ROW_H);
+      uint32_t row = scroll_offset + static_cast<uint32_t>(rel_y / TREE_ROW_H());
       if (row >= n) return false;
       // Disabled rows refuse selection and activation entirely.
       if (!tv_item_enabled(*this, rows[row].id)) return true;
@@ -6372,7 +6496,7 @@ namespace xpl_host
     if (event->type != NEUI_EVENT_MOUSE_BUTTON_DOWN) return false;
     int rel_y = event->data.mouse.y - abs_y;
     if (rel_y < 0) return true;
-    uint32_t row = scroll_offset + static_cast<uint32_t>(rel_y / TREE_ROW_H);
+    uint32_t row = scroll_offset + static_cast<uint32_t>(rel_y / TREE_ROW_H());
     if (row >= n) return true;
 
     const VisRow& vr = rows[row];

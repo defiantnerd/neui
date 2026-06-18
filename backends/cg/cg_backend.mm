@@ -12,7 +12,16 @@
 // has Y increasing downward, matching the renderer.h convention. No explicit
 // Y-flip in begin_frame is needed.
 
+// The CG backend serves both macOS (AppKit) and iOS (UIKit). CoreGraphics +
+// CoreText are identical on both; only the font-weight constant table, the
+// native-handle view type, and the screen-scale query differ. Those three
+// spots are wrapped in TARGET_OS_IPHONE conditionals below.
+#import <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#import <UIKit/UIKit.h>
+#else
 #import <AppKit/AppKit.h>
+#endif
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreText/CoreText.h>
 
@@ -103,10 +112,24 @@ namespace neui_cg_backend
     return cache;
   }
 
-  // CSS-style weight (100..900, 0 = unset) -> AppKit NSFontWeight scale.
-  // Mirror of the d2d backend's normalise_weight mapping.
+  // CSS-style weight (100..900, 0 = unset) -> platform font-weight scale.
+  // Mirror of the d2d backend's normalise_weight mapping. AppKit's
+  // NSFontWeight* and UIKit's UIFontWeight* constants are both CGFloat scales
+  // over the same range, so only the constant names differ between platforms.
   static CGFloat css_weight_to_nsfontweight(int weight)
   {
+#if TARGET_OS_IPHONE
+    if (weight <= 0)  return UIFontWeightRegular;
+    if (weight < 150) return UIFontWeightUltraLight; // 100
+    if (weight < 250) return UIFontWeightThin;       // 200
+    if (weight < 350) return UIFontWeightLight;      // 300
+    if (weight < 450) return UIFontWeightRegular;    // 400
+    if (weight < 550) return UIFontWeightMedium;     // 500
+    if (weight < 650) return UIFontWeightSemibold;   // 600
+    if (weight < 750) return UIFontWeightBold;       // 700
+    if (weight < 850) return UIFontWeightHeavy;      // 800
+    return UIFontWeightBlack;                         // 900
+#else
     if (weight <= 0)  return NSFontWeightRegular;
     if (weight < 150) return NSFontWeightUltraLight; // 100
     if (weight < 250) return NSFontWeightThin;       // 200
@@ -117,6 +140,7 @@ namespace neui_cg_backend
     if (weight < 750) return NSFontWeightBold;       // 700
     if (weight < 850) return NSFontWeightHeavy;      // 800
     return NSFontWeightBlack;                         // 900
+#endif
   }
 
   // Resolve the active font (top of the ctx's font stack, or system default
@@ -144,6 +168,26 @@ namespace neui_cg_backend
     if (it != cache.end()) return it->second;
 
     CGFloat ns_weight = css_weight_to_nsfontweight(weight);
+#if TARGET_OS_IPHONE
+    UIFont* font = nil;
+    if (family.empty()) {
+      // SF Pro on modern iOS, at the requested weight.
+      font = [UIFont systemFontOfSize:static_cast<CGFloat>(font_size)
+                               weight:ns_weight];
+    } else {
+      NSString* fam = [NSString stringWithUTF8String:family.c_str()];
+      if (fam) {
+        UIFontDescriptor* desc = [UIFontDescriptor fontDescriptorWithFontAttributes:@{
+          UIFontDescriptorFamilyAttribute : fam,
+          UIFontDescriptorTraitsAttribute : @{ UIFontWeightTrait : @(ns_weight) },
+        }];
+        font = [UIFont fontWithDescriptor:desc size:static_cast<CGFloat>(font_size)];
+      }
+      if (!font)  // unknown family -> graceful fallback to the system font
+        font = [UIFont systemFontOfSize:static_cast<CGFloat>(font_size)
+                                 weight:ns_weight];
+    }
+#else
     NSFont* font = nil;
     if (family.empty()) {
       // SF Pro on modern macOS, at the requested weight.
@@ -162,7 +206,8 @@ namespace neui_cg_backend
         font = [NSFont systemFontOfSize:static_cast<CGFloat>(font_size)
                                   weight:ns_weight];
     }
-    // NSFont is toll-free bridged with CTFont; retain a +1 ref for the cache.
+#endif
+    // NSFont / UIFont is toll-free bridged with CTFont; retain a +1 ref for the cache.
     CTFontRef ctf = font ? (CTFontRef)CFBridgingRetain(font) : nullptr;
     if (ctf) cache[key] = ctf;
     return ctf;
@@ -231,11 +276,20 @@ namespace neui_cg_backend
     st->width  = static_cast<float>(width);
     st->height = static_cast<float>(height);
     if (native_handle) {
+#if TARGET_OS_IPHONE
+      UIView* view = (__bridge UIView*)native_handle;
+      // The view may not yet be in a window when create_context fires from
+      // platform_create_appwindow - fall back to the main screen if so.
+      CGFloat scale = (view.window && view.window.screen)
+                        ? view.window.screen.scale
+                        : UIScreen.mainScreen.scale;
+#else
       NSView* view = (__bridge NSView*)native_handle;
       // The view may not yet be in a window when create_context fires from
       // platform_create_appwindow - fall back to mainScreen if so.
       CGFloat scale = view.window ? view.window.backingScaleFactor
                                    : NSScreen.mainScreen.backingScaleFactor;
+#endif
       if (scale <= 0) scale = 1.0;
       st->backing_scale = static_cast<float>(scale);
       st->dpi           = static_cast<uint32_t>(96.0f * st->backing_scale + 0.5f);

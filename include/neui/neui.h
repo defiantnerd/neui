@@ -27,6 +27,7 @@
 #include "d/scroll.h"
 #include "d/tabs.h"
 #include "d/notify.h"
+#include "d/metrics.h"
 
 #ifdef __cplusplus
 extern "C" {

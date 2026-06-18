@@ -6,6 +6,7 @@
 
 #include "host.h"
 #include "../shared/dnd_dispatch.h"
+#include "../shared/metrics.h"
 
 #include <cstring>
 
@@ -282,6 +283,7 @@ namespace macos_host
     if (!strcmp(iface, NEUI_API_SCROLL))    return &scroll_api;
     if (!strcmp(iface, NEUI_API_TABS))      return &tabs_api;
     if (!strcmp(iface, NEUI_API_NOTIFY))    return &notify_api;
+    if (!strcmp(iface, NEUI_API_METRICS))   return &neui_detail::k_metrics_api;
     return nullptr;
   }
 

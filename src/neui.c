@@ -53,6 +53,9 @@ extern void neui_register_win32host(void);
 #ifdef NEUI_HAS_MACOSHOST
 extern void neui_register_macoshost(void);
 #endif
+#ifdef NEUI_HAS_IOSHOST
+extern void neui_register_ioshost(void);
+#endif
 #ifdef NEUI_HAS_XPLHOST
 extern void neui_register_xplhost(void);
 #endif
@@ -66,6 +69,9 @@ void neui_init(void)
 #endif
 #ifdef NEUI_HAS_MACOSHOST
   neui_register_macoshost();
+#endif
+#ifdef NEUI_HAS_IOSHOST
+  neui_register_ioshost();
 #endif
 #ifdef NEUI_HAS_XPLHOST
   neui_register_xplhost();

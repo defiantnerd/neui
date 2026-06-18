@@ -258,6 +258,25 @@ namespace xpl_host
   // in-frame platforms reserve band space.
   bool platform_menubar_in_frame();
 
+  // Additive per-platform top inset (logical px), ADDED to whatever the
+  // in-frame band painter reserves. This is the seam for platforms that must
+  // keep content out from under system chrome WITHOUT drawing the Linux-style
+  // cascading-dropdown band (so platform_menubar_in_frame() stays false there).
+  //
+  //   iOS: the status bar / notch safe area (view.safeAreaInsets.top) plus, when
+  //        the frame carries a MENUBAR child, a band tall enough for the native
+  //        hamburger UIButton that opens the menu as a UIMenu popover. The
+  //        hamburger is a real subview (not painted by paint_menubar, which is
+  //        gated off on iOS), so only the inset reservation is shared.
+  //   Win32 / macOS / Linux / null: 0 (their menu chrome is native or already
+  //        handled by the in-frame band). Returning 0 keeps frame_top_inset
+  //        byte-for-byte unchanged on those platforms.
+  //
+  // frame_native_handle is the frame's native window/view handle (may be null
+  // before the window is created); has_menubar is true when the frame has a
+  // visible MENUBAR child.
+  int  platform_frame_extra_top_inset(void* frame_native_handle, bool has_menubar);
+
   // Create a new top-level menu bar handle.
   // menubar_widget_id is the encoded (session_id<<16 | widget_index) used by
   // the macOS implementation to route NSMenuItem activations back to the

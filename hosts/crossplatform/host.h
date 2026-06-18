@@ -151,10 +151,22 @@ namespace xpl_host
     // GRID widgets expose their scroll model so the platform layer can drive
     // pixel-precise smooth scrolling / rubber-band (macOS). nullptr otherwise.
     virtual neui_detail::GridModel* grid_model_ptr() { return nullptr; }
+    // The widget's attached behavior asset, if any (CUSTOMDRAW). Lets the
+    // DnD drag-source resolution (iOS) check for a DRAG_SOURCE handler without
+    // downcasting. asset_none for every other widget type.
+    virtual neui_asset_t behavior_asset_id() const { return asset_none; }
     // Scrolling SECTION exposes its scroll state so the paint walk +
     // hit-tester can offset + clip child positioning. nullptr otherwise
     // (non-scrolling SECTION, or any non-SECTION widget).
     virtual neui_detail::SectionScrollState* scroll_state_ptr() { return nullptr; }
+
+    // True while this widget is mid scrollbar-thumb drag (a BUTTON_DOWN landed
+    // on the thumb and the drag rides the MOUSE_MOVE path). Default false;
+    // widgets with an internal scrollbar (LISTBOX / TREEVIEW / GRID / scrolling
+    // SECTION) override to expose their `sb_dragging` flag. Used by the iOS
+    // touch-pan recognizer to stay inert when a touch is already driving the
+    // thumb directly - so a thumb drag is not also turned into a kinetic pan.
+    virtual bool scrollbar_dragging() const { return false; }
 
     // Fire NEUI_EVENT_SCROLL_CHANGED if the widget's scroll position
     // changed since the last notification. SECTION overrides; other
@@ -287,6 +299,10 @@ namespace xpl_host
     neui_detail::SectionScrollState* scroll_state_ptr() override {
       return scroll_state.get();
     }
+    bool scrollbar_dragging() const override {
+      return scroll_state &&
+             (scroll_state->vert_drag.active || scroll_state->horz_drag.active);
+    }
     const neui_detail::SectionLayout* section_layout_ptr() const override {
       return &last_layout;
     }
@@ -366,6 +382,7 @@ namespace xpl_host
     bool     sb_dragging          = false;
     int      sb_drag_start_y      = 0;
     uint32_t sb_drag_start_offset = 0;
+    bool scrollbar_dragging() const override { return sb_dragging; }
 
     // Cached line-start byte offsets (the result of ml_line_starts(text)),
     // consumed by paint() so it doesn't rescan the whole buffer every frame.
@@ -523,6 +540,7 @@ namespace xpl_host
     bool     sb_dragging     = false;
     int      sb_drag_start_y = 0;
     uint32_t sb_drag_start_offset = 0;
+    bool scrollbar_dragging() const override { return sb_dragging; }
 
     void paint(neui_render_backend_t*, neui_render_ctx_t, bool is_focused) override;
     bool on_keydown(uint32_t keycode, uint32_t modifiers) override;
@@ -603,6 +621,7 @@ namespace xpl_host
     bool     sb_dragging          = false;
     int      sb_drag_start_y      = 0;
     uint32_t sb_drag_start_offset = 0;
+    bool scrollbar_dragging() const override { return sb_dragging; }
 
     // Flattened representation of one visible row.
     struct VisRow { uint32_t id; int depth; bool has_children; };
@@ -650,6 +669,7 @@ namespace xpl_host
     // turning the CUSTOMDRAW into a fully interactive painted control.
     // See <neui/d/behavior.h>.
     neui_asset_t behavior_asset = asset_none;
+    neui_asset_t behavior_asset_id() const override { return behavior_asset; }
     // Lazy per-widget drag state. Allocated on first MOUSE_BUTTON_DOWN
     // that lands on a drag-kind handler.
     std::unique_ptr<neui_detail::BehaviorRuntime> behavior_rt;
@@ -687,6 +707,9 @@ namespace xpl_host
     bool on_mouse_event(neui_event_t* event) override;
     void on_focus_change(bool gained) override;
     neui_detail::GridModel* grid_model_ptr() override { return &model; }
+    bool scrollbar_dragging() const override {
+      return model.vert_drag.active || model.horz_drag.active;
+    }
   };
 
   // MENUBAR - native menu bar handle + all item bookkeeping
@@ -1112,6 +1135,29 @@ namespace xpl_host
                          const char* const* formats, uint32_t count,
                          uint32_t suggested, uint32_t buttonmap,
                          neui_data_item_t data_item);
+
+    // iOS drag-source resolution. iOS drags are gesture-driven (a
+    // UIDragInteraction delegate responds to the system long-press-drag),
+    // not initiated programmatically via begin_drag - so the interaction
+    // hit-tests the widget under the gesture and asks here whether it is a
+    // drag source. A widget is a drag source when it carries a DRAG_SOURCE
+    // behavior asset; this resolves that handler's DataItem (from the
+    // drag_data_key attr) + allowed_actions. Returns the deepest such widget
+    // under (frame_local_x, frame_local_y), or 0 if none. The resolved
+    // DataItem id lives in this Session's _data_items store (transient -
+    // the caller copies its bytes into an NSItemProvider, then it may be
+    // released). `out_*` are only written when a drag source is found.
+    uint32_t dnd_resolve_drag_source(uint32_t frame_widget_idx,
+                                      int frame_local_x, int frame_local_y,
+                                      neui_detail::DataItem* out_item,
+                                      uint32_t& out_allowed_actions);
+
+    // Write the negotiated DnD action back to a DRAG_SOURCE behavior's
+    // result_attr (+ fire ATTR_CHANGED + invalidate), mirroring the desktop
+    // DRAG_SOURCE result feedback. Called from the UIDragInteraction
+    // session-did-end delegate once iOS reports the drop operation. No-op if
+    // the widget has no DRAG_SOURCE handler or no result_attr configured.
+    void dnd_report_drag_result(uint32_t widget_idx, uint32_t action);
 
     // Optional menu-item validation callback. Polled at WM_INITMENUPOPUP.
     neui_menu_client_t*             _menu_client               = nullptr;
