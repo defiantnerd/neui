@@ -2,7 +2,8 @@
 
 Running list of open work. Items are terse; design rationale lives in
 `CLAUDE.md` or in `plans/` files. Shipped work is tracked in git, not
-here.
+here. Accepted behavioral quirks that are *not* work items live in
+`known_issues.md`.
 
 ## Host parity (win32 ↔ macOS)
 

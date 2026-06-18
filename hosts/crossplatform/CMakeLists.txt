@@ -19,6 +19,20 @@ if(WIN32)
   # windowsapp.lib supplies RoGetActivationFactory / RoOriginateLanguageException
   # required by the C++/WinRT projection used in theme_provider_win32.h.
   target_link_libraries(neui-xplhost PRIVATE neui-backend-d2d windowsapp)
+elseif(NEUI_IOS)
+  # iOS uses the same shared CoreGraphics backend as macOS, but the UIKit
+  # platform layer instead of the AppKit one. This branch MUST come before the
+  # generic APPLE branch since iOS also matches APPLE.
+  target_sources(neui-xplhost PRIVATE platform_ios.mm)
+  set_source_files_properties(platform_ios.mm PROPERTIES
+    COMPILE_FLAGS "-fobjc-arc"
+  )
+  target_link_libraries(neui-xplhost PRIVATE neui-backend-cg
+    "-framework UIKit"
+    "-framework Foundation"
+    "-framework CoreGraphics"
+    "-framework QuartzCore"
+  )
 elseif(APPLE)
   target_sources(neui-xplhost PRIVATE platform_macos.mm)
   set_source_files_properties(platform_macos.mm PROPERTIES

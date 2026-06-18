@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.15)
 
-# CoreGraphics rendering backend for the crossplatform host on macOS.
-# Mirrors backends/d2d on Windows and backends/null elsewhere.
+# CoreGraphics rendering backend for the crossplatform host on macOS + iOS.
+# Mirrors backends/d2d on Windows and backends/null elsewhere. The CG + CoreText
+# draw code is shared; only the UI framework differs (AppKit on macOS, UIKit on
+# iOS) - cg_backend.mm picks the import via TARGET_OS_IPHONE.
 if(NOT APPLE)
   return()
 endif()
@@ -17,8 +19,15 @@ target_include_directories(neui-backend-cg
   PUBLIC  ${PROJECT_SOURCE_DIR}/include
 )
 
+# AppKit only exists on macOS; on iOS the UI framework is UIKit.
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  set(NEUI_CG_UI_FRAMEWORK "-framework UIKit")
+else()
+  set(NEUI_CG_UI_FRAMEWORK "-framework AppKit")
+endif()
+
 target_link_libraries(neui-backend-cg PRIVATE
-  "-framework AppKit"
+  ${NEUI_CG_UI_FRAMEWORK}
   "-framework CoreGraphics"
   "-framework CoreText"
   "-framework ImageIO"

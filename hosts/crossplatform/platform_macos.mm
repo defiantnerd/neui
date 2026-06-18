@@ -1569,6 +1569,7 @@ namespace xpl_host
   // Session::dispatch_menu_event.
 
   bool platform_menubar_in_frame() { return false; }   // macOS uses the global NSMenu
+  int  platform_frame_extra_top_inset(void* /*nh*/, bool /*has_menubar*/) { return 0; }
 
   void* platform_menubar_create(uint32_t menubar_widget_id)
   {

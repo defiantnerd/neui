@@ -16,7 +16,18 @@ endif()
 option(NEUI_BUILD_EXAMPLES "Build the neui example programs" ${NEUI_IS_TOP_LEVEL})
 option(NEUI_BUILD_TESTS    "Build the neui unit tests"       ${NEUI_IS_TOP_LEVEL})
 
-# Objective-C++ is needed for the macOS host platform layer (.mm files).
+# iOS is an APPLE platform too, so it must be detected distinctly from macOS:
+# the CoreGraphics backend is shared (gated on APPLE), but the AppKit macOS
+# host must NOT be built for iOS, and the UIKit iOS host is built only here.
+# CMAKE_SYSTEM_NAME is "iOS" when configuring with -DCMAKE_SYSTEM_NAME=iOS
+# (CMake's built-in iOS toolchain support).
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  set(NEUI_IOS ON)
+else()
+  set(NEUI_IOS OFF)
+endif()
+
+# Objective-C++ is needed for the macOS / iOS host platform layers (.mm files).
 if(APPLE)
   enable_language(OBJCXX)
 endif()
@@ -58,9 +69,17 @@ if(WIN32)
   add_subdirectory("hosts/win32")
   add_subdirectory("backends/d2d")
 endif()
+# CoreGraphics backend covers both macOS and iOS.
 if(APPLE)
   add_subdirectory("backends/cg")
+endif()
+# Native AppKit host - macOS only (NOT iOS, which uses the UIKit host below).
+if(APPLE AND NOT NEUI_IOS)
   add_subdirectory("hosts/macos")
+endif()
+# Native UIKit host - iOS only.
+if(NEUI_IOS)
+  add_subdirectory("hosts/ios")
 endif()
 if(UNIX AND NOT APPLE)
   add_subdirectory("backends/cairo")
@@ -85,8 +104,11 @@ target_compile_definitions(neui PRIVATE NEUI_HAS_XPLHOST)
 if(WIN32)
   target_compile_definitions(neui PRIVATE NEUI_HAS_WIN32HOST)
 endif()
-if(APPLE)
+if(APPLE AND NOT NEUI_IOS)
   target_compile_definitions(neui PRIVATE NEUI_HAS_MACOSHOST)
+endif()
+if(NEUI_IOS)
+  target_compile_definitions(neui PRIVATE NEUI_HAS_IOSHOST)
 endif()
 
 # provide public headers
@@ -103,7 +125,10 @@ set_target_properties(neui PROPERTIES
 
 # Example programs. Defaults ON when neui is the top-level project, OFF as a
 # subproject; override with -DNEUI_BUILD_EXAMPLES=ON/OFF (option defined above).
-if(NEUI_BUILD_EXAMPLES)
+# The desktop examples are plain executables with no app bundle / Info.plist /
+# scene manifest, so they cannot link or run on iOS - gate them off there.
+# A dedicated iOS example app target is a later milestone.
+if(NEUI_BUILD_EXAMPLES AND NOT NEUI_IOS)
 
 # Example program
 # On MSVC we provide the application manifest via an .rc file that
@@ -356,3 +381,72 @@ if(APPLE)
 endif()
 
 endif() # NEUI_BUILD_EXAMPLES
+
+# Minimal iOS example app (XPL host). The desktop examples above are plain
+# executables that can't bundle/launch on iOS, so iOS gets its own bundled
+# target: a UIApplicationMain app whose SceneDelegate builds a tiny neui UI
+# (SECTION + LABEL/BUTTON/INPUTBOX/CHECKBOX/SLIDER) after the scene connects.
+# Pinned to the crossplatform host (the native iOS host is still a stub).
+#
+# To turn the built .app into something runnable in the simulator, build with
+# code signing disabled (CODE_SIGNING_ALLOWED=NO / CODE_SIGNING_REQUIRED=NO),
+# then `xcrun simctl install booted <path>.app` + `simctl launch`.
+if(NEUI_BUILD_EXAMPLES AND NEUI_IOS)
+  # A PNG bundled into the .app root so the IMAGE widget (and the
+  # image_loader_ios.h bundle-resolution path) is exercised at runtime.
+  set(NEUI_IOS_EXAMPLE_RES "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage.png")
+  add_executable(neui_ios_example MACOSX_BUNDLE
+    examples/ios/main.m
+    examples/ios/AppDelegate.m
+    examples/ios/SceneDelegate.mm
+    ${NEUI_IOS_EXAMPLE_RES})
+  # ARC for the ObjC / ObjC++ example sources (matches the host platform layer).
+  set_source_files_properties(
+    examples/ios/main.m
+    examples/ios/AppDelegate.m
+    examples/ios/SceneDelegate.mm
+    PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+  # Copy the PNG into the bundle root (Resources flatten to the .app dir on iOS).
+  # COMBINE_HIDPI_IMAGES off so a future @2x companion isn't merged into a .tiff,
+  # which would break the path-keyed loader (same gotcha as the macOS example).
+  set_source_files_properties(${NEUI_IOS_EXAMPLE_RES} PROPERTIES
+    MACOSX_PACKAGE_LOCATION "Resources"
+    XCODE_ATTRIBUTE_COMBINE_HIDPI_IMAGES NO)
+  set_target_properties(neui_ios_example PROPERTIES
+    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/examples/ios/Info.plist"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "com.defiantnerd.neui.ios.example"
+    MACOSX_BUNDLE_BUNDLE_NAME "neui iOS"
+    XCODE_ATTRIBUTE_COMBINE_HIDPI_IMAGES NO
+    # Target BOTH iPhone (1) and iPad (2). Without iPad in the device family the
+    # app runs in iPhone-compatibility mode on iPad, so userInterfaceIdiom reports
+    # Phone and the hardware-keyboard system menu bar machinery is never enabled
+    # (-buildMenuWithBuilder: is iPad-only). "1,2" makes it a native iPad app so
+    # the menu-bar contribution path is reachable; the hamburger still serves
+    # iPhone.
+    XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+    XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.defiantnerd.neui.ios.example")
+  # neui-ioshost supplies neui_register_ioshost() (referenced by neui_init()
+  # under NEUI_HAS_IOSHOST). It registers an empty native host stub today; the
+  # example explicitly selects the crossplatform host, but the symbol must
+  # still resolve - same pattern as the desktop examples linking neui-macoshost.
+  # Phase-2 investigation screen: -DNEUI_IOS_PHASE2=1 builds the example's
+  # GRID/LISTBOX/COMBOBOX/TREEVIEW/TABVIEW screen on the XPL host instead of
+  # the core-subset demo (SceneDelegate.mm gates on NEUI_IOS_PHASE2).
+  if(NEUI_IOS_PHASE2)
+    target_compile_definitions(neui_ios_example PRIVATE NEUI_IOS_PHASE2=1)
+  endif()
+  target_link_libraries(neui_ios_example PRIVATE
+    neui neui-xplhost neui-ioshost neui-backend-cg
+    "-framework UIKit"
+    "-framework Foundation"
+    "-framework CoreGraphics"
+    "-framework QuartzCore")
+  # NEUIApplication (hosts/ios/application_ios.mm, in neui-ioshost) is the app's
+  # principal class, but it is only referenced BY STRING in UIApplicationMain
+  # (examples/ios/main.m), so the linker would dead-strip its object from the
+  # static lib and -[UIApplicationMain] would fail to find the class. -force_load
+  # the host lib so the ObjC class (and the app-level menu-bar contribution hooks)
+  # are always present in the executable.
+  target_link_options(neui_ios_example PRIVATE
+    "-Wl,-force_load,$<TARGET_FILE:neui-ioshost>")
+endif() # NEUI_IOS example

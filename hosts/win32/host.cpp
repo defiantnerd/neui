@@ -9,6 +9,7 @@
 #include "../shared/win32/theme_provider_win32.h"
 #include "../shared/win32/theme_brushes_win32.h"
 #include "../shared/win32/dark_menu_win32.h"
+#include "../shared/metrics.h"
 
 /*
 *       win32 host
@@ -80,6 +81,7 @@ namespace win32_host
     if (!strcmp(iface, NEUI_API_SCROLL))    return &win32_host::scroll_api;
     if (!strcmp(iface, NEUI_API_TABS))      return &win32_host::tabs_api;
     if (!strcmp(iface, NEUI_API_NOTIFY))    return &win32_host::notify_api;
+    if (!strcmp(iface, NEUI_API_METRICS))   return &neui_detail::k_metrics_api;
     return nullptr;
   }
 

@@ -81,6 +81,16 @@ typedef struct neui_notify_api
   // On win32 (native AND xpl) this is MessageBoxExW with a neutral
   // language id; macOS maps to NSAlert run modally; the null platform
   // returns 0.
+  //
+  // iOS DIVERGENCE: UIAlertController is inherently asynchronous (it is
+  // presented, not run modally), so the synchronous "blocks and returns
+  // the chosen NEUI_ID_*" contract does NOT hold on iOS. The iOS host
+  // presents the alert (buttons appear + dismiss correctly on tap) and
+  // returns immediately with the sentinel NEUI_MB_IOS_PENDING (-1, defined
+  // in the host's message_box_ios.h; distinct from every NEUI_ID_* and from
+  // the 0 failure return). Delivering the chosen button back to the client
+  // (a completion callback / event) is a deferred follow-up; for now treat
+  // NEUI_MB_IOS_PENDING as "shown, result not yet available".
   int  (NEUI_ABI *message_box)(neui_session_t session,
                                neui_widget_t parent_window,
                                const char* text, const char* caption,

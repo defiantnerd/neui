@@ -357,6 +357,24 @@ enum {
   NEUI_KNOB_MODE_HORIZONTAL = 2,   // horizontal drag, right increases
 };
 
+// ---- Host-reserved session keys (neui.ios.*) ------------------------------
+// Set via attrs->set_session_int (NOT a per-widget neui.attr.* well-known key,
+// so it needs no k_well_known_attrs row). Only the native iOS host
+// (neui.host.ios) reads it; every other host stores it inertly.
+//
+// int: rendering style for a 2-state NEUI_W_CHECKBOX on the native iOS host.
+// Read ONCE at checkbox creation - changing it afterwards only affects
+// checkboxes created later. NEUI_W_CHECKBOX3 (tri-state) ALWAYS uses the
+// square-glyph style regardless of this key (a UISwitch has no indeterminate
+// state).
+#define NEUI_IOS_CHECKBOX_STYLE "neui.ios.checkbox_style"
+
+// Values for NEUI_IOS_CHECKBOX_STYLE.
+enum {
+  NEUI_IOS_CHECKBOX_SWITCH = 0,   // real UISwitch (green toggle) + label (default)
+  NEUI_IOS_CHECKBOX_GLYPH  = 1,   // square SF-Symbol glyph + label
+};
+
 typedef struct neui_attr_api {
   uint32_t neui_version;
 

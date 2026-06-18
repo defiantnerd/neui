@@ -2167,6 +2167,8 @@ namespace
   // suffices (destroy is a no-op; the model is reconstructed from parent_item_id
   // links at paint time).
   bool  platform_menubar_in_frame()                                                    { return true; }
+  // Linux reserves the band via platform_menubar_in_frame(); no extra inset.
+  int   platform_frame_extra_top_inset(void* /*nh*/, bool /*has_menubar*/)             { return 0; }
   void* platform_menubar_create(uint32_t /*widget_id*/)                                 { return reinterpret_cast<void*>(0x1); }
   void  platform_menubar_destroy(void* /*hmenu*/)                                       {}
   void  platform_menubar_attach(void* /*frame*/, void* /*hmenu*/)                       {}

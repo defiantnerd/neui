@@ -216,7 +216,7 @@ namespace neui_detail
   {
     if (!text || !*text) return 0;
     if (section_align_is_none(align)) return 0;
-    int bh = static_cast<int>(SECTION_HEADER_H);
+    int bh = static_cast<int>(section_header_h());
     if (bh > height) bh = height;
     return bh;
   }

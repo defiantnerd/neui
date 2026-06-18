@@ -38,6 +38,33 @@ namespace neui_detail
     return platform_default_smooth;
   }
 
+  // ---- Continuous pan -> discrete wheel notches --------------------------
+  //
+  // A touch host that wants to feed a finger pan into a notch-based consumer
+  // (e.g. give a scrollable inner widget first refusal on the drag by
+  // synthesizing MOUSE_WHEEL) has to bank the continuous motion until a whole
+  // notch builds up. `points_per_notch` logical px == one notch.
+  //
+  // Crucially the fractional remainder is banked PER AXIS (separate accum_x /
+  // accum_y), so a diagonal or alternating-axis gesture doesn't cross-
+  // contaminate: leftover horizontal motion must not leak into the next
+  // vertical delta. Returns the whole-notch count on the dominant axis (0 =
+  // nothing to flush yet) and sets out_horizontal to that axis. The sign is
+  // carried through verbatim (natural-scroll: content follows the finger).
+  inline int pan_delta_to_notch(double dx, double dy, double points_per_notch,
+                                double& accum_x, double& accum_y,
+                                bool& out_horizontal)
+  {
+    bool horiz = std::fabs(dx) > std::fabs(dy);
+    double mag = horiz ? dx : dy;
+    double& accum = horiz ? accum_x : accum_y;
+    accum += mag / points_per_notch;
+    int notch = (int)accum;
+    accum -= notch;
+    out_horizontal = horiz;
+    return notch;
+  }
+
   // ---- Tuning constants ---------------------------------------------------
 
   // Spring-back lerp factor per 60 Hz tick (higher = snappier). Exponential
@@ -90,6 +117,25 @@ namespace neui_detail
     // settled spring. Reset to 0 by scroll_wheel on every event that
     // mutates raw_px while overscrolled.
     int    quiet_ticks       = 0;
+
+    // ---- Per-instance feel tuning (iOS touch-pan seam) ------------------
+    //
+    // Both DEFAULT to 1.0, which reproduces the shared tuning constants
+    // byte-for-byte - so every existing host (macOS / Win32 / Linux / null,
+    // GRID + SECTION) is unchanged unless it explicitly sets them. The iOS
+    // xpl host bumps them per-frame so swipe-to-scroll overscroll feels
+    // right on a touch device (a finger flick wants a longer, gentler
+    // rubber-band than a mouse wheel / trackpad), without altering the
+    // desktop kinetics.
+    //
+    //   overscroll_range_scale: multiplies the asymptotic rubber-band limit
+    //     (scroll_rubber_limit). >1 lets the content stretch further past an
+    //     edge before the spring resists. iOS sets 1.5 (+50% range).
+    //   bounce_rate_scale: multiplies the per-tick spring-back lerp. <1 makes
+    //     the return gentler / slower (longer settle time). iOS sets ~0.667
+    //     (1/1.5) so the spring-back takes ~1.5x as long.
+    double overscroll_range_scale = 1.0;
+    double bounce_rate_scale      = 1.0;
   };
 
   // Platform-neutral description of a wheel event. The host fills this in
@@ -119,10 +165,18 @@ namespace neui_detail
   // viewport, hard-capped at SCROLL_OVERSCROLL_MAX). Single source of
   // truth so scroll_wheel and the legacy `scroll_rubber` / `scroll_overshoot`
   // shims agree on what "the edge of the rubber" means.
-  inline double scroll_rubber_limit(double dim)
+  // `range_scale` (default 1.0 => unchanged for every existing caller)
+  // multiplies BOTH the viewport-fraction term and the hard cap, so a host
+  // can widen / narrow the elastic range without touching the shared
+  // constants. The iOS touch-pan host passes ScrollKinetics::overscroll_range_scale.
+  inline double scroll_rubber_limit(double dim, double range_scale = 1.0)
   {
     double limit = dim * 0.5;
     if (limit > SCROLL_OVERSCROLL_MAX) limit = SCROLL_OVERSCROLL_MAX;
+    // Scale the resolved limit so the elastic range grows uniformly whether
+    // the viewport-fraction term or the hard cap won (range_scale == 1.0
+    // leaves the shared value exactly as before).
+    limit *= range_scale;
     if (limit < 1.0) limit = 1.0;
     return limit;
   }
@@ -131,9 +185,9 @@ namespace neui_detail
   // input distance `x` (the amount the user pulled past the edge) into the
   // damped, asymptotically-bounded display distance. Approaches `limit`
   // (a capped fraction of the viewport) but never reaches it.
-  inline double scroll_overshoot(double x, double dim)
+  inline double scroll_overshoot(double x, double dim, double range_scale = 1.0)
   {
-    double limit = scroll_rubber_limit(dim);
+    double limit = scroll_rubber_limit(dim, range_scale);
     return (1.0 - 1.0 / (x * SCROLL_OVERSCROLL_STIFFNESS / limit + 1.0)) * limit;
   }
 
@@ -144,9 +198,10 @@ namespace neui_detail
   // adds the delta, re-applies the forward map. Asymptotes to infinity as
   // `over` approaches `limit`; the caller clamps just below limit so the
   // result stays finite.
-  inline double scroll_overshoot_inverse(double over, double dim)
+  inline double scroll_overshoot_inverse(double over, double dim,
+                                          double range_scale = 1.0)
   {
-    double limit = scroll_rubber_limit(dim);
+    double limit = scroll_rubber_limit(dim, range_scale);
     // Clamp `over` slightly below `limit` so the divisor stays finite.
     // The forward map can never legitimately produce `over >= limit`, so
     // any caller hitting this clamp has a numerical glitch (or seeded
@@ -188,7 +243,8 @@ namespace neui_detail
   // keep the asymptotic damping so a sustained over-flick still feels
   // springy.)
   inline double scroll_apply_damped_input(double raw, double delta,
-                                            double max_px, double dim)
+                                            double max_px, double dim,
+                                            double range_scale = 1.0)
   {
     bool releasing_bottom = (raw > max_px && delta > 0.0);
     bool releasing_top    = (raw < 0.0    && delta < 0.0);
@@ -203,18 +259,18 @@ namespace neui_detail
       // map would dampen it a second time and shrink the visible
       // response. Same for landing in-range.
       if (releasing_bottom && new_raw < 0.0)
-        return -scroll_overshoot(-new_raw, dim);
+        return -scroll_overshoot(-new_raw, dim, range_scale);
       if (releasing_top && new_raw > max_px)
-        return max_px + scroll_overshoot(new_raw - max_px, dim);
+        return max_px + scroll_overshoot(new_raw - max_px, dim, range_scale);
       return new_raw;
     }
 
     // Step 1: invert raw -> cumulative input integral.
     double integral;
     if (raw < 0.0) {
-      integral = -scroll_overshoot_inverse(-raw, dim);
+      integral = -scroll_overshoot_inverse(-raw, dim, range_scale);
     } else if (raw > max_px) {
-      integral = max_px + scroll_overshoot_inverse(raw - max_px, dim);
+      integral = max_px + scroll_overshoot_inverse(raw - max_px, dim, range_scale);
     } else {
       integral = raw;
     }
@@ -224,9 +280,9 @@ namespace neui_detail
 
     // Step 3: re-apply the forward rubber map.
     if (integral < 0.0) {
-      return -scroll_overshoot(-integral, dim);
+      return -scroll_overshoot(-integral, dim, range_scale);
     } else if (integral > max_px) {
-      return max_px + scroll_overshoot(integral - max_px, dim);
+      return max_px + scroll_overshoot(integral - max_px, dim, range_scale);
     }
     return integral;
   }
@@ -294,7 +350,8 @@ namespace neui_detail
       // make the spring-back's settle-time grow with input magnitude even
       // though the visible position had long since saturated.
       k.raw_px = scroll_apply_damped_input(k.raw_px, in.delta_px,
-                                             max_px, viewport_px);
+                                             max_px, viewport_px,
+                                             k.overscroll_range_scale);
     }
 
     act.changed = true;
@@ -361,7 +418,13 @@ namespace neui_detail
       return true;
     }
 
-    k.raw_px += d * SCROLL_BOUNCE_LERP;
+    // bounce_rate_scale defaults to 1.0 (shared SCROLL_BOUNCE_LERP exactly);
+    // the iOS host lowers it (<1) for a gentler / longer spring-back. Clamp
+    // the effective lerp below 1.0 so a misconfigured >1 scale can't overshoot
+    // the target into oscillation.
+    double lerp = SCROLL_BOUNCE_LERP * k.bounce_rate_scale;
+    if (lerp > 1.0) lerp = 1.0;
+    k.raw_px += d * lerp;
     return true;
   }
 
