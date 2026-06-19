@@ -138,6 +138,18 @@ typedef struct neui_widget_api {
   // exist. (Vtable-appended; check the api version / pointer before calling.)
   void               (NEUI_ABI *get_client_rect)(neui_session_t session, neui_widget_t widget,
                                                   int* x, int* y, int* width, int* height);
+  // Instantiate a CUSTOMDRAW widget from a COMPONENT asset (see
+  // NEUI_ASSET_KIND_COMPONENT / neui_asset_api::create_component_*). Creates
+  // the widget under `parent`, attaches the component's compound (visual) +
+  // behavior (input), and stamps the component's default attrs. (x, y) are
+  // parent-relative logical px; if width / height <= 0 the component's default
+  // size is used. Set per-instance values afterwards via the attr API
+  // (attrs->set_*). Returns widget_none on a bad / non-component asset or a
+  // cross-session handle. (Vtable-appended; check the api version / pointer
+  // before calling.)
+  neui_widget_t      (NEUI_ABI *create_from_component)(neui_session_t session, neui_widget_t parent,
+                                                       neui_asset_t component,
+                                                       int x, int y, int width, int height);
 } neui_widget_api_t;
 
 #define NEUI_W_APPWINDOW  "neui.std.appwindow"

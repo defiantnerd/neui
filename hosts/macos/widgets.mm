@@ -10,6 +10,8 @@
 
 #import <AppKit/AppKit.h>
 
+#include <fstream>
+#include <string>
 #include "host.h"
 #include "checkbox_image.h"
 #include "../shared/macos/clipboard_macos.h"
@@ -696,6 +698,20 @@ namespace macos_host
         auto* entry = s->_asset_manager.get_slot(asset.id & 0xffff);
         if (entry && entry->kind == NEUI_ASSET_KIND_BEHAVIOR) {
           wd.behavior_asset = asset;
+        } else if (entry && entry->kind == NEUI_ASSET_KIND_COMPONENT) {
+          // COMPONENT bundles compound + behavior + defaults: attach both
+          // slots and stamp defaults (keys the widget lacks; client pre-sets win).
+          wd.compound_asset = entry->comp_compound;
+          wd.behavior_asset = entry->comp_behavior;
+          auto& bag = neui_detail::ensure_attrs(wd.attrs);
+          for (const auto& d : entry->comp_defaults) {
+            if (bag.has(d.key)) continue;
+            switch (d.type) {
+              case neui_detail::ComponentDefaultAttr::INT:    bag.set_int(d.key, d.ival); break;
+              case neui_detail::ComponentDefaultAttr::FLOAT:  bag.set_float(d.key, d.fval); break;
+              case neui_detail::ComponentDefaultAttr::STRING: bag.set_string(d.key, d.sval.c_str()); break;
+            }
+          }
         } else {
           wd.compound_asset = asset;
         }
@@ -703,6 +719,24 @@ namespace macos_host
       mark_widget_dirty_for_paint(wd);
     }
     // Other widget types: no-op.
+  }
+
+  // Instantiate a CUSTOMDRAW from a COMPONENT asset (create + COMPONENT-aware
+  // set_asset, which attaches both slots + stamps defaults). Mirrors win32.
+  static neui_widget_t NEUI_ABI w_create_from_component(neui_session_t session,
+      neui_widget_t parent, neui_asset_t component, int x, int y, int width, int height)
+  {
+    auto* s = get_session_for_widget(session, parent);
+    if (!s || component.id == asset_none.id) return widget_none;
+    if (((component.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return widget_none;
+    auto* ce = s->_asset_manager.get_slot(component.id & 0xffff);
+    if (!ce || ce->kind != NEUI_ASSET_KIND_COMPONENT) return widget_none;
+    if (width  <= 0) width  = static_cast<int>(ce->comp_w + 0.5f);
+    if (height <= 0) height = static_cast<int>(ce->comp_h + 0.5f);
+    neui_widget_t w = w_create(session, parent, NEUI_W_CUSTOMDRAW, x, y, width, height, nullptr);
+    if (w.id == widget_none.id) return widget_none;
+    w_set_asset(session, w, component);
+    return w;
   }
 
   static void NEUI_ABI w_set_enabled(neui_session_t session, neui_widget_t widget, bool enabled)
@@ -792,6 +826,7 @@ namespace macos_host
     w_set_enabled,
     w_get_enabled,
     w_get_client_rect,
+    w_create_from_component,
   };
 
   // -------------------------------------------------------------------------
@@ -2119,7 +2154,13 @@ namespace macos_host
     if (asset.id == asset_none.id) return false;
     if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return false;
     auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
-    if (!e || e->scale <= 0.0f) return false;
+    if (!e) return false;
+    if (e->kind == NEUI_ASSET_KIND_COMPONENT) {
+      if (out_w) *out_w = e->comp_w;
+      if (out_h) *out_h = e->comp_h;
+      return true;
+    }
+    if (e->scale <= 0.0f) return false;
     if (out_w) *out_w = static_cast<float>(e->width_px)  / e->scale;
     if (out_h) *out_h = static_cast<float>(e->height_px) / e->scale;
     return true;
@@ -2231,6 +2272,121 @@ namespace macos_host
     return s->_asset_manager.get_font_family(font.id & 0xffff, out_buf, cap);
   }
 
+  // Asset / compound / behavior tables (compound_api / behavior_api defined
+  // later in this TU; asset_api just below). Forward-declared so the component
+  // thunks can hand all three to build_component.
+  extern neui_asset_api_t    asset_api;
+  extern neui_compound_api_t compound_api;
+  extern neui_behavior_api_t behavior_api;
+
+  static void release_built_component_macos(neui_session_t session,
+                                            neui_detail::BuiltComponent& built)
+  {
+    if (built.compound.id != asset_none.id) a_destroy(session, built.compound);
+    if (built.behavior.id != asset_none.id) a_destroy(session, built.behavior);
+    for (auto a : built.owned_assets) a_destroy(session, a);
+  }
+
+  static neui_asset_t NEUI_ABI a_create_component_from_string(
+      neui_session_t session, const char* json, uint32_t len,
+      const neui_component_env_t* env)
+  {
+    auto* s = get_session(session);
+    if (!s || !json) return asset_none;
+    neui_detail::ComponentApis apis;
+    apis.asset    = &asset_api;
+    apis.compound = &compound_api;
+    apis.behavior = &behavior_api;
+    neui_detail::BuiltComponent built =
+        neui_detail::build_component(session, json, len, env, apis);
+    if (!built.ok) { release_built_component_macos(session, built); return asset_none; }
+    uint32_t slot = s->_asset_manager.allocate_component(built);
+    if (slot == 0) { release_built_component_macos(session, built); return asset_none; }
+    return pack_asset_macos(s->session_id(), slot);
+  }
+
+  static neui_asset_t NEUI_ABI a_create_component_from_file(
+      neui_session_t session, const char* path_utf8,
+      const neui_component_env_t* env)
+  {
+    auto* s = get_session(session);
+    if (!s || !path_utf8) return asset_none;
+    std::ifstream in(path_utf8, std::ios::binary);
+    if (!in) return asset_none;
+    std::string data((std::istreambuf_iterator<char>(in)),
+                     std::istreambuf_iterator<char>());
+    neui_component_env_t local{};
+    const neui_component_env_t* use_env = env;
+    static thread_local std::string base_keep;
+    if (!env || !env->base_dir) {
+      std::string p = path_utf8;
+      size_t cut = p.find_last_of("/\\");
+      base_keep = (cut == std::string::npos) ? std::string() : p.substr(0, cut);
+      if (env) local = *env;
+      local.base_dir = base_keep.c_str();
+      use_env = &local;
+    }
+    return a_create_component_from_string(session, data.c_str(),
+                                          static_cast<uint32_t>(data.size()), use_env);
+  }
+
+  static uint32_t NEUI_ABI a_component_param_count(neui_session_t session,
+                                                   neui_asset_t component)
+  {
+    auto* s = get_session(session);
+    if (!s || component.id == asset_none.id) return 0;
+    if (((component.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return 0;
+    auto* e = s->_asset_manager.get_slot(component.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_COMPONENT) return 0;
+    return static_cast<uint32_t>(e->comp_params.size());
+  }
+
+  static bool NEUI_ABI a_component_param_at(neui_session_t session,
+                                            neui_asset_t component,
+                                            uint32_t index,
+                                            neui_component_param_t* out)
+  {
+    auto* s = get_session(session);
+    if (!s || !out || component.id == asset_none.id) return false;
+    if (((component.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return false;
+    auto* e = s->_asset_manager.get_slot(component.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_COMPONENT) return false;
+    if (index >= e->comp_params.size()) return false;
+    const auto& p = e->comp_params[index];
+    out->key = p.key.c_str(); out->label = p.label.c_str();
+    out->min = p.min; out->max = p.max; out->def = p.def;
+    return true;
+  }
+
+  static uint32_t NEUI_ABI a_serialize_component(neui_session_t session,
+                                                 neui_asset_t component,
+                                                 char* out_buf, uint32_t cap,
+                                                 int indent)
+  {
+    auto* s = get_session(session);
+    if (!s || component.id == asset_none.id) return 0;
+    if (((component.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return 0;
+    auto* e = s->_asset_manager.get_slot(component.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_COMPONENT) return 0;
+    neui_detail::ComponentSerializeInput in;
+    in.name = &e->comp_name; in.width = e->comp_w; in.height = e->comp_h;
+    in.params = &e->comp_params;
+    in.asset_names = &e->comp_asset_names;
+    in.asset_handle_names = &e->comp_asset_handle_names;
+    auto* cce = s->_asset_manager.get_slot(e->comp_compound.id & 0xffff);
+    auto* bbe = s->_asset_manager.get_slot(e->comp_behavior.id & 0xffff);
+    in.compound = (cce && cce->compound) ? cce->compound.get() : nullptr;
+    in.behavior = (bbe && bbe->behavior) ? bbe->behavior.get() : nullptr;
+    std::string json = neui_detail::serialize_component(in, indent);
+    uint32_t full = static_cast<uint32_t>(json.size());
+    if (out_buf && cap > 0) {
+      uint32_t n = (full > cap - 1) ? cap - 1 : full;
+      if (n) std::memcpy(out_buf, json.data(), n);
+      out_buf[n] = '\0';
+    }
+    return full;
+  }
+
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
     a_create_bitmap,
@@ -2245,6 +2401,11 @@ namespace macos_host
     a_create_font,
     a_create_font_from_file,
     a_get_font_family,
+    a_create_component_from_string,
+    a_create_component_from_file,
+    a_component_param_count,
+    a_component_param_at,
+    a_serialize_component,
   };
 
   // Compound API. Mutators dispatch to the shared mutator helpers in

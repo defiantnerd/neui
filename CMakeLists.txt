@@ -374,6 +374,48 @@ if(NEUI_BUNDLED_FONTS)
   endif()
 endif()
 
+# Declarative "component" format example. Loads components/knob.json into a
+# COMPONENT asset and instantiates four knobs from it (both create_from_component
+# and create + set_asset), then re-serializes it (designer round-trip).
+if(MSVC)
+  add_executable(neui_component_knob_example WIN32
+    examples/component_knob_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_component_knob_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_component_knob_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_component_knob_example WIN32 examples/component_knob_example.cpp)
+elseif(APPLE)
+  add_executable(neui_component_knob_example MACOSX_BUNDLE examples/component_knob_example.cpp)
+else()
+  add_executable(neui_component_knob_example examples/component_knob_example.cpp)
+endif()
+target_link_libraries(neui_component_knob_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_component_knob_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_component_knob_example PRIVATE neui-macoshost)
+endif()
+# Copy the component document(s) next to the executable so the relative
+# "components/knob.json" path resolves at runtime. On macOS bundles, place them
+# in Resources/components.
+file(GLOB NEUI_COMPONENT_DOCS "${CMAKE_CURRENT_SOURCE_DIR}/examples/components/*.json")
+if(NEUI_COMPONENT_DOCS)
+  if(APPLE)
+    set_source_files_properties(${NEUI_COMPONENT_DOCS} PROPERTIES
+      MACOSX_PACKAGE_LOCATION "Resources/components")
+    target_sources(neui_component_knob_example PRIVATE ${NEUI_COMPONENT_DOCS})
+  else()
+    add_custom_command(TARGET neui_component_knob_example POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory
+              "$<TARGET_FILE_DIR:neui_component_knob_example>/components"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NEUI_COMPONENT_DOCS}
+              "$<TARGET_FILE_DIR:neui_component_knob_example>/components")
+  endif()
+endif()
+
 # Scrolling SECTION example. Demonstrates NEUI_ATTR_SCROLL_MODE +
 # NEUI_ATTR_ALIGN_TEXT="none" with runtime toggles for chip position,
 # scroll axes, and a row-count-driven content generator. Pinned to the

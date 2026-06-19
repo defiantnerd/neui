@@ -13,6 +13,7 @@
 #include "compound.h"
 #include "behavior.h"
 #include "painter.h"  // draw_asset_thunk_t + neui_painter + k_painter_api
+#include "component_loader.h"  // BuiltComponent / ComponentDefaultAttr / ComponentParam
 
 // Session-scoped asset slot table shared by all three hosts. Each host
 // previously carried a near-identical manager (xpl AssetManager, win32
@@ -87,6 +88,25 @@ namespace neui_detail
     // tiers and get_pixels_for_export rejects them.
     uint64_t          font_token  = 0;
     std::string       font_family;
+
+    // Populated for NEUI_ASSET_KIND_COMPONENT entries. A component bundles a
+    // COMPOUND (comp_compound) + a BEHAVIOR (comp_behavior) - handles into
+    // this same store - plus a default-attr template stamped onto each
+    // instance, a param manifest, and a default size. comp_owned_assets are
+    // the path-loaded layer assets the component owns (assets handed in by a
+    // client resolve_asset callback are borrowed and NOT listed here).
+    // release_slot releases comp_compound / comp_behavior / comp_owned_assets.
+    neui_asset_t                      comp_compound = asset_none;
+    neui_asset_t                      comp_behavior = asset_none;
+    std::vector<neui_asset_t>         comp_owned_assets;
+    std::vector<ComponentDefaultAttr> comp_defaults;
+    std::vector<ComponentParam>       comp_params;
+    float                             comp_w = 0.0f;
+    float                             comp_h = 0.0f;
+    // Round-trip metadata for serialize_component (designer export).
+    std::string                                      comp_name;
+    std::vector<std::pair<std::string, std::string>> comp_asset_names;
+    std::vector<std::pair<uint32_t, std::string>>    comp_asset_handle_names;
   };
 
   template <typename Loader>
@@ -158,6 +178,29 @@ namespace neui_detail
       auto entry = std::make_unique<AssetEntry>();
       entry->kind     = NEUI_ASSET_KIND_BEHAVIOR;
       entry->behavior = std::make_unique<BehaviorAsset>();
+      return alloc_slot(std::move(entry));
+    }
+
+    // Allocate a NEUI_ASSET_KIND_COMPONENT slot wrapping a built component
+    // (the compound + behavior + defaults + params + default size produced by
+    // build_component). The component takes ownership of the sub-assets and
+    // any path-loaded layer assets; release_slot releases them. Returns 0 if
+    // the build failed or produced no compound.
+    uint32_t allocate_component(const BuiltComponent& built)
+    {
+      if (!built.ok || built.compound.id == asset_none.id) return 0;
+      auto entry = std::make_unique<AssetEntry>();
+      entry->kind              = NEUI_ASSET_KIND_COMPONENT;
+      entry->comp_compound     = built.compound;
+      entry->comp_behavior     = built.behavior;
+      entry->comp_owned_assets = built.owned_assets;
+      entry->comp_defaults     = built.defaults;
+      entry->comp_params       = built.params;
+      entry->comp_w            = built.width;
+      entry->comp_h            = built.height;
+      entry->comp_name              = built.name;
+      entry->comp_asset_names       = built.asset_names;
+      entry->comp_asset_handle_names = built.asset_handle_names;
       return alloc_slot(std::move(entry));
     }
 
@@ -337,6 +380,21 @@ namespace neui_detail
       if (entry->font_token && backend && backend->unregister_font) {
         backend->unregister_font(entry->font_token);
         entry->font_token = 0;
+      }
+      // Release a COMPONENT's owned sub-assets (compound + behavior + path-
+      // loaded layer assets). Slot-only: the store is session-agnostic, so the
+      // low 16 bits of each handle are the slot (the host owns the session
+      // bits). Borrowed assets (from a client resolve_asset callback) are not
+      // listed in comp_owned_assets, so they're left alone. Snapshot the
+      // handles before the recursive calls (which mutate _handles/_free_slots).
+      if (entry->kind == NEUI_ASSET_KIND_COMPONENT) {
+        neui_asset_t sub_c = entry->comp_compound;
+        neui_asset_t sub_b = entry->comp_behavior;
+        std::vector<neui_asset_t> owned = entry->comp_owned_assets;
+        if (sub_c.id != asset_none.id) release_slot(sub_c.id & 0xffffu, backend);
+        if (sub_b.id != asset_none.id) release_slot(sub_b.id & 0xffffu, backend);
+        for (auto a : owned)
+          if (a.id != asset_none.id) release_slot(a.id & 0xffffu, backend);
       }
       entry.reset();
       _free_slots.push_back(slot);

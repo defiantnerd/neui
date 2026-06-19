@@ -1,6 +1,8 @@
 #include <cstring>
 #include <algorithm>
+#include <fstream>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "host.h"
@@ -452,6 +454,15 @@ namespace xpl_host
       platform_invalidate(frame);
   }
 
+  // Forward decls: COMPONENT attach helper + the one-call instantiate thunk.
+  // Defined alongside the component asset thunks (they need compound_api /
+  // behavior_api, declared later in this TU).
+  static void attach_component(Session* s, uint32_t idx,
+                               neui_detail::AssetEntry* ce);
+  static neui_widget_t NEUI_ABI w_create_from_component(
+      neui_session_t session, neui_widget_t parent, neui_asset_t component,
+      int x, int y, int width, int height);
+
   // Bind an asset handle as the IMAGE widget's source. Drops any path
   // source (wd.text) so the asset becomes sole source - mirrors the
   // win32 native host's contract and the painter's draw_asset thunk
@@ -485,6 +496,11 @@ namespace xpl_host
         auto* entry  = s->_asset_manager.get_slot(slot);
         if (entry && entry->kind == NEUI_ASSET_KIND_BEHAVIOR) {
           cd->behavior_asset = asset;
+        } else if (entry && entry->kind == NEUI_ASSET_KIND_COMPONENT) {
+          // A COMPONENT bundles a compound + behavior + defaults: attach both
+          // slots and stamp the defaults (so a component can be applied to an
+          // already-created CUSTOMDRAW, not only via create_from_component).
+          attach_component(s, idx, entry);
         } else {
           // Default route (BITMAP / COMPOUND / null entry): compound slot.
           cd->compound_asset = asset;
@@ -712,6 +728,7 @@ namespace xpl_host
     w_set_enabled,
     w_get_enabled,
     w_get_client_rect,
+    w_create_from_component,
   };
 
   // -------------------------------------------------------------------------
@@ -1942,7 +1959,13 @@ namespace xpl_host
     if (asset.id == asset_none.id) return false;
     if (((asset.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return false;
     auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
-    if (!e || e->scale <= 0.0f) return false;
+    if (!e) return false;
+    if (e->kind == NEUI_ASSET_KIND_COMPONENT) {
+      if (out_w) *out_w = e->comp_w;
+      if (out_h) *out_h = e->comp_h;
+      return true;
+    }
+    if (e->scale <= 0.0f) return false;
     if (out_w) *out_w = static_cast<float>(e->width_px)  / e->scale;
     if (out_h) *out_h = static_cast<float>(e->height_px) / e->scale;
     return true;
@@ -2052,6 +2075,186 @@ namespace xpl_host
     return s->_asset_manager.get_font_family(font.id & 0xffff, out_buf, cap);
   }
 
+  // Asset / compound / behavior api tables (asset_api is defined just below;
+  // compound_api / behavior_api later in this TU). Forward-declared here so the
+  // component thunks can hand all three to build_component.
+  extern neui_asset_api_t    asset_api;
+  extern neui_compound_api_t compound_api;
+  extern neui_behavior_api_t behavior_api;
+
+  // Release a partially / fully built component's sub-assets (used on the
+  // failure paths and shared by both create_component thunks).
+  static void release_built_component(neui_session_t session,
+                                      neui_detail::BuiltComponent& built)
+  {
+    if (built.compound.id != asset_none.id) as_destroy(session, built.compound);
+    if (built.behavior.id != asset_none.id) as_destroy(session, built.behavior);
+    for (auto a : built.owned_assets) as_destroy(session, a);
+  }
+
+  static neui_asset_t NEUI_ABI as_create_component_from_string(
+      neui_session_t session, const char* json, uint32_t len,
+      const neui_component_env_t* env)
+  {
+    auto* s = get_session(session);
+    if (!s || !json) return asset_none;
+    neui_detail::ComponentApis apis;
+    apis.asset    = &asset_api;
+    apis.compound = &compound_api;
+    apis.behavior = &behavior_api;
+    neui_detail::BuiltComponent built =
+        neui_detail::build_component(session, json, len, env, apis);
+    if (!built.ok) { release_built_component(session, built); return asset_none; }
+    uint32_t slot = s->_asset_manager.allocate_component(built);
+    if (slot == 0) { release_built_component(session, built); return asset_none; }
+    return pack_asset(s->_session_id, slot);
+  }
+
+  static neui_asset_t NEUI_ABI as_create_component_from_file(
+      neui_session_t session, const char* path_utf8,
+      const neui_component_env_t* env)
+  {
+    auto* s = get_session(session);
+    if (!s || !path_utf8) return asset_none;
+
+    // Read the whole file (std::ifstream avoids the fopen /W4 deprecation).
+    std::ifstream in(path_utf8, std::ios::binary);
+    if (!in) return asset_none;
+    std::string data((std::istreambuf_iterator<char>(in)),
+                     std::istreambuf_iterator<char>());
+
+    // Default env.base_dir to the file's directory so relative asset paths
+    // resolve next to the .json. A caller-supplied env wins.
+    neui_component_env_t local{};
+    const neui_component_env_t* use_env = env;
+    if (!env || !env->base_dir) {
+      std::string p = path_utf8;
+      size_t cut = p.find_last_of("/\\");
+      static thread_local std::string base_keep;
+      base_keep = (cut == std::string::npos) ? std::string() : p.substr(0, cut);
+      if (env) local = *env;
+      local.base_dir = base_keep.c_str();
+      use_env = &local;
+    }
+    return as_create_component_from_string(session, data.c_str(),
+                                           static_cast<uint32_t>(data.size()),
+                                           use_env);
+  }
+
+  static uint32_t NEUI_ABI as_component_param_count(neui_session_t session,
+                                                    neui_asset_t component)
+  {
+    auto* s = get_session(session);
+    if (!s || component.id == asset_none.id) return 0;
+    if (((component.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return 0;
+    auto* e = s->_asset_manager.get_slot(component.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_COMPONENT) return 0;
+    return static_cast<uint32_t>(e->comp_params.size());
+  }
+
+  static bool NEUI_ABI as_component_param_at(neui_session_t session,
+                                             neui_asset_t component,
+                                             uint32_t index,
+                                             neui_component_param_t* out)
+  {
+    auto* s = get_session(session);
+    if (!s || !out || component.id == asset_none.id) return false;
+    if (((component.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return false;
+    auto* e = s->_asset_manager.get_slot(component.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_COMPONENT) return false;
+    if (index >= e->comp_params.size()) return false;
+    const auto& p = e->comp_params[index];
+    out->key   = p.key.c_str();
+    out->label = p.label.c_str();
+    out->min   = p.min;
+    out->max   = p.max;
+    out->def   = p.def;
+    return true;
+  }
+
+  static uint32_t NEUI_ABI as_serialize_component(neui_session_t session,
+                                                  neui_asset_t component,
+                                                  char* out_buf, uint32_t cap,
+                                                  int indent)
+  {
+    auto* s = get_session(session);
+    if (!s || component.id == asset_none.id) return 0;
+    if (((component.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return 0;
+    auto* e = s->_asset_manager.get_slot(component.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_COMPONENT) return 0;
+
+    neui_detail::ComponentSerializeInput in;
+    in.name               = &e->comp_name;
+    in.width              = e->comp_w;
+    in.height             = e->comp_h;
+    in.params             = &e->comp_params;
+    in.asset_names        = &e->comp_asset_names;
+    in.asset_handle_names = &e->comp_asset_handle_names;
+    auto* ce = s->_asset_manager.get_slot(e->comp_compound.id & 0xffff);
+    auto* be = s->_asset_manager.get_slot(e->comp_behavior.id & 0xffff);
+    in.compound = (ce && ce->compound) ? ce->compound.get() : nullptr;
+    in.behavior = (be && be->behavior) ? be->behavior.get() : nullptr;
+
+    std::string json = neui_detail::serialize_component(in, indent);
+    uint32_t full = static_cast<uint32_t>(json.size());
+    if (out_buf && cap > 0) {
+      uint32_t n = (full > cap - 1) ? cap - 1 : full;
+      if (n) std::memcpy(out_buf, json.data(), n);
+      out_buf[n] = '\0';
+    }
+    return full;
+  }
+
+  // Attach a COMPONENT's compound + behavior to a CUSTOMDRAW widget and stamp
+  // its default attrs (only keys the widget doesn't already carry, so client
+  // pre-sets win). Shared by w_set_asset (COMPONENT route) + create_from_component.
+  static void attach_component(Session* s, uint32_t idx,
+                               neui_detail::AssetEntry* ce)
+  {
+    if (!s || !ce || ce->kind != NEUI_ASSET_KIND_COMPONENT) return;
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    auto* cd = dynamic_cast<CustomDrawWidget*>(&wd);
+    if (!cd) return;
+    cd->compound_asset = ce->comp_compound;
+    cd->behavior_asset = ce->comp_behavior;
+    auto& bag = neui_detail::ensure_attrs(wd.attrs);
+    for (const auto& d : ce->comp_defaults) {
+      if (bag.has(d.key)) continue;  // client pre-set wins
+      switch (d.type) {
+        case neui_detail::ComponentDefaultAttr::INT:    bag.set_int(d.key, d.ival); break;
+        case neui_detail::ComponentDefaultAttr::FLOAT:  bag.set_float(d.key, d.fval); break;
+        case neui_detail::ComponentDefaultAttr::STRING: bag.set_string(d.key, d.sval.c_str()); break;
+      }
+    }
+  }
+
+  static neui_widget_t NEUI_ABI w_create_from_component(
+      neui_session_t session, neui_widget_t parent, neui_asset_t component,
+      int x, int y, int width, int height)
+  {
+    auto* s = get_session_for_widget(session, parent);
+    if (!s || component.id == asset_none.id) return widget_none;
+    if (((component.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return widget_none;
+    auto* ce = s->_asset_manager.get_slot(component.id & 0xffff);
+    if (!ce || ce->kind != NEUI_ASSET_KIND_COMPONENT) return widget_none;
+
+    if (width  <= 0) width  = static_cast<int>(ce->comp_w + 0.5f);
+    if (height <= 0) height = static_cast<int>(ce->comp_h + 0.5f);
+
+    neui_widget_t w = w_create(session, parent, NEUI_W_CUSTOMDRAW,
+                               x, y, width, height, nullptr);
+    if (w.id == widget_none.id) return widget_none;
+
+    // Re-resolve the entry (w_create does not touch the asset table, but keep
+    // the lookup local so a future change can't leave a stale pointer).
+    ce = s->_asset_manager.get_slot(component.id & 0xffff);
+    attach_component(s, WidgetToIndex(w), ce);
+    if (void* frame = s->find_parent_native_handle(WidgetToIndex(w)))
+      platform_invalidate(frame);
+    return w;
+  }
+
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
     as_create_bitmap,
@@ -2066,6 +2269,11 @@ namespace xpl_host
     as_create_font,
     as_create_font_from_file,
     as_get_font_family,
+    as_create_component_from_string,
+    as_create_component_from_file,
+    as_component_param_count,
+    as_component_param_at,
+    as_serialize_component,
   };
 
   // ===========================================================================
