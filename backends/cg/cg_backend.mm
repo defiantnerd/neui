@@ -894,8 +894,21 @@ namespace neui_cg_backend
     CGDataProviderRelease(dp);
     if (!font) return false;
 
+    // CTFontManagerRegisterGraphicsFont is deprecated as of macOS 15, but the
+    // sanctioned replacement (CTFontManagerRegisterFontDescriptors over
+    // descriptors from CTFontManagerCreateFontDescriptorsFromData) rejects raw
+    // in-memory data with kCTFontManagerErrorInsufficientInfo (303) - those
+    // descriptors are for matching, not registration. The only non-deprecated
+    // path for bytes is a temp file + RegisterFontsForURL, whose lifecycle (and
+    // sandbox temp-dir fragility for plugins) is not worth it. Register the
+    // in-process CGFont and silence the deprecation deliberately. (The file
+    // form below uses the non-deprecated URL API.)
     CFErrorRef err = nullptr;
-    if (!CTFontManagerRegisterGraphicsFont(font, &err)) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    bool registered = CTFontManagerRegisterGraphicsFont(font, &err);
+#pragma clang diagnostic pop
+    if (!registered) {
       if (err) CFRelease(err);
       CGFontRelease(font);
       return false;
@@ -976,7 +989,10 @@ namespace neui_cg_backend
           CFRelease(it->url);
         }
       } else if (it->cg_font) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         CTFontManagerUnregisterGraphicsFont(it->cg_font, &err);
+#pragma clang diagnostic pop
         CGFontRelease(it->cg_font);
       }
       if (err) CFRelease(err);

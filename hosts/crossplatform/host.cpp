@@ -1443,7 +1443,8 @@ namespace xpl_host
   {
     if (keycode == NEUI_KEY_SPACE || keycode == NEUI_KEY_RETURN) {
       if (session) {
-        neui_event_t ev = { NEUI_EVENT_MOUSE_BUTTON_CLICK };
+        neui_event_t ev = {};
+        ev.type = NEUI_EVENT_MOUSE_BUTTON_CLICK;
         ev.data.mouse = { { widget_id }, 0, 0, 0 };
         session->dispatch_event(&ev);
       }

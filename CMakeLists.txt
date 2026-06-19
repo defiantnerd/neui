@@ -58,6 +58,25 @@ else()
   add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif()
 
+# The registry lib (neui) and the host libs reference each other's symbols:
+# neui calls each host's register wrapper, and those wrappers double as the
+# forced-symbol refs that pull the host objects out of their static archives.
+# That cycle is intentional, but it means a consumer's link line lists
+# libneui.a twice - once explicitly, once propagated through a host lib's
+# PRIVATE dependency on neui. The link is correct (the linker drops the
+# duplicate), but Apple's new linker (ld_prime, Xcode 15+) emits an
+# "ignoring duplicate libraries" warning for it. Silence that one cosmetic
+# warning where the linker accepts the flag. (CheckLinkerFlag needs CMake
+# 3.18; our floor is 3.15, so guard the version too.)
+if(APPLE AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.18)
+  include(CheckLinkerFlag)
+  check_linker_flag(CXX "-Wl,-no_warn_duplicate_libraries"
+                    NEUI_LD_NO_WARN_DUP_LIBS)
+  if(NEUI_LD_NO_WARN_DUP_LIBS)
+    add_link_options("-Wl,-no_warn_duplicate_libraries")
+  endif()
+endif()
+
 # build a library with a appropriate host
 add_library(neui src/neui.c)
 

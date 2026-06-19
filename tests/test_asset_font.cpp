@@ -113,7 +113,6 @@ TEST_CASE("AssetStore font: get_font_family copies + truncates")
 TEST_CASE("AssetStore font: get_font_family rejects non-FONT slots")
 {
   reset_counters();
-  neui_render_backend_t backend = make_backend();
   AssetStore<FakeLoader> store;
 
   uint32_t comp = store.allocate_compound();
