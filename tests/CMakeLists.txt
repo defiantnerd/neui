@@ -18,6 +18,7 @@ add_executable(neui_tests
   test_section_scroll.cpp
   test_shortcut_format.cpp
   test_clipboard_item.cpp
+  test_asset_font.cpp
   test_tabview.cpp)
 
 target_include_directories(neui_tests PRIVATE

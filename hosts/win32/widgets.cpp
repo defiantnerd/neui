@@ -8,6 +8,7 @@
 #include <vector>
 #include <algorithm>
 #include <string>
+#include <unordered_map>
 #include "window.h"  // provides get_hinstance(), ChildSubclassProc
 #include "../../backends/d2d/d2d_backend.h"
 #include "../shared/win32/clipboard_win32.h"
@@ -5066,6 +5067,21 @@ namespace win32_host
     return { ((session_id & 0xffff) << 16) | (slot & 0xffff) };
   }
 
+  // Win32 native host extra font prong (Part E): a DirectWrite custom
+  // collection does NOT expose a face to GDI CreateFontW, so native HFONT
+  // widgets (Edit / Button / ...) need a second registration via
+  // AddFontMemResourceEx / AddFontResourceExW(FR_PRIVATE). The removable
+  // handle (memory) or the private path (file) is kept here keyed by the
+  // packed asset id and undone in as_destroy. Process-global, so a session
+  // torn down without per-asset destroy leaves the registration until exit -
+  // acceptable (the family stays resolvable, matching the backend prong).
+  struct W32GdiFont { HANDLE mem = nullptr; std::wstring path; };
+  static std::unordered_map<uint32_t, W32GdiFont>& w32_gdi_fonts()
+  {
+    static std::unordered_map<uint32_t, W32GdiFont> m;
+    return m;
+  }
+
   static neui_asset_t NEUI_ABI as_create_bitmap(neui_session_t session,
                                                   uint32_t width_px,
                                                   uint32_t height_px,
@@ -5109,6 +5125,15 @@ namespace win32_host
     if (!s) return;
     if (asset.id == asset_none.id) return;
     if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return;
+    // Undo the GDI font prong (if this asset was a registered font).
+    auto& gdi = w32_gdi_fonts();
+    auto git = gdi.find(asset.id);
+    if (git != gdi.end()) {
+      if (git->second.mem) RemoveFontMemResourceEx(git->second.mem);
+      else if (!git->second.path.empty())
+        RemoveFontResourceExW(git->second.path.c_str(), FR_PRIVATE, nullptr);
+      gdi.erase(git);
+    }
     s->_asset_manager.release_slot(asset.id & 0xffff,
                                     neui_d2d_backend::get_backend());
   }
@@ -5190,6 +5215,54 @@ namespace win32_host
                                      &w32_painter_draw_asset_thunk);
   }
 
+  static neui_asset_t NEUI_ABI as_create_font(neui_session_t session,
+                                               const uint8_t* data, uint32_t len)
+  {
+    auto* s = get_session(session);
+    if (!s || !data || len == 0) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_font(
+      data, len, neui_d2d_backend::get_backend());
+    if (slot == 0) return asset_none;
+    neui_asset_t a = pack_asset_w32(s->session_id(), slot);
+    // GDI prong for native HFONT widgets (AddFontMemResourceEx copies data).
+    DWORD count = 0;
+    HANDLE h = AddFontMemResourceEx(const_cast<uint8_t*>(data), len,
+                                     nullptr, &count);
+    if (h) w32_gdi_fonts()[a.id] = W32GdiFont{ h, {} };
+    return a;
+  }
+
+  static neui_asset_t NEUI_ABI as_create_font_from_file(neui_session_t session,
+                                                        const char* path_utf8)
+  {
+    auto* s = get_session(session);
+    if (!s || !path_utf8) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_font_from_file(
+      path_utf8, neui_d2d_backend::get_backend());
+    if (slot == 0) return asset_none;
+    neui_asset_t a = pack_asset_w32(s->session_id(), slot);
+    // GDI prong: register the file privately for native HFONT widgets.
+    std::wstring wpath;
+    int need = MultiByteToWideChar(CP_UTF8, 0, path_utf8, -1, nullptr, 0);
+    if (need > 1) {
+      wpath.resize(need - 1);
+      MultiByteToWideChar(CP_UTF8, 0, path_utf8, -1, wpath.data(), need);
+      if (AddFontResourceExW(wpath.c_str(), FR_PRIVATE, nullptr) > 0)
+        w32_gdi_fonts()[a.id] = W32GdiFont{ nullptr, wpath };
+    }
+    return a;
+  }
+
+  static uint32_t NEUI_ABI as_get_font_family(neui_session_t session,
+                                              neui_asset_t font,
+                                              char* out_buf, uint32_t cap)
+  {
+    auto* s = get_session(session);
+    if (!s || font.id == asset_none.id) return 0;
+    if (((font.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return 0;
+    return s->_asset_manager.get_font_family(font.id & 0xffff, out_buf, cap);
+  }
+
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
     as_create_bitmap,
@@ -5201,6 +5274,9 @@ namespace win32_host
     as_create_behavior,
     as_create_surface,
     as_paint_surface,
+    as_create_font,
+    as_create_font_from_file,
+    as_get_font_family,
   };
 
   // ---------------------------------------------------------------------------

@@ -261,6 +261,38 @@ typedef struct neui_render_backend {
   bool (NEUI_ABI *read_pixels_bgra)(neui_render_ctx_t ctx,
                                       uint8_t*         out_bgra);
 
+  // --- Font registration (backs NEUI_ASSET_KIND_FONT) --------------------
+  //
+  // Register a client-supplied font so its family becomes resolvable by
+  // push_font / draw_text / measure_text. These are FACTORY / PROCESS level,
+  // not per-context: registration affects font resolution for every render
+  // context the backend serves, so they take no ctx. Font-cache keys
+  // (already family + weight + size) need no change; registration only
+  // widens name resolution. An unknown family still falls back to the
+  // host default, so this is purely additive.
+
+  // Register a font from memory. The backend reads the family name out of
+  // the font data and makes that family resolvable. out_family receives the
+  // family name (UTF-8, truncated to cap, NUL-terminated). The backend does
+  // NOT own `data` - the caller (asset store) keeps the bytes alive for the
+  // returned token's lifetime. Writes an opaque token into *out_token for
+  // unregister_font and returns true on success; returns false (token 0,
+  // empty family) on failure or on backends without font support (null).
+  bool (NEUI_ABI *register_font)(const uint8_t* data, uint32_t len,
+                                 char* out_family, uint32_t cap,
+                                 uint64_t* out_token);
+
+  // Path variant (.ttf / .otf / .ttc). Some backends register URLs / paths
+  // more robustly than in-memory bytes. Same contract as register_font.
+  bool (NEUI_ABI *register_font_file)(const char* path,
+                                      char* out_family, uint32_t cap,
+                                      uint64_t* out_token);
+
+  // Best-effort unregister of a previously registered font. A backend may
+  // not fully release a face still referenced by a cached text format; that
+  // is acceptable - the name stops resolving for new draws. No-op on token 0.
+  void (NEUI_ABI *unregister_font)(uint64_t token);
+
 } neui_render_backend_t;
 
 #ifdef __cplusplus

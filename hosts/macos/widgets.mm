@@ -2199,6 +2199,38 @@ namespace macos_host
                                      &macos_painter_draw_asset_thunk);
   }
 
+  static neui_asset_t NEUI_ABI a_create_font(neui_session_t session,
+                                              const uint8_t* data, uint32_t len)
+  {
+    auto* s = get_session(session);
+    if (!s || !data || len == 0) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_font(
+      data, len, neui_cg_backend::get_backend());
+    if (slot == 0) return asset_none;
+    return pack_asset_macos(s->session_id(), slot);
+  }
+
+  static neui_asset_t NEUI_ABI a_create_font_from_file(neui_session_t session,
+                                                       const char* path_utf8)
+  {
+    auto* s = get_session(session);
+    if (!s || !path_utf8) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_font_from_file(
+      path_utf8, neui_cg_backend::get_backend());
+    if (slot == 0) return asset_none;
+    return pack_asset_macos(s->session_id(), slot);
+  }
+
+  static uint32_t NEUI_ABI a_get_font_family(neui_session_t session,
+                                             neui_asset_t font,
+                                             char* out_buf, uint32_t cap)
+  {
+    auto* s = get_session(session);
+    if (!s || font.id == asset_none.id) return 0;
+    if (((font.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return 0;
+    return s->_asset_manager.get_font_family(font.id & 0xffff, out_buf, cap);
+  }
+
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
     a_create_bitmap,
@@ -2210,6 +2242,9 @@ namespace macos_host
     a_create_behavior,
     a_create_surface,
     a_paint_surface,
+    a_create_font,
+    a_create_font_from_file,
+    a_get_font_family,
   };
 
   // Compound API. Mutators dispatch to the shared mutator helpers in

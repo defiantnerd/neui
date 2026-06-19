@@ -58,6 +58,25 @@ else()
   add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif()
 
+# The registry lib (neui) and the host libs reference each other's symbols:
+# neui calls each host's register wrapper, and those wrappers double as the
+# forced-symbol refs that pull the host objects out of their static archives.
+# That cycle is intentional, but it means a consumer's link line lists
+# libneui.a twice - once explicitly, once propagated through a host lib's
+# PRIVATE dependency on neui. The link is correct (the linker drops the
+# duplicate), but Apple's new linker (ld_prime, Xcode 15+) emits an
+# "ignoring duplicate libraries" warning for it. Silence that one cosmetic
+# warning where the linker accepts the flag. (CheckLinkerFlag needs CMake
+# 3.18; our floor is 3.15, so guard the version too.)
+if(APPLE AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.18)
+  include(CheckLinkerFlag)
+  check_linker_flag(CXX "-Wl,-no_warn_duplicate_libraries"
+                    NEUI_LD_NO_WARN_DUP_LIBS)
+  if(NEUI_LD_NO_WARN_DUP_LIBS)
+    add_link_options("-Wl,-no_warn_duplicate_libraries")
+  endif()
+endif()
+
 # build a library with a appropriate host
 add_library(neui src/neui.c)
 
@@ -305,6 +324,52 @@ if(WIN32)
 endif()
 if(APPLE)
   target_link_libraries(neui_surface_example PRIVATE neui-macoshost)
+endif()
+
+# Font-loading example. Registers a client-supplied font (NEUI_ASSET_KIND_FONT)
+# via assets->create_font_from_file and proves the family reaches both the
+# native-control prong (BUTTON / INPUTBOX) and the painted prong (CUSTOMDRAW
+# push_font). Any .ttf dropped in examples/fonts/ is copied next to the
+# executable so the bundled-resource path can be exercised; absent that the
+# example falls back to a distinctive system font so it always renders.
+if(MSVC)
+  add_executable(neui_font_loading_example WIN32
+    examples/font_loading_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_font_loading_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_font_loading_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_font_loading_example WIN32 examples/font_loading_example.cpp)
+elseif(APPLE)
+  add_executable(neui_font_loading_example MACOSX_BUNDLE examples/font_loading_example.cpp)
+else()
+  add_executable(neui_font_loading_example examples/font_loading_example.cpp)
+endif()
+target_link_libraries(neui_font_loading_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_font_loading_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_font_loading_example PRIVATE neui-macoshost)
+endif()
+# Copy any bundled fonts next to the executable (no-op if examples/fonts is
+# empty / absent). On macOS bundles, place them in Resources/fonts.
+file(GLOB NEUI_BUNDLED_FONTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/fonts/*.ttf"
+                              "${CMAKE_CURRENT_SOURCE_DIR}/examples/fonts/*.otf"
+                              "${CMAKE_CURRENT_SOURCE_DIR}/examples/fonts/*.ttc")
+if(NEUI_BUNDLED_FONTS)
+  if(APPLE)
+    set_source_files_properties(${NEUI_BUNDLED_FONTS} PROPERTIES
+      MACOSX_PACKAGE_LOCATION "Resources/fonts")
+    target_sources(neui_font_loading_example PRIVATE ${NEUI_BUNDLED_FONTS})
+  else()
+    add_custom_command(TARGET neui_font_loading_example POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory
+              "$<TARGET_FILE_DIR:neui_font_loading_example>/fonts"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NEUI_BUNDLED_FONTS}
+              "$<TARGET_FILE_DIR:neui_font_loading_example>/fonts")
+  endif()
 endif()
 
 # Scrolling SECTION example. Demonstrates NEUI_ATTR_SCROLL_MODE +
