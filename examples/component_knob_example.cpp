@@ -19,6 +19,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 #ifdef WIN32
 #define ACTIVE_HOST "neui.host.win32"
@@ -84,6 +87,25 @@ static bool NEUI_ABI on_event(void* /*token*/, neui_event_t* event)
   return false;  // the compound + behavior assets handle paint + input
 }
 
+// Locate a bundled component document. Tries the cwd-relative path first
+// (Windows/Linux copy it next to the binary), then the macOS .app bundle's
+// Contents/Resources (where CMake's MACOSX_PACKAGE_LOCATION puts it).
+static std::string find_component_doc(const char* rel)
+{
+  if (FILE* f = fopen(rel, "rb")) { fclose(f); return rel; }
+#ifdef __APPLE__
+  char exe[4096]; uint32_t cap = sizeof(exe);
+  if (_NSGetExecutablePath(exe, &cap) == 0) {
+    std::string dir(exe);                       // .../Contents/MacOS/<exe>
+    size_t slash = dir.find_last_of('/');
+    if (slash != std::string::npos) dir.resize(slash);  // .../Contents/MacOS
+    std::string res = dir + "/../Resources/" + rel;     // .../Contents/Resources/<rel>
+    if (FILE* f = fopen(res.c_str(), "rb")) { fclose(f); return res; }
+  }
+#endif
+  return rel;  // last resort: let the loader report the failure
+}
+
 static void* NEUI_ABI get_interface(void* /*token*/, const char* iface)
 {
   static neui_widget_client_t widget_client;
@@ -129,10 +151,11 @@ int main(int /*argc*/, char* /*argv*/[])
   env.base_dir      = nullptr;          // _from_file defaults it to the .json dir
   env.resolve_asset = resolve_asset;    // inject "indicator" -> the surface
   env.user          = &app;
+  std::string knob_doc = find_component_doc("components/knob.json");
   app.knob = app.assets->create_component_from_file(app.session,
-                                                    "components/knob.json", &env);
+                                                    knob_doc.c_str(), &env);
   if (app.knob.id == asset_none.id)
-    dbglog("[component] FAILED to load components/knob.json\n");
+    dbglog("[component] FAILED to load %s\n", knob_doc.c_str());
 
   // Designer round-trip: re-serialize the loaded component back to JSON.
   if (app.knob.id != asset_none.id) {
