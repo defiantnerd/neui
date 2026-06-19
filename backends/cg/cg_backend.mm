@@ -26,6 +26,7 @@
 #import <CoreText/CoreText.h>
 
 #include <cmath>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -841,6 +842,150 @@ namespace neui_cg_backend
   }
 
   // ---------------------------------------------------------------------------
+  // Client-registered fonts (NEUI_ASSET_KIND_FONT).
+  //
+  // Registration is process-scoped via CTFontManager, which makes the family
+  // resolvable both for the painted path (get_active_font's NSFont/UIFont
+  // descriptor lookup, unchanged) AND for the native control host's
+  // NSFont/UIFont fontWithName: - so the macOS/iOS native prong comes for
+  // free. Unknown families still fall back, so this is additive.
+
+  struct AppFontEntry {
+    uint64_t  token   = 0;
+    CGFontRef cg_font = nullptr;  // memory form (retained; unregistered on release)
+    CFURLRef  url     = nullptr;  // file form (retained)
+    bool      is_file = false;
+  };
+  static std::vector<AppFontEntry>& app_fonts()
+  {
+    static std::vector<AppFontEntry> v;
+    return v;
+  }
+  static uint64_t g_next_font_token = 1;
+
+  static void copy_family(CFStringRef famcf, char* out_family, uint32_t cap)
+  {
+    if (!out_family || cap == 0) return;
+    out_family[0] = '\0';
+    if (!famcf) return;
+    char buf[256] = { 0 };
+    if (CFStringGetCString(famcf, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+      uint32_t n = static_cast<uint32_t>(std::strlen(buf));
+      if (n > cap - 1) n = cap - 1;
+      if (n) std::memcpy(out_family, buf, n);
+      out_family[n] = '\0';
+    }
+  }
+
+  static bool cg_register_font(const uint8_t* data, uint32_t len,
+                                char* out_family, uint32_t cap,
+                                uint64_t* out_token)
+  {
+    if (out_family && cap) out_family[0] = '\0';
+    if (out_token) *out_token = 0;
+    if (!data || len == 0) return false;
+
+    // Provider does not own the bytes (callback null) - the asset store keeps
+    // them alive for the token's lifetime and unregister runs before they go.
+    CGDataProviderRef dp =
+      CGDataProviderCreateWithData(nullptr, data, len, nullptr);
+    if (!dp) return false;
+    CGFontRef font = CGFontCreateWithDataProvider(dp);
+    CGDataProviderRelease(dp);
+    if (!font) return false;
+
+    CFErrorRef err = nullptr;
+    if (!CTFontManagerRegisterGraphicsFont(font, &err)) {
+      if (err) CFRelease(err);
+      CGFontRelease(font);
+      return false;
+    }
+
+    // Family name via a transient CTFont over the CGFont.
+    CTFontRef   ctf   = CTFontCreateWithGraphicsFont(font, 12.0, nullptr, nullptr);
+    CFStringRef famcf = ctf ? CTFontCopyFamilyName(ctf) : nullptr;
+    copy_family(famcf, out_family, cap);
+    if (famcf) CFRelease(famcf);
+    if (ctf)   CFRelease(ctf);
+
+    AppFontEntry e;
+    e.token   = g_next_font_token++;
+    e.cg_font = font;       // retained until unregister
+    e.is_file = false;
+    app_fonts().push_back(e);
+    if (out_token) *out_token = e.token;
+    return true;
+  }
+
+  static bool cg_register_font_file(const char* path,
+                                     char* out_family, uint32_t cap,
+                                     uint64_t* out_token)
+  {
+    if (out_family && cap) out_family[0] = '\0';
+    if (out_token) *out_token = 0;
+    if (!path || !*path) return false;
+
+    CFStringRef cfpath =
+      CFStringCreateWithCString(nullptr, path, kCFStringEncodingUTF8);
+    if (!cfpath) return false;
+    CFURLRef url = CFURLCreateWithFileSystemPath(nullptr, cfpath,
+                                                  kCFURLPOSIXPathStyle, false);
+    CFRelease(cfpath);
+    if (!url) return false;
+
+    CFErrorRef err = nullptr;
+    if (!CTFontManagerRegisterFontsForURL(url, kCTFontManagerScopeProcess,
+                                           &err)) {
+      if (err) CFRelease(err);
+      CFRelease(url);
+      return false;
+    }
+
+    // Family name from the URL's first descriptor.
+    CFArrayRef descs = CTFontManagerCreateFontDescriptorsFromURL(url);
+    if (descs && CFArrayGetCount(descs) > 0) {
+      CTFontDescriptorRef d =
+        (CTFontDescriptorRef)CFArrayGetValueAtIndex(descs, 0);
+      CFStringRef famcf =
+        (CFStringRef)CTFontDescriptorCopyAttribute(d, kCTFontFamilyNameAttribute);
+      copy_family(famcf, out_family, cap);
+      if (famcf) CFRelease(famcf);
+    }
+    if (descs) CFRelease(descs);
+
+    AppFontEntry e;
+    e.token   = g_next_font_token++;
+    e.url     = url;        // retained until unregister
+    e.is_file = true;
+    app_fonts().push_back(e);
+    if (out_token) *out_token = e.token;
+    return true;
+  }
+
+  static void cg_unregister_font(uint64_t token)
+  {
+    if (!token) return;
+    auto& v = app_fonts();
+    for (auto it = v.begin(); it != v.end(); ++it) {
+      if (it->token != token) continue;
+      CFErrorRef err = nullptr;
+      if (it->is_file) {
+        if (it->url) {
+          CTFontManagerUnregisterFontsForURL(it->url,
+                                             kCTFontManagerScopeProcess, &err);
+          CFRelease(it->url);
+        }
+      } else if (it->cg_font) {
+        CTFontManagerUnregisterGraphicsFont(it->cg_font, &err);
+        CGFontRelease(it->cg_font);
+      }
+      if (err) CFRelease(err);
+      v.erase(it);
+      return;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
 
   static neui_render_backend_t backend = {
     NEUI_VERSION,
@@ -879,6 +1024,9 @@ namespace neui_cg_backend
     cg_pop_font,
     cg_create_offscreen_context,
     cg_read_pixels_bgra,
+    cg_register_font,
+    cg_register_font_file,
+    cg_unregister_font,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

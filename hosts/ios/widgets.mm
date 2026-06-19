@@ -1448,12 +1448,37 @@ namespace ios_host
                                     &ios_painter_draw_asset_thunk);
   }
 
+  static neui_asset_t NEUI_ABI as_create_font(neui_session_t session,
+                                              const uint8_t* data, uint32_t len)
+  {
+    auto* s = get_session(session);
+    if (!s || !data || len == 0) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_font(data, len, neui_cg_backend::get_backend());
+    return slot ? pack_asset_ios(s->session_id(), slot) : asset_none;
+  }
+  static neui_asset_t NEUI_ABI as_create_font_from_file(neui_session_t session, const char* path)
+  {
+    auto* s = get_session(session);
+    if (!s || !path) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_font_from_file(path, neui_cg_backend::get_backend());
+    return slot ? pack_asset_ios(s->session_id(), slot) : asset_none;
+  }
+  static uint32_t NEUI_ABI as_get_font_family(neui_session_t session, neui_asset_t font,
+                                              char* out_buf, uint32_t cap)
+  {
+    auto* s = get_session(session);
+    if (!s || font.id == asset_none.id) return 0;
+    if (((font.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return 0;
+    return s->_asset_manager.get_font_family(font.id & 0xffff, out_buf, cap);
+  }
+
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
     as_create_bitmap, as_create_from_file, as_destroy,
     as_get_size, as_get_kind,
     as_create_compound, as_create_behavior,
     as_create_surface, as_paint_surface,
+    as_create_font, as_create_font_from_file, as_get_font_family,
   };
 
   // -------------------------------------------------------------------------

@@ -19,6 +19,9 @@
 #include <cairo/cairo.h>
 #include <cairo/cairo-ft.h>
 #include <fontconfig/fontconfig.h>
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#include FT_TRUETYPE_TABLES_H
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -26,6 +29,7 @@
 #include <sys/ipc.h>
 #include <sys/shm.h>
 
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -113,6 +117,73 @@ namespace neui_cairo_backend
     return cache;
   }
 
+  // --- Client-registered fonts (NEUI_ASSET_KIND_FONT) -----------------------
+  //
+  // App fonts resolve via FreeType directly (not Fontconfig, which has no
+  // memory-add API), so they are looked up by family before the Fontconfig
+  // path and are NOT entered into face_cache() - that keeps the never-evicted
+  // cache free of faces that a best-effort unregister destroys. Each entry is
+  // one file = one weight; a multi-weight family is several entries sharing a
+  // family name, and the active weight picks the nearest weight_class.
+  struct AppFontEntry {
+    uint64_t           token        = 0;
+    FT_Face            ft_face      = nullptr;  // memory form references the asset-store bytes
+    cairo_font_face_t* cr_face      = nullptr;
+    int                weight_class = 400;       // OS/2 usWeightClass (100..900)
+    std::string        family;
+    bool               is_file      = false;
+  };
+  static std::vector<AppFontEntry>& app_fonts()
+  {
+    static std::vector<AppFontEntry> v;
+    return v;
+  }
+  static uint64_t g_next_font_token = 1;
+
+  static FT_Library g_ft_lib = nullptr;
+  static bool ensure_ft()
+  {
+    if (g_ft_lib) return true;
+    return FT_Init_FreeType(&g_ft_lib) == 0;
+  }
+
+  static bool iequals(const std::string& a, const std::string& b)
+  {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+      unsigned char ca = static_cast<unsigned char>(a[i]);
+      unsigned char cb = static_cast<unsigned char>(b[i]);
+      if (std::tolower(ca) != std::tolower(cb)) return false;
+    }
+    return true;
+  }
+
+  // The OS/2 weight class of an FT face, 400/700 fallback from the style bit.
+  static int ft_weight_class(FT_Face face)
+  {
+    if (!face) return 400;
+    TT_OS2* os2 = static_cast<TT_OS2*>(FT_Get_Sfnt_Table(face, FT_SFNT_OS2));
+    if (os2 && os2->usWeightClass) return static_cast<int>(os2->usWeightClass);
+    return (face->style_flags & FT_STYLE_FLAG_BOLD) ? 700 : 400;
+  }
+
+  // Pick the registered app face whose family matches `family` and whose
+  // weight is nearest the requested weight (0 => 400). Null if none match.
+  static cairo_font_face_t* find_app_face(const std::string& family, int weight)
+  {
+    if (family.empty()) return nullptr;
+    const int want = weight > 0 ? weight : 400;
+    cairo_font_face_t* best = nullptr;
+    int best_diff = 1 << 30;
+    for (auto& e : app_fonts()) {
+      if (!e.cr_face || !iequals(e.family, family)) continue;
+      int diff = e.weight_class - want;
+      if (diff < 0) diff = -diff;
+      if (diff < best_diff) { best_diff = diff; best = e.cr_face; }
+    }
+    return best;
+  }
+
   // Resolve the active (family, weight) from the ctx font stack into a cached
   // cairo_font_face_t. Empty family => Fontconfig's default sans. Unknown
   // families degrade gracefully (Fontconfig always substitutes a real font).
@@ -122,6 +193,9 @@ namespace neui_cairo_backend
       ? &st->font_stack.back() : nullptr;
     const std::string family = fs ? fs->family : std::string();
     const int         weight = fs ? fs->weight : 0;
+
+    // Client-registered fonts win over Fontconfig (and bypass face_cache).
+    if (cairo_font_face_t* app = find_app_face(family, weight)) return app;
 
     std::string key = family;
     key += '|';
@@ -755,6 +829,92 @@ namespace neui_cairo_backend
   }
 
   // --------------------------------------------------------------------------
+  // Client-registered fonts (NEUI_ASSET_KIND_FONT).
+
+  static void cairo_copy_family(const char* fam, char* out, uint32_t cap)
+  {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (!fam) return;
+    uint32_t n = static_cast<uint32_t>(std::strlen(fam));
+    if (n > cap - 1) n = cap - 1;
+    if (n) std::memcpy(out, fam, n);
+    out[n] = '\0';
+  }
+
+  // Finish registration from a built FT face: wrap it in a cairo face, read
+  // its family + weight class, store it. Consumes the face on failure.
+  static bool cairo_register_ft_face(FT_Face face, bool is_file,
+                                     char* out_family, uint32_t cap,
+                                     uint64_t* out_token)
+  {
+    cairo_font_face_t* cr = cairo_ft_font_face_create_for_ft_face(face, 0);
+    if (!cr || cairo_font_face_status(cr) != CAIRO_STATUS_SUCCESS) {
+      if (cr) cairo_font_face_destroy(cr);
+      FT_Done_Face(face);
+      return false;
+    }
+    AppFontEntry e;
+    e.token        = g_next_font_token++;
+    e.ft_face      = face;
+    e.cr_face      = cr;
+    e.weight_class = ft_weight_class(face);
+    e.is_file      = is_file;
+    if (face->family_name) e.family = face->family_name;
+    cairo_copy_family(face->family_name, out_family, cap);
+    if (out_token) *out_token = e.token;
+    app_fonts().push_back(std::move(e));
+    return true;
+  }
+
+  static bool cairo_register_font(const uint8_t* data, uint32_t len,
+                                  char* out_family, uint32_t cap,
+                                  uint64_t* out_token)
+  {
+    if (out_family && cap) out_family[0] = '\0';
+    if (out_token) *out_token = 0;
+    if (!data || len == 0 || !ensure_ft()) return false;
+    FT_Face face = nullptr;
+    // References the caller's bytes (asset store keeps them alive until
+    // unregister -> FT_Done_Face runs first, per release_slot ordering).
+    if (FT_New_Memory_Face(g_ft_lib, data, static_cast<FT_Long>(len), 0, &face) != 0
+     || !face)
+      return false;
+    return cairo_register_ft_face(face, /*is_file*/false, out_family, cap, out_token);
+  }
+
+  static bool cairo_register_font_file(const char* path,
+                                       char* out_family, uint32_t cap,
+                                       uint64_t* out_token)
+  {
+    if (out_family && cap) out_family[0] = '\0';
+    if (out_token) *out_token = 0;
+    if (!path || !*path || !ensure_ft()) return false;
+    FT_Face face = nullptr;
+    if (FT_New_Face(g_ft_lib, path, 0, &face) != 0 || !face) return false;
+    // Also make Fontconfig aware so name lookups elsewhere resolve it too.
+    FcConfigAppFontAddFile(nullptr,
+                           reinterpret_cast<const FcChar8*>(path));
+    return cairo_register_ft_face(face, /*is_file*/true, out_family, cap, out_token);
+  }
+
+  static void cairo_unregister_font(uint64_t token)
+  {
+    if (!token) return;
+    auto& v = app_fonts();
+    for (auto it = v.begin(); it != v.end(); ++it) {
+      if (it->token != token) continue;
+      // Drop the cairo ref first (it may reference the FT face), then the FT
+      // face. Fontconfig has no per-file remove; the file entry stays in the
+      // app config (best-effort, harmless - lookups go through find_app_face).
+      if (it->cr_face) cairo_font_face_destroy(it->cr_face);
+      if (it->ft_face) FT_Done_Face(it->ft_face);
+      v.erase(it);
+      return;
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // Off-screen contexts (NEUI_ASSET_KIND_SURFACE).
 
   static neui_render_ctx_t cairo_create_offscreen_context(uint32_t width_px,
@@ -834,6 +994,9 @@ namespace neui_cairo_backend
     cairo_pop_font,
     cairo_create_offscreen_context,
     cairo_read_pixels_bgra,
+    cairo_register_font,
+    cairo_register_font_file,
+    cairo_unregister_font,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

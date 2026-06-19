@@ -42,6 +42,11 @@ namespace neui_null_backend
   static void  null_pop_font       (neui_render_ctx_t) {}
   static neui_render_ctx_t null_create_offscreen_context(uint32_t, uint32_t, float) { return nullptr; }
   static bool  null_read_pixels_bgra(neui_render_ctx_t, uint8_t*) { return false; }
+  static bool  null_register_font(const uint8_t*, uint32_t, char* of, uint32_t cap, uint64_t* ot)
+  { if (of && cap) of[0] = '\0'; if (ot) *ot = 0; return false; }
+  static bool  null_register_font_file(const char*, char* of, uint32_t cap, uint64_t* ot)
+  { if (of && cap) of[0] = '\0'; if (ot) *ot = 0; return false; }
+  static void  null_unregister_font(uint64_t) {}
 
   static neui_render_backend_t backend = {
     NEUI_VERSION,
@@ -80,6 +85,9 @@ namespace neui_null_backend
     null_pop_font,
     null_create_offscreen_context,
     null_read_pixels_bgra,
+    null_register_font,
+    null_register_font_file,
+    null_unregister_font,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

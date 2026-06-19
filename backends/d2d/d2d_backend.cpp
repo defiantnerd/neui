@@ -7,6 +7,7 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <dwrite.h>
+#include <dwrite_3.h>
 #include <cstdint>
 #include <cstring>
 #include <cmath>
@@ -226,6 +227,239 @@ namespace neui_d2d_backend
     return SUCCEEDED(hr);
   }
 
+  // --- Client-registered fonts (NEUI_ASSET_KIND_FONT) -----------------------
+  //
+  // Registered fonts are merged into a custom IDWriteFontCollection1 that
+  // get_text_format consults instead of the system collection. The merged
+  // set ALSO includes the system font set, so passing it to CreateTextFormat
+  // resolves both custom and system families - unknown families still fall
+  // back to the default in get_text_format's "Segoe UI" branch.
+  static IDWriteFactory3*               g_dwrite3          = nullptr;
+  static IDWriteFactory5*               g_dwrite5          = nullptr; // in-memory loader (Win10 1709+)
+  static IDWriteInMemoryFontFileLoader* g_inmem_loader     = nullptr;
+  static IDWriteFontCollection1*        g_custom_collection = nullptr;
+
+  struct CustomFontEntry { uint64_t token = 0; IDWriteFontFile* file = nullptr; };
+  static std::vector<CustomFontEntry>   g_custom_fonts;
+  static uint64_t                       g_next_font_token  = 1;
+
+  // QI the shared DWrite factory up to the v3 (font-set / collection-from-set)
+  // and optional v5 (in-memory loader) interfaces. v3 is required for any
+  // font registration; v5 only for the in-memory form. Both are Win10; a
+  // failed QI returns false so create_font degrades to asset_none.
+  static bool ensure_dwrite3()
+  {
+    if (!g_dwrite_factory) return false;
+    if (!g_dwrite3) g_dwrite_factory->QueryInterface(IID_PPV_ARGS(&g_dwrite3));
+    if (!g_dwrite3) return false;
+    if (!g_dwrite5) g_dwrite_factory->QueryInterface(IID_PPV_ARGS(&g_dwrite5));
+    return true;
+  }
+
+  static std::string wide_to_utf8(const std::wstring& w)
+  {
+    if (w.empty()) return {};
+    int need = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0,
+                                    nullptr, nullptr);
+    if (need <= 1) return {};
+    std::string s(static_cast<size_t>(need - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), need,
+                         nullptr, nullptr);
+    return s;
+  }
+
+  static std::wstring utf8_to_wide(const char* s)
+  {
+    std::wstring w;
+    if (!s || !*s) return w;
+    int need = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
+    if (need > 1) {
+      w.resize(static_cast<size_t>(need - 1));
+      MultiByteToWideChar(CP_UTF8, 0, s, -1, w.data(), need);
+    }
+    return w;
+  }
+
+  // Read the WIN32 family name of the first face in a font file.
+  static bool read_family_from_file(IDWriteFontFile* file, std::wstring& out)
+  {
+    if (!g_dwrite3 || !file) return false;
+    BOOL                  supported = FALSE;
+    DWRITE_FONT_FILE_TYPE ftype     = DWRITE_FONT_FILE_TYPE_UNKNOWN;
+    DWRITE_FONT_FACE_TYPE fctype    = DWRITE_FONT_FACE_TYPE_UNKNOWN;
+    UINT32                num_faces = 0;
+    if (FAILED(file->Analyze(&supported, &ftype, &fctype, &num_faces))
+     || !supported)
+      return false;
+
+    IDWriteFontSetBuilder* sb = nullptr;
+    if (FAILED(g_dwrite3->CreateFontSetBuilder(&sb)) || !sb) return false;
+    // AddFontFile lives on the v1 builder (Win10 1703+); fail gracefully if
+    // unavailable so create_font degrades to asset_none.
+    IDWriteFontSetBuilder1* sb1 = nullptr;
+    if (FAILED(sb->QueryInterface(IID_PPV_ARGS(&sb1))) || !sb1) {
+      sb->Release();
+      return false;
+    }
+    HRESULT hr = sb1->AddFontFile(file);
+    sb1->Release();
+    if (FAILED(hr)) { sb->Release(); return false; }
+    IDWriteFontSet* set = nullptr;
+    hr = sb->CreateFontSet(&set);
+    sb->Release();
+    if (FAILED(hr) || !set) return false;
+
+    bool ok = false;
+    if (set->GetFontCount() > 0) {
+      BOOL exists = FALSE;
+      IDWriteLocalizedStrings* names = nullptr;
+      if (SUCCEEDED(set->GetPropertyValues(
+            0, DWRITE_FONT_PROPERTY_ID_WIN32_FAMILY_NAME, &exists, &names))
+       && exists && names && names->GetCount() > 0) {
+        UINT32 len = 0;
+        if (SUCCEEDED(names->GetStringLength(0, &len)) && len > 0) {
+          std::vector<wchar_t> buf(len + 1u, 0);
+          if (SUCCEEDED(names->GetString(0, buf.data(), len + 1u))) {
+            out.assign(buf.data());
+            ok = !out.empty();
+          }
+        }
+      }
+      if (names) names->Release();
+    }
+    set->Release();
+    return ok;
+  }
+
+  // Rebuild g_custom_collection = system font set + every registered file.
+  static void rebuild_custom_collection()
+  {
+    if (g_custom_collection) { g_custom_collection->Release(); g_custom_collection = nullptr; }
+    if (!g_dwrite3 || g_custom_fonts.empty()) return;
+
+    IDWriteFontSetBuilder* sb = nullptr;
+    if (FAILED(g_dwrite3->CreateFontSetBuilder(&sb)) || !sb) return;
+
+    // AddFontFile / AddFontSet both live on the v1 builder (Win10 1703+).
+    // Without it we can't add the custom files at all, so bail (the previous
+    // collection was already released above; null = system-only resolution).
+    IDWriteFontSetBuilder1* sb1 = nullptr;
+    if (FAILED(sb->QueryInterface(IID_PPV_ARGS(&sb1))) || !sb1) {
+      sb->Release();
+      return;
+    }
+
+    // Fold in the system fonts so the merged collection resolves system
+    // families too (CreateTextFormat takes a single collection).
+    IDWriteFontSet* sysset = nullptr;
+    if (SUCCEEDED(g_dwrite3->GetSystemFontSet(&sysset)) && sysset) {
+      sb1->AddFontSet(sysset);
+      sysset->Release();
+    }
+    for (auto& e : g_custom_fonts)
+      if (e.file) sb1->AddFontFile(e.file);
+
+    IDWriteFontSet* set = nullptr;
+    if (SUCCEEDED(sb->CreateFontSet(&set)) && set) {
+      g_dwrite3->CreateFontCollectionFromFontSet(set, &g_custom_collection);
+      set->Release();
+    }
+    sb1->Release();
+    sb->Release();
+  }
+
+  // Take ownership of `file` (AddRef'd into the registry), read its family
+  // name, and rebuild the merged collection. Common tail of the memory /
+  // file register entry points.
+  static bool d2d_register_common(IDWriteFontFile* file,
+                                   char* out_family, uint32_t cap,
+                                   uint64_t* out_token)
+  {
+    std::wstring fam;
+    if (!read_family_from_file(file, fam)) return false;
+
+    CustomFontEntry e;
+    e.token = g_next_font_token++;
+    e.file  = file;
+    file->AddRef();
+    g_custom_fonts.push_back(e);
+    rebuild_custom_collection();
+
+    if (out_family && cap > 0) {
+      std::string u = wide_to_utf8(fam);
+      uint32_t n = static_cast<uint32_t>(u.size());
+      if (n > cap - 1) n = cap - 1;
+      if (n) std::memcpy(out_family, u.data(), n);
+      out_family[n] = '\0';
+    }
+    if (out_token) *out_token = e.token;
+    return true;
+  }
+
+  static bool d2d_register_font(const uint8_t* data, uint32_t len,
+                                 char* out_family, uint32_t cap,
+                                 uint64_t* out_token)
+  {
+    if (out_family && cap) out_family[0] = '\0';
+    if (out_token) *out_token = 0;
+    if (!data || len == 0) return false;
+    if (!ensure_factory() || !ensure_dwrite3() || !g_dwrite5) return false;
+
+    if (!g_inmem_loader) {
+      if (FAILED(g_dwrite5->CreateInMemoryFontFileLoader(&g_inmem_loader))
+       || !g_inmem_loader)
+        return false;
+      g_dwrite5->RegisterFontFileLoader(g_inmem_loader);
+    }
+
+    IDWriteFontFile* file = nullptr;
+    // ownerObject == null: the loader copies the data, so registration does
+    // not depend on the caller's buffer surviving - but the asset store keeps
+    // it alive regardless, matching the documented cross-backend contract.
+    HRESULT hr = g_inmem_loader->CreateInMemoryFontFileReference(
+      g_dwrite_factory, data, len, nullptr, &file);
+    if (FAILED(hr) || !file) return false;
+
+    bool ok = d2d_register_common(file, out_family, cap, out_token);
+    file->Release();
+    return ok;
+  }
+
+  static bool d2d_register_font_file(const char* path,
+                                      char* out_family, uint32_t cap,
+                                      uint64_t* out_token)
+  {
+    if (out_family && cap) out_family[0] = '\0';
+    if (out_token) *out_token = 0;
+    if (!path || !*path) return false;
+    if (!ensure_factory() || !ensure_dwrite3()) return false;
+
+    std::wstring wpath = utf8_to_wide(path);
+    if (wpath.empty()) return false;
+    IDWriteFontFile* file = nullptr;
+    if (FAILED(g_dwrite_factory->CreateFontFileReference(wpath.c_str(),
+                                                          nullptr, &file))
+     || !file)
+      return false;
+
+    bool ok = d2d_register_common(file, out_family, cap, out_token);
+    file->Release();
+    return ok;
+  }
+
+  static void d2d_unregister_font(uint64_t token)
+  {
+    if (!token) return;
+    for (auto it = g_custom_fonts.begin(); it != g_custom_fonts.end(); ++it) {
+      if (it->token == token) {
+        if (it->file) it->file->Release();
+        g_custom_fonts.erase(it);
+        rebuild_custom_collection();
+        return;
+      }
+    }
+  }
+
   // Snap a CSS-style weight (100..900) to the nearest DWRITE_FONT_WEIGHT
   // bucket. 0 / out-of-range => Normal (400).
   static DWRITE_FONT_WEIGHT normalise_weight(int weight)
@@ -263,9 +497,11 @@ namespace neui_d2d_backend
     if (it != g_text_format_cache.end()) return it->second;
 
     IDWriteTextFormat* fmt = nullptr;
+    // g_custom_collection (when present) merges the system fonts with every
+    // client-registered family, so it resolves both; null = system only.
     HRESULT hr = g_dwrite_factory->CreateTextFormat(
       key.family.c_str(),
-      nullptr,
+      g_custom_collection,
       static_cast<DWRITE_FONT_WEIGHT>(key.weight),
       DWRITE_FONT_STYLE_NORMAL,
       DWRITE_FONT_STRETCH_NORMAL,
@@ -1183,6 +1419,9 @@ namespace neui_d2d_backend
     d2d_pop_font,
     d2d_create_offscreen_context,
     d2d_read_pixels_bgra,
+    d2d_register_font,
+    d2d_register_font_file,
+    d2d_unregister_font,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

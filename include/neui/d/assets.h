@@ -4,8 +4,8 @@
 #include <stdbool.h>
 #include "api.h"
 
-// Asset API - session-scoped media handles (bitmaps today, SVG / vector /
-// font reserved for later). Acquired via
+// Asset API - session-scoped media handles (bitmaps, surfaces, compounds,
+// behaviors, and client-registered fonts; SVG / vector reserved). Acquired via
 //   neui_asset_api_t* a = (neui_asset_api_t*)
 //     neui_api->get_interface(session, NEUI_API_ASSETS);
 // and used outside the paint loop to load / preload media. During paint,
@@ -62,7 +62,12 @@ extern "C" {
     // next unused integer so old client builds stay forward-compatible.
     // NEUI_ASSET_KIND_SVG    = 5,
     // NEUI_ASSET_KIND_VECTOR = 6,
-    // NEUI_ASSET_KIND_FONT   = 7,
+    // Client-registered font. Created via neui_asset_api::create_font /
+    // create_from_file; the handle owns the registration lifetime. The font
+    // is referenced for drawing by its family-name string (NEUI_ATTR_FONT_*
+    // / push_font), exactly like a system font - the handle itself is never
+    // passed to the draw path. See "Font loading" in CLAUDE.md.
+    NEUI_ASSET_KIND_FONT     = 7,
   } neui_asset_kind_t;
 
   // Client paint callback for neui_asset_api::paint_surface. Mirrors the
@@ -166,6 +171,47 @@ extern "C" {
                                     uint32_t              clear_argb,
                                     neui_surface_paint_fn fn,
                                     void*                 user);
+
+    // --- Font loading (NEUI_ASSET_KIND_FONT) -----------------------------
+    //
+    // Register a client-supplied font so its family becomes resolvable for
+    // text rendering WITHOUT installing it system-wide. The font is then
+    // referenced by its family-name string (set NEUI_ATTR_FONT_FAMILY on a
+    // widget, or call push_font in a CUSTOMDRAW paint) exactly like a system
+    // font - the returned handle only owns the registration lifetime and is
+    // never passed to the draw path. Push, not pull: an unknown family still
+    // falls back to the host default; registration just widens the set of
+    // names that resolve. Family-name collisions are last-wins (ship a
+    // uniquely-renamed family to avoid clashes).
+    //
+    // A multi-weight family is several files (Regular / Bold / ...); register
+    // each file with one call - the backend coalesces faces that share a
+    // family name, and push_font(family, weight) selects the weight. Italic
+    // is not selectable today (the font stack is family + weight only).
+
+    // Register an in-memory font (TTF / OTF / TTC bytes). The framework
+    // copies the bytes and owns the copy for the asset's lifetime (the
+    // FreeType / DirectWrite in-memory loaders require the buffer stay live).
+    // Returns asset_none if the backend cannot register fonts (null backend)
+    // or the data is not a usable font.
+    neui_asset_t (NEUI_ABI *create_font)(neui_session_t session,
+                                         const uint8_t* data,
+                                         uint32_t       len);
+
+    // Path convenience form (.ttf / .otf / .ttc). Resolution is immediate;
+    // returns asset_none on failure. More robust than create_font on
+    // backends that prefer URL / path registration.
+    neui_asset_t (NEUI_ABI *create_font_from_file)(neui_session_t session,
+                                                   const char*    path_utf8);
+
+    // Write the registered family name into out_buf (UTF-8, NUL-terminated,
+    // truncated to cap). Returns the full length (excluding the NUL), or 0
+    // if the asset is not a FONT. Lets the client discover the name to pass
+    // to NEUI_ATTR_FONT_FAMILY when it differs from the filename.
+    uint32_t (NEUI_ABI *get_font_family)(neui_session_t session,
+                                         neui_asset_t   font,
+                                         char*          out_buf,
+                                         uint32_t       cap);
   } neui_asset_api_t;
 
 #ifdef __cplusplus

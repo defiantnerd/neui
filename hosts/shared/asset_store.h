@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstring>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -74,6 +75,18 @@ namespace neui_detail
     // `pixels` (above) holds the most recently rendered frame, fed back
     // into the standard BITMAP draw path via the per-ctx bitmap cache.
     neui_render_ctx_t surface_ctx = nullptr;
+
+    // Populated for NEUI_ASSET_KIND_FONT entries. The backend register token
+    // (0 = none) drives unregister_font on release; font_family is the
+    // family name read back from the font data (the name the client passes
+    // to NEUI_ATTR_FONT_FAMILY / push_font). For the in-memory form the
+    // owned byte copy lives in `pixels` above (kept alive so the backend's
+    // FreeType / in-memory loader keeps a valid buffer for the token's
+    // lifetime); the file form leaves `pixels` empty (the backend reads the
+    // file itself). FONT entries never enter the bitmaps / surface_ctx
+    // tiers and get_pixels_for_export rejects them.
+    uint64_t          font_token  = 0;
+    std::string       font_family;
   };
 
   template <typename Loader>
@@ -146,6 +159,68 @@ namespace neui_detail
       entry->kind     = NEUI_ASSET_KIND_BEHAVIOR;
       entry->behavior = std::make_unique<BehaviorAsset>();
       return alloc_slot(std::move(entry));
+    }
+
+    // Register an in-memory font (NEUI_ASSET_KIND_FONT). Copies the bytes
+    // into the entry (keeping them alive for the backend's loader), calls
+    // backend->register_font, and on success stashes the token + resolved
+    // family name. Returns 0 on bad args, on backends without font support,
+    // or when the data is not a usable font.
+    uint32_t allocate_font(const uint8_t* data, uint32_t len,
+                            neui_render_backend_t* backend)
+    {
+      if (!data || len == 0 || !backend || !backend->register_font) return 0;
+
+      auto entry = std::make_unique<AssetEntry>();
+      entry->kind = NEUI_ASSET_KIND_FONT;
+      entry->pixels.assign(data, data + len);  // own the bytes for the loader
+
+      char     family[256] = { 0 };
+      uint64_t token       = 0;
+      if (!backend->register_font(entry->pixels.data(), len,
+                                   family, sizeof(family), &token))
+        return 0;
+      entry->font_token  = token;
+      entry->font_family = family;
+      return alloc_slot(std::move(entry));
+    }
+
+    // Register a font from a file path (NEUI_ASSET_KIND_FONT) via
+    // backend->register_font_file. The backend reads the file itself, so no
+    // byte copy is held. Returns 0 on failure / no font support.
+    uint32_t allocate_font_from_file(const std::string& path,
+                                      neui_render_backend_t* backend)
+    {
+      if (path.empty() || !backend || !backend->register_font_file) return 0;
+
+      auto entry = std::make_unique<AssetEntry>();
+      entry->kind = NEUI_ASSET_KIND_FONT;
+
+      char     family[256] = { 0 };
+      uint64_t token       = 0;
+      if (!backend->register_font_file(path.c_str(),
+                                        family, sizeof(family), &token))
+        return 0;
+      entry->font_token  = token;
+      entry->font_family = family;
+      return alloc_slot(std::move(entry));
+    }
+
+    // Copy a FONT entry's resolved family name into out_buf (UTF-8,
+    // NUL-terminated, truncated to cap). Returns the full length excluding
+    // the NUL, or 0 for a non-FONT / invalid slot.
+    uint32_t get_font_family(uint32_t slot, char* out_buf, uint32_t cap)
+    {
+      AssetEntry* e = get_slot(slot);
+      if (!e || e->kind != NEUI_ASSET_KIND_FONT) return 0;
+      const std::string& fam = e->font_family;
+      if (out_buf && cap > 0) {
+        uint32_t n = static_cast<uint32_t>(fam.size());
+        if (n > cap - 1) n = cap - 1;
+        if (n) std::memcpy(out_buf, fam.data(), n);
+        out_buf[n] = '\0';
+      }
+      return static_cast<uint32_t>(fam.size());
     }
 
     // Allocate a SURFACE slot. Creates an off-screen render ctx via
@@ -256,6 +331,13 @@ namespace neui_detail
         backend->destroy_context(entry->surface_ctx);
         entry->surface_ctx = nullptr;
       }
+      // Unregister FONT entries BEFORE freeing the byte buffer below - the
+      // backend's FreeType face / in-memory loader still references
+      // entry->pixels until unregister_font runs.
+      if (entry->font_token && backend && backend->unregister_font) {
+        backend->unregister_font(entry->font_token);
+        entry->font_token = 0;
+      }
       entry.reset();
       _free_slots.push_back(slot);
     }
@@ -333,6 +415,16 @@ namespace neui_detail
           if (entry && entry->surface_ctx) {
             backend->destroy_context(entry->surface_ctx);
             entry->surface_ctx = nullptr;
+          }
+        }
+      }
+      // Unregister any FONT entries (still referencing entry->pixels) before
+      // the table - and the byte buffers - are dropped.
+      if (backend && backend->unregister_font) {
+        for (auto& entry : _handles) {
+          if (entry && entry->font_token) {
+            backend->unregister_font(entry->font_token);
+            entry->font_token = 0;
           }
         }
       }
