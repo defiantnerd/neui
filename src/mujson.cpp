@@ -39,9 +39,34 @@ namespace neui
     // Set the error string and signal failure in one expression.
     inline bool fail(const char* msg) { lasterr = msg; return false; }
 
+    // Skip whitespace and comments. Comments are a non-strict extension:
+    // `//` runs to end-of-line, `/* ... */` spans (an unterminated block
+    // comment is skipped to end-of-input, which the caller then reports as an
+    // unexpected end). A lone '/' that begins neither form is left in place so
+    // bare scalar values may still contain a slash. Note: a comment must be
+    // separated from a bare (unquoted) scalar by whitespace or a structural
+    // char - the scalar reader does not look ahead for comment starts.
     inline void skipWs(const char*& p)
     {
-      while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+      for (;;)
+      {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+
+        if (p[0] == '/' && p[1] == '/')
+        {
+          p += 2;
+          while (*p != 0 && *p != '\n') ++p;
+          continue;
+        }
+        if (p[0] == '/' && p[1] == '*')
+        {
+          p += 2;
+          while (*p != 0 && !(p[0] == '*' && p[1] == '/')) ++p;
+          if (*p != 0) p += 2; // consume the closing */
+          continue;
+        }
+        break;
+      }
     }
 
     // Hex digit value, or -1 (also for the '\0' terminator).

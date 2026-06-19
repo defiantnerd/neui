@@ -121,6 +121,41 @@ TEST_CASE("mujson: whitespace and commas")
   CHECK(errIs("{a:[,]}", "expected a value"));
 }
 
+TEST_CASE("mujson: comments")
+{
+  // line comments at various positions
+  auto o = mujson::parse("{ // header\n a:1, // after a\n b:2 // after b\n }");
+  CHECK(o.size() == 2);
+  CHECK(is<int>(find(o, "a")) && std::get<int>(find(o, "a")->value) == 1);
+  CHECK(is<int>(find(o, "b")) && std::get<int>(find(o, "b")->value) == 2);
+
+  // block comments inline, incl. between key and colon and before the value
+  o = mujson::parse("{ a /* k */ : /* v */ 1, /* mid */ b:2 /* tail */ }");
+  CHECK(is<int>(find(o, "a")) && std::get<int>(find(o, "a")->value) == 1);
+  CHECK(is<int>(find(o, "b")) && std::get<int>(find(o, "b")->value) == 2);
+
+  // block comment spanning lines, and interspersed inside an array
+  o = mujson::parse("{ list:[ 1, /* two */ 2,\n /* three\n   continued */ 3 ] }");
+  const auto& la = std::get<mujson::array_t>(find(o, "list")->value);
+  CHECK(la.size() == 3 && is<int>(&la[0]) && is<int>(&la[1]) && is<int>(&la[2]));
+
+  // an object holding only a comment is an (empty) success
+  CHECK(ok("{ /* nothing here */ }"));
+  CHECK(ok("{ // just a line\n }"));
+
+  // a comment after the closing brace is ignored
+  CHECK(ok("{a:1} // trailing\n"));
+  CHECK(ok("{a:1}/* trailing */"));
+
+  // a lone '/' is NOT a comment: bare scalars may still contain a slash
+  o = mujson::parse("{ a:1/2, b:foo/bar }");
+  CHECK(is<std::string>(find(o, "a")) && std::get<std::string>(find(o, "a")->value) == "1/2");
+  CHECK(is<std::string>(find(o, "b")) && std::get<std::string>(find(o, "b")->value) == "foo/bar");
+
+  // an unterminated block comment is skipped to end -> reported as unexpected end
+  CHECK(errIs("{ a:1 /* no end", "unexpected string termination"));
+}
+
 TEST_CASE("mujson: escapes and unicode")
 {
   // named escapes inside a key and a value
