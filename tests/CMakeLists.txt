@@ -19,11 +19,16 @@ add_executable(neui_tests
   test_shortcut_format.cpp
   test_clipboard_item.cpp
   test_asset_font.cpp
-  test_tabview.cpp)
+  test_tabview.cpp
+  test_mujson.cpp
+  # mujson lives in the core lib, but the suite links no library, so its TU is
+  # compiled directly into the test executable (same pattern as the *.cpp above).
+  ${PROJECT_SOURCE_DIR}/src/mujson.cpp)
 
 target_include_directories(neui_tests PRIVATE
   ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_SOURCE_DIR}/hosts/shared)
+  ${PROJECT_SOURCE_DIR}/hosts/shared
+  ${PROJECT_SOURCE_DIR}/src)
 
 target_compile_features(neui_tests PRIVATE cxx_std_17)
 
