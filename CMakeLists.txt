@@ -77,8 +77,10 @@ if(APPLE AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.18)
   endif()
 endif()
 
-# build a library with a appropriate host
-add_library(neui src/neui.c)
+# build a library with a appropriate host. mujson (src/mujson.cpp) is a small
+# JSON-like parser that belongs to the core lib (neui::mujson) - C++ alongside
+# the C registry; CMake compiles each TU in its own language.
+add_library(neui src/neui.c src/mujson.cpp)
 
 # Per-platform host + backend selection.
 #   Windows : neui-win32host (native HWND host) + neui-xplhost (D2D-rendered)
