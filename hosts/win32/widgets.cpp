@@ -3017,7 +3017,8 @@ namespace win32_host
   static neui_widget_t NEUI_ABI create_from_component(neui_session_t session,
       neui_widget_t parent, neui_asset_t component, int x, int y, int width, int height)
   {
-    auto* s = get_session(session);
+    // Validate the session via the parent handle (matches xpl + macOS parity).
+    auto* s = get_session_for_widget(session, parent);
     if (!s || component.id == asset_none.id) return widget_none;
     if (((component.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return widget_none;
     auto* ce = s->_asset_manager.get_slot(component.id & 0xffff);

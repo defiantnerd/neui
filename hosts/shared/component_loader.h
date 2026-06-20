@@ -685,6 +685,10 @@ namespace neui_detail
       for (uint32_t slot : compound_sorted_slots(*in.compound)) {
         const CompoundLayer* L = compound_get_layer(*in.compound, slot);
         if (!L) continue;
+        // Compare against a default-constructed layer rather than hard-coded
+        // literals, so the model's defaults (compound.h) stay the single source
+        // of truth - a default change can't silently desync the serializer.
+        const CompoundLayer defL{};
         mj::object_t lo;
         lo.emplace_back("kind", njson_str(layer_kind_token(L->kind)));
         if (L->z != 0) lo.emplace_back("z", njson_int(L->z));
@@ -721,10 +725,10 @@ namespace neui_detail
         }
 
         if (L->kind == NEUI_COMPOUND_LAYER_TEXT) {
-          if (!L->text_template.empty()) lo.emplace_back("text", njson_str(L->text_template));
-          if (L->text_size != 12.0f)     lo.emplace_back("font_size", njson_num(L->text_size));
-          if (L->text_color_set)         lo.emplace_back("color", njson_str(hexcolor(L->text_color)));
-          if (L->text_align_x != 1 || L->text_align_y != 1) {
+          if (!L->text_template.empty())       lo.emplace_back("text", njson_str(L->text_template));
+          if (L->text_size != defL.text_size)  lo.emplace_back("font_size", njson_num(L->text_size));
+          if (L->text_color_set)               lo.emplace_back("color", njson_str(hexcolor(L->text_color)));
+          if (L->text_align_x != defL.text_align_x || L->text_align_y != defL.text_align_y) {
             mj::array_t al;
             al.push_back(njson_str(align_x_token(L->text_align_x)));
             al.push_back(njson_str(align_y_token(L->text_align_y)));
@@ -738,7 +742,7 @@ namespace neui_detail
               lo.emplace_back("asset", njson_str(*nm));
           }
           if (L->rotation != 0.0f)        lo.emplace_back("rotation", njson_num(L->rotation));
-          if (L->tint != 0xFFFFFFFFu)     lo.emplace_back("tint", njson_str(hexcolor(L->tint)));
+          if (L->tint != defL.tint)       lo.emplace_back("tint", njson_str(hexcolor(L->tint)));
         } else if (L->kind == NEUI_COMPOUND_LAYER_RECT ||
                    L->kind == NEUI_COMPOUND_LAYER_PATH) {
           if (L->fill_color)   lo.emplace_back("fill_color",   njson_str(hexcolor(L->fill_color)));
@@ -800,36 +804,40 @@ namespace neui_detail
       for (uint32_t i = 1; i < in.behavior->handlers.size(); ++i) {
         const BehaviorHandler* H = in.behavior->handlers[i].get();
         if (!H) continue;
+        // Compare against a default-constructed handler so the model's defaults
+        // (behavior.h) stay the single source of truth - a default change can't
+        // silently desync the serializer (the old code duplicated the literals).
+        const BehaviorHandler def{};
         mj::object_t ho;
         ho.emplace_back("kind", njson_str(behavior_kind_token(H->kind)));
-        if (H->target != "neui.param.value")            ho.emplace_back("target", njson_str(H->target));
-        if (H->target_default != "neui.param.default")  ho.emplace_back("target_default", njson_str(H->target_default));
-        if (!H->target_y.empty())                       ho.emplace_back("target_y", njson_str(H->target_y));
-        if (H->snap_attr != "neui.attr.steps")          ho.emplace_back("snap_attr", njson_str(H->snap_attr));
-        if (!H->cursor.empty())                         ho.emplace_back("cursor", njson_str(H->cursor));
-        if (H->fine_modifier != FineModifier::Shift)    ho.emplace_back("fine_modifier", njson_str(fine_mod_token(H->fine_modifier)));
-        if (H->min != 0.0f)                             ho.emplace_back("min", njson_num(H->min));
-        if (H->max != 1.0f)                             ho.emplace_back("max", njson_num(H->max));
-        if (H->step != 0.01f)                           ho.emplace_back("step", njson_num(H->step));
-        if (H->coarse != 0.10f)                         ho.emplace_back("coarse", njson_num(H->coarse));
-        if (H->fine_scale != 0.2f)                      ho.emplace_back("fine_scale", njson_num(H->fine_scale));
-        if (H->sweep != 200.0f)                         ho.emplace_back("sweep", njson_num(H->sweep));
-        if (H->sweep_y != 200.0f)                       ho.emplace_back("sweep_y", njson_num(H->sweep_y));
-        if (H->deadzone != 4.0f)                        ho.emplace_back("deadzone", njson_num(H->deadzone));
-        if (H->wrap != 0)                               ho.emplace_back("wrap", njson_int(H->wrap));
-        if (H->threshold_px != 4.0f)                    ho.emplace_back("threshold_px", njson_num(H->threshold_px));
-        if (H->allowed_actions != 3u)                   ho.emplace_back("allowed_actions", njson_int(static_cast<int>(H->allowed_actions)));
-        if (!H->drag_data_key.empty())                  ho.emplace_back("drag_data_key", njson_str(H->drag_data_key));
-        if (!H->drag_preview_key.empty())               ho.emplace_back("drag_preview_key", njson_str(H->drag_preview_key));
-        if (H->drag_hot_x != -1)                        ho.emplace_back("drag_hot_x", njson_int(H->drag_hot_x));
-        if (H->drag_hot_y != -1)                        ho.emplace_back("drag_hot_y", njson_int(H->drag_hot_y));
-        if (!H->result_attr.empty())                    ho.emplace_back("result_attr", njson_str(H->result_attr));
-        if (H->anchor_parent != NEUI_ANCHOR_TOP_LEFT)   ho.emplace_back("anchor_parent", njson_int(static_cast<int>(H->anchor_parent)));
-        if (H->anchor_self != NEUI_ANCHOR_TOP_LEFT)     ho.emplace_back("anchor_self", njson_int(static_cast<int>(H->anchor_self)));
-        if (H->offset_x)                                ho.emplace_back("offset_x", njson_int(H->offset_x));
-        if (H->offset_y)                                ho.emplace_back("offset_y", njson_int(H->offset_y));
-        if (H->width != NEUI_COMPOUND_FILL)             ho.emplace_back("width", njson_int(H->width));
-        if (H->height != NEUI_COMPOUND_FILL)            ho.emplace_back("height", njson_int(H->height));
+        if (H->target != def.target)                  ho.emplace_back("target", njson_str(H->target));
+        if (H->target_default != def.target_default)  ho.emplace_back("target_default", njson_str(H->target_default));
+        if (H->target_y != def.target_y)              ho.emplace_back("target_y", njson_str(H->target_y));
+        if (H->snap_attr != def.snap_attr)            ho.emplace_back("snap_attr", njson_str(H->snap_attr));
+        if (H->cursor != def.cursor)                  ho.emplace_back("cursor", njson_str(H->cursor));
+        if (H->fine_modifier != def.fine_modifier)    ho.emplace_back("fine_modifier", njson_str(fine_mod_token(H->fine_modifier)));
+        if (H->min != def.min)                        ho.emplace_back("min", njson_num(H->min));
+        if (H->max != def.max)                        ho.emplace_back("max", njson_num(H->max));
+        if (H->step != def.step)                      ho.emplace_back("step", njson_num(H->step));
+        if (H->coarse != def.coarse)                  ho.emplace_back("coarse", njson_num(H->coarse));
+        if (H->fine_scale != def.fine_scale)          ho.emplace_back("fine_scale", njson_num(H->fine_scale));
+        if (H->sweep != def.sweep)                    ho.emplace_back("sweep", njson_num(H->sweep));
+        if (H->sweep_y != def.sweep_y)                ho.emplace_back("sweep_y", njson_num(H->sweep_y));
+        if (H->deadzone != def.deadzone)              ho.emplace_back("deadzone", njson_num(H->deadzone));
+        if (H->wrap != def.wrap)                      ho.emplace_back("wrap", njson_int(H->wrap));
+        if (H->threshold_px != def.threshold_px)      ho.emplace_back("threshold_px", njson_num(H->threshold_px));
+        if (H->allowed_actions != def.allowed_actions) ho.emplace_back("allowed_actions", njson_int(static_cast<int>(H->allowed_actions)));
+        if (H->drag_data_key != def.drag_data_key)    ho.emplace_back("drag_data_key", njson_str(H->drag_data_key));
+        if (H->drag_preview_key != def.drag_preview_key) ho.emplace_back("drag_preview_key", njson_str(H->drag_preview_key));
+        if (H->drag_hot_x != def.drag_hot_x)          ho.emplace_back("drag_hot_x", njson_int(H->drag_hot_x));
+        if (H->drag_hot_y != def.drag_hot_y)          ho.emplace_back("drag_hot_y", njson_int(H->drag_hot_y));
+        if (H->result_attr != def.result_attr)        ho.emplace_back("result_attr", njson_str(H->result_attr));
+        if (H->anchor_parent != def.anchor_parent)    ho.emplace_back("anchor_parent", njson_int(static_cast<int>(H->anchor_parent)));
+        if (H->anchor_self != def.anchor_self)        ho.emplace_back("anchor_self", njson_int(static_cast<int>(H->anchor_self)));
+        if (H->offset_x != def.offset_x)              ho.emplace_back("offset_x", njson_int(H->offset_x));
+        if (H->offset_y != def.offset_y)              ho.emplace_back("offset_y", njson_int(H->offset_y));
+        if (H->width != def.width)                    ho.emplace_back("width", njson_int(H->width));
+        if (H->height != def.height)                  ho.emplace_back("height", njson_int(H->height));
         harr.push_back(njson_obj(std::move(ho)));
       }
       root.emplace_back("behavior", njson_arr(std::move(harr)));
