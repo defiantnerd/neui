@@ -1,0 +1,129 @@
+name: CI
+
+# Compile-check + unit tests on the three desktop hosts:
+#   - Linux   : crossplatform host + Cairo/X11 backend (GCC)
+#   - macOS   : native AppKit host + CoreGraphics backend (AppleClang, Xcode)
+#   - Windows : native Win32 host + Direct2D backend (MSVC)
+# Each job configures, builds Debug, and runs the ctest suite. The build is
+# warning-clean by design (the project turns warnings up but not into errors),
+# so this guards against compile breaks and test regressions on every host.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a branch).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (GCC · Cairo/X11)
+            os: ubuntu-latest
+            configure: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DNEUI_WERROR=ON
+            build: cmake --build build --parallel
+            test: ctest --test-dir build --output-on-failure
+          - name: macOS (AppleClang · Xcode)
+            os: macos-latest
+            configure: cmake -B build -G Xcode -DNEUI_WERROR=ON
+            build: cmake --build build --config Debug --parallel
+            test: ctest --test-dir build -C Debug --output-on-failure
+          - name: Windows (MSVC · Direct2D)
+            os: windows-latest
+            configure: cmake -B build -DNEUI_WERROR=ON
+            build: cmake --build build --config Debug --parallel
+            test: ctest --test-dir build -C Debug --output-on-failure
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # X11 + Cairo + FreeType + Fontconfig dev headers, plus the two optional
+      # packages (XInput2 -> NEUI_HAS_XI2, D-Bus -> NEUI_HAS_DBUS) so the full
+      # Linux feature set compiles. Matches the dev-package list in CLAUDE.md.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libx11-dev libxext-dev libxi-dev \
+            libcairo2-dev libfreetype-dev libfontconfig1-dev \
+            libdbus-1-dev
+
+      - name: Configure
+        run: ${{ matrix.configure }}
+
+      - name: Build
+        run: ${{ matrix.build }}
+
+      # Headless-safe: the registered tests (neui_tests, and on Linux the
+      # offscreen neui_cairo_smoke) need no display. The X-display-dependent
+      # neui_embed_smoke is built but not ctest-registered, so it is not run.
+      - name: Test
+        run: ${{ matrix.test }}
+
+  # iOS: build the UIKit host + the whole portable tree for the simulator
+  # (arm64), then RUN the unit suite on a booted simulator. Running on the iOS
+  # runtime/libc++ is not redundant with the macOS job - it validates the
+  # portable code (e.g. mujson's strtod/charconv paths) under the iOS
+  # deployment target, exactly the surface that bit us on charconv availability.
+  ios:
+    name: iOS (AppleClang · simulator)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure
+        run: >
+          cmake -B build-ios -G Xcode
+          -DCMAKE_SYSTEM_NAME=iOS
+          -DCMAKE_OSX_SYSROOT=iphonesimulator
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+          -DNEUI_WERROR=ON
+
+      - name: Build
+        run: cmake --build build-ios --config Debug --parallel
+
+      - name: Run unit tests on simulator
+        run: |
+          set -euo pipefail
+          APP=$(find build-ios -name 'neui_tests.app' -type d | head -n1)
+          [ -n "$APP" ] || { echo "neui_tests.app not found"; exit 1; }
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Info.plist")
+          echo "App=$APP  Bundle=$BUNDLE_ID"
+
+          # Newest available iOS runtime + a device type IT supports. Picking a
+          # device type from the global list can yield e.g. an iPhone 6s Plus
+          # that no modern runtime supports -> SimError 403 "Incompatible
+          # device"; a runtime's own supportedDeviceTypes are guaranteed valid.
+          # Single-line python (no nested blocks) to stay robust inside YAML.
+          PAIR=$(xcrun simctl list runtimes --json | python3 -c "import json,sys; rts=[r for r in json.load(sys.stdin)['runtimes'] if r['platform']=='iOS' and r['isAvailable']]; rt=max(rts,key=lambda r:[int(x) for x in r['version'].split('.')]); dts=rt['supportedDeviceTypes']; iph=[t for t in dts if 'iPhone' in t['name']] or dts; print(rt['identifier'],iph[-1]['identifier'])")
+          RUNTIME=${PAIR% *}
+          DEVTYPE=${PAIR#* }
+          echo "Runtime=$RUNTIME  DeviceType=$DEVTYPE"
+
+          UDID=$(xcrun simctl create neui-ci "$DEVTYPE" "$RUNTIME")
+          xcrun simctl boot "$UDID"
+          xcrun simctl install "$UDID" "$APP"
+
+          # --console-pty streams the app's stdout and returns when it exits.
+          # simctl launch's own exit status is unreliable, so assert on the
+          # framework's summary line instead.
+          set +e
+          xcrun simctl launch --console-pty "$UDID" "$BUNDLE_ID" | tee sim-out.txt
+          set -e
+          xcrun simctl shutdown "$UDID" || true
+          xcrun simctl delete "$UDID" || true
+
+          # e.g. "neui_test: 231 test cases (231 passed, 0 failed); 1310 checks (0 failed)"
+          grep -Eq 'test cases \([0-9]+ passed, 0 failed\); [0-9]+ checks \(0 failed\)' sim-out.txt
+          echo "iOS unit tests passed."

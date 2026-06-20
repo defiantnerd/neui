@@ -110,6 +110,41 @@ TEST_CASE("AssetStore font: get_font_family copies + truncates")
   CHECK_EQ(std::string(small), std::string("Fake"));
 }
 
+TEST_CASE("AssetStore font: get_font_family boundary - exact fit, cap 1, cap 0, null")
+{
+  reset_counters();
+  neui_render_backend_t backend = make_backend();
+  AssetStore<FakeLoader> store;
+
+  const uint8_t bytes[4] = { 0 };
+  uint32_t slot = store.allocate_font(bytes, sizeof(bytes), &backend);
+  REQUIRE(slot != 0);
+  // "FakeFamily" is 10 chars; full length is always the return value.
+
+  // Exact fit: cap == len + 1 holds the whole name + NUL, no truncation.
+  char exact[11] = { 0 };
+  CHECK_EQ((int)store.get_font_family(slot, exact, sizeof(exact)), 10);
+  CHECK_EQ(std::string(exact), std::string("FakeFamily"));
+
+  // One short: cap == len truncates by exactly one char (9 + NUL).
+  char oneshort[10] = { 0 };
+  CHECK_EQ((int)store.get_font_family(slot, oneshort, sizeof(oneshort)), 10);
+  CHECK_EQ(std::string(oneshort), std::string("FakeFamil"));
+
+  // cap == 1: only the NUL fits -> empty string, full length still reported.
+  char one[1] = { '\x7f' };
+  CHECK_EQ((int)store.get_font_family(slot, one, sizeof(one)), 10);
+  CHECK_EQ((int)one[0], 0);
+
+  // cap == 0: nothing is written (sentinel survives), full length reported.
+  char sentinel = '\x7f';
+  CHECK_EQ((int)store.get_font_family(slot, &sentinel, 0), 10);
+  CHECK_EQ((int)sentinel, 0x7f);
+
+  // null buffer: no write, no crash, full length reported.
+  CHECK_EQ((int)store.get_font_family(slot, nullptr, 16), 10);
+}
+
 TEST_CASE("AssetStore font: get_font_family rejects non-FONT slots")
 {
   reset_counters();

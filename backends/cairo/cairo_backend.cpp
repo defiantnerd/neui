@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -842,9 +843,31 @@ namespace neui_cairo_backend
     out[n] = '\0';
   }
 
-  // Finish registration from a built FT face: wrap it in a cairo face, read
-  // its family + weight class, store it. Consumes the face on failure.
-  static bool cairo_register_ft_face(FT_Face face, bool is_file,
+  // FreeType face (+ optional owned byte copy for the in-memory form) whose
+  // teardown is handed to Cairo. destroy_app_face_data runs only when Cairo
+  // releases its LAST reference to the cairo_font_face_t - which includes the
+  // scaled-font instances Cairo keeps in its own process-global cache, and so
+  // can outlive cairo_font_face_destroy. That is exactly why unregister must
+  // NOT call FT_Done_Face eagerly (the old bug): freeing the FT_Face - or the
+  // bytes it lazily reads glyphs from - out from under a still-cached scaled
+  // font is a use-after-free. Freeing here guarantees FT_Done_Face runs first,
+  // then the bytes the face referenced.
+  struct AppFaceData { FT_Face face; uint8_t* bytes; };
+  static const cairo_user_data_key_t g_app_face_key = {};
+  static void destroy_app_face_data(void* p)
+  {
+    AppFaceData* d = static_cast<AppFaceData*>(p);
+    if (!d) return;
+    if (d->face) FT_Done_Face(d->face);
+    delete[] d->bytes;
+    delete d;
+  }
+
+  // Finish registration from a built FT face: wrap it in a cairo face, hand
+  // the FT face (+ owned bytes, in-memory form) to the cairo face's lifetime,
+  // read its family + weight class, store it. Consumes the face + bytes on
+  // failure.
+  static bool cairo_register_ft_face(FT_Face face, uint8_t* owned_bytes, bool is_file,
                                      char* out_family, uint32_t cap,
                                      uint64_t* out_token)
   {
@@ -852,11 +875,22 @@ namespace neui_cairo_backend
     if (!cr || cairo_font_face_status(cr) != CAIRO_STATUS_SUCCESS) {
       if (cr) cairo_font_face_destroy(cr);
       FT_Done_Face(face);
+      delete[] owned_bytes;
+      return false;
+    }
+    AppFaceData* fd = new (std::nothrow) AppFaceData{ face, owned_bytes };
+    if (!fd ||
+        cairo_font_face_set_user_data(cr, &g_app_face_key, fd,
+                                      destroy_app_face_data) != CAIRO_STATUS_SUCCESS) {
+      delete fd;
+      cairo_font_face_destroy(cr);
+      FT_Done_Face(face);
+      delete[] owned_bytes;
       return false;
     }
     AppFontEntry e;
     e.token        = g_next_font_token++;
-    e.ft_face      = face;
+    e.ft_face      = face;       // owned by the cairo face now; not freed in unregister
     e.cr_face      = cr;
     e.weight_class = ft_weight_class(face);
     e.is_file      = is_file;
@@ -874,13 +908,20 @@ namespace neui_cairo_backend
     if (out_family && cap) out_family[0] = '\0';
     if (out_token) *out_token = 0;
     if (!data || len == 0 || !ensure_ft()) return false;
+    // Own a private copy: FT_New_Memory_Face reads glyph data from this buffer
+    // for the face's lifetime, which (via Cairo's scaled-font cache) can
+    // outlast both unregister and the asset store's own copy - so the buffer's
+    // lifetime is tied to the FT face's, freed by destroy_app_face_data.
+    uint8_t* owned = new (std::nothrow) uint8_t[len];
+    if (!owned) return false;
+    std::memcpy(owned, data, len);
     FT_Face face = nullptr;
-    // References the caller's bytes (asset store keeps them alive until
-    // unregister -> FT_Done_Face runs first, per release_slot ordering).
-    if (FT_New_Memory_Face(g_ft_lib, data, static_cast<FT_Long>(len), 0, &face) != 0
-     || !face)
+    if (FT_New_Memory_Face(g_ft_lib, owned, static_cast<FT_Long>(len), 0, &face) != 0
+     || !face) {
+      delete[] owned;
       return false;
-    return cairo_register_ft_face(face, /*is_file*/false, out_family, cap, out_token);
+    }
+    return cairo_register_ft_face(face, owned, /*is_file*/false, out_family, cap, out_token);
   }
 
   static bool cairo_register_font_file(const char* path,
@@ -895,7 +936,8 @@ namespace neui_cairo_backend
     // Also make Fontconfig aware so name lookups elsewhere resolve it too.
     FcConfigAppFontAddFile(nullptr,
                            reinterpret_cast<const FcChar8*>(path));
-    return cairo_register_ft_face(face, /*is_file*/true, out_family, cap, out_token);
+    return cairo_register_ft_face(face, /*owned_bytes*/nullptr, /*is_file*/true,
+                                  out_family, cap, out_token);
   }
 
   static void cairo_unregister_font(uint64_t token)
@@ -904,11 +946,13 @@ namespace neui_cairo_backend
     auto& v = app_fonts();
     for (auto it = v.begin(); it != v.end(); ++it) {
       if (it->token != token) continue;
-      // Drop the cairo ref first (it may reference the FT face), then the FT
-      // face. Fontconfig has no per-file remove; the file entry stays in the
-      // app config (best-effort, harmless - lookups go through find_app_face).
+      // Release our reference to the cairo face only. The FT face + owned bytes
+      // are freed by destroy_app_face_data when Cairo drops its LAST reference,
+      // which may be a cached scaled font that outlives this call - freeing the
+      // FT face eagerly here would pull it out from under that scaled font (the
+      // old use-after-free). Fontconfig has no per-file remove; the file entry
+      // stays in the app config (best-effort, harmless - find_app_face gates).
       if (it->cr_face) cairo_font_face_destroy(it->cr_face);
-      if (it->ft_face) FT_Done_Face(it->ft_face);
       v.erase(it);
       return;
     }

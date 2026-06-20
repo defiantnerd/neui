@@ -470,3 +470,57 @@ TEST_CASE("serialize_component: round-trips through the loader")
   CHECK(g_handlers[0].flts.count("max") == 0);
   CHECK(g_handlers[0].flts.count("deadzone") == 0);
 }
+
+// Regression: a drag_biaxial handler's per-axis Y target must survive JSON
+// load (target_y was previously absent from the string-prop table, so it was
+// silently dropped at load while serialize still emitted it - a lossy
+// round-trip for any biaxial component).
+TEST_CASE("component_loader: drag_biaxial target_y survives load + round-trip")
+{
+  const char* kBiaxial = R"json({
+    "component": "xy_pad",
+    "size": [120, 120],
+    "compound": [
+      { "kind": "rect", "z": 0, "anchor": ["top_left","top_left"], "size": "fill",
+        "fill_color": "#FF202020" }
+    ],
+    "behavior": [
+      { "kind": "drag_biaxial", "target": "neui.param.x", "target_y": "neui.param.y",
+        "sweep": 100, "sweep_y": 100 }
+    ]
+  })json";
+
+  BuiltComponent c = run_loader(kBiaxial);
+  CHECK(c.ok);
+  REQUIRE(g_handlers.size() == 1);
+  CHECK(g_handlers[0].kind == NEUI_BEHAVIOR_KIND_DRAG_BIAXIAL);
+  // The fix: target_y reaches be_set_string instead of being dropped.
+  REQUIRE(g_handlers[0].strs.count("target_y") == 1);
+  CHECK(g_handlers[0].strs.at("target_y") == "neui.param.y");
+  CHECK(g_handlers[0].strs.at("target") == "neui.param.x");
+
+  // Round-trip: hand-build a biaxial behavior, serialize, reload, confirm
+  // target_y is preserved end-to-end.
+  BehaviorAsset ba;
+  uint32_t h = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_BIAXIAL);
+  BehaviorHandler* H = behavior_get_handler(ba, h);
+  H->target   = "neui.param.x";
+  H->target_y = "neui.param.y";
+
+  CompoundAsset ca;
+  std::string nm = "xy_pad";
+  std::vector<std::pair<std::string, std::string>> an;
+  std::vector<std::pair<uint32_t, std::string>>    hn;
+  ComponentSerializeInput in;
+  in.name = &nm; in.width = 120.0f; in.height = 120.0f;
+  in.asset_names = &an; in.asset_handle_names = &hn;
+  in.compound = &ca; in.behavior = &ba;
+
+  std::string json = serialize_component(in, 0);
+  BuiltComponent rebuilt = run_loader(json);
+  CHECK(rebuilt.ok);
+  REQUIRE(g_handlers.size() == 1);
+  CHECK(g_handlers[0].kind == NEUI_BEHAVIOR_KIND_DRAG_BIAXIAL);
+  REQUIRE(g_handlers[0].strs.count("target_y") == 1);
+  CHECK(g_handlers[0].strs.at("target_y") == "neui.param.y");
+}

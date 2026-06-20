@@ -156,6 +156,32 @@ TEST_CASE("mujson: comments")
   CHECK(errIs("{ a:1 /* no end", "unexpected string termination"));
 }
 
+// Characterization: a comment marker that immediately abuts a bare scalar (no
+// separating whitespace) is swallowed INTO the scalar token, because parseScalar
+// stops only at , } ] or whitespace - it does not look ahead for // or /*. This
+// is a documented sharp edge (src/mujson.cpp); pin it so a future "fix" to the
+// scalar/comment interaction can't change it silently.
+TEST_CASE("mujson: comment markers abutting a bare scalar are part of the token")
+{
+  // No space before // -> the whole "1//x" is one bare scalar (a string,
+  // since it isn't a number). The // never becomes a line comment.
+  auto o = mujson::parse("{a:1//x}");
+  CHECK(o.size() == 1);
+  CHECK(is<std::string>(find(o, "a")) &&
+        std::get<std::string>(find(o, "a")->value) == "1//x");
+
+  // No space before /* -> the scalar absorbs "1/*"; the leftover " c */}" then
+  // fails the "expected ',' or '}'" check. So this does NOT parse.
+  CHECK(errIs("{a:1/* c */}", "expected ',' or '}'"));
+
+  // Contrast: WITH separating whitespace the // is a real comment to EOL, and a
+  // following newline lets the object continue normally.
+  o = mujson::parse("{a:1, //x\n b:2}");
+  CHECK(o.size() == 2);
+  CHECK(is<int>(find(o, "a")) && std::get<int>(find(o, "a")->value) == 1);
+  CHECK(is<int>(find(o, "b")) && std::get<int>(find(o, "b")->value) == 2);
+}
+
 TEST_CASE("mujson: escapes and unicode")
 {
   // named escapes inside a key and a value
@@ -197,6 +223,14 @@ TEST_CASE("mujson: errors and depth")
   // empty object is success, not an error
   CHECK(ok("{}"));
   CHECK(std::string(mujson::getLastError()).empty());
+
+  // null input must not crash; reports the same error as a non-object string
+  {
+    auto r = mujson::parse(static_cast<const char*>(nullptr));
+    CHECK(r.empty());
+    CHECK(std::string(mujson::getLastError()) ==
+          "string does not start with curly braces");
+  }
 
   // depth guard fires beyond kMaxDepth (128)
   std::string deep;

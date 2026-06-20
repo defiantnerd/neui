@@ -113,6 +113,20 @@ namespace neui_cg_backend
     return cache;
   }
 
+  // Drop every cached CTFont so the next get_active_font re-resolves against
+  // the current CTFontManager registration set. Without this, a (family,
+  // weight, size) drawn *before* its font was registered would keep resolving
+  // to the cached system fallback even after registration (and a stale custom
+  // face would survive unregister). Registration is a rare, startup-time op,
+  // so flushing the whole (tiny) cache is cheaper than tracking per-family
+  // keys and is not on any draw path.
+  static void flush_font_cache()
+  {
+    auto& cache = font_cache();
+    for (auto& kv : cache) if (kv.second) CFRelease(kv.second);
+    cache.clear();
+  }
+
   // CSS-style weight (100..900, 0 = unset) -> platform font-weight scale.
   // Mirror of the d2d backend's normalise_weight mapping. AppKit's
   // NSFontWeight* and UIKit's UIFontWeight* constants are both CGFloat scales
@@ -855,6 +869,11 @@ namespace neui_cg_backend
     CGFontRef cg_font = nullptr;  // memory form (retained; unregistered on release)
     CFURLRef  url     = nullptr;  // file form (retained)
     bool      is_file = false;
+    // False when registration returned kCTFontManagerErrorAlreadyRegistered:
+    // the family is already process-registered (by us earlier or another caller),
+    // so this handle must NOT unregister it on release (only release our owned
+    // CGFont / CFURL objects). Keeps "last-wins" working for duplicate data.
+    bool      owns_registration = true;
   };
   static std::vector<AppFontEntry>& app_fonts()
   {
@@ -908,8 +927,12 @@ namespace neui_cg_backend
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     bool registered = CTFontManagerRegisterGraphicsFont(font, &err);
 #pragma clang diagnostic pop
-    if (!registered) {
-      if (err) CFRelease(err);
+    // Already-registered (same face registered earlier) is not a failure: the
+    // family resolves, so we still succeed - just don't claim ownership of the
+    // registration (last-wins for duplicate data, instead of asset_none).
+    bool already = err && CFErrorGetCode(err) == kCTFontManagerErrorAlreadyRegistered;
+    if (err) { CFRelease(err); err = nullptr; }
+    if (!registered && !already) {
       CGFontRelease(font);
       return false;
     }
@@ -925,7 +948,9 @@ namespace neui_cg_backend
     e.token   = g_next_font_token++;
     e.cg_font = font;       // retained until unregister
     e.is_file = false;
+    e.owns_registration = registered;  // false if it was already registered
     app_fonts().push_back(e);
+    flush_font_cache();     // a name drawn before now must re-resolve
     if (out_token) *out_token = e.token;
     return true;
   }
@@ -947,9 +972,11 @@ namespace neui_cg_backend
     if (!url) return false;
 
     CFErrorRef err = nullptr;
-    if (!CTFontManagerRegisterFontsForURL(url, kCTFontManagerScopeProcess,
-                                           &err)) {
-      if (err) CFRelease(err);
+    bool registered = CTFontManagerRegisterFontsForURL(url, kCTFontManagerScopeProcess,
+                                                        &err);
+    bool already = err && CFErrorGetCode(err) == kCTFontManagerErrorAlreadyRegistered;
+    if (err) { CFRelease(err); err = nullptr; }
+    if (!registered && !already) {  // already-registered is success (last-wins)
       CFRelease(url);
       return false;
     }
@@ -970,7 +997,9 @@ namespace neui_cg_backend
     e.token   = g_next_font_token++;
     e.url     = url;        // retained until unregister
     e.is_file = true;
+    e.owns_registration = registered;  // false if it was already registered
     app_fonts().push_back(e);
+    flush_font_cache();     // a name drawn before now must re-resolve
     if (out_token) *out_token = e.token;
     return true;
   }
@@ -982,21 +1011,28 @@ namespace neui_cg_backend
     for (auto it = v.begin(); it != v.end(); ++it) {
       if (it->token != token) continue;
       CFErrorRef err = nullptr;
+      // Only unregister if this handle actually owns the registration; a handle
+      // for an already-registered family just releases its own CGFont / CFURL
+      // so it can't unregister a face another live handle still relies on.
       if (it->is_file) {
         if (it->url) {
-          CTFontManagerUnregisterFontsForURL(it->url,
-                                             kCTFontManagerScopeProcess, &err);
+          if (it->owns_registration)
+            CTFontManagerUnregisterFontsForURL(it->url,
+                                               kCTFontManagerScopeProcess, &err);
           CFRelease(it->url);
         }
       } else if (it->cg_font) {
+        if (it->owns_registration) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        CTFontManagerUnregisterGraphicsFont(it->cg_font, &err);
+          CTFontManagerUnregisterGraphicsFont(it->cg_font, &err);
 #pragma clang diagnostic pop
+        }
         CGFontRelease(it->cg_font);
       }
       if (err) CFRelease(err);
       v.erase(it);
+      flush_font_cache();   // drop any cached CTFont for the gone family
       return;
     }
   }

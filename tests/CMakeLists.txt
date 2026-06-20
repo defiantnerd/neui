@@ -33,6 +33,16 @@ target_include_directories(neui_tests PRIVATE
 
 target_compile_features(neui_tests PRIVATE cxx_std_17)
 
+# iOS: the suite is a console-style program, but iOS only installs/launches app
+# bundles - give it a deterministic bundle id so CI can install it on a booted
+# simulator, launch it by id, and scrape the pass/fail summary from the console.
+if(NEUI_IOS)
+  set_target_properties(neui_tests PROPERTIES
+    MACOSX_BUNDLE TRUE
+    MACOSX_BUNDLE_GUI_IDENTIFIER "org.neui.tests"
+    XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "org.neui.tests")
+endif()
+
 add_test(NAME neui_tests COMMAND neui_tests)
 
 # Linux-only: Cairo software backend offscreen smoke test. Unlike neui_tests
