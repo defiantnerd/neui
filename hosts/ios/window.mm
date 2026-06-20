@@ -136,6 +136,7 @@ namespace ios_host {
                                              neui_render_ctx_t ctx,
                                              neui_asset_t asset,
                                              float x, float y, float w, float h,
+                                             uint32_t frame,
                                              uint32_t tint);
   static WidgetData* widget_for_id(uint32_t widget_id, Session** out_sess);
   static void paint_widget_into_ctx(Session* s, WidgetData& wd,
@@ -2318,11 +2319,13 @@ namespace ios_host
               backend->rotate(wd.render_ctx, rot);
               backend->translate(wd.render_ctx, -dw * 0.5f, -dh * 0.5f);
               ios_painter_draw_asset_thunk(s, backend, wd.render_ctx, wd.image_asset,
-                                           0, 0, dw, dh, 0xFFFFFFFFu);
+                                           0, 0, dw, dh,
+                                           neui_detail::k_draw_asset_whole, 0xFFFFFFFFu);
               backend->pop_transform(wd.render_ctx);
             } else {
               ios_painter_draw_asset_thunk(s, backend, wd.render_ctx, wd.image_asset,
-                                           dx, dy, dw, dh, 0xFFFFFFFFu);
+                                           dx, dy, dw, dh,
+                                           neui_detail::k_draw_asset_whole, 0xFFFFFFFFu);
             }
           }
         }
@@ -2521,6 +2524,7 @@ namespace ios_host
                                              neui_render_ctx_t ctx,
                                              neui_asset_t asset,
                                              float x, float y, float w, float h,
+                                             uint32_t frame,
                                              uint32_t tint)
   {
     auto* s = static_cast<Session*>(host_token);
@@ -2528,7 +2532,13 @@ namespace ios_host
     if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return;
     auto* entry = s->_asset_manager.get_slot(asset.id & 0xffff);
     if (!entry) return;
-    neui_detail::painter_draw_entry_cached(backend, ctx, entry, x, y, w, h, tint);
+    // Frame-aware path samples one filmstrip cell; k_draw_asset_whole draws
+    // the whole bitmap (hosts/shared/painter.h).
+    if (frame == neui_detail::k_draw_asset_whole)
+      neui_detail::painter_draw_entry_cached(backend, ctx, entry, x, y, w, h, tint);
+    else
+      neui_detail::painter_draw_entry_frame_cached(backend, ctx, entry, frame,
+                                                    x, y, w, h, tint);
   }
 
   // -------------------------------------------------------------------------

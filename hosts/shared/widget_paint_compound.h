@@ -171,11 +171,17 @@ namespace neui_detail
         float rot = effective_float(L, "rotation", L.rotation, bag);
         uint32_t tint = static_cast<uint32_t>(
           effective_int(L, "tint", static_cast<int>(L.tint), bag));
+        // Filmstrip cell. Default 0; commonly bound to a value attr. On an
+        // ordinary (untagged) asset the frame is ignored and the whole bitmap
+        // draws, so routing every asset layer through the frame-aware helper
+        // is behaviour-preserving for non-filmstrip layers.
+        int frame_i = effective_int(L, "frame", L.frame, bag);
+        uint32_t frame = (frame_i < 0) ? 0u : static_cast<uint32_t>(frame_i);
         // tint == 0 (alpha 0) would make the layer invisible; skip the
         // upload/draw entirely rather than running the backend's tint
         // primitive only to output fully-transparent pixels. The
         // 0xFFFFFFFFu passthrough sentinel and any other tint value
-        // both route through the same painter_draw_asset_tinted helper;
+        // both route through the same painter_draw_asset_frame_tinted helper;
         // the backend short-circuits effect setup on the passthrough.
         if (tint == 0u) break;
 
@@ -186,10 +192,10 @@ namespace neui_detail
           k_painter_api.translate(p, cx, cy);
           k_painter_api.rotate(p, rot);
           k_painter_api.translate(p, -cx, -cy);
-          painter_draw_asset_tinted(p, asset, r.x, r.y, r.w, r.h, tint);
+          painter_draw_asset_frame_tinted(p, asset, frame, r.x, r.y, r.w, r.h, tint);
           k_painter_api.pop_transform(p);
         } else {
-          painter_draw_asset_tinted(p, asset, r.x, r.y, r.w, r.h, tint);
+          painter_draw_asset_frame_tinted(p, asset, frame, r.x, r.y, r.w, r.h, tint);
         }
         break;
       }

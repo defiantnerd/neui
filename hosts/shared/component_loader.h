@@ -513,6 +513,10 @@ namespace neui_detail
           int tint;
           if (as_color(obj_get(*lo, "tint"), tint))
             apis.compound->set_int(session, cs, layer, "tint", tint);
+          double frame_d;
+          if (as_num(obj_get(*lo, "frame"), frame_d))
+            apis.compound->set_int(session, cs, layer, "frame",
+                                   static_cast<int>(std::lround(frame_d)));
         } else if (kind == NEUI_COMPOUND_LAYER_RECT ||
                    kind == NEUI_COMPOUND_LAYER_PATH) {
           int col;
@@ -743,6 +747,7 @@ namespace neui_detail
           }
           if (L->rotation != 0.0f)        lo.emplace_back("rotation", njson_num(L->rotation));
           if (L->tint != defL.tint)       lo.emplace_back("tint", njson_str(hexcolor(L->tint)));
+          if (L->frame != defL.frame)     lo.emplace_back("frame", njson_int(L->frame));
         } else if (L->kind == NEUI_COMPOUND_LAYER_RECT ||
                    L->kind == NEUI_COMPOUND_LAYER_PATH) {
           if (L->fill_color)   lo.emplace_back("fill_color",   njson_str(hexcolor(L->fill_color)));

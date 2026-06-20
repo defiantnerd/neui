@@ -210,6 +210,28 @@ TEST_CASE("apply_set_int: \"tint\" lands on asset layers only")
   CHECK_EQ((unsigned)A.tint, 0xFF40C0FFu);  // A is unchanged
 }
 
+TEST_CASE("apply_set_int: \"frame\" lands on asset layers only; effective_int + binding")
+{
+  CompoundLayer A; A.kind = NEUI_COMPOUND_LAYER_ASSET;
+  CHECK_EQ(A.frame, 0);                       // default
+  CHECK(apply_set_int(A, "frame", 17));
+  CHECK_EQ(A.frame, 17);
+
+  // Static value flows through effective_int.
+  AttrBag bag;
+  CHECK_EQ(effective_int(A, "frame", A.frame, &bag), 17);
+
+  // A binding (value 0..1 -> frame 0..63) overrides the static value.
+  bag.set_float("value", 0.5f);
+  CompoundBinding b; b.attr_key = "value"; b.scale = 63.0f; b.offset = 0.0f;
+  A.bindings["frame"] = b;
+  CHECK_EQ(effective_int(A, "frame", A.frame, &bag), 32);   // round(0.5*63)
+
+  // Non-asset layers don't carry a frame slot.
+  CompoundLayer R; R.kind = NEUI_COMPOUND_LAYER_RECT;
+  CHECK_FALSE(apply_set_int(R, "frame", 3));
+}
+
 // ---------------------------------------------------------------------------
 // Path layer
 // ---------------------------------------------------------------------------

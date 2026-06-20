@@ -97,6 +97,11 @@ namespace neui_detail
     // Asset-layer fields.
     neui_asset_t             asset    = asset_none;
     float                    rotation = 0.0f;
+    // Filmstrip cell to draw (row-major). Ignored when `asset` carries no
+    // frame layout (an ordinary bitmap draws whole regardless). Default 0;
+    // typically bound to a value attr (bind "frame" -> value, scale N-1) so
+    // a knob/fader value scrubs the strip. Negative results clamp to 0.
+    int                      frame    = 0;
     // Multiplicative ARGB tint applied to the bitmap's pixels. The
     // default 0xFFFFFFFFu is the passthrough sentinel - it short-circuits
     // the backend's tint primitive entirely so untinted draws cost
@@ -419,7 +424,8 @@ namespace neui_detail
       if (prop == "stroke_color") { L.stroke_color = static_cast<uint32_t>(v); return true; }
     }
     if (L.kind == NEUI_COMPOUND_LAYER_ASSET) {
-      if (prop == "tint") { L.tint = static_cast<uint32_t>(v); return true; }
+      if (prop == "tint")  { L.tint  = static_cast<uint32_t>(v); return true; }
+      if (prop == "frame") { L.frame = v; return true; }
     }
     return false;
   }

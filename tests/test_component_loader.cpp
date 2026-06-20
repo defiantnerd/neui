@@ -256,6 +256,29 @@ TEST_CASE("component_loader: anchors, fill, offset, bind")
   CHECK(ind->binds.at("rotation").scale > 4.7f && ind->binds.at("rotation").scale < 4.72f);
 }
 
+TEST_CASE("component_loader: asset layer frame prop (static + bound) round-trips")
+{
+  const char* json = R"json({
+    "size": [80, 80],
+    "layers": [
+      { "kind": "asset", "asset": "strip", "frame": 7 },
+      { "kind": "asset", "asset": "strip",
+        "bind": { "frame": { "attr": "neui.param.value", "scale": 63, "offset": 0 } } }
+    ]
+  })json";
+  BuiltComponent built = run_loader(json);
+  (void)built;
+
+  const LayerRec* a0 = layer_of_kind(NEUI_COMPOUND_LAYER_ASSET, 0);
+  const LayerRec* a1 = layer_of_kind(NEUI_COMPOUND_LAYER_ASSET, 1);
+  REQUIRE(a0); REQUIRE(a1);
+  CHECK(a0->ints.at("frame") == 7);             // static frame parsed
+  REQUIRE(a1->binds.count("frame") == 1);       // bound frame parsed
+  CHECK(a1->binds.at("frame").attr == "neui.param.value");
+  CHECK(a1->binds.at("frame").scale == 63.0f);
+  CHECK(a0->ints.count("frame") == 1 && a1->ints.count("frame") == 0);
+}
+
 TEST_CASE("component_loader: text props, colors, show_when")
 {
   run_loader(kKnobJson);

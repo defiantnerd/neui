@@ -113,6 +113,15 @@ extern "C" {
     float       def;
   } neui_component_param_t;
 
+  // Orientation for the create_filmstrip_from_file convenience form: a
+  // single-row (HORIZONTAL) or single-column (VERTICAL) strip of
+  // frame_count equal cells. For a true 2D grid, load the bitmap with
+  // create_from_file and tag it with set_frame_layout(cols, rows, gutter).
+  typedef enum neui_filmstrip_orientation {
+    NEUI_FILMSTRIP_VERTICAL   = 0,   // cols 1, rows frame_count (top-to-bottom)
+    NEUI_FILMSTRIP_HORIZONTAL = 1,   // cols frame_count, rows 1 (left-to-right)
+  } neui_filmstrip_orientation_t;
+
   // Client paint callback for neui_asset_api::paint_surface. Mirrors the
   // NEUI_EVENT_WIDGET_PAINT payload shape so a client can reuse the same
   // drawing code on a widget and on a surface. The painter / api pair is
@@ -303,6 +312,41 @@ extern "C" {
                                              neui_asset_t component,
                                              char* out_buf, uint32_t cap,
                                              int indent);
+
+    // --- Filmstrip / stitchmap assets ------------------------------------
+    // (Vtable-appended; check the api version / pointer before calling.)
+    //
+    // A filmstrip ("stitchmap" / "sprite strip") is a BITMAP / SURFACE asset
+    // whose pixels pack frame_count equal-size frames in a cols x rows
+    // row-major grid (the audio-plugin convention: a single column of N
+    // stacked knob/fader frames, value -> frame). Tagging an asset doesn't
+    // change its kind; it stays a bitmap for every other consumer. Draw a
+    // single frame via painter_api->draw_asset_frame.
+
+    // Tag an existing BITMAP / SURFACE asset with a frame grid. cols / rows
+    // >= 1 (vertical strip = cols 1; horizontal = rows 1). gutter_px is the
+    // physical-pixel padding between cells (0 = tight pack). Cell size is the
+    // floor of the fitted division, so the grid always stays in bounds.
+    // Returns false (leaving the asset an untagged plain bitmap) for a
+    // non-bitmap kind, cols/rows < 1, a zero-size bitmap, or a grid that
+    // can't fit at least 1 px per cell. Re-tagging overwrites a prior layout.
+    bool (NEUI_ABI *set_frame_layout)(neui_session_t session, neui_asset_t asset,
+                                       uint32_t cols, uint32_t rows,
+                                       uint32_t gutter_px);
+
+    // Load a bitmap from a file (like create_from_file, incl. @2x / @3x
+    // resolution) and tag it as a frame_count-frame strip in the given
+    // orientation, in one call. Returns asset_none if the load fails or the
+    // strip doesn't divide evenly enough to fit (frame_count < 1, or the
+    // bitmap is too small along the strip axis).
+    neui_asset_t (NEUI_ABI *create_filmstrip_from_file)(
+        neui_session_t session, const char* path_utf8,
+        uint32_t frame_count, neui_filmstrip_orientation_t orientation);
+
+    // Number of frames in a filmstrip asset, or 0 if the handle is invalid
+    // or the asset carries no frame layout (i.e. an ordinary bitmap).
+    uint32_t (NEUI_ABI *get_frame_count)(neui_session_t session,
+                                         neui_asset_t asset);
   } neui_asset_api_t;
 
 #ifdef __cplusplus

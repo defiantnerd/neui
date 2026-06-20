@@ -2118,20 +2118,25 @@ namespace macos_host
     return pack_asset_macos(s->session_id(), slot);
   }
 
-  static neui_asset_t NEUI_ABI a_create_from_file(neui_session_t session,
-                                                    const char* path_utf8)
+  // Best-guess @Nx scale for a file load: the main screen's backing scale.
+  // Falls back to 1.0 when no screen is available.
+  static float best_asset_scale_macos()
   {
-    auto* s = get_session(session);
-    if (!s || !path_utf8) return asset_none;
-    // Pick the highest backing-scale across the session's frames as the
-    // preference for @Nx variant resolution. Falls back to the main
-    // screen's backing scale when no frame has been created yet.
     float scale = 1.0f;
     if (NSScreen.mainScreen) {
       float main_scale = (float)NSScreen.mainScreen.backingScaleFactor;
       if (main_scale > scale) scale = main_scale;
     }
-    uint32_t slot = s->_asset_manager.allocate_from_file(path_utf8, scale);
+    return scale;
+  }
+
+  static neui_asset_t NEUI_ABI a_create_from_file(neui_session_t session,
+                                                    const char* path_utf8)
+  {
+    auto* s = get_session(session);
+    if (!s || !path_utf8) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_from_file(path_utf8,
+                                                         best_asset_scale_macos());
     if (slot == 0) return asset_none;
     return pack_asset_macos(s->session_id(), slot);
   }
@@ -2205,6 +2210,7 @@ namespace macos_host
                                                  neui_asset_t asset,
                                                  float x, float y,
                                                  float w, float h,
+                                                 uint32_t frame,
                                                  uint32_t tint);
 
   static neui_asset_t NEUI_ABI a_create_surface(neui_session_t session,
@@ -2387,6 +2393,41 @@ namespace macos_host
     return full;
   }
 
+  static bool NEUI_ABI a_set_frame_layout(neui_session_t session,
+                                          neui_asset_t asset,
+                                          uint32_t cols, uint32_t rows,
+                                          uint32_t gutter_px)
+  {
+    auto* s = get_session(session);
+    if (!s || asset.id == asset_none.id) return false;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return false;
+    return s->_asset_manager.set_frame_layout(asset.id & 0xffff,
+                                              cols, rows, gutter_px);
+  }
+
+  static neui_asset_t NEUI_ABI a_create_filmstrip_from_file(
+      neui_session_t session, const char* path_utf8,
+      uint32_t frame_count, neui_filmstrip_orientation_t orientation)
+  {
+    auto* s = get_session(session);
+    if (!s || !path_utf8) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_filmstrip_from_file(
+        path_utf8, best_asset_scale_macos(), frame_count,
+        orientation == NEUI_FILMSTRIP_HORIZONTAL,
+        neui_cg_backend::get_backend());
+    if (slot == 0) return asset_none;
+    return pack_asset_macos(s->session_id(), slot);
+  }
+
+  static uint32_t NEUI_ABI a_get_frame_count(neui_session_t session,
+                                             neui_asset_t asset)
+  {
+    auto* s = get_session(session);
+    if (!s || asset.id == asset_none.id) return 0;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return 0;
+    return s->_asset_manager.frame_count(asset.id & 0xffff);
+  }
+
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
     a_create_bitmap,
@@ -2406,6 +2447,9 @@ namespace macos_host
     a_component_param_count,
     a_component_param_at,
     a_serialize_component,
+    a_set_frame_layout,
+    a_create_filmstrip_from_file,
+    a_get_frame_count,
   };
 
   // Compound API. Mutators dispatch to the shared mutator helpers in

@@ -2738,6 +2738,7 @@ namespace xpl_host
       neui_render_ctx_t ctx,
       neui_asset_t asset,
       float x, float y, float w, float h,
+      uint32_t frame,
       uint32_t tint)
   {
     auto* s = static_cast<Session*>(host_token);
@@ -2749,9 +2750,14 @@ namespace xpl_host
     auto* entry = s->_asset_manager.get_slot(slot);
     if (!entry) return;
     // Cache-walk + lazy GPU upload + draw shared with the native hosts
-    // (hosts/shared/painter.h).
-    neui_detail::painter_draw_entry_cached(backend, ctx, entry,
-                                            x, y, w, h, tint);
+    // (hosts/shared/painter.h). The frame-aware path samples one filmstrip
+    // cell; k_draw_asset_whole draws the whole bitmap.
+    if (frame == neui_detail::k_draw_asset_whole)
+      neui_detail::painter_draw_entry_cached(backend, ctx, entry,
+                                              x, y, w, h, tint);
+    else
+      neui_detail::painter_draw_entry_frame_cached(backend, ctx, entry, frame,
+                                                    x, y, w, h, tint);
   }
 
   // CUSTOMDRAW - hands the curated painter API to the client and lets
