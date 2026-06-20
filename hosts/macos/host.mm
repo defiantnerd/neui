@@ -1,8 +1,7 @@
 // Native macOS host - Session lifecycle + interface routing + register_host.
 //
-// Step 1 scaffold. Mirror of hosts/win32/host.cpp. The actual session
-// implementation (NSWindow lifecycle, message pump, widget management)
-// lands in steps 3+ per plans/native-macos-host.md.
+// Mirror of hosts/win32/host.cpp. The session implementation (NSWindow
+// lifecycle, message pump, widget management) lives in window.mm / widgets.mm.
 
 #include "host.h"
 #include "../shared/dnd_dispatch.h"

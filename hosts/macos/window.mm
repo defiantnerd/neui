@@ -2,8 +2,8 @@
 // NEUINativeControlTarget (target-action sink), NEUINativeContentView (flipped
 // container), and Session::widget_show dispatch.
 //
-// Step 4 of plans/native-macos-host.md adds LABEL + BUTTON. Per-step
-// extension below the switch in widget_show.
+// Per-type widget construction (LABEL / BUTTON / ...) hangs off the switch
+// in widget_show.
 
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>

@@ -1,10 +1,9 @@
 // Native macOS host - neui_widget_api_t / neui_items_api_t / neui_tree_api_t /
 // neui_attr_api_t / neui_clipboard_api_t / neui_commands_api_t.
 //
-// Step 3 of plans/native-macos-host.md: wires widget_create / widget_destroy
-// (tree slot allocation) and routes widget_show through Session. NSWindow
-// plumbing for APPWINDOW lives in window.mm; later steps extend
-// widget_show's per-type switch (LABEL / BUTTON / INPUTBOX / ...).
+// Wires widget_create / widget_destroy (tree slot allocation) and routes
+// widget_show through Session. NSWindow plumbing for APPWINDOW lives in
+// window.mm; widget_show's per-type switch covers LABEL / BUTTON / INPUTBOX / ...
 //
 // Shape mirror of hosts/win32/widgets.cpp.
 

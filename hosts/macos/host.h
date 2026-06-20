@@ -189,7 +189,7 @@ namespace macos_host
     // Tab-into-off-screen-child auto-scroll is wired only on win32 + xpl.
     void ensure_widget_visible(uint32_t widget_idx);
 
-    // Widget API (subset filled per step in plans/native-macos-host.md).
+    // Widget API.
     // Step 3 wires create / destroy / show for APPWINDOW; later widget
     // types extend the show / destroy switch in widgets.mm + window.mm.
     neui_widget_t widget_create(neui_widget_t parent, const char* type,
