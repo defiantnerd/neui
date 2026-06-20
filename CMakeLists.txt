@@ -15,6 +15,10 @@ endif()
 
 option(NEUI_BUILD_EXAMPLES "Build the neui example programs" ${NEUI_IS_TOP_LEVEL})
 option(NEUI_BUILD_TESTS    "Build the neui unit tests"       ${NEUI_IS_TOP_LEVEL})
+# Treat compiler warnings as errors. OFF for local dev (warnings surface but
+# don't break the build - the project's documented default); CI turns it ON
+# (-DNEUI_WERROR=ON) so a new warning fails the build on every host.
+option(NEUI_WERROR         "Treat compiler warnings as errors" OFF)
 
 # iOS is an APPLE platform too, so it must be detected distinctly from macOS:
 # the CoreGraphics backend is shared (gated on APPLE), but the AppKit macOS
@@ -54,6 +58,12 @@ if(MSVC)
   string(REGEX REPLACE "/W[0-4]" "" CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}")
   string(REGEX REPLACE "/W[0-4]" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
   add_compile_options(/W4 /wd4100)
+  if(NEUI_WERROR)
+    # Warnings as errors, EXCEPT deprecation (C4996): OS/CRT deprecations track
+    # vendor API churn and shouldn't break the build the way a real-bug warning
+    # should. /WX can't keep a single warning non-fatal, so disable 4996 here.
+    add_compile_options(/WX /wd4996)
+  endif()
   # The win32 theme provider uses C++/WinRT (UISettings accent colours).
   # Compiled as C++17 (below), C++/WinRT's base.h falls back to
   # <experimental/coroutine> because the standard <coroutine> needs C++20;
@@ -63,7 +73,17 @@ if(MSVC)
   # moves to C++20, where C++/WinRT uses <coroutine> instead.)
   add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
 else()
-  add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+  # -Wno-missing-field-initializers: `App app = {0};` (the canonical C
+  # whole-struct zero-init) trips this under -Wextra even though it is fully
+  # well-defined - same "nothing to fix" category as -Wunused-parameter above.
+  add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
+  if(NEUI_WERROR)
+    # Warnings as errors, but keep deprecation warnings visible-yet-non-fatal:
+    # they track OS-vendor API churn (e.g. iOS 26 deprecating UIScreen.mainScreen)
+    # rather than real defects. Everything else (-Wunused, -Wenum-compare,
+    # -Wuninitialized, ...) is a hard error.
+    add_compile_options(-Werror -Wno-error=deprecated-declarations)
+  endif()
 endif()
 
 # The registry lib (neui) and the host libs reference each other's symbols:

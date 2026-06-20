@@ -2569,7 +2569,9 @@ namespace ios_host
 
   static void ios_grid_repaint(WidgetData& wd) { mark_widget_dirty_for_paint(wd); }
 
-  static neui_detail::GridViewport ios_grid_viewport(WidgetData& wd)
+  // Not yet wired into the iOS GRID paint/hit-test path (port is a core subset);
+  // kept for when it is. [[maybe_unused]] so -Werror strict builds don't trip.
+  [[maybe_unused]] static neui_detail::GridViewport ios_grid_viewport(WidgetData& wd)
   {
     auto& m   = ios_grid_ensure_model(wd);
     auto  cfg = neui_detail::grid_read_config(wd.attrs.get());

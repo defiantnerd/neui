@@ -439,19 +439,6 @@ namespace {
     std::string last_attr_key;
     float       last_attr_value = 0.0f;
   };
-
-  void result_emit_attr_changed(void* host_data, const char* attr_key, float value)
-  {
-    auto* p = static_cast<ResultProbe*>(host_data);
-    p->attr_changed_calls++;
-    p->last_attr_key   = attr_key ? attr_key : "";
-    p->last_attr_value = value;
-  }
-  void result_invalidate(void* host_data)
-  {
-    auto* p = static_cast<ResultProbe*>(host_data);
-    p->invalidate_calls++;
-  }
 }
 
 TEST_CASE("DRAG_SOURCE result_attr: negotiated action lands in the bag + ATTR_CHANGED fires")

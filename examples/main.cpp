@@ -590,7 +590,7 @@ int main(int argc, char** argv) {
   auto open_item = app.tree->add(sess, menubar, file_menu,      "Open", (void*)2);
   auto save_item = app.tree->add(sess, menubar, file_menu,      "Save", (void*)3);
                    app.tree->add(sess, menubar, file_menu,      "-",    nullptr);
-  auto exit_item = app.tree->add(sess, menubar, file_menu,      "Exit", (void*)4);
+                   app.tree->add(sess, menubar, file_menu,      "Exit", (void*)4);
   app.tree->set_shortcut(sess, menubar, new_item,  NEUI_KMOD_CTRL, NEUI_KEY_N);
   app.tree->set_shortcut(sess, menubar, open_item, NEUI_KMOD_CTRL, NEUI_KEY_O);
   app.tree->set_shortcut(sess, menubar, save_item, NEUI_KMOD_CTRL, NEUI_KEY_S);
@@ -606,7 +606,7 @@ int main(int argc, char** argv) {
   // app.tree->set_enabled (sess, menubar, redo_item, false);  // Redo is grayed
 
   auto help_menu  = app.tree->add(sess, menubar, tree_item_root, "Help",  nullptr);
-  auto about_item = app.tree->add(sess, menubar, help_menu,      "About", (void*)20);
+                    app.tree->add(sess, menubar, help_menu,      "About", (void*)20);
 
   // --- Left column (x=5, width=195) ---
 

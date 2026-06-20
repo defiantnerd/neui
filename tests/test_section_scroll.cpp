@@ -464,10 +464,12 @@ TEST_CASE("scroll_kinetics_smooth_enabled: PLATFORM defers, STEPPED / SMOOTH for
   // SMOOTH (2) forces on regardless of host default.
   CHECK(scroll_kinetics_smooth_enabled(NEUI_SCROLL_KINETICS_SMOOTH,
                                          /*platform_default_smooth=*/false));
-  // Numeric parity with the GRID alias.
-  CHECK_EQ(NEUI_SCROLL_KINETICS_PLATFORM, NEUI_GRID_SCROLL_PLATFORM);
-  CHECK_EQ(NEUI_SCROLL_KINETICS_STEPPED,  NEUI_GRID_SCROLL_STEPPED);
-  CHECK_EQ(NEUI_SCROLL_KINETICS_SMOOTH,   NEUI_GRID_SCROLL_SMOOTH);
+  // Numeric parity with the GRID alias. These are deliberately distinct enum
+  // types whose values match by design, so compare as int (a direct enum-to-enum
+  // == is a legitimate -Wenum-compare warning we don't want to suppress globally).
+  CHECK_EQ((int)NEUI_SCROLL_KINETICS_PLATFORM, (int)NEUI_GRID_SCROLL_PLATFORM);
+  CHECK_EQ((int)NEUI_SCROLL_KINETICS_STEPPED,  (int)NEUI_GRID_SCROLL_STEPPED);
+  CHECK_EQ((int)NEUI_SCROLL_KINETICS_SMOOTH,   (int)NEUI_GRID_SCROLL_SMOOTH);
 }
 
 // ---------------------------------------------------------------------------

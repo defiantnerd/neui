@@ -28,17 +28,17 @@ jobs:
         include:
           - name: Linux (GCC · Cairo/X11)
             os: ubuntu-latest
-            configure: cmake -B build -DCMAKE_BUILD_TYPE=Debug
+            configure: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DNEUI_WERROR=ON
             build: cmake --build build --parallel
             test: ctest --test-dir build --output-on-failure
           - name: macOS (AppleClang · Xcode)
             os: macos-latest
-            configure: cmake -B build -G Xcode
+            configure: cmake -B build -G Xcode -DNEUI_WERROR=ON
             build: cmake --build build --config Debug --parallel
             test: ctest --test-dir build -C Debug --output-on-failure
           - name: Windows (MSVC · Direct2D)
             os: windows-latest
-            configure: cmake -B build
+            configure: cmake -B build -DNEUI_WERROR=ON
             build: cmake --build build --config Debug --parallel
             test: ctest --test-dir build -C Debug --output-on-failure
     steps:
@@ -69,3 +69,56 @@ jobs:
       # neui_embed_smoke is built but not ctest-registered, so it is not run.
       - name: Test
         run: ${{ matrix.test }}
+
+  # iOS: build the UIKit host + the whole portable tree for the simulator
+  # (arm64), then RUN the unit suite on a booted simulator. Running on the iOS
+  # runtime/libc++ is not redundant with the macOS job - it validates the
+  # portable code (e.g. mujson's strtod/charconv paths) under the iOS
+  # deployment target, exactly the surface that bit us on charconv availability.
+  ios:
+    name: iOS (AppleClang · simulator)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure
+        run: >
+          cmake -B build-ios -G Xcode
+          -DCMAKE_SYSTEM_NAME=iOS
+          -DCMAKE_OSX_SYSROOT=iphonesimulator
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+          -DNEUI_WERROR=ON
+
+      - name: Build
+        run: cmake --build build-ios --config Debug --parallel
+
+      - name: Run unit tests on simulator
+        run: |
+          set -euo pipefail
+          APP=$(find build-ios -name 'neui_tests.app' -type d | head -n1)
+          [ -n "$APP" ] || { echo "neui_tests.app not found"; exit 1; }
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Info.plist")
+          echo "App=$APP  Bundle=$BUNDLE_ID"
+
+          # Newest available iOS runtime + an iPhone device type on the runner.
+          RUNTIME=$(xcrun simctl list runtimes --json | python3 -c "import json,sys; r=[x for x in json.load(sys.stdin)['runtimes'] if x['platform']=='iOS' and x['isAvailable']]; print(r[-1]['identifier'])")
+          DEVTYPE=$(xcrun simctl list devicetypes --json | python3 -c "import json,sys; d=[x for x in json.load(sys.stdin)['devicetypes'] if 'iPhone' in x['name']]; print(d[-1]['identifier'])")
+          echo "Runtime=$RUNTIME  DeviceType=$DEVTYPE"
+
+          UDID=$(xcrun simctl create neui-ci "$DEVTYPE" "$RUNTIME")
+          xcrun simctl boot "$UDID"
+          xcrun simctl install "$UDID" "$APP"
+
+          # --console-pty streams the app's stdout and returns when it exits.
+          # simctl launch's own exit status is unreliable, so assert on the
+          # framework's summary line instead.
+          set +e
+          xcrun simctl launch --console-pty "$UDID" "$BUNDLE_ID" | tee sim-out.txt
+          set -e
+          xcrun simctl shutdown "$UDID" || true
+          xcrun simctl delete "$UDID" || true
+
+          # e.g. "neui_test: 231 test cases (231 passed, 0 failed); 1310 checks (0 failed)"
+          grep -Eq 'test cases \([0-9]+ passed, 0 failed\); [0-9]+ checks \(0 failed\)' sim-out.txt
+          echo "iOS unit tests passed."
