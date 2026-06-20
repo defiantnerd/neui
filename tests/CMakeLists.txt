@@ -21,6 +21,7 @@ add_executable(neui_tests
   test_asset_font.cpp
   test_tabview.cpp
   test_mujson.cpp
+  test_component_loader.cpp
   # mujson lives in the core lib, but the suite links no library, so its TU is
   # compiled directly into the test executable (same pattern as the *.cpp above).
   ${PROJECT_SOURCE_DIR}/src/mujson.cpp)

@@ -68,7 +68,50 @@ extern "C" {
     // / push_font), exactly like a system font - the handle itself is never
     // passed to the draw path. See "Font loading" in CLAUDE.md.
     NEUI_ASSET_KIND_FONT     = 7,
+    // Component: a reusable, declarative bundle of a COMPOUND (visual) + a
+    // BEHAVIOR (input) + default attrs + a param manifest + a default size,
+    // loaded from a JSON document via create_component_from_file / _string and
+    // instantiated via widgets->create_from_component (or attached to an
+    // existing CUSTOMDRAW via widgets->set_asset). A *component* bundles a
+    // *compound* plus a *behavior* - distinct kinds. See <neui/d/component.h>.
+    NEUI_ASSET_KIND_COMPONENT = 8,
   } neui_asset_kind_t;
+
+  // --- Component loading types (NEUI_ASSET_KIND_COMPONENT) ----------------
+  // Defined here (rather than in <neui/d/component.h>) so neui_asset_api_t can
+  // reference them without a circular include; component.h is the doc umbrella
+  // and includes this header.
+
+  // Optional asset-resolution overrides for component loading. May be NULL ->
+  // pure path mode (asset names resolved as files relative to base_dir).
+  //   base_dir      - root for relative asset paths. create_component_from_file
+  //                   sets it to the .json's directory automatically; for
+  //                   _from_string the caller sets it (NULL / "" = cwd).
+  //   resolve_asset - consulted FIRST for each asset name (return asset_none to
+  //                   fall through to path mode). Lets a client inject pre-
+  //                   loaded / in-memory handles by name. hint_path is the raw
+  //                   string from the JSON "assets" map. Returned handles are
+  //                   borrowed (client-owned); path-resolved handles are owned
+  //                   by the component and released with it.
+  //   user          - passed back to resolve_asset.
+  typedef struct neui_component_env {
+    const char*  base_dir;
+    neui_asset_t (NEUI_ABI *resolve_asset)(void* user, const char* name,
+                                           const char* hint_path);
+    void*        user;
+  } neui_component_env_t;
+
+  // One entry of a component's parameter manifest (from the JSON "params"
+  // list). key / label point into component-owned storage and stay valid
+  // until the component asset is destroyed. min / max / def are the declared
+  // range and default (def is also stamped into each instance's AttrBag).
+  typedef struct neui_component_param {
+    const char* key;
+    const char* label;
+    float       min;
+    float       max;
+    float       def;
+  } neui_component_param_t;
 
   // Client paint callback for neui_asset_api::paint_surface. Mirrors the
   // NEUI_EVENT_WIDGET_PAINT payload shape so a client can reuse the same
@@ -212,6 +255,54 @@ extern "C" {
                                          neui_asset_t   font,
                                          char*          out_buf,
                                          uint32_t       cap);
+
+    // --- Component loading (NEUI_ASSET_KIND_COMPONENT) -------------------
+    // (Vtable-appended; check the api version / pointer before calling.)
+    //
+    // Parse a JSON component document (in-host neui::mujson) and materialize
+    // it into a COMPONENT asset that owns a COMPOUND (visual) + a BEHAVIOR
+    // (input) + a default-attr template + a param manifest + a default size.
+    // env may be NULL (path mode). Returns asset_none on malformed JSON, an
+    // unusable document, or a backend without compound/behavior support (e.g.
+    // the null backend) - graceful, like create_surface. get_kind returns
+    // NEUI_ASSET_KIND_COMPONENT; get_size returns the default size; destroy
+    // releases the owned compound + behavior (and any path-loaded layer
+    // assets) too. Instantiate via widgets->create_from_component.
+    neui_asset_t (NEUI_ABI *create_component_from_string)(neui_session_t session,
+                                                          const char* json_utf8,
+                                                          uint32_t len,
+                                                          const neui_component_env_t* env);
+    // File convenience: reads the file and sets env.base_dir to its directory
+    // (so relative asset paths resolve next to the .json). Returns asset_none
+    // on read failure or malformed JSON.
+    neui_asset_t (NEUI_ABI *create_component_from_file)(neui_session_t session,
+                                                        const char* path_utf8,
+                                                        const neui_component_env_t* env);
+    // Parameter manifest passthrough (the JSON "params" list). count returns
+    // the number of declared params; at writes the i-th into *out (its key /
+    // label point into component-owned storage, valid until the component is
+    // destroyed) and returns true, or false for an out-of-range index /
+    // non-component asset.
+    uint32_t (NEUI_ABI *component_param_count)(neui_session_t session,
+                                               neui_asset_t component);
+    bool     (NEUI_ABI *component_param_at)(neui_session_t session,
+                                            neui_asset_t component,
+                                            uint32_t index,
+                                            neui_component_param_t* out);
+
+    // Serialize a COMPONENT asset back to a JSON document (designer round-
+    // trip). Writes the structural definition only - size, params, assets,
+    // layers, behavior - using minimal-diff emission (only properties that
+    // differ from their defaults). Per-instance attr values are NOT part of a
+    // component, so none are written; an asset layer serializes by the name it
+    // was loaded under. Writes up to cap bytes including the NUL into out_buf
+    // and returns the full length excluding the NUL (call with out_buf=NULL /
+    // cap=0 to size first). Returns 0 for a non-component / invalid asset.
+    // indent = spaces per nesting level (0 = compact single line).
+    uint32_t (NEUI_ABI *serialize_component)(neui_session_t session,
+                                             neui_asset_t component,
+                                             char* out_buf, uint32_t cap,
+                                             int indent);
   } neui_asset_api_t;
 
 #ifdef __cplusplus

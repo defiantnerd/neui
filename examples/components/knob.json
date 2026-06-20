@@ -1,0 +1,40 @@
+{
+  // A rotary knob, defined declaratively. mujson tolerates // and /* */
+  // comments, bare keys and a trailing comma - this file uses standard JSON.
+  "component": "knob",
+  "size": [110, 110],
+
+  // The one parameter this knob exposes. "default" is stamped onto every
+  // instance's AttrBag; min/max/label form the param manifest.
+  "params": [
+    { "key": "neui.param.value", "default": 0.5, "min": 0, "max": 1, "label": "Value" }
+  ],
+
+  // Visual layer stack (painted bottom-to-top by z).
+  "layers": [
+    // The knob disc: a rounded rect whose corner_radius makes it a circle.
+    { "kind": "rect", "z": -1, "anchor": ["center", "center"], "size": [84, 84],
+      "fill_color": "#FF2A2E38", "stroke_color": "#FF5C7AA8",
+      "stroke_width": 2, "corner_radius": 42 },
+
+    // The rotating pointer - an injected SURFACE named "indicator". Its
+    // rotation is bound to the value: 0..1 maps to -135deg..+135deg
+    // (scale = 3*pi/2, offset = -3*pi/4).
+    { "kind": "asset", "z": 0, "anchor": ["center", "center"], "size": [80, 80],
+      "asset": "indicator",
+      "bind": { "rotation": { "attr": "neui.param.value", "scale": 4.712389, "offset": -2.356194 } } },
+
+    // The label below the disc - {name} is filled from the per-instance attr.
+    { "kind": "text", "z": 1, "anchor": ["bottom", "bottom"], "size": ["fill", 20],
+      "text": "{name}", "font_size": 13, "color": "#FFD8E2F0",
+      "align": ["center", "center"] }
+  ],
+
+  // Interactive behavior: rotary drag + wheel + arrow keys + right-click reset.
+  "behavior": [
+    { "kind": "drag_rotational", "target": "neui.param.value", "min": 0, "max": 1 },
+    { "kind": "wheel", "step": 0.02 },
+    { "kind": "key_step", "step": 0.01, "coarse": 0.1 },
+    { "kind": "context_reset", "target_default": "neui.param.default" }
+  ]
+}
