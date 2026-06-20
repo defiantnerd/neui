@@ -538,12 +538,6 @@ if(NEUI_BUILD_EXAMPLES AND NEUI_IOS)
   # under NEUI_HAS_IOSHOST). It registers an empty native host stub today; the
   # example explicitly selects the crossplatform host, but the symbol must
   # still resolve - same pattern as the desktop examples linking neui-macoshost.
-  # Phase-2 investigation screen: -DNEUI_IOS_PHASE2=1 builds the example's
-  # GRID/LISTBOX/COMBOBOX/TREEVIEW/TABVIEW screen on the XPL host instead of
-  # the core-subset demo (SceneDelegate.mm gates on NEUI_IOS_PHASE2).
-  if(NEUI_IOS_PHASE2)
-    target_compile_definitions(neui_ios_example PRIVATE NEUI_IOS_PHASE2=1)
-  endif()
   target_link_libraries(neui_ios_example PRIVATE
     neui neui-xplhost neui-ioshost neui-backend-cg
     "-framework UIKit"
