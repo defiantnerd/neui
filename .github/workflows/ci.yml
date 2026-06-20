@@ -43,7 +43,7 @@ jobs:
             test: ctest --test-dir build -C Debug --output-on-failure
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # X11 + Cairo + FreeType + Fontconfig dev headers, plus the two optional
       # packages (XInput2 -> NEUI_HAS_XI2, D-Bus -> NEUI_HAS_DBUS) so the full

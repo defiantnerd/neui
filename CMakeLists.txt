@@ -54,6 +54,14 @@ if(MSVC)
   string(REGEX REPLACE "/W[0-4]" "" CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}")
   string(REGEX REPLACE "/W[0-4]" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
   add_compile_options(/W4 /wd4100)
+  # The win32 theme provider uses C++/WinRT (UISettings accent colours).
+  # Compiled as C++17 (below), C++/WinRT's base.h falls back to
+  # <experimental/coroutine> because the standard <coroutine> needs C++20;
+  # recent MSVC STLs (VS 2022 17.13+ / VS 2026) turn that header's deprecation
+  # into a hard error (STL1011). We use no coroutines ourselves - this is purely
+  # C++/WinRT's transitive include - so silence it. (Removable once the project
+  # moves to C++20, where C++/WinRT uses <coroutine> instead.)
+  add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
 else()
   add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif()
