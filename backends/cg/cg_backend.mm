@@ -113,6 +113,20 @@ namespace neui_cg_backend
     return cache;
   }
 
+  // Drop every cached CTFont so the next get_active_font re-resolves against
+  // the current CTFontManager registration set. Without this, a (family,
+  // weight, size) drawn *before* its font was registered would keep resolving
+  // to the cached system fallback even after registration (and a stale custom
+  // face would survive unregister). Registration is a rare, startup-time op,
+  // so flushing the whole (tiny) cache is cheaper than tracking per-family
+  // keys and is not on any draw path.
+  static void flush_font_cache()
+  {
+    auto& cache = font_cache();
+    for (auto& kv : cache) if (kv.second) CFRelease(kv.second);
+    cache.clear();
+  }
+
   // CSS-style weight (100..900, 0 = unset) -> platform font-weight scale.
   // Mirror of the d2d backend's normalise_weight mapping. AppKit's
   // NSFontWeight* and UIKit's UIFontWeight* constants are both CGFloat scales
@@ -926,6 +940,7 @@ namespace neui_cg_backend
     e.cg_font = font;       // retained until unregister
     e.is_file = false;
     app_fonts().push_back(e);
+    flush_font_cache();     // a name drawn before now must re-resolve
     if (out_token) *out_token = e.token;
     return true;
   }
@@ -971,6 +986,7 @@ namespace neui_cg_backend
     e.url     = url;        // retained until unregister
     e.is_file = true;
     app_fonts().push_back(e);
+    flush_font_cache();     // a name drawn before now must re-resolve
     if (out_token) *out_token = e.token;
     return true;
   }
@@ -997,6 +1013,7 @@ namespace neui_cg_backend
       }
       if (err) CFRelease(err);
       v.erase(it);
+      flush_font_cache();   // drop any cached CTFont for the gone family
       return;
     }
   }

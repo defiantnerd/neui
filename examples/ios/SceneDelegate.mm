@@ -1,15 +1,15 @@
 // Scene delegate - builds the neui UI once the UIWindowScene connects.
 //
-// Written as .mm so it can call neui's C/C++ API directly. The example targets
-// the crossplatform (XPL) host explicitly via neui_get_api("neui.host.crossplatform")
-// because the native iOS host is still a stub in this milestone.
+// Written as .mm so it can call neui's C/C++ API directly. The example runs on
+// the native iOS host (neui.host.ios), falling back to the crossplatform (XPL)
+// host if the native one is unavailable.
 //
-// MILESTONE 3 additions: an IMAGE widget loading a bundled PNG (exercises the
-// image_loader_ios.h CGImageSource + bundle-resolution path), the appwindow
-// opting into NEUI_ATTR_FOLLOW_SYSTEM_THEME=1 (exercises the
-// theme_provider_ios.h light/dark path + traitCollectionDidChange: live update),
-// a clipboard round-trip smoke (exercises clipboard_ios.h), and a RESIZE handler
-// that grows the SECTION to fill the frame so the UI fills the device screen.
+// It exercises the full iOS surface: native LABEL/BUTTON/INPUTBOX/CHECKBOX(3)/
+// SLIDER + an IMAGE loading a bundled PNG (image_loader_ios.h CGImageSource +
+// bundle resolution), a TABVIEW carrying GRID/LISTBOX/TREEVIEW/COMBOBOX pages,
+// a drag & drop demo, the hamburger / system menu bar, toasts + a message box,
+// NEUI_ATTR_FOLLOW_SYSTEM_THEME live light/dark, and a responsive layout driven
+// by NEUI_API_METRICS that reflows on RESIZE / Dynamic Type changes.
 
 #import "SceneDelegate.h"
 #import <UIKit/UIKit.h>   // dispatch a launch toast + capture a screenshot moment
@@ -17,19 +17,6 @@
 #include <neui/neui.h>
 #include <cstring>
 #include <cstdio>
-
-// PHASE 2 (investigation): a separate screen exercising the five "complex"
-// widgets - GRID / LISTBOX / COMBOBOX / TREEVIEW / TABVIEW - on the
-// crossplatform (XPL) host. These widgets are implemented in platform-neutral
-// shared C++ (hosts/crossplatform/host.cpp); the hypothesis under test is that
-// they render + function on the xpl iOS platform layer with no new host code.
-// Enable by configuring with -DNEUI_IOS_PHASE2=1 (the CMake target sets the
-// compile define). When set, build_ui() builds the phase-2 screen and forces
-// the XPL host regardless of NEUI_IOS_USE_NATIVE_HOST. Default off, so the
-// normal milestone-7 native-host demo is unchanged.
-#ifndef NEUI_IOS_PHASE2
-#define NEUI_IOS_PHASE2 0
-#endif
 
 // ---------------------------------------------------------------------------
 // neui client glue. A tiny app model + a widget client whose onevent echoes
@@ -45,7 +32,6 @@ struct App {
   neui_tree_api_t*      tree   = nullptr;
   neui_notify_api_t*    notify = nullptr;
   neui_grid_api_t*      grid   = nullptr;
-  neui_tabs_api_t*      tabs   = nullptr;
   neui_items_api_t*     items  = nullptr;
   neui_metrics_api_t*   metrics = nullptr;
   neui_dnd_api_t*       dnd    = nullptr;
@@ -62,11 +48,11 @@ struct App {
   neui_widget_t         check3 = {};   // tri-state: always the square-glyph control
   neui_widget_t         slider = {};
   neui_widget_t         image  = {};
-  neui_widget_t         grid_w = {};   // native-host GRID (M-phase2)
+  neui_widget_t         grid_w = {};   // native-host GRID
   neui_widget_t         list_w  = {};  // native-host LISTBOX (UITableView)
   neui_widget_t         tree_w  = {};  // native-host TREEVIEW (UITableView)
   neui_widget_t         combo_w = {};  // native-host COMBOBOX (UIButton + UIMenu)
-  // Native-host TABVIEW (M-phase2): a chip strip with pages, one per tab.
+  // Native-host TABVIEW: a chip strip with pages, one per tab.
   neui_widget_t         tv      = {};
   neui_widget_t         tab_lbl = {};  // status label updated on tab switch
   // Drag & drop demo (native host). A CUSTOMDRAW drag source (carrying a
@@ -78,7 +64,6 @@ struct App {
   neui_widget_t         dnd_status = {};
   neui_data_item_t      dnd_item   = {};   // text payload the source carries
   neui_asset_t          dnd_behav  = {};   // DRAG_SOURCE behavior asset
-  neui_item_t           tab_g   = {};  // grid page index (for relayout)
   // Menu item ids whose TREE_ITEM_ACTIVATED we react to.
   neui_item_t           mi_view_msg = {};
   neui_item_t           mi_file_new = {};
@@ -442,280 +427,12 @@ void clipboard_smoke(App* a)
               std::strcmp(probe, buf) == 0 ? "OK" : "MISMATCH");
 }
 
-// MILESTONE 7: a compile-time switch selecting the NATIVE UIKit iOS host
-// (neui.host.ios) vs the crossplatform (xpl) host. Default ON so this
-// milestone's verification exercises the native host; flip to 0 to fall back
-// to the xpl path (still fully functional).
-#ifndef NEUI_IOS_USE_NATIVE_HOST
-#define NEUI_IOS_USE_NATIVE_HOST 1
-#endif
-
-#if NEUI_IOS_PHASE2
-// ---------------------------------------------------------------------------
-// PHASE-2 SCREEN: GRID / LISTBOX / COMBOBOX / TREEVIEW / TABVIEW on the XPL
-// host. Each widget lives on its own tab page so they all get a generous full-
-// width slot; the TABVIEW itself is the fifth widget under test. Forces the
-// crossplatform host. No new host code - if these paint + respond, the
-// hypothesis (the xpl complex widgets work on iOS as-is) holds.
-
-struct P2 {
-  neui_widget_api_t* w     = nullptr;
-  neui_attr_api_t*   attrs = nullptr;
-  neui_items_api_t*  items = nullptr;
-  neui_tree_api_t*   tree  = nullptr;
-  neui_grid_api_t*   grid  = nullptr;
-  neui_session_t     s     = {};
-  neui_widget_t      win   = {};
-  neui_widget_t      tv    = {};
-  neui_widget_t      grid_w = {};
-  neui_widget_t      list  = {};
-  neui_widget_t      combo = {};
-  neui_widget_t      treev = {};
-  neui_widget_t      section = {};
-  neui_widget_t      status = {};
-};
-P2 g_p2;
-
-void p2_relayout(P2* a);   // forward decl (used by p2_onevent's RESIZE branch)
-
-bool p2_onevent(void* token, neui_event_t* e)
-{
-  P2* a = static_cast<P2*>(token);
-  if (e->type == NEUI_EVENT_APP_QUIT) return true;
-
-  // Log a few observable interactions into the status label so a tap is
-  // visibly working (where simctl can drive one).
-  if (e->type == NEUI_EVENT_RESIZE && e->data.resize.widget.id == a->win.id) {
-    p2_relayout(a);
-    return false;
-  }
-
-  char buf[160];
-  switch (e->type) {
-    case NEUI_EVENT_ITEM_SELECTED:
-      if (a->status.id) {
-        std::snprintf(buf, sizeof buf, "ITEM_SELECTED idx=%u",
-                      (unsigned)e->data.item.index);
-        a->w->set_text(a->s, a->status, buf);
-      }
-      return false;
-    case NEUI_EVENT_GRID_ROW_SELECTED:
-      if (a->status.id) {
-        std::snprintf(buf, sizeof buf, "GRID row=%d",
-                      (int)e->data.grid_row.row);
-        a->w->set_text(a->s, a->status, buf);
-      }
-      return false;
-    case NEUI_EVENT_TREE_ITEM_SELECTED:
-      if (a->status.id)
-        a->w->set_text(a->s, a->status, "TREE item selected");
-      return false;
-    default:
-      return false;
-  }
-}
-
-neui_widget_client_t g_p2_wclient = { NEUI_VERSION, nullptr, p2_onevent };
-
-void* p2_iface(void* /*t*/, const char* n)
-{
-  return std::strcmp(n, NEUI_API_WIDGETS) ? nullptr : (void*)&g_p2_wclient;
-}
-
-neui_client_t g_p2_client = { NEUI_VERSION, p2_iface };
-
-void p2_relayout(P2* a)
-{
-  if (!a->w || !a->w->get_client_rect) return;
-  int cx = 0, cy = 0, cw = 0, ch = 0;
-  a->w->get_client_rect(a->s, a->win, &cx, &cy, &cw, &ch);
-  if (cw <= 0 || ch <= 0) return;
-  const int M = 12;
-  int sx = cx + M, sy = cy + M, sw = cw - 2 * M;
-  int sh = ch - 2 * M - 28;            // leave room for the status label
-  if (sw < 80) sw = 80;
-  if (sh < 120) sh = 120;
-  a->w->set_pos(a->s, a->tv, sx, sy, sw, sh);
-  a->w->set_pos(a->s, a->status, sx, sy + sh + 4, sw, 22);
-}
-
-void build_phase2()
-{
-  neui_init();
-  neui_api_t* api = neui_get_api("neui.host.crossplatform");
-  if (!api) api = neui_get_api(nullptr);
-  if (!api) return;
-
-  P2* a = &g_p2;
-  a->s     = api->create_session(&g_p2_client, a);
-  a->w     = (neui_widget_api_t*) api->get_interface(a->s, NEUI_API_WIDGETS);
-  a->attrs = (neui_attr_api_t*)   api->get_interface(a->s, NEUI_API_ATTRS);
-  a->items = (neui_items_api_t*)  api->get_interface(a->s, NEUI_API_ITEMS);
-  a->tree  = (neui_tree_api_t*)   api->get_interface(a->s, NEUI_API_TREE);
-  a->grid  = (neui_grid_api_t*)   api->get_interface(a->s, NEUI_API_GRID);
-  if (!a->w) return;
-
-  a->win = a->w->create(a->s, widget_none, NEUI_W_APPWINDOW, 0, 0, 390, 800, nullptr);
-  if (a->attrs)
-    a->attrs->set_int(a->s, a->win, NEUI_ATTR_FOLLOW_SYSTEM_THEME, 1);
-
-  // TABVIEW spanning the frame; one complex widget per page.
-  a->tv = a->w->create(a->s, a->win, NEUI_W_TABVIEW, 12, 48, 366, 700, nullptr);
-
-  // --- Page 1: GRID -------------------------------------------------------
-  neui_widget_t pg_grid = a->w->create(a->s, a->tv, NEUI_W_TABPAGE, 0, 0, 0, 0, nullptr);
-  a->w->set_text(a->s, pg_grid, "Grid");
-  a->grid_w = a->w->create(a->s, pg_grid, NEUI_W_GRID, 8, 8, 340, 600, nullptr);
-  if (a->grid) {
-    a->grid->add_column(a->s, a->grid_w, "Name",  150);
-    a->grid->add_column(a->s, a->grid_w, "Kind",  90);
-    a->grid->add_column(a->s, a->grid_w, "Size",  80);
-    // 120 rows so the body overflows any device viewport - touch-pan scroll is
-    // demonstrable (and clamps at the ends). The default 22 px row_h * 120 rows
-    // is ~2640 px of content against a < 800 px body.
-    static const char* kinds[] = { "file", "dir", "link" };
-    static const char* sizes[] = { "12 KB", "-", "4 KB", "880 B", "1 MB", "2.3 MB" };
-    for (int i = 0; i < 120; ++i) {
-      char name[32];
-      std::snprintf(name, sizeof name, "item-%03d", i);
-      const char* v[] = { name, kinds[i % 3], sizes[i % 6], nullptr };
-      a->grid->add_row(a->s, a->grid_w, v);
-    }
-  }
-
-  // --- Page 2: LISTBOX ----------------------------------------------------
-  neui_widget_t pg_list = a->w->create(a->s, a->tv, NEUI_W_TABPAGE, 0, 0, 0, 0, nullptr);
-  a->w->set_text(a->s, pg_list, "List");
-  a->list = a->w->create(a->s, pg_list, NEUI_W_LISTBOX, 8, 8, 340, 360, nullptr);
-  if (a->items) {
-    // 60 items so the list overflows its 360 px slot and scrolls (line-delta
-    // touch-pan path).
-    for (int i = 0; i < 60; ++i) {
-      char li[32];
-      std::snprintf(li, sizeof li, "List row %02d", i);
-      a->items->add(a->s, a->list, li, nullptr);
-    }
-    a->items->set_selected(a->s, a->list, 0);
-  }
-
-  // --- Page 3: COMBOBOX ---------------------------------------------------
-  neui_widget_t pg_combo = a->w->create(a->s, a->tv, NEUI_W_TABPAGE, 0, 0, 0, 0, nullptr);
-  a->w->set_text(a->s, pg_combo, "Combo");
-  neui_widget_t clbl = a->w->create(a->s, pg_combo, NEUI_W_LABEL, 8, 8, 200, 22, nullptr);
-  a->w->set_text(a->s, clbl, "Pick a fruit:");
-  a->combo = a->w->create(a->s, pg_combo, NEUI_W_COMBOBOX, 8, 36, 200, 30, nullptr);
-  if (a->items) {
-    const char* fr[] = { "Apple", "Banana", "Cherry", "Date", "Elderberry" };
-    for (auto* s : fr) a->items->add(a->s, a->combo, s, nullptr);
-    a->items->set_selected(a->s, a->combo, 0);
-  }
-
-  // --- Page 4: TREEVIEW ---------------------------------------------------
-  neui_widget_t pg_tree = a->w->create(a->s, a->tv, NEUI_W_TABPAGE, 0, 0, 0, 0, nullptr);
-  a->w->set_text(a->s, pg_tree, "Tree");
-  a->treev = a->w->create(a->s, pg_tree, NEUI_W_TREEVIEW, 8, 8, 340, 360, nullptr);
-  if (a->tree) {
-    // Several expanded folders, each with many leaves, so the expanded tree
-    // overflows its 360 px slot and scrolls (line-delta touch-pan path).
-    neui_item_t root = a->tree->add(a->s, a->treev, tree_item_root, "Project", nullptr);
-    for (int f = 0; f < 6; ++f) {
-      char fname[32];
-      std::snprintf(fname, sizeof fname, "folder-%d", f);
-      neui_item_t folder = a->tree->add(a->s, a->treev, root, fname, nullptr);
-      for (int leaf = 0; leaf < 8; ++leaf) {
-        char lname[40];
-        std::snprintf(lname, sizeof lname, "file-%d-%02d.cpp", f, leaf);
-        a->tree->add(a->s, a->treev, folder, lname, nullptr);
-      }
-    }
-  }
-
-  // --- Page 5: scrolling SECTION ------------------------------------------
-  // A SECTION with scroll_mode="vertical" whose stacked child buttons overflow
-  // the body, exercising the section-kinetics touch-pan path directly (the GRID
-  // path is page 1; the line-delta path is pages 2/4; TABPAGE is itself a
-  // chip-less scrolling section under every page).
-  neui_widget_t pg_sec = a->w->create(a->s, a->tv, NEUI_W_TABPAGE, 0, 0, 0, 0, nullptr);
-  a->w->set_text(a->s, pg_sec, "Section");
-  a->section = a->w->create(a->s, pg_sec, NEUI_W_SECTION, 8, 8, 340, 500, nullptr);
-  if (a->attrs)
-    a->attrs->set_string(a->s, a->section, NEUI_ATTR_SCROLL_MODE, "vertical");
-  a->w->set_text(a->s, a->section, "Scrolling section");
-  for (int i = 0; i < 40; ++i) {
-    char b[24];
-    std::snprintf(b, sizeof b, "Row button %02d", i);
-    neui_widget_t btn = a->w->create(a->s, a->section, NEUI_W_BUTTON,
-                                     8, 8 + i * 34, 300, 28, nullptr);
-    a->w->set_text(a->s, btn, b);
-  }
-
-  // Status label below the tabview.
-  a->status = a->w->create(a->s, a->win, NEUI_W_LABEL, 12, 752, 366, 22, nullptr);
-  a->w->set_text(a->s, a->status, "Phase 2 (XPL host): tap a widget");
-
-  p2_relayout(a);
-  a->w->show(a->s, a->win);
-
-#ifdef NEUI_IOS_DEMO_AUTOTAB
-  // Verification-only: cycle the selected tab so each complex widget can be
-  // screenshotted without a tap (simctl can't synthesize touches reliably).
-  if (neui_tabs_api_t* tabs = (neui_tabs_api_t*)api->get_interface(a->s, NEUI_API_TABS)) {
-    static neui_tabs_api_t* s_tabs = tabs;
-    static neui_widget_t    s_tv   = a->tv;
-    static neui_session_t   s_sess = a->s;
-    for (int i = 1; i <= 3; ++i) {
-      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * i * NSEC_PER_SEC)),
-                     dispatch_get_main_queue(), ^{
-        s_tabs->set_selected(s_sess, s_tv, (uint32_t)i);
-      });
-    }
-  }
-#endif
-
-#ifdef NEUI_IOS_P2SCROLL_VERIFY
-  // Verification-only (headless): simctl cannot synthesize a swipe, so prove the
-  // shared-kinetics plumbing end-to-end WITHOUT a gesture - switch to the
-  // scrolling-SECTION tab and drive a programmatic scroll via NEUI_API_SCROLL.
-  // The committed offset moving + clamping + firing SCROLL_CHANGED confirms the
-  // section scroll state is live; the touch-pan handler feeds the very same
-  // commit path. A live swipe (device / Simulator mouse-drag) verifies the
-  // gesture wiring itself.
-  if (neui_scroll_api_t* scroll =
-        (neui_scroll_api_t*)api->get_interface(a->s, NEUI_API_SCROLL)) {
-    if (neui_tabs_api_t* tabs = (neui_tabs_api_t*)api->get_interface(a->s, NEUI_API_TABS))
-      tabs->set_selected(a->s, a->tv, 4);   // the "Section" tab (5th)
-    static neui_scroll_api_t* s_scroll = scroll;
-    static neui_widget_t      s_sec    = a->section;
-    static neui_session_t     s_sess2  = a->s;
-    static neui_widget_api_t* s_w      = a->w;
-    static neui_widget_t      s_status = a->status;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-      s_scroll->set_scroll(s_sess2, s_sec, 0, 400);   // scroll down 400 px
-      int sx = 0, sy = 0;
-      s_scroll->get_scroll(s_sess2, s_sec, &sx, &sy);
-      char buf[96];
-      std::snprintf(buf, sizeof buf, "set_scroll(0,400) -> committed y=%d", sy);
-      s_w->set_text(s_sess2, s_status, buf);
-    });
-  }
-#endif
-}
-#endif // NEUI_IOS_PHASE2
-
 void build_ui()
 {
-#if NEUI_IOS_PHASE2
-  build_phase2();
-  return;
-#endif
   neui_init();
-#if NEUI_IOS_USE_NATIVE_HOST
+  // Native iOS host, falling back to the crossplatform host if it is absent.
   neui_api_t* api = neui_get_api("neui.host.ios");
   if (!api) api = neui_get_api("neui.host.crossplatform");
-#else
-  neui_api_t* api = neui_get_api("neui.host.crossplatform");
-#endif
   if (!api) api = neui_get_api(nullptr);
   if (!api) return;
 
@@ -726,7 +443,6 @@ void build_ui()
   g_app.tree   = (neui_tree_api_t*)      api->get_interface(g_app.s, NEUI_API_TREE);
   g_app.notify = (neui_notify_api_t*)    api->get_interface(g_app.s, NEUI_API_NOTIFY);
   g_app.grid   = (neui_grid_api_t*)      api->get_interface(g_app.s, NEUI_API_GRID);
-  g_app.tabs   = (neui_tabs_api_t*)      api->get_interface(g_app.s, NEUI_API_TABS);
   g_app.items  = (neui_items_api_t*)     api->get_interface(g_app.s, NEUI_API_ITEMS);
   g_app.metrics = (neui_metrics_api_t*)  api->get_interface(g_app.s, NEUI_API_METRICS);
   g_app.dnd      = (neui_dnd_api_t*)      api->get_interface(g_app.s, NEUI_API_DND);
@@ -786,11 +502,7 @@ void build_ui()
   // A SECTION groups the controls visually; relayout() sizes it to the frame.
   g_app.sec = g_app.w->create(g_app.s, g_app.win, NEUI_W_SECTION,
                               16, 48, 358, 700, nullptr);
-#if NEUI_IOS_USE_NATIVE_HOST
-  g_app.w->set_text(g_app.s, g_app.sec, "neui on iOS (native host)");
-#else
-  g_app.w->set_text(g_app.s, g_app.sec, "neui on iOS (XPL host)");
-#endif
+  g_app.w->set_text(g_app.s, g_app.sec, "neui on iOS");
 
   g_app.input  = g_app.w->create(g_app.s, g_app.sec, NEUI_W_INPUTBOX,  16, 16, 326, 36, nullptr);
   g_app.button = g_app.w->create(g_app.s, g_app.sec, NEUI_W_BUTTON,    16, 64, 120, 40, nullptr);
@@ -870,13 +582,11 @@ void build_ui()
   g_app.image = g_app.w->create(g_app.s, g_app.sec, NEUI_W_IMAGE, 16, 276, 326, 150, nullptr);
   g_app.w->set_text(g_app.s, g_app.image, "myimage.png");
 
-#if NEUI_IOS_USE_NATIVE_HOST
-  // Native-host TABVIEW (phase-2): a chip strip with three NEUI_W_TABPAGE pages,
-  // each carrying a few body-relative widgets. A chip TAP selects a tab (fires
-  // TAB_DESELECTED/SELECTED, swaps which page is visible); the GRID lives in the
-  // middle page so the native GRID port composes inside a tab. relayout() sizes
-  // the tabview into the section's lower body area. Only built on the native
-  // host - the xpl host already exercises TABVIEW via the NEUI_IOS_PHASE2 screen.
+  // TABVIEW: a chip strip with NEUI_W_TABPAGE pages, each carrying a few
+  // body-relative widgets. A chip TAP selects a tab (fires TAB_DESELECTED/
+  // SELECTED, swaps which page is visible); the GRID / LISTBOX / TREEVIEW each
+  // live in their own page so the table widgets compose inside a tab. relayout()
+  // sizes the tabview into the section's lower body area.
   // (placeholder geometry; relayout() positions it for real before show.)
   g_app.tv = g_app.w->create(g_app.s, g_app.sec, NEUI_W_TABVIEW, 16, 414, 326, 240, nullptr);
 
@@ -963,7 +673,6 @@ void build_ui()
   g_app.w->set_text(g_app.s, more_lbl, "A slider on the last tab:");
   neui_widget_t more_sl = g_app.w->create(g_app.s, pg_more, NEUI_W_SLIDER, 16, 52, 280, 32, nullptr);
   if (g_app.attrs) g_app.attrs->set_float(g_app.s, more_sl, NEUI_PARAM_VALUE, 0.3f);
-#endif
 
   // Initial layout against the scene-seeded client rect, then show. A RESIZE
   // (incl. the first safe-area inset resolve) re-runs relayout() afterwards.
@@ -974,45 +683,16 @@ void build_ui()
   // Smoke the clipboard seam now that the session is live.
   clipboard_smoke(&g_app);
 
-  // Fire a toast automatically a moment after the UI builds so the M5 toast
-  // path (CADisplayLink heartbeat + Session::paint_toast) is exercised and
-  // screenshot-able without needing a tap. Delayed ~0.8 s so the frame has laid
-  // out + the safe-area inset has resolved (the toast anchors below it).
+  // Fire a toast automatically a moment after the UI builds so the toast path
+  // (CADisplayLink heartbeat + Session::paint_toast) is exercised. Delayed
+  // ~0.8 s so the frame has laid out + the safe-area inset has resolved (the
+  // toast anchors below it).
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
                  dispatch_get_main_queue(), ^{
     if (g_app.notify && g_app.w)
       g_app.notify->toast(g_app.s, g_app.win,
                           "Welcome to neui on iOS!\nThis toast auto-fired at launch.");
   });
-
-#ifdef NEUI_IOS_DEMO_SELECTTAB
-  // Verification-only (headless): simctl can't tap a chip, so programmatically
-  // select the native TABVIEW tab named by NEUI_IOS_DEMO_SELECTTAB (an index)
-  // so the LISTBOX ("List", tab 3) or TREEVIEW ("Tree", tab 4) page is visible
-  // for a screenshot. A live tap verifies the chip wiring + row interaction.
-  if (g_app.tabs && g_app.tv.id != 0) {
-    static neui_tabs_api_t*   s_tabs = g_app.tabs;
-    static neui_widget_t      s_tv   = g_app.tv;
-    static neui_session_t     s_sess = g_app.s;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-      s_tabs->set_selected(s_sess, s_tv, (uint32_t)(NEUI_IOS_DEMO_SELECTTAB));
-    });
-  }
-#endif
-
-#ifdef NEUI_IOS_DEMO_AUTOALERT
-  // Verification-only: auto-present the message box after the toast clears so a
-  // screenshot can capture the UIAlertController. Compiled out of the normal
-  // build (the menu's "Show Message Box" item is the real trigger).
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.4 * NSEC_PER_SEC)),
-                 dispatch_get_main_queue(), ^{
-    if (g_app.notify && g_app.w)
-      g_app.notify->message_box(g_app.s, g_app.win,
-                                "This is a neui message box on iOS.", "Message",
-                                NEUI_MB_OKCANCEL | NEUI_MB_ICONINFORMATION);
-  });
-#endif
 
   // NOTE: deliberately NOT calling api->run(g_app.s) - UIApplicationMain owns
   // the run loop on iOS.

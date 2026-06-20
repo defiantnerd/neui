@@ -491,11 +491,11 @@ endif()
 
 endif() # NEUI_BUILD_EXAMPLES
 
-# Minimal iOS example app (XPL host). The desktop examples above are plain
+# iOS example app (native iOS host). The desktop examples above are plain
 # executables that can't bundle/launch on iOS, so iOS gets its own bundled
-# target: a UIApplicationMain app whose SceneDelegate builds a tiny neui UI
-# (SECTION + LABEL/BUTTON/INPUTBOX/CHECKBOX/SLIDER) after the scene connects.
-# Pinned to the crossplatform host (the native iOS host is still a stub).
+# target: a UIApplicationMain app whose SceneDelegate builds the neui UI after
+# the scene connects. Runs on the native iOS host (neui.host.ios), falling back
+# to the crossplatform host if it is absent.
 #
 # To turn the built .app into something runnable in the simulator, build with
 # code signing disabled (CODE_SIGNING_ALLOWED=NO / CODE_SIGNING_REQUIRED=NO),
@@ -535,15 +535,7 @@ if(NEUI_BUILD_EXAMPLES AND NEUI_IOS)
     XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
     XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.defiantnerd.neui.ios.example")
   # neui-ioshost supplies neui_register_ioshost() (referenced by neui_init()
-  # under NEUI_HAS_IOSHOST). It registers an empty native host stub today; the
-  # example explicitly selects the crossplatform host, but the symbol must
-  # still resolve - same pattern as the desktop examples linking neui-macoshost.
-  # Phase-2 investigation screen: -DNEUI_IOS_PHASE2=1 builds the example's
-  # GRID/LISTBOX/COMBOBOX/TREEVIEW/TABVIEW screen on the XPL host instead of
-  # the core-subset demo (SceneDelegate.mm gates on NEUI_IOS_PHASE2).
-  if(NEUI_IOS_PHASE2)
-    target_compile_definitions(neui_ios_example PRIVATE NEUI_IOS_PHASE2=1)
-  endif()
+  # under NEUI_HAS_IOSHOST) and the native iOS host the example runs on.
   target_link_libraries(neui_ios_example PRIVATE
     neui neui-xplhost neui-ioshost neui-backend-cg
     "-framework UIKit"

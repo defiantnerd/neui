@@ -331,9 +331,23 @@ namespace neui_d2d_backend
     return ok;
   }
 
+  // Drop every cached IDWriteTextFormat so the next get_text_format rebuilds
+  // against the current g_custom_collection. Without this, a (family, weight,
+  // size) drawn *before* its font was registered would keep resolving to the
+  // cached system-only fallback even after registration (mirrors the CG
+  // backend's flush_font_cache). Called from rebuild_custom_collection, the
+  // single point both register and unregister funnel through.
+  static void flush_text_format_cache()
+  {
+    for (auto& kv : g_text_format_cache)
+      if (kv.second) kv.second->Release();
+    g_text_format_cache.clear();
+  }
+
   // Rebuild g_custom_collection = system font set + every registered file.
   static void rebuild_custom_collection()
   {
+    flush_text_format_cache();
     if (g_custom_collection) { g_custom_collection->Release(); g_custom_collection = nullptr; }
     if (!g_dwrite3 || g_custom_fonts.empty()) return;
 

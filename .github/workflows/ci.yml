@@ -1,0 +1,71 @@
+name: CI
+
+# Compile-check + unit tests on the three desktop hosts:
+#   - Linux   : crossplatform host + Cairo/X11 backend (GCC)
+#   - macOS   : native AppKit host + CoreGraphics backend (AppleClang, Xcode)
+#   - Windows : native Win32 host + Direct2D backend (MSVC)
+# Each job configures, builds Debug, and runs the ctest suite. The build is
+# warning-clean by design (the project turns warnings up but not into errors),
+# so this guards against compile breaks and test regressions on every host.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a branch).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (GCC · Cairo/X11)
+            os: ubuntu-latest
+            configure: cmake -B build -DCMAKE_BUILD_TYPE=Debug
+            build: cmake --build build --parallel
+            test: ctest --test-dir build --output-on-failure
+          - name: macOS (AppleClang · Xcode)
+            os: macos-latest
+            configure: cmake -B build -G Xcode
+            build: cmake --build build --config Debug --parallel
+            test: ctest --test-dir build -C Debug --output-on-failure
+          - name: Windows (MSVC · Direct2D)
+            os: windows-latest
+            configure: cmake -B build
+            build: cmake --build build --config Debug --parallel
+            test: ctest --test-dir build -C Debug --output-on-failure
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # X11 + Cairo + FreeType + Fontconfig dev headers, plus the two optional
+      # packages (XInput2 -> NEUI_HAS_XI2, D-Bus -> NEUI_HAS_DBUS) so the full
+      # Linux feature set compiles. Matches the dev-package list in CLAUDE.md.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libx11-dev libxext-dev libxi-dev \
+            libcairo2-dev libfreetype-dev libfontconfig1-dev \
+            libdbus-1-dev
+
+      - name: Configure
+        run: ${{ matrix.configure }}
+
+      - name: Build
+        run: ${{ matrix.build }}
+
+      # Headless-safe: the registered tests (neui_tests, and on Linux the
+      # offscreen neui_cairo_smoke) need no display. The X-display-dependent
+      # neui_embed_smoke is built but not ctest-registered, so it is not run.
+      - name: Test
+        run: ${{ matrix.test }}

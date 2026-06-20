@@ -10,7 +10,10 @@
 
 #include <charconv>
 #include <cctype>
+#include <cerrno>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include "mujson.h"
@@ -220,13 +223,22 @@ namespace neui
       const char* e = b + tok.size();
 
       // Prefer a whole-token int; fall back to a whole-token double; else string.
+      // The integer std::from_chars overload ships with libc++'s C++17 support
+      // (no availability gate). The *floating-point* overload, however, is
+      // annotated unavailable below macOS 13.3 / iOS 16.3 - calling it there is
+      // a compile error, not a runtime fallback - so the double path uses the
+      // portable std::strtod instead. tok is NUL-terminated (std::string) and
+      // whitespace-free here; require the whole token consumed and a finite
+      // result so bare words like "inf"/"nan" stay strings, and over/underflow
+      // (errno == ERANGE) falls through to string - matching from_chars.
       int n = 0;
       auto ri = std::from_chars(b, e, n);
       if (ri.ec == std::errc() && ri.ptr == e) { out.value = n; return true; }
 
-      double d = 0.0;
-      auto rd = std::from_chars(b, e, d);
-      if (rd.ec == std::errc() && rd.ptr == e) { out.value = d; return true; }
+      errno = 0;
+      char* dend = nullptr;
+      double d = std::strtod(b, &dend);
+      if (dend == e && errno == 0 && std::isfinite(d)) { out.value = d; return true; }
 
       out.value = std::move(tok);
       return true;
@@ -364,9 +376,17 @@ namespace neui
     {
       // JSON has no NaN/Inf; emit null to keep the output valid.
       if (!std::isfinite(d)) { out += "null"; return; }
+      // std::to_chars(double) is annotated unavailable below macOS 13.3 /
+      // iOS 16.3 (compile error at a lower deployment target), so emit the
+      // shortest %g precision (15..17 significant digits) that round-trips -
+      // matching to_chars' shortest-representation output on every target.
       char buf[32];
-      auto r = std::to_chars(buf, buf + sizeof(buf), d);
-      std::string s(buf, r.ptr);
+      for (int prec = 15; prec <= 17; ++prec)
+      {
+        std::snprintf(buf, sizeof(buf), "%.*g", prec, d);
+        if (std::strtod(buf, nullptr) == d) break;
+      }
+      std::string s(buf);
       // Keep the value typed as a double on re-parse (else "1000" reads as int).
       if (s.find_first_of(".eE") == std::string::npos) s += ".0";
       out += s;
@@ -422,6 +442,7 @@ namespace neui
   mujson::object_t mujson::parse(const char* s)
   {
     lasterr = "";
+    if (!s) { lasterr = err_nocurlybraces; return {}; }
     const char* p = s;
     skipWs(p);
     if (*p != '{') { lasterr = err_nocurlybraces; return {}; }

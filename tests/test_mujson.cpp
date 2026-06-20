@@ -198,6 +198,14 @@ TEST_CASE("mujson: errors and depth")
   CHECK(ok("{}"));
   CHECK(std::string(mujson::getLastError()).empty());
 
+  // null input must not crash; reports the same error as a non-object string
+  {
+    auto r = mujson::parse(static_cast<const char*>(nullptr));
+    CHECK(r.empty());
+    CHECK(std::string(mujson::getLastError()) ==
+          "string does not start with curly braces");
+  }
+
   // depth guard fires beyond kMaxDepth (128)
   std::string deep;
   for (int i = 0; i < 200; ++i) deep += "{a:";

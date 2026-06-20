@@ -221,9 +221,9 @@ namespace neui_detail
     inline PropType behavior_prop_type(const std::string& p)
     {
       // strings
-      if (p == "target" || p == "target_default" || p == "snap_attr" ||
-          p == "fine_modifier" || p == "cursor" || p == "drag_data_key" ||
-          p == "drag_preview_key" || p == "result_attr")
+      if (p == "target" || p == "target_y" || p == "target_default" ||
+          p == "snap_attr" || p == "fine_modifier" || p == "cursor" ||
+          p == "drag_data_key" || p == "drag_preview_key" || p == "result_attr")
         return P_STRING;
       // floats
       if (p == "min" || p == "max" || p == "step" || p == "coarse" ||
