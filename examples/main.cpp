@@ -1201,19 +1201,20 @@ int main(int argc, char** argv) {
       app.compound->set_int(sess, cs, path_layer, "fill_color",   (int)0xFFFFFFFF);
       app.compound->set_int(sess, cs, path_layer, "stroke_color", (int)0xFF202830);
       app.compound->set_float(sess, cs, path_layer, "stroke_width", 1.0f);
-      // Chevron: outer triangle (right-pointing >) with a notch carved
-      // out on the back-left edge for a flat-shouldered look.
-      //
-      //   (4, 3) -----+
-      //        \      \
-      //         \      \
-      //          \      +  (15, 10)
-      //          /      /
-      //         /      /
-      //   (4, 17) ----+
-      //
-      // Inner notch (clockwise so the even-odd or non-zero fill rule
-      // carves the interior) starts at (7, 8) -> (10, 10) -> (7, 12).
+      /* Chevron: outer triangle (right-pointing >) with a notch carved
+         out on the back-left edge for a flat-shouldered look. (Block comment,
+         not //, so the trailing backslashes in the art don't trip -Wcomment.)
+
+           (4, 3) -----+
+                \      \
+                 \      \
+                  \      +  (15, 10)
+                  /      /
+                 /      /
+           (4, 17) ----+
+
+         Inner notch (clockwise so the even-odd or non-zero fill rule
+         carves the interior) starts at (7, 8) -> (10, 10) -> (7, 12). */
       neui_path_cmd_t chev[] = {
         { NEUI_PATH_CMD_MOVE_TO, {  4.0f,  3.0f, 0, 0, 0 } },
         { NEUI_PATH_CMD_LINE_TO, { 15.0f, 10.0f, 0, 0, 0 } },
