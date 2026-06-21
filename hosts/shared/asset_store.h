@@ -14,6 +14,7 @@
 #include "behavior.h"
 #include "painter.h"  // draw_asset_thunk_t + neui_painter + k_painter_api
 #include "component_loader.h"  // BuiltComponent / ComponentDefaultAttr / ComponentParam
+#include "filmstrip_recognize.h"  // FilmstripLayout + sidecar/filename discovery
 
 // Session-scoped asset slot table shared by all three hosts. Each host
 // previously carried a near-identical manager (xpl AssetManager, win32
@@ -253,26 +254,43 @@ namespace neui_detail
       return true;
     }
 
-    // Convenience: load a bitmap from a file (allocate_from_file, incl.
-    // @2x/@3x resolution) and tag it as a frame_count-frame strip - a single
-    // column (horizontal == false) or single row (horizontal == true). On tag
+    // Load a bitmap from a file (allocate_from_file, incl. @2x/@3x resolution)
+    // and tag it with an explicit cols x rows (+ gutter) frame grid. On tag
     // failure the freshly-loaded slot is released so a partial untagged asset
-    // never leaks. Returns 0 on bad frame_count / load failure / unfittable
-    // strip.
-    uint32_t allocate_filmstrip_from_file(const std::string& name, float scale,
-                                           uint32_t frame_count, bool horizontal,
-                                           neui_render_backend_t* backend)
+    // never leaks. Returns 0 on load failure / unfittable grid.
+    uint32_t allocate_filmstrip_grid_from_file(const std::string& name, float scale,
+                                               uint32_t cols, uint32_t rows,
+                                               uint32_t gutter_px,
+                                               neui_render_backend_t* backend)
     {
-      if (frame_count < 1) return 0;
       uint32_t slot = allocate_from_file(name, scale);
       if (slot == 0) return 0;
-      const uint32_t cols = horizontal ? frame_count : 1u;
-      const uint32_t rows = horizontal ? 1u : frame_count;
-      if (!set_frame_layout(slot, cols, rows, /*gutter_px=*/0)) {
+      if (!set_frame_layout(slot, cols, rows, gutter_px)) {
         release_slot(slot, backend);
         return 0;
       }
       return slot;
+    }
+
+    // Convenience: load + tag a frame_count-frame strip - a single column
+    // (horizontal == false) or single row (horizontal == true). When
+    // frame_count == 0, DISCOVER the layout from a "<path>.json" / "<base>.json"
+    // sidecar or a "<N>frames" / "-<N>" filename token (filmstrip_recognize.h);
+    // `horizontal` then picks the axis for the filename branch. Returns 0 on
+    // bad/undiscoverable layout, load failure, or an unfittable strip.
+    uint32_t allocate_filmstrip_from_file(const std::string& name, float scale,
+                                           uint32_t frame_count, bool horizontal,
+                                           neui_render_backend_t* backend)
+    {
+      if (frame_count == 0) {
+        FilmstripLayout lay;
+        if (!filmstrip_discover_from_path(name, horizontal, lay)) return 0;
+        return allocate_filmstrip_grid_from_file(name, scale, lay.cols, lay.rows,
+                                                 lay.gutter, backend);
+      }
+      const uint32_t cols = horizontal ? frame_count : 1u;
+      const uint32_t rows = horizontal ? 1u : frame_count;
+      return allocate_filmstrip_grid_from_file(name, scale, cols, rows, 0, backend);
     }
 
     // Allocate a slot holding an empty CompoundAsset. Mutated via

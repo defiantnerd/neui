@@ -325,6 +325,69 @@ TEST_CASE("filmstrip: frame-aware draw emits LOGICAL src coords at @2x scale")
   CHECK_EQ((int)g_last_src[3], 64);
 }
 
+// ---------------------------------------------------------------------------
+// Recognition helpers (filmstrip_recognize.h)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("filmstrip: parse_filename accepts marked trailing counts")
+{
+  uint32_t n = 0;
+  CHECK(filmstrip_parse_filename("knob_100frames", n)); CHECK_EQ((int)n, 100);
+  CHECK(filmstrip_parse_filename("KNOB_64FRAME",  n)); CHECK_EQ((int)n, 64);   // case-insensitive, singular
+  CHECK(filmstrip_parse_filename("fader-128",     n)); CHECK_EQ((int)n, 128);
+  CHECK(filmstrip_parse_filename("knob_100",      n)); CHECK_EQ((int)n, 100);
+  CHECK(filmstrip_parse_filename("knob_f64",      n)); CHECK_EQ((int)n, 64);
+  CHECK(filmstrip_parse_filename("knob_strip128", n)); CHECK_EQ((int)n, 128);
+  CHECK(filmstrip_parse_filename("filmstrip256",  n)); CHECK_EQ((int)n, 256);
+}
+
+TEST_CASE("filmstrip: parse_filename rejects unmarked / ambiguous names")
+{
+  uint32_t n = 99;
+  CHECK_FALSE(filmstrip_parse_filename("image2", n));   // bare trailing digit
+  CHECK_FALSE(filmstrip_parse_filename("shelf3", n));   // 'f' not separator-marked
+  CHECK_FALSE(filmstrip_parse_filename("panda",  n));   // no digits
+  CHECK_FALSE(filmstrip_parse_filename("lemur",  n));
+  CHECK_FALSE(filmstrip_parse_filename("knob_1", n));   // count < 2
+  CHECK_EQ((int)n, 99);                                  // out untouched on reject
+}
+
+TEST_CASE("filmstrip: parse_sidecar reads frames/orientation and cols/rows/gutter")
+{
+  FilmstripLayout l;
+  REQUIRE(filmstrip_parse_sidecar(R"({ "frames": 100 })", l));
+  CHECK_EQ((int)l.cols, 1); CHECK_EQ((int)l.rows, 100);
+
+  REQUIRE(filmstrip_parse_sidecar(R"({ "frames": 8, "orientation": "horizontal" })", l));
+  CHECK_EQ((int)l.cols, 8); CHECK_EQ((int)l.rows, 1);
+
+  REQUIRE(filmstrip_parse_sidecar(R"({ "cols": 4, "rows": 2, "gutter": 3 })", l));
+  CHECK_EQ((int)l.cols, 4); CHECK_EQ((int)l.rows, 2); CHECK_EQ((int)l.gutter, 3);
+
+  // Junk / missing keys -> not a layout.
+  CHECK_FALSE(filmstrip_parse_sidecar(R"({ "hello": 1 })", l));
+  CHECK_FALSE(filmstrip_parse_sidecar("not json at all", l));
+}
+
+TEST_CASE("filmstrip: create-with-discovery tags from a filename token")
+{
+  SizedLoader::s_w = 64; SizedLoader::s_h = 6400;        // 100 cells of 64x64
+  neui_render_backend_t backend = make_backend();
+  AssetStore<SizedLoader> store;
+
+  // frame_count == 0 => discover. No sidecar file exists, so it falls to the
+  // "_100frames" filename token.
+  uint32_t slot = store.allocate_filmstrip_from_file(
+      "knob_100frames.png", 1.0f, /*frame_count=*/0, /*horizontal=*/false, &backend);
+  REQUIRE(slot != 0);
+  CHECK_EQ((int)store.frame_count(slot), 100);
+
+  // A plain name with no sidecar / token => discovery fails => 0.
+  uint32_t none = store.allocate_filmstrip_from_file(
+      "plain.png", 1.0f, 0, false, &backend);
+  CHECK_EQ((int)none, 0);
+}
+
 TEST_CASE("filmstrip: frame draw on an untagged bitmap draws the whole image")
 {
   reset_counters();

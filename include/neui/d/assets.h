@@ -335,10 +335,16 @@ extern "C" {
                                        uint32_t gutter_px);
 
     // Load a bitmap from a file (like create_from_file, incl. @2x / @3x
-    // resolution) and tag it as a frame_count-frame strip in the given
-    // orientation, in one call. Returns asset_none if the load fails or the
-    // strip doesn't divide evenly enough to fit (frame_count < 1, or the
-    // bitmap is too small along the strip axis).
+    // resolution) and tag it as a frame strip, in one call.
+    //   frame_count > 0 : explicit - a frame_count-frame strip in `orientation`.
+    //   frame_count == 0: DISCOVER the layout from a "<path>.json" /
+    //                     "<base>.json" sidecar ({ "frames": N, "orientation":
+    //                     ..., "gutter": ... } or { "cols", "rows", "gutter" }),
+    //                     else a "<N>frames" / "-<N>" / "_f<N>" / "strip<N>"
+    //                     filename token (count only - `orientation` picks the
+    //                     axis).
+    // Returns asset_none if the load fails, the strip doesn't divide evenly
+    // enough to fit, or (discovery) no sidecar / filename token is found.
     neui_asset_t (NEUI_ABI *create_filmstrip_from_file)(
         neui_session_t session, const char* path_utf8,
         uint32_t frame_count, neui_filmstrip_orientation_t orientation);

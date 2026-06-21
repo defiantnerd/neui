@@ -39,9 +39,11 @@ namespace
     std::map<std::string, std::string>  strs;
   };
 
-  std::vector<LayerRec>    g_layers;
-  std::vector<HandlerRec>  g_handlers;
-  std::vector<std::string> g_loaded_files;
+  struct FrameLayoutRec { uint32_t cols, rows, gutter; };
+  std::vector<LayerRec>              g_layers;
+  std::vector<HandlerRec>            g_handlers;
+  std::vector<std::string>           g_loaded_files;
+  std::map<uint32_t, FrameLayoutRec> g_frame_layouts;   // asset id -> grid
   bool                     g_compound_created = false;
   bool                     g_behavior_created = false;
 
@@ -50,6 +52,7 @@ namespace
     g_layers.clear();
     g_handlers.clear();
     g_loaded_files.clear();
+    g_frame_layouts.clear();
     g_compound_created = false;
     g_behavior_created = false;
   }
@@ -65,6 +68,9 @@ namespace
     neui_asset_t a; a.id = 1000u + static_cast<uint32_t>(g_loaded_files.size());
     return a;
   }
+  bool NEUI_ABI fake_set_frame_layout(neui_session_t, neui_asset_t a,
+                                      uint32_t cols, uint32_t rows, uint32_t gutter)
+  { g_frame_layouts[a.id] = { cols, rows, gutter }; return true; }
 
   // --- fake compound api ---------------------------------------------------
   neui_compound_layer_t NEUI_ABI fake_add_layer(neui_session_t, neui_asset_t,
@@ -123,9 +129,10 @@ namespace
                                neui_behavior_api_t& b)
   {
     a = neui_asset_api_t{};
-    a.create_compound  = fake_create_compound;
-    a.create_behavior  = fake_create_behavior;
-    a.create_from_file = fake_create_from_file;
+    a.create_compound   = fake_create_compound;
+    a.create_behavior   = fake_create_behavior;
+    a.create_from_file  = fake_create_from_file;
+    a.set_frame_layout  = fake_set_frame_layout;
 
     c = neui_compound_api_t{};
     c.add_layer   = fake_add_layer;
@@ -277,6 +284,33 @@ TEST_CASE("component_loader: asset layer frame prop (static + bound) round-trips
   CHECK(a1->binds.at("frame").attr == "neui.param.value");
   CHECK(a1->binds.at("frame").scale == 63.0f);
   CHECK(a0->ints.count("frame") == 1 && a1->ints.count("frame") == 0);
+}
+
+TEST_CASE("component_loader: frame_layout tags the resolved asset")
+{
+  const char* json = R"json({
+    "size": [80, 80],
+    "assets": { "strip": "knob_100.png" },
+    "layers": [
+      { "kind": "asset", "asset": "strip",
+        "frame_layout": { "frames": 100, "orientation": "vertical" },
+        "bind": { "frame": { "attr": "neui.param.value", "scale": 99 } } }
+    ]
+  })json";
+  run_loader(json);
+
+  // The asset layer resolved "strip" to a create_from_file handle; the loader
+  // tagged that handle with the frame grid via set_frame_layout.
+  const LayerRec* a0 = layer_of_kind(NEUI_COMPOUND_LAYER_ASSET, 0);
+  REQUIRE(a0);
+  REQUIRE(a0->assets.count("asset") == 1);
+  uint32_t aid = a0->assets.at("asset");
+  REQUIRE(g_frame_layouts.count(aid) == 1);
+  CHECK_EQ((int)g_frame_layouts.at(aid).cols, 1);
+  CHECK_EQ((int)g_frame_layouts.at(aid).rows, 100);
+  // frame bind round-trips through the generic numeric-bind path.
+  REQUIRE(a0->binds.count("frame") == 1);
+  CHECK(a0->binds.at("frame").scale == 99.0f);
 }
 
 TEST_CASE("component_loader: text props, colors, show_when")

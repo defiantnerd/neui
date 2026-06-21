@@ -19,6 +19,7 @@
 // serialize_component to introspect a built component back to JSON.
 #include "compound.h"
 #include "behavior.h"
+#include "filmstrip_recognize.h"  // filmstrip_layout_from_object
 
 // mujson lives in the core lib (src/). Hosts reach hosts/shared via relative
 // includes and don't carry src/ on their include path, so reference it
@@ -502,10 +503,24 @@ namespace neui_detail
           if (as_num(obj_get(*lo, "weight"), wt))
             apis.compound->set_int(session, cs, layer, "weight", static_cast<int>(std::lround(wt)));
         } else if (kind == NEUI_COMPOUND_LAYER_ASSET) {
+          neui_asset_t layer_asset = asset_none;
           if (auto* name = as_str(obj_get(*lo, "asset"))) {
-            neui_asset_t a = resolve_asset(*name);
-            if (a.id != asset_none.id)
-              apis.compound->set_asset(session, cs, layer, "asset", a);
+            layer_asset = resolve_asset(*name);
+            if (layer_asset.id != asset_none.id)
+              apis.compound->set_asset(session, cs, layer, "asset", layer_asset);
+          }
+          // "frame_layout": tag the resolved asset as a filmstrip so a later
+          // "frame" prop / bind selects a cell. Same object shape as the file
+          // sidecar ({frames,orientation,gutter} or {cols,rows,gutter}). Not
+          // re-emitted by serialize_component (the layout lives on the asset,
+          // not the layer) - a documented round-trip gap.
+          if (layer_asset.id != asset_none.id && apis.asset->set_frame_layout) {
+            if (const mj::object_t* fl = as_obj(obj_get(*lo, "frame_layout"))) {
+              FilmstripLayout lay;
+              if (filmstrip_layout_from_object(*fl, lay))
+                apis.asset->set_frame_layout(session, layer_asset,
+                                             lay.cols, lay.rows, lay.gutter);
+            }
           }
           double rot;
           if (as_num(obj_get(*lo, "rotation"), rot))

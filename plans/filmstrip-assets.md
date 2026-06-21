@@ -7,12 +7,16 @@
   `frame_src_rect` store helpers; `filmstrip_src_rect` + `upload_entry_bitmap`
   refactor + `painter_draw_entry_frame_cached` in `hosts/shared/painter.h`.
   Tier-1 `tests/test_asset_filmstrip.cpp`.
-- **Step 2 - public API: SHIPPED (Linux-verified; win/mac/iOS wired, not yet
-  compiled there).** `neui_painter_api_t::draw_asset_frame`; `neui_asset_api_t`
-  `set_frame_layout` / `create_filmstrip_from_file` / `get_frame_count` +
-  `neui_filmstrip_orientation_t`. The draw thunk gained a trailing `frame`
-  param + `k_draw_asset_whole` sentinel (one path serves whole-bitmap and
-  per-cell draws); wired across xpl / win32 / macOS / iOS.
+- **Step 2 - public API: SHIPPED (Linux + win32 verified; macOS/iOS wired,
+  not yet compiled there).** `neui_painter_api_t::draw_asset_frame`;
+  `neui_asset_api_t` `set_frame_layout` / `create_filmstrip_from_file` /
+  `get_frame_count` + `neui_filmstrip_orientation_t`. The draw thunk gained a
+  trailing `frame` param + `k_draw_asset_whole` sentinel (one path serves
+  whole-bitmap and per-cell draws); wired across xpl / win32 / macOS / iOS.
+  Note: `draw_bitmap`'s source rect is in the bitmap's LOGICAL space (each
+  backend re-applies the bitmap scale), so the draw path divides the physical
+  cell rect by the asset scale - regression-covered for @2x in
+  `tests/test_asset_filmstrip.cpp`.
 - **Step 4 - declarative `frame` prop: SHIPPED.** `frame` prop on compound
   asset layers (`compound.h` + `widget_paint_compound.h` routes every asset
   layer through `painter_draw_asset_frame_tinted`; behaviour-preserving for
@@ -20,10 +24,15 @@
   `bind:{frame:...}`. Example `examples/filmstrip_knob_example.cpp`
   (`neui_filmstrip_knob_example`) - procedural SURFACE strip, value->frame
   bind, rotational drag.
-- **Step 3 - recognition helpers: PENDING.** Sidecar JSON / filename / aspect
-  heuristic, AND the component-doc `frame_layout` JSON sugar (tag a path-loaded
-  asset from within the component) - deferred here since both belong with the
-  path-based recognition layer.
+- **Step 3 - recognition helpers: SHIPPED.** `hosts/shared/filmstrip_recognize.h`
+  - pure `filmstrip_parse_filename` (knob_100frames / -128 / _f64 / strip128 /
+  _100, conservative), `filmstrip_parse_sidecar` (mujson: {frames,orientation,
+  gutter} or {cols,rows,gutter}), and `filmstrip_discover_from_path` (sidecar
+  then filename). `create_filmstrip_from_file(frame_count == 0)` now discovers.
+  Component-doc `frame_layout` on an asset layer tags the resolved asset (not
+  re-emitted by serialize - documented gap). Tier-1 in `test_asset_filmstrip.cpp`
+  + `test_component_loader.cpp`. The aspect-ratio guess was dropped as too
+  unreliable (false-positives on tall non-strip images).
 
 
 Follow-up to `neui_asset_api_t` (and a natural companion to the
@@ -233,13 +242,13 @@ declaration** and offer convenience layers the client opts into:
    tokens: `_100frames`, `-128`, `_strip128`, `_fNN`. A small helper
    `parse_filmstrip_filename(name) -> optional<count>`. Opt-in via the
    same `frame_count == 0` discovery path, *after* the sidecar check.
-4. **Aspect-ratio heuristic (hint only, never authoritative)** - if
-   `height % width == 0 && height/width >= 4`, *suggest* a vertical
-   strip of `height/width`. Only surfaced through an explicit
-   `guess_frame_count(asset)` query a tool/designer could call - NEVER
-   auto-applied (a tall photo must not get sliced).
 
-Recognition layers 2-4 live in the **xpl/shared asset code** (they need
+(An aspect-ratio heuristic - "`height/width >= 4` => N frames" - was
+considered and **rejected**: too unreliable, false-positives on any tall
+non-strip image, and not worth the footgun. Explicit + sidecar + filename
+cover the real cases.)
+
+Recognition layers 2-3 live in the **xpl/shared asset code** (they need
 file IO + mujson), reachable from all hosts. The store core
 (`set_frame_layout`) stays pure metadata.
 
@@ -298,8 +307,8 @@ call.)
    by a Tier-1 test against fake loader/backend.
 2. **Public API** (`set_frame_layout` / `create_filmstrip_from_file` /
    `get_frame_count` / `draw_asset_frame`) wired on all three hosts.
-3. **Recognition helpers** (sidecar JSON via mujson, filename parse,
-   heuristic query) - opt-in, in shared/xpl asset code.
+3. **Recognition helpers** (sidecar JSON via mujson, filename parse) -
+   opt-in, in shared/xpl asset code.
 4. **Declarative** - compound `frame` prop + bind routing + component
    JSON `frame_layout`.
 
@@ -311,7 +320,7 @@ call.)
   row-major cells incl. gutter, out-of-fit grid is rejected,
   out-of-range frame clamps. Parse helpers:
   `parse_filmstrip_filename("knob_100frames")` -> 100; sidecar JSON
-  round-trip; heuristic only fires on tall integer-multiple images.
+  round-trip; discovery tags from a filename token.
 - **Linux smoke** - extend or add a Cairo smoke test that tags a
   generated strip and `read_pixels_bgra` confirms frame N samples the
   expected cell.
