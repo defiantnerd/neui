@@ -12,6 +12,7 @@
 // mujson lives in the core lib (src/). Same relative reference component_loader.h
 // uses - hosts don't carry src/ on their include path.
 #include "../../src/mujson.h"
+#include "mujson_accessors.h"  // obj_get / as_num / as_str (shared with component_loader)
 
 // Filmstrip recognition helpers. There is NO reliable in-band marker that a
 // PNG/JPG is a frame strip, so recognition is a layered, opt-in convention
@@ -19,9 +20,13 @@
 //   1. explicit  - set_frame_layout / create_filmstrip_from_file(count>0).
 //   2. sidecar   - a "<image>.json" (or "<base>.json") next to the file:
 //                  { "frames": 100, "orientation": "vertical", "gutter": 0 }
-//                  or { "cols": C, "rows": R, "gutter": G }.
-//   3. filename  - a trailing token: knob_100frames / fader-128 / knob_f64 /
-//                  strip128 / knob_100.
+//                  or { "cols": C, "rows": R, "gutter": G }. A bare "frames"
+//                  with no "orientation" key defaults to a VERTICAL strip (the
+//                  audio-plugin convention) - the sidecar is authoritative, so
+//                  a horizontal strip must say so explicitly.
+//   3. filename  - a trailing <N>frames / <N>frame / <N>f token (the discover
+//                  axis comes from create_filmstrip_from_file's orientation arg,
+//                  which defaults to vertical).
 // Both layers are consulted by filmstrip_discover_from_path (used when
 // create_filmstrip_from_file is asked to discover, frame_count == 0).
 // (An aspect-ratio guess was considered and rejected - it's not reliable
@@ -41,22 +46,24 @@ namespace neui_detail
     bool valid() const { return cols >= 1 && rows >= 1; }
   };
 
-  // --- mujson value pluck (case-sensitive key) ---------------------------
-  inline bool fr_obj_int(const neui::mujson::object_t& o, const char* key, long& out)
+  // Read a key as a positive grid count. Rejects absent / non-positive values
+  // AND anything that doesn't fit a uint32 - without the upper bound an absurd
+  // sidecar (e.g. {"frames": 4294967297}) would WRAP on the cast to a small
+  // bogus count (1) that set_frame_layout would happily accept.
+  inline bool fr_count(const neui::mujson::object_t& o, const char* key, uint32_t& out)
   {
-    for (const auto& kv : o)
-      if (kv.first == key) {
-        if (auto* p = std::get_if<int>(&kv.second.value))    { out = *p; return true; }
-        if (auto* p = std::get_if<double>(&kv.second.value)) { out = static_cast<long>(*p); return true; }
-      }
-    return false;
+    double d;
+    if (!as_num(obj_get(o, key), d)) return false;
+    if (!(d >= 1.0 && d <= 4294967295.0)) return false;
+    out = static_cast<uint32_t>(d);
+    return true;
   }
-  inline const std::string* fr_obj_str(const neui::mujson::object_t& o, const char* key)
+  inline uint32_t fr_gutter(const neui::mujson::object_t& o)
   {
-    for (const auto& kv : o)
-      if (kv.first == key)
-        if (auto* p = std::get_if<std::string>(&kv.second.value)) return p;
-    return nullptr;
+    double d;
+    if (!as_num(obj_get(o, "gutter"), d)) return 0u;
+    if (d <= 0.0 || d > 4294967295.0) return 0u;   // negative / absurd -> none
+    return static_cast<uint32_t>(d);
   }
 
   // Build a layout from a parsed object. Accepts { cols, rows, gutter? } OR
@@ -65,24 +72,20 @@ namespace neui_detail
   inline bool filmstrip_layout_from_object(const neui::mujson::object_t& o,
                                            FilmstripLayout& out)
   {
-    long cols = 0, rows = 0, gutter = 0, frames = 0;
-    const bool has_cols = fr_obj_int(o, "cols", cols);
-    const bool has_rows = fr_obj_int(o, "rows", rows);
-    fr_obj_int(o, "gutter", gutter);
-    if (gutter < 0) gutter = 0;
+    const uint32_t gutter = fr_gutter(o);
 
-    if (has_cols && has_rows && cols >= 1 && rows >= 1) {
-      out.cols = static_cast<uint32_t>(cols);
-      out.rows = static_cast<uint32_t>(rows);
-      out.gutter = static_cast<uint32_t>(gutter);
+    uint32_t cols = 0, rows = 0;
+    if (fr_count(o, "cols", cols) && fr_count(o, "rows", rows)) {
+      out.cols = cols; out.rows = rows; out.gutter = gutter;
       return true;
     }
-    if (fr_obj_int(o, "frames", frames) && frames >= 1) {
-      const std::string* ori = fr_obj_str(o, "orientation");
+    uint32_t frames = 0;
+    if (fr_count(o, "frames", frames)) {
+      const std::string* ori = as_str(obj_get(o, "orientation"));
       const bool horiz = ori && (*ori == "horizontal" || *ori == "h");
-      out.cols = horiz ? static_cast<uint32_t>(frames) : 1u;
-      out.rows = horiz ? 1u : static_cast<uint32_t>(frames);
-      out.gutter = static_cast<uint32_t>(gutter);
+      out.cols = horiz ? frames : 1u;
+      out.rows = horiz ? 1u : frames;
+      out.gutter = gutter;
       return true;
     }
     return false;
@@ -96,11 +99,13 @@ namespace neui_detail
   }
 
   // Parse a trailing frame-count token from a base filename (no directory, no
-  // extension). Recognizes <N>frames / <N>frame (keyword after the number)
-  // and a number at the very end preceded by a separator or marker:
-  //   _<N>, -<N>, _f<N>, -f<N>, strip<N>, _strip<N>, -strip<N>.
-  // Requires N >= 2 (a 1-frame strip is pointless and would match "_v1").
-  // Conservative: an unmarked trailing number (e.g. "image2") is rejected.
+  // extension). Requires the number to be immediately followed by an explicit
+  // frame keyword at the very end of the name: <N>frames / <N>frame / <N>f
+  //   knob_100frames, KNOB_64FRAME, fader-128f.
+  // Requires N >= 2 (a 1-frame strip is pointless). Deliberately conservative:
+  // a bare trailing number with no keyword (knob_100, fader-128, image2) and an
+  // incidental word match (airstrip5, logo-2024) are rejected - those shapes
+  // are far too common as ordinary asset names to auto-slice into a strip.
   inline bool filmstrip_parse_filename(const std::string& base_in, uint32_t& count_out)
   {
     std::string s;
@@ -112,25 +117,18 @@ namespace neui_detail
       return a.size() >= n && a.compare(a.size() - n, n, b) == 0;
     };
 
-    bool kw = false;
-    if (ends_with(s, "frames")) { s.erase(s.size() - 6); kw = true; }
-    else if (ends_with(s, "frame")) { s.erase(s.size() - 5); kw = true; }
+    // Strip the required trailing keyword (longest first). No keyword => not a
+    // strip filename.
+    if      (ends_with(s, "frames")) s.erase(s.size() - 6);
+    else if (ends_with(s, "frame"))  s.erase(s.size() - 5);
+    else if (ends_with(s, "f"))      s.erase(s.size() - 1);
+    else return false;
 
     size_t i = s.size();
     while (i > 0 && s[i - 1] >= '0' && s[i - 1] <= '9') --i;
-    if (i == s.size()) return false;                 // no trailing digits
-    const std::string digits = s.substr(i);
-    const std::string rem    = s.substr(0, i);
-    const long n = std::strtol(digits.c_str(), nullptr, 10);
+    if (i == s.size()) return false;                 // keyword not preceded by a number
+    const long n = std::strtol(s.c_str() + i, nullptr, 10);
     if (n < 2) return false;
-
-    bool ok = kw;
-    if (!ok) {
-      if (ends_with(rem, "_") || ends_with(rem, "-")) ok = true;
-      else if (ends_with(rem, "_f") || ends_with(rem, "-f")
-            || ends_with(rem, "strip")) ok = true;
-    }
-    if (!ok) return false;
     count_out = static_cast<uint32_t>(n);
     return true;
   }

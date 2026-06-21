@@ -2532,13 +2532,11 @@ namespace ios_host
     if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return;
     auto* entry = s->_asset_manager.get_slot(asset.id & 0xffff);
     if (!entry) return;
-    // Frame-aware path samples one filmstrip cell; k_draw_asset_whole draws
-    // the whole bitmap (hosts/shared/painter.h).
-    if (frame == neui_detail::k_draw_asset_whole)
-      neui_detail::painter_draw_entry_cached(backend, ctx, entry, x, y, w, h, tint);
-    else
-      neui_detail::painter_draw_entry_frame_cached(backend, ctx, entry, frame,
-                                                    x, y, w, h, tint);
+    // The dispatch helper owns the whole-vs-cell rule (k_draw_asset_whole
+    // draws the whole bitmap; a frame index samples one filmstrip cell)
+    // (hosts/shared/painter.h).
+    neui_detail::painter_draw_entry_dispatch(backend, ctx, entry, frame,
+                                             x, y, w, h, tint);
   }
 
   // -------------------------------------------------------------------------

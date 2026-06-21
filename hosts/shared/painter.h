@@ -163,6 +163,24 @@ namespace neui_detail {
     backend->draw_bitmap(ctx, bmp, sx, sy, sw, sh, x, y, w, h, tint);
   }
 
+  // Sentinel-aware dispatch shared by every host's draw_asset thunk: the
+  // k_draw_asset_whole sentinel routes to the whole-bitmap draw, any real
+  // frame index to the cell sampler (which itself degrades to a whole-bitmap
+  // draw on an untagged entry). Keeps the whole-vs-cell rule in one place so a
+  // future change can't silently diverge across hosts.
+  template <typename EntryT>
+  inline void painter_draw_entry_dispatch(neui_render_backend_t* backend,
+                                          neui_render_ctx_t ctx,
+                                          EntryT* entry, uint32_t frame,
+                                          float x, float y, float w, float h,
+                                          uint32_t tint)
+  {
+    if (frame == k_draw_asset_whole)
+      painter_draw_entry_cached(backend, ctx, entry, x, y, w, h, tint);
+    else
+      painter_draw_entry_frame_cached(backend, ctx, entry, frame, x, y, w, h, tint);
+  }
+
 } // namespace neui_detail
 
 // Concrete layout of the opaque neui_painter handed to clients via
@@ -265,6 +283,11 @@ namespace neui_detail {
                                         float x, float y, float w, float h)
   {
     if (!p || !p->draw_asset_thunk) return;
+    // k_draw_asset_whole (UINT32_MAX) is the "draw the whole bitmap" sentinel.
+    // A caller asking to draw that exact frame index means the LAST frame, so
+    // nudge it onto the cell path (filmstrip_src_rect clamps any out-of-range
+    // index to the last cell) instead of silently drawing the whole strip.
+    if (frame == k_draw_asset_whole) frame = k_draw_asset_whole - 1u;
     p->draw_asset_thunk(p->host_token, p->backend, p->ctx, asset,
                           x, y, w, h, frame, 0xFFFFFFFFu);
   }
@@ -288,6 +311,9 @@ namespace neui_detail {
                                                uint32_t tint)
   {
     if (!p || !p->draw_asset_thunk) return;
+    // See painter_draw_asset_frame: keep the whole-bitmap sentinel out of the
+    // frame value domain so frame == UINT32_MAX clamps to the last cell.
+    if (frame == k_draw_asset_whole) frame = k_draw_asset_whole - 1u;
     p->draw_asset_thunk(p->host_token, p->backend, p->ctx, asset,
                           x, y, w, h, frame, tint);
   }

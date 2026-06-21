@@ -761,14 +761,11 @@ namespace win32_host
     auto* entry = s->_asset_manager.get_slot(slot);
     if (!entry) return;
     // Cache-walk + lazy GPU upload + draw shared with the other hosts
-    // (hosts/shared/painter.h). The frame-aware path samples one filmstrip
-    // cell; k_draw_asset_whole draws the whole bitmap.
-    if (frame == neui_detail::k_draw_asset_whole)
-      neui_detail::painter_draw_entry_cached(backend, ctx, entry,
-                                              x, y, w, h, tint);
-    else
-      neui_detail::painter_draw_entry_frame_cached(backend, ctx, entry, frame,
-                                                    x, y, w, h, tint);
+    // (hosts/shared/painter.h). The dispatch helper owns the whole-vs-cell
+    // rule (k_draw_asset_whole draws the whole bitmap; a frame index samples
+    // one filmstrip cell).
+    neui_detail::painter_draw_entry_dispatch(backend, ctx, entry, frame,
+                                             x, y, w, h, tint);
   }
 
   // Invalidate the widget's HWND if it hosts a CUSTOMDRAW compound whose
@@ -5417,6 +5414,7 @@ namespace win32_host
     in.params = &e->comp_params;
     in.asset_names = &e->comp_asset_names;
     in.asset_handle_names = &e->comp_asset_handle_names;
+    in.asset_frame_layouts = &e->comp_asset_frame_layouts;
     auto* cce = s->_asset_manager.get_slot(e->comp_compound.id & 0xffff);
     auto* bbe = s->_asset_manager.get_slot(e->comp_behavior.id & 0xffff);
     in.compound = (cce && cce->compound) ? cce->compound.get() : nullptr;

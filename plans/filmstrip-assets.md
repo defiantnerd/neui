@@ -11,12 +11,14 @@
   not yet compiled there).** `neui_painter_api_t::draw_asset_frame`;
   `neui_asset_api_t` `set_frame_layout` / `create_filmstrip_from_file` /
   `get_frame_count` + `neui_filmstrip_orientation_t`. The draw thunk gained a
-  trailing `frame` param + `k_draw_asset_whole` sentinel (one path serves
-  whole-bitmap and per-cell draws); wired across xpl / win32 / macOS / iOS.
-  Note: `draw_bitmap`'s source rect is in the bitmap's LOGICAL space (each
-  backend re-applies the bitmap scale), so the draw path divides the physical
-  cell rect by the asset scale - regression-covered for @2x in
-  `tests/test_asset_filmstrip.cpp`.
+  trailing `frame` param + `k_draw_asset_whole` sentinel; the whole-vs-cell
+  branch lives once in `painter_draw_entry_dispatch` (`hosts/shared/painter.h`)
+  and every host thunk forwards to it. `painter_draw_asset_frame` / `_tinted`
+  remap an incoming `frame == k_draw_asset_whole` to the last cell so the
+  sentinel can't be mistaken for a real frame index. Note: `draw_bitmap`'s
+  source rect is in the bitmap's LOGICAL space (each backend re-applies the
+  bitmap scale), so the draw path divides the physical cell rect by the asset
+  scale - regression-covered for @2x in `tests/test_asset_filmstrip.cpp`.
 - **Step 4 - declarative `frame` prop: SHIPPED.** `frame` prop on compound
   asset layers (`compound.h` + `widget_paint_compound.h` routes every asset
   layer through `painter_draw_asset_frame_tinted`; behaviour-preserving for
@@ -25,14 +27,20 @@
   (`neui_filmstrip_knob_example`) - procedural SURFACE strip, value->frame
   bind, rotational drag.
 - **Step 3 - recognition helpers: SHIPPED.** `hosts/shared/filmstrip_recognize.h`
-  - pure `filmstrip_parse_filename` (knob_100frames / -128 / _f64 / strip128 /
-  _100, conservative), `filmstrip_parse_sidecar` (mujson: {frames,orientation,
-  gutter} or {cols,rows,gutter}), and `filmstrip_discover_from_path` (sidecar
-  then filename). `create_filmstrip_from_file(frame_count == 0)` now discovers.
-  Component-doc `frame_layout` on an asset layer tags the resolved asset (not
-  re-emitted by serialize - documented gap). Tier-1 in `test_asset_filmstrip.cpp`
-  + `test_component_loader.cpp`. The aspect-ratio guess was dropped as too
-  unreliable (false-positives on tall non-strip images).
+  - pure `filmstrip_parse_filename` (a number + an explicit frame keyword:
+  `<N>frames` / `<N>frame` / `<N>f`; a bare `-128` / `_100` separator and
+  incidental word matches like `airstrip5` / `logo-2024` are rejected as too
+  common to auto-slice), `filmstrip_parse_sidecar` (mujson: {frames,orientation,
+  gutter} or {cols,rows,gutter}; a bare `frames` defaults to VERTICAL, the
+  sidecar is authoritative; counts past UINT32_MAX are rejected, not wrapped),
+  and `filmstrip_discover_from_path` (sidecar then filename).
+  `create_filmstrip_from_file(frame_count == 0)` now discovers. Component-doc
+  `frame_layout` on an asset layer tags the resolved asset AND is recorded on
+  the COMPONENT entry so `serialize_component` re-emits it (round-trip closed).
+  The mujson value accessors are shared once in `hosts/shared/mujson_accessors.h`
+  (used by both the recognizer and `component_loader.h`). Tier-1 in
+  `test_asset_filmstrip.cpp` + `test_component_loader.cpp`. The aspect-ratio
+  guess was dropped as too unreliable (false-positives on tall non-strip images).
 
 
 Follow-up to `neui_asset_api_t` (and a natural companion to the

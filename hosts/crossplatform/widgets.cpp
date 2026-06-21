@@ -2197,6 +2197,7 @@ namespace xpl_host
     in.params             = &e->comp_params;
     in.asset_names        = &e->comp_asset_names;
     in.asset_handle_names = &e->comp_asset_handle_names;
+    in.asset_frame_layouts = &e->comp_asset_frame_layouts;
     auto* ce = s->_asset_manager.get_slot(e->comp_compound.id & 0xffff);
     auto* be = s->_asset_manager.get_slot(e->comp_behavior.id & 0xffff);
     in.compound = (ce && ce->compound) ? ce->compound.get() : nullptr;

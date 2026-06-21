@@ -83,6 +83,16 @@ uint32_t make_bitmap(AssetStore<FakeLoader>& store, uint32_t w, uint32_t h) {
 
 neui_render_ctx_t k_ctx = reinterpret_cast<neui_render_ctx_t>(0x100u);
 
+// Recording draw_asset thunk: captures the frame index the painter forwards,
+// so the k_draw_asset_whole sentinel remap can be asserted directly.
+uint32_t g_thunk_frame = 0xDEADu;
+void NEUI_ABI recording_asset_thunk(void*, neui_render_backend_t*,
+                                    neui_render_ctx_t, neui_asset_t,
+                                    float, float, float, float,
+                                    uint32_t frame, uint32_t) {
+  g_thunk_frame = frame;
+}
+
 } // namespace
 
 TEST_CASE("filmstrip: vertical strip tags frame size + count")
@@ -325,30 +335,81 @@ TEST_CASE("filmstrip: frame-aware draw emits LOGICAL src coords at @2x scale")
   CHECK_EQ((int)g_last_src[3], 64);
 }
 
+TEST_CASE("filmstrip: dispatch routes the whole-bitmap sentinel vs a cell")
+{
+  reset_counters();
+  neui_render_backend_t backend = make_backend();
+  AssetStore<FakeLoader> store;
+  uint32_t slot = make_bitmap(store, 64, 6400);      // 1 x 100 vertical strip
+  REQUIRE(store.set_frame_layout(slot, 1, 100, 0));
+  AssetEntry* e = store.get_slot(slot);
+  REQUIRE(e != nullptr);
+
+  // Sentinel -> whole bitmap (src 0,0,0,0).
+  painter_draw_entry_dispatch(&backend, k_ctx, e, k_draw_asset_whole,
+                              0.0f, 0.0f, 64.0f, 64.0f, 0xFFFFFFFFu);
+  CHECK_EQ((int)g_last_src[1], 0);
+  CHECK_EQ((int)g_last_src[3], 0);                   // sh == 0 => whole bitmap
+
+  // A real frame index -> that cell sub-rect.
+  painter_draw_entry_dispatch(&backend, k_ctx, e, 3,
+                              0.0f, 0.0f, 64.0f, 64.0f, 0xFFFFFFFFu);
+  CHECK_EQ((int)g_last_src[1], 3 * 64);
+  CHECK_EQ((int)g_last_src[3], 64);
+}
+
+TEST_CASE("filmstrip: draw_asset_frame keeps UINT32_MAX off the whole-bitmap sentinel")
+{
+  neui_painter p{};
+  p.draw_asset_thunk = &recording_asset_thunk;
+
+  // A frame index that collides with k_draw_asset_whole must be nudged onto the
+  // cell path (where filmstrip_src_rect clamps it to the last frame) rather
+  // than silently drawing the whole strip.
+  g_thunk_frame = 0xDEADu;
+  painter_draw_asset_frame(&p, neui_asset_t{ 0x10001u }, k_draw_asset_whole,
+                           0.0f, 0.0f, 32.0f, 32.0f);
+  CHECK(g_thunk_frame == k_draw_asset_whole - 1u);
+
+  // An ordinary frame index passes through unchanged.
+  g_thunk_frame = 0xDEADu;
+  painter_draw_asset_frame(&p, neui_asset_t{ 0x10001u }, 7u,
+                           0.0f, 0.0f, 32.0f, 32.0f);
+  CHECK(g_thunk_frame == 7u);
+}
+
 // ---------------------------------------------------------------------------
 // Recognition helpers (filmstrip_recognize.h)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("filmstrip: parse_filename accepts marked trailing counts")
+TEST_CASE("filmstrip: parse_filename accepts a number + frame keyword")
 {
   uint32_t n = 0;
   CHECK(filmstrip_parse_filename("knob_100frames", n)); CHECK_EQ((int)n, 100);
   CHECK(filmstrip_parse_filename("KNOB_64FRAME",  n)); CHECK_EQ((int)n, 64);   // case-insensitive, singular
-  CHECK(filmstrip_parse_filename("fader-128",     n)); CHECK_EQ((int)n, 128);
-  CHECK(filmstrip_parse_filename("knob_100",      n)); CHECK_EQ((int)n, 100);
-  CHECK(filmstrip_parse_filename("knob_f64",      n)); CHECK_EQ((int)n, 64);
-  CHECK(filmstrip_parse_filename("knob_strip128", n)); CHECK_EQ((int)n, 128);
-  CHECK(filmstrip_parse_filename("filmstrip256",  n)); CHECK_EQ((int)n, 256);
+  CHECK(filmstrip_parse_filename("fader-128f",    n)); CHECK_EQ((int)n, 128);  // short 'f' keyword
+  CHECK(filmstrip_parse_filename("spinner24frames", n)); CHECK_EQ((int)n, 24); // no separator needed
 }
 
 TEST_CASE("filmstrip: parse_filename rejects unmarked / ambiguous names")
 {
   uint32_t n = 99;
-  CHECK_FALSE(filmstrip_parse_filename("image2", n));   // bare trailing digit
-  CHECK_FALSE(filmstrip_parse_filename("shelf3", n));   // 'f' not separator-marked
+  // A bare trailing number (no frame keyword) is NOT a strip - too common as an
+  // ordinary asset name to auto-slice.
+  CHECK_FALSE(filmstrip_parse_filename("fader-128", n));  // bare separator + number
+  CHECK_FALSE(filmstrip_parse_filename("knob_100",  n));  // bare separator + number
+  CHECK_FALSE(filmstrip_parse_filename("logo-2024", n));  // a year, not 2024 frames
+  CHECK_FALSE(filmstrip_parse_filename("image2",    n));  // bare trailing digit
+  // 'strip'/'f'-prefix markers no longer count - incidental word matches.
+  CHECK_FALSE(filmstrip_parse_filename("knob_strip128", n));
+  CHECK_FALSE(filmstrip_parse_filename("filmstrip256",  n));
+  CHECK_FALSE(filmstrip_parse_filename("airstrip5",     n));
+  CHECK_FALSE(filmstrip_parse_filename("knob_f64",      n)); // 'f' before the number
+  // No digit before the keyword / no digits / count < 2.
+  CHECK_FALSE(filmstrip_parse_filename("wolf",   n));   // ends 'f' but no number
+  CHECK_FALSE(filmstrip_parse_filename("shelf3", n));   // ends with a digit, no keyword
   CHECK_FALSE(filmstrip_parse_filename("panda",  n));   // no digits
-  CHECK_FALSE(filmstrip_parse_filename("lemur",  n));
-  CHECK_FALSE(filmstrip_parse_filename("knob_1", n));   // count < 2
+  CHECK_FALSE(filmstrip_parse_filename("knob_1frames", n)); // count < 2
   CHECK_EQ((int)n, 99);                                  // out untouched on reject
 }
 
@@ -367,6 +428,21 @@ TEST_CASE("filmstrip: parse_sidecar reads frames/orientation and cols/rows/gutte
   // Junk / missing keys -> not a layout.
   CHECK_FALSE(filmstrip_parse_sidecar(R"({ "hello": 1 })", l));
   CHECK_FALSE(filmstrip_parse_sidecar("not json at all", l));
+}
+
+TEST_CASE("filmstrip: parse_sidecar rejects out-of-range / non-positive counts")
+{
+  FilmstripLayout l;
+  // A count past UINT32_MAX must be rejected, not wrapped on the cast to a
+  // small bogus value (mujson stores an out-of-int-range number as a double).
+  CHECK_FALSE(filmstrip_parse_sidecar(R"({ "frames": 5000000000 })", l));
+  CHECK_FALSE(filmstrip_parse_sidecar(R"({ "cols": 1, "rows": 4294967296 })", l));
+  // Non-positive counts are not a strip.
+  CHECK_FALSE(filmstrip_parse_sidecar(R"({ "frames": 0 })", l));
+  CHECK_FALSE(filmstrip_parse_sidecar(R"({ "cols": 2, "rows": -3 })", l));
+  // A negative gutter is ignored (treated as 0), not a rejection.
+  REQUIRE(filmstrip_parse_sidecar(R"({ "frames": 8, "gutter": -5 })", l));
+  CHECK_EQ((int)l.gutter, 0);
 }
 
 TEST_CASE("filmstrip: create-with-discovery tags from a filename token")

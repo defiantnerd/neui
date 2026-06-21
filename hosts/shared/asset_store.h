@@ -130,6 +130,7 @@ namespace neui_detail
     std::string                                      comp_name;
     std::vector<std::pair<std::string, std::string>> comp_asset_names;
     std::vector<std::pair<uint32_t, std::string>>    comp_asset_handle_names;
+    std::vector<std::pair<uint32_t, FilmstripLayout>> comp_asset_frame_layouts;
   };
 
   template <typename Loader>
@@ -209,6 +210,11 @@ namespace neui_detail
       const uint32_t fw = static_cast<uint32_t>((e->width_px  - gutters_x) / cols);
       const uint32_t fh = static_cast<uint32_t>((e->height_px - gutters_y) / rows);
       if (fw == 0 || fh == 0) return false;
+      // frame_count must stay addressable as a uint32 - guard the product so a
+      // pathological grid can't wrap to a small bogus count (the comment above
+      // promises a mis-tag never yields an out-of-bounds source rect).
+      const uint64_t fc = static_cast<uint64_t>(cols) * rows;
+      if (fc > 0xFFFFFFFFull) return false;
 
       auto fs = std::make_unique<FilmstripInfo>();
       fs->cols        = cols;
@@ -216,7 +222,7 @@ namespace neui_detail
       fs->gutter_px   = gutter_px;
       fs->frame_w_px  = fw;
       fs->frame_h_px  = fh;
-      fs->frame_count = cols * rows;
+      fs->frame_count = static_cast<uint32_t>(fc);
       e->filmstrip = std::move(fs);
       return true;
     }
@@ -333,6 +339,7 @@ namespace neui_detail
       entry->comp_name              = built.name;
       entry->comp_asset_names       = built.asset_names;
       entry->comp_asset_handle_names = built.asset_handle_names;
+      entry->comp_asset_frame_layouts = built.asset_frame_layouts;
       return alloc_slot(std::move(entry));
     }
 
