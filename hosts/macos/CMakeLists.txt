@@ -28,6 +28,7 @@ target_include_directories(neui-macoshost
 
 target_link_libraries(neui-macoshost PRIVATE
   neui
+  neui-qrcodegen
   neui-backend-cg
   "-framework AppKit"
   "-framework Foundation"

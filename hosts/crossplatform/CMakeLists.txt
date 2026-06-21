@@ -12,7 +12,7 @@ target_include_directories(neui-xplhost
   PUBLIC  ${PROJECT_SOURCE_DIR}/include
 )
 
-target_link_libraries(neui-xplhost PRIVATE neui)
+target_link_libraries(neui-xplhost PRIVATE neui neui-qrcodegen)
 
 if(WIN32)
   target_sources(neui-xplhost PRIVATE platform_win32.cpp)

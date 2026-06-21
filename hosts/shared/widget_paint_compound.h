@@ -2,6 +2,8 @@
 
 #include <neui/neui.h>
 
+#include <qrcodegen.hpp>
+
 #include "compound.h"
 #include "attrs.h"
 #include "painter.h"
@@ -89,6 +91,133 @@ namespace neui_detail
                                 L.parent_anchor, L.self_anchor,
                                 static_cast<float>(ox), static_cast<float>(oy),
                                 eff_w, eff_h);
+  }
+
+  // ---- QR layer -----------------------------------------------------------
+
+  // Resolve a QR layer's source string: NEUI_ATTR_QRCODE on the widget's
+  // AttrBag (if present + non-empty) wins; otherwise the layer's "text"
+  // template (default "{value}") rendered against the bag.
+  inline std::string qr_resolve_text(const CompoundLayer& L, const AttrBag* bag)
+  {
+    if (bag && bag->has(NEUI_ATTR_QRCODE)) {
+      if (const char* s = bag->get_string(NEUI_ATTR_QRCODE)) {
+        if (s[0] != '\0') return std::string(s);
+      }
+    }
+    return render_template(L.text_segments, bag);
+  }
+
+  // Premultiply a straight-alpha 0xAARRGGBB into a 4-byte BGRA8 sample.
+  inline void qr_premul_bgra(uint32_t argb, uint8_t out[4])
+  {
+    const uint32_t a = (argb >> 24) & 0xffu;
+    const uint32_t r = (argb >> 16) & 0xffu;
+    const uint32_t g = (argb >> 8)  & 0xffu;
+    const uint32_t b =  argb        & 0xffu;
+    out[0] = static_cast<uint8_t>(b * a / 255u);
+    out[1] = static_cast<uint8_t>(g * a / 255u);
+    out[2] = static_cast<uint8_t>(r * a / 255u);
+    out[3] = static_cast<uint8_t>(a);
+  }
+
+  // Rasterise the QR symbol into `sym`'s BGRA8 buffer. `sym.side_px` is the
+  // target square side in physical pixels; module size is the largest integer
+  // that fits the symbol + quiet zone inside it, so the bitmap is crisp (no
+  // fractional-module blur). On encode failure (text too long for any version)
+  // or empty text, the buffer is left empty (the layer draws nothing).
+  inline void qr_rasterize(CompoundLayer::QrSymbol& sym, float scale)
+  {
+    sym.pixels.clear();
+    sym.w_px = sym.h_px = 0;
+    sym.scale = (scale > 0.0f) ? scale : 1.0f;
+    if (sym.text.empty() || sym.side_px == 0u) return;
+    try {
+      qrcodegen::QrCode qr = qrcodegen::QrCode::encodeText(
+        sym.text.c_str(), static_cast<qrcodegen::QrCode::Ecc>(sym.ecc));
+      const int      N = qr.getSize();
+      const int      quiet = sym.quiet;
+      const uint32_t T = static_cast<uint32_t>(N) + 2u * static_cast<uint32_t>(quiet);
+      uint32_t module_px = (T != 0u) ? (sym.side_px / T) : 0u;
+      if (module_px == 0u) module_px = 1u;
+      const uint32_t dim = module_px * T;
+
+      uint8_t dpx[4], bpx[4];
+      qr_premul_bgra(sym.dark, dpx);
+      qr_premul_bgra(sym.bg,   bpx);
+
+      sym.pixels.resize(static_cast<size_t>(dim) * dim * 4u);
+      for (uint32_t y = 0; y < dim; ++y) {
+        const int my = static_cast<int>(y / module_px) - quiet;
+        uint8_t* row = sym.pixels.data() + static_cast<size_t>(y) * dim * 4u;
+        for (uint32_t x = 0; x < dim; ++x) {
+          const int mx = static_cast<int>(x / module_px) - quiet;
+          const bool darkmod =
+            (mx >= 0 && mx < N && my >= 0 && my < N) && qr.getModule(mx, my);
+          const uint8_t* src = darkmod ? dpx : bpx;
+          uint8_t* px = row + static_cast<size_t>(x) * 4u;
+          px[0] = src[0]; px[1] = src[1]; px[2] = src[2]; px[3] = src[3];
+        }
+      }
+      sym.w_px = dim;
+      sym.h_px = dim;
+    } catch (...) {
+      // data_too_long or any other failure: leave the buffer empty.
+      sym.pixels.clear();
+      sym.w_px = sym.h_px = 0;
+    }
+  }
+
+  // Find the cached symbol matching the generation key, or rasterise a new one
+  // (FIFO-evicting the oldest when the cache is full). Returns nullptr only if
+  // the freshly-built symbol failed to rasterise (empty / too-long text).
+  // Because the cache is keyed by the full key (incl. the resolved text), one
+  // shared layer serves many widgets each showing a different QR code.
+  inline CompoundLayer::QrSymbol* qr_get_symbol(
+      const CompoundLayer& L, const std::string& text, uint32_t side_px,
+      uint32_t dark, uint32_t bg, int ecc, int quiet, float scale)
+  {
+    for (auto& sym : L.qr_cache) {
+      if (sym && sym->text == text && sym->side_px == side_px &&
+          sym->dark == dark && sym->bg == bg &&
+          sym->ecc == ecc && sym->quiet == quiet)
+        return sym.get();
+    }
+    auto sym = std::make_unique<CompoundLayer::QrSymbol>();
+    sym->text = text; sym->side_px = side_px; sym->dark = dark; sym->bg = bg;
+    sym->ecc = ecc;   sym->quiet = quiet;
+    qr_rasterize(*sym, scale);
+    if (sym->pixels.empty()) return nullptr;
+    if (L.qr_cache.size() >= k_qr_cache_max)
+      L.qr_cache.erase(L.qr_cache.begin());  // FIFO evict oldest
+    L.qr_cache.push_back(std::move(sym));
+    return L.qr_cache.back().get();
+  }
+
+  // Lazy per-(ctx) GPU upload of a cached symbol's bitmap. Mirrors
+  // upload_entry_bitmap; re-uploads on a backend generation bump (device loss).
+  inline void* qr_upload(neui_painter_t* p, CompoundLayer::QrSymbol& sym)
+  {
+    neui_render_backend_t* backend = p ? p->backend : nullptr;
+    neui_render_ctx_t      ctx     = p ? p->ctx : nullptr;
+    if (!backend || !ctx || sym.pixels.empty()) return nullptr;
+    const uint32_t gen = backend->get_context_generation
+      ? backend->get_context_generation(ctx) : 0u;
+    auto it = sym.bitmaps.find(ctx);
+    if (it != sym.bitmaps.end() && it->second.generation != gen) {
+      if (backend->destroy_bitmap && it->second.bmp)
+        backend->destroy_bitmap(ctx, it->second.bmp);
+      sym.bitmaps.erase(it);
+      it = sym.bitmaps.end();
+    }
+    if (it == sym.bitmaps.end()) {
+      if (!backend->create_bitmap) return nullptr;
+      void* bmp = backend->create_bitmap(ctx, sym.w_px, sym.h_px,
+                                         sym.pixels.data(), sym.scale);
+      if (!bmp) return nullptr;
+      it = sym.bitmaps.emplace(ctx, CompoundLayer::CtxBmp{ bmp, gen }).first;
+    }
+    return it->second.bmp;
   }
 
   // Paint a single layer.
@@ -263,6 +392,59 @@ namespace neui_detail
           build_rounded_rect_path(p, r.x, r.y, r.w, r.h, radius);
           if (has_fill)   k_painter_api.fill_path  (p, fill);
           if (has_stroke) k_painter_api.stroke_path(p, sw, stroke);
+        }
+        break;
+      }
+      case NEUI_COMPOUND_LAYER_QR: {
+        std::string text = qr_resolve_text(L, bag);
+
+        // Dark colour: explicit "fill_color" (qr_dark != 0) else theme
+        // text_primary so it tracks light / dark mode. Background: qr_background
+        // (0 = transparent). ECC + quiet zone from their props.
+        uint32_t dark = (L.qr_dark != 0u)
+          ? L.qr_dark : neui_detail::color(neui_detail::ColorRole::text_primary);
+        uint32_t bg    = L.qr_background;
+        int      ecc   = L.qr_ecc;
+        int      quiet = L.qr_quiet;
+
+        // Target square side in physical pixels (the symbol is square; we
+        // letterbox within a non-square rect).
+        float scale = k_painter_api.get_scale_factor(p);
+        if (scale <= 0.0f) scale = 1.0f;
+        float side_logical = (r.w < r.h) ? r.w : r.h;
+        uint32_t side_px =
+          static_cast<uint32_t>(side_logical * scale + 0.5f);
+
+        // The per-widget string is the cache key, so two widgets sharing this
+        // layer with different NEUI_ATTR_QRCODE values each get their own
+        // symbol rather than fighting over one held bitmap.
+        CompoundLayer::QrSymbol* sym =
+          qr_get_symbol(L, text, side_px, dark, bg, ecc, quiet, scale);
+        if (!sym) break;  // empty / un-encodable text - draw nothing
+
+        void* bmp = qr_upload(p, *sym);
+        if (bmp && p->backend && p->backend->draw_bitmap && sym->w_px > 0) {
+          // Draw at native resolution (bitmap logical size = w_px / scale),
+          // centred within the layer rect to keep it square + crisp.
+          float dw = static_cast<float>(sym->w_px) / sym->scale;
+          float dh = static_cast<float>(sym->h_px) / sym->scale;
+          float dx = r.x + (r.w - dw) * 0.5f;
+          float dy = r.y + (r.h - dh) * 0.5f;
+          // Pixel-snap the origin to the device grid. The bitmap is 1:1 with
+          // physical pixels (w_px == dw*scale), so a fractional physical
+          // origin - which a logical centre offset hits at non-integer DPI
+          // like 150% - would make the backend bilinear-resample it, smearing
+          // module edges and making some lines look a pixel wider than others.
+          // Snapping so dx*scale / dy*scale are whole pixels keeps every module
+          // a uniform width. (Each CUSTOMDRAW ctx origin is itself pixel-
+          // aligned, so snapping in local space lands on the physical grid.)
+          if (scale > 0.0f) {
+            dx = static_cast<float>(std::lround(dx * scale)) / scale;
+            dy = static_cast<float>(std::lround(dy * scale)) / scale;
+          }
+          p->backend->draw_bitmap(p->ctx, bmp,
+                                  0.0f, 0.0f, 0.0f, 0.0f,  // full bitmap
+                                  dx, dy, dw, dh, 0xFFFFFFFFu);
         }
         break;
       }

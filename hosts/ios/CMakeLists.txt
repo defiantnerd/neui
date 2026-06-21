@@ -34,6 +34,7 @@ target_include_directories(neui-ioshost
 
 target_link_libraries(neui-ioshost PRIVATE
   neui
+  neui-qrcodegen
   neui-backend-cg
   "-framework UIKit"
   "-framework Foundation"

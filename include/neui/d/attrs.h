@@ -217,6 +217,14 @@ extern "C" {
 // reflects the latest value just before the disc is drawn.
 #define NEUI_ATTR_VALUE_TEXT "neui.attr.value_text"
 
+// string: the payload a NEUI_COMPOUND_LAYER_QR layer encodes. When this
+// attr is present (and non-empty) on a CUSTOMDRAW widget carrying a QR
+// compound layer, the layer encodes this value verbatim, taking
+// precedence over the layer's own "text" template prop. Unset / empty =
+// the layer falls back to its "text" template (default "{value}"). Live -
+// the symbol re-rasterises next paint when this changes.
+#define NEUI_ATTR_QRCODE "neui.attr.qrcode"
+
 // string: font family for text rendered by the widget (e.g. "Consolas",
 // "Segoe UI"). Empty / unset leaves the host's system default in place
 // (Segoe UI on the Win32 / D2D backend). Honoured by the Direct2D

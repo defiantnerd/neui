@@ -933,12 +933,41 @@ namespace neui_d2d_backend
 
     D2D1_RECT_F dst_rect = D2D1::RectF(dst_x, dst_y, dst_x + dst_w, dst_y + dst_h);
 
+    // Interpolation mode: a bitmap drawn at (approximately) its native size -
+    // 1:1 source-to-destination DEVICE pixels - must NOT be linearly resampled,
+    // or pixel-exact content (QR symbols, pixel art) gets gray seams from edge
+    // blending, especially at fractional DPI like 150%. Compare in device px
+    // (not DIPs) so a HiDPI-upscaled photo - same DIP size but more device px -
+    // still gets smooth LINEAR scaling. NEAREST only kicks in for genuine
+    // 1:1 device blits.
+    const float dev_scale = static_cast<float>(ctx->dpi) / 96.0f;
+    float src_dev_w, src_dev_h;
+    if (src_w <= 0.0f || src_h <= 0.0f) {
+      D2D1_SIZE_U px = bmp->GetPixelSize();
+      src_dev_w = static_cast<float>(px.width);
+      src_dev_h = static_cast<float>(px.height);
+    } else {
+      FLOAT bdx = 96.0f, bdy = 96.0f;
+      bmp->GetDpi(&bdx, &bdy);
+      const float bmp_scale = bdx / 96.0f;  // bitmap DIP -> device px
+      src_dev_w = src_w * bmp_scale;
+      src_dev_h = src_h * bmp_scale;
+    }
+    const float dst_dev_w = dst_w * dev_scale;
+    const float dst_dev_h = dst_h * dev_scale;
+    const bool native_1to1 =
+      std::fabs(dst_dev_w - src_dev_w) < 0.5f &&
+      std::fabs(dst_dev_h - src_dev_h) < 0.5f;
+    const D2D1_BITMAP_INTERPOLATION_MODE interp = native_1to1
+      ? D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+      : D2D1_BITMAP_INTERPOLATION_MODE_LINEAR;
+
     if (tint == 0xFFFFFFFFu) {
       // Untinted fast path: byte-for-byte identical to the pre-effect
       // shipping behaviour. Avoids any effect setup so the common case
       // pays no extra cost.
       ctx->target->DrawBitmap(bmp, dst_rect, current_alpha(ctx),
-                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                               interp,
                                src_rect);
       return;
     }
@@ -952,7 +981,7 @@ namespace neui_d2d_backend
         // Effects unavailable; fall back to the untinted draw rather than
         // skipping the layer entirely.
         ctx->target->DrawBitmap(bmp, dst_rect, current_alpha(ctx),
-                                 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                                 interp,
                                  src_rect);
         return;
       }

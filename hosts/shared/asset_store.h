@@ -597,6 +597,12 @@ namespace neui_detail
           if (it->second.bmp) backend->destroy_bitmap(ctx, it->second.bmp);
           entry->bitmaps.erase(it);
         }
+        // QR compound layers hold their own per-(ctx) uploads of the symbol
+        // bitmap; free them for this ctx too.
+        if (entry->compound)
+          neui_detail::compound_release_ctx_bitmaps(
+            *entry->compound, ctx,
+            [&](void* bmp) { backend->destroy_bitmap(ctx, bmp); });
       }
     }
 
@@ -607,6 +613,18 @@ namespace neui_detail
           if (!entry) continue;
           for (auto& [ctx, cached] : entry->bitmaps)
             if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
+          // Free QR compound layers' per-(ctx) symbol uploads across all ctxs.
+          if (entry->compound) {
+            for (auto& layer : entry->compound->layers) {
+              if (!layer) continue;
+              for (auto& sym : layer->qr_cache) {
+                if (!sym) continue;
+                for (auto& [ctx, cached] : sym->bitmaps)
+                  if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
+                sym->bitmaps.clear();
+              }
+            }
+          }
         }
       }
       // Release any SURFACE entries' off-screen ctxs before dropping the

@@ -117,3 +117,16 @@ stays lean. Flip them on explicitly if you need them:
 ## license
 
 MIT
+
+## acknowledgements
+
+neui gratefully incorporates the following third-party code:
+
+- **QR Code generator** by [Project Nayuki](https://www.nayuki.io/page/qr-code-generator-library)
+  (MIT License) - vendored in `third_party/qrcode/`, used to generate the
+  matrix behind the `NEUI_COMPOUND_LAYER_QR` compound layer.
+- **stb_image** by Sean Barrett and contributors
+  ([nothings/stb](https://github.com/nothings/stb), public domain / MIT) -
+  vendored in `third_party/stb/`, used for image decoding.
+
+Many thanks to their authors for sharing their work.
