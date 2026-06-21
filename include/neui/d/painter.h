@@ -107,8 +107,10 @@ extern "C" {
 
     // ---- Assets ------------------------------------------------------------
 
-    // Draw the asset at handle `asset` aspect-fitted into (x, y, w, h)
-    // in logical pixels. No-op if the handle is invalid or the asset
+    // Draw the asset at handle `asset` scaled to fill (x, y, w, h) in
+    // logical pixels. The image is stretched to the rect independently on
+    // each axis - aspect ratio is NOT preserved, so pass an aspect-correct
+    // rect if you need it. No-op if the handle is invalid or the asset
     // couldn't be loaded. For bitmaps the per-context GPU upload happens
     // lazily on first draw and is cached for the lifetime of the
     // backend context.
@@ -139,11 +141,14 @@ extern "C" {
     // (Vtable-appended; check the api version / pointer before calling.)
     //
     // Draw cell `frame` of a filmstrip / stitchmap asset (a bitmap tagged via
-    // neui_asset_api::set_frame_layout) aspect-fitted into (x, y, w, h). The
-    // whole strip uploads to the GPU once; each frame is a sub-rect sample of
-    // that single upload, so animating the frame is cheap. `frame` clamps into
-    // [0, frame_count), so a value past the end pins to the last frame. On an
-    // asset with no frame layout this draws the whole bitmap (== draw_asset).
+    // neui_asset_api::set_frame_layout) scaled to fill (x, y, w, h). Like
+    // draw_asset, the cell is stretched to the rect independently on each axis
+    // - aspect ratio is NOT preserved, so pass a rect matching the cell aspect
+    // if you need it. The whole strip uploads to the GPU once; each frame is a
+    // sub-rect sample of that single upload, so animating the frame is cheap.
+    // `frame` clamps into [0, frame_count), so a value past the end pins to the
+    // last frame. On an asset with no frame layout this draws the whole bitmap
+    // (== draw_asset).
     void (NEUI_ABI *draw_asset_frame)(neui_painter_t* p, neui_asset_t asset,
                                        uint32_t frame,
                                        float x, float y, float w, float h);

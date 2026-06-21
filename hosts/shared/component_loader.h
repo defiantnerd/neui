@@ -501,9 +501,14 @@ namespace neui_detail
           if (layer_asset.id != asset_none.id && apis.asset->set_frame_layout) {
             if (const mj::object_t* fl = as_obj(obj_get(*lo, "frame_layout"))) {
               FilmstripLayout lay;
-              if (filmstrip_layout_from_object(*fl, lay)) {
-                apis.asset->set_frame_layout(session, layer_asset,
-                                             lay.cols, lay.rows, lay.gutter);
+              // Only record (for serialize re-emit) when the tag actually took:
+              // a layout that doesn't fit the bitmap leaves the asset an
+              // untagged plain bitmap, and re-emitting a frame_layout the
+              // runtime dropped would make a load -> serialize -> reload claim a
+              // strip that was never applied.
+              if (filmstrip_layout_from_object(*fl, lay) &&
+                  apis.asset->set_frame_layout(session, layer_asset,
+                                               lay.cols, lay.rows, lay.gutter)) {
                 bool seen = false;
                 for (const auto& e : out.asset_frame_layouts)
                   if (e.first == layer_asset.id) { seen = true; break; }
@@ -518,9 +523,16 @@ namespace neui_detail
           if (as_color(obj_get(*lo, "tint"), tint))
             apis.compound->set_int(session, cs, layer, "tint", tint);
           double frame_d;
-          if (as_num(obj_get(*lo, "frame"), frame_d))
+          if (as_num(obj_get(*lo, "frame"), frame_d)) {
+            // Clamp before lround: a malformed doc with a huge double would
+            // overflow `long` in std::lround (UB). A frame index is a small
+            // non-negative cell number; the draw path clamps the upper end to
+            // the strip's last cell anyway.
+            if (frame_d < 0.0) frame_d = 0.0;
+            else if (frame_d > 2147483647.0) frame_d = 2147483647.0;
             apis.compound->set_int(session, cs, layer, "frame",
                                    static_cast<int>(std::lround(frame_d)));
+          }
         } else if (kind == NEUI_COMPOUND_LAYER_RECT ||
                    kind == NEUI_COMPOUND_LAYER_PATH) {
           int col;
@@ -691,6 +703,11 @@ namespace neui_detail
 
     if (in.compound) {
       mj::array_t larr;
+      // A frame-strip layout lives on the asset, not the layer, so it is only
+      // re-emitted on the FIRST asset layer (in serialization order) that
+      // references each tagged asset. Emitting it on every layer sharing the
+      // asset would bloat the round-trip document (minimal-diff violation).
+      std::vector<uint32_t> emitted_frame_layout_assets;
       for (uint32_t slot : compound_sorted_slots(*in.compound)) {
         const CompoundLayer* L = compound_get_layer(*in.compound, slot);
         if (!L) continue;
@@ -757,10 +774,15 @@ namespace neui_detail
           // a load -> serialize -> reload round-trip keeps the strip tagged.
           // Emitted in the convention-matching shape: a single-axis grid as
           // { frames[, orientation] }, a true 2D grid as { cols, rows }.
-          if (in.asset_frame_layouts && L->asset.id != asset_none.id) {
+          bool fl_already_emitted = false;
+          for (uint32_t id : emitted_frame_layout_assets)
+            if (id == L->asset.id) { fl_already_emitted = true; break; }
+          if (in.asset_frame_layouts && L->asset.id != asset_none.id &&
+              !fl_already_emitted) {
             for (const auto& fl : *in.asset_frame_layouts) {
               if (fl.first != L->asset.id) continue;
               const FilmstripLayout& lay = fl.second;
+              emitted_frame_layout_assets.push_back(L->asset.id);
               mj::object_t flo;
               if (lay.cols == 1u) {
                 flo.emplace_back("frames", njson_int(static_cast<int>(lay.rows)));

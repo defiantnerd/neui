@@ -340,9 +340,16 @@ extern "C" {
     //   frame_count == 0: DISCOVER the layout from a "<path>.json" /
     //                     "<base>.json" sidecar ({ "frames": N, "orientation":
     //                     ..., "gutter": ... } or { "cols", "rows", "gutter" }),
-    //                     else a "<N>frames" / "-<N>" / "_f<N>" / "strip<N>"
-    //                     filename token (count only - `orientation` picks the
-    //                     axis).
+    //                     else a trailing "<N>frames" / "<N>frame" / "<N>f"
+    //                     filename token, where the digits must start the name
+    //                     or follow a separator (knob_100frames, fader-128f). A
+    //                     bare trailing number ("knob_100"), an 'f' glued to
+    //                     letters ("mix2f"), or an incidental word match
+    //                     ("filmstrip256", "airstrip5") is NOT treated as a
+    //                     strip. Both the token and a sidecar "frames" with no
+    //                     "orientation" key yield a count only - `orientation`
+    //                     picks the axis. An explicit sidecar "orientation" or
+    //                     a "cols"/"rows" pair overrides `orientation`.
     // Returns asset_none if the load fails, the strip doesn't divide evenly
     // enough to fit, or (discovery) no sidecar / filename token is found.
     neui_asset_t (NEUI_ABI *create_filmstrip_from_file)(

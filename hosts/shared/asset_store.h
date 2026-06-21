@@ -54,15 +54,17 @@ namespace neui_detail
   // of N stacked frames, value -> frame). Present (non-null on AssetEntry)
   // only when the asset has been tagged via set_frame_layout; the kind stays
   // BITMAP / SURFACE so every other consumer treats it as an ordinary
-  // bitmap. frame_w_px / frame_h_px are derived once at tag time so the draw
-  // path does no division per frame.
+  // bitmap. The per-cell source rect is computed at draw time by
+  // filmstrip_src_rect (which tiles the full bitmap dimension exactly);
+  // frame_w_px / frame_h_px are the nominal (floored) cell size kept for the
+  // fit check + frame_info queries, not the draw-time pitch.
   struct FilmstripInfo
   {
     uint32_t frame_count = 0;   // cols * rows
     uint32_t cols        = 1;   // grid columns (vertical strip = 1)
     uint32_t rows        = 0;   // grid rows
     uint32_t gutter_px   = 0;   // physical px between cells (0 = tight pack)
-    uint32_t frame_w_px  = 0;   // physical px per cell
+    uint32_t frame_w_px  = 0;   // nominal (floored) physical px per cell
     uint32_t frame_h_px  = 0;
   };
 
@@ -248,11 +250,13 @@ namespace neui_detail
     bool frame_src_rect(uint32_t slot, uint32_t frame,
                         float* sx, float* sy, float* sw, float* sh)
     {
-      const FilmstripInfo* fs = frame_info(slot);
-      if (!fs) return false;
+      AssetEntry* e = get_slot(slot);
+      if (!e || !e->filmstrip) return false;
+      const FilmstripInfo* fs = e->filmstrip.get();
       float x = 0, y = 0, w = 0, h = 0;
-      filmstrip_src_rect(fs->frame_count, fs->cols, fs->frame_w_px,
-                         fs->frame_h_px, fs->gutter_px, frame, x, y, w, h);
+      filmstrip_src_rect(fs->frame_count, fs->cols, fs->rows,
+                         e->width_px, e->height_px, fs->gutter_px,
+                         frame, x, y, w, h);
       if (sx) *sx = x;
       if (sy) *sy = y;
       if (sw) *sw = w;
