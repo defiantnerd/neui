@@ -130,6 +130,52 @@ namespace neui_detail
     };
     std::vector<PathCommand> path_cmds;
 
+    // QR-layer (NEUI_COMPOUND_LAYER_QR) config. The string to encode reuses
+    // text_template / text_segments above (default "{value}"), unless the
+    // widget's AttrBag carries a non-empty NEUI_ATTR_QRCODE string, which
+    // wins. These knobs are part of the (shared) layer, so they apply to
+    // every widget the compound backs.
+    uint32_t qr_dark       = 0;           // dark-module ARGB; 0 = theme text_primary
+    uint32_t qr_background = 0x00000000;  // ARGB behind the modules; 0 = transparent
+    int      qr_ecc        = 1;           // neui_qr_ecc_t (0..3); default MEDIUM
+    int      qr_quiet      = 4;           // quiet-zone width in modules
+
+    // Per-(ctx) uploaded bitmap handle - same lazy pattern as
+    // AssetEntry::bitmaps (CtxBitmap there; a local mirror here keeps
+    // compound.h free of the asset_store.h dependency, which includes us).
+    struct CtxBmp { void* bmp = nullptr; uint32_t generation = 0; };
+
+    // A single rasterised QR symbol plus the generation key it was built
+    // from and its per-(ctx) GPU uploads.
+    struct QrSymbol {
+      // Generation key - the symbol is reused while all of these match.
+      std::string text;
+      uint32_t    side_px = 0;            // target square side, physical px
+      uint32_t    dark    = 0;
+      uint32_t    bg      = 0;
+      int         ecc     = -1;
+      int         quiet   = -1;
+      // Rasterised bitmap (BGRA8 premultiplied, square).
+      std::vector<uint8_t> pixels;        // w_px * h_px * 4 bytes
+      uint32_t    w_px  = 0;
+      uint32_t    h_px  = 0;
+      float       scale = 1.0f;
+      // Per-(ctx) GPU upload. Dropped + re-uploaded on a generation bump
+      // (device loss).
+      std::unordered_map<neui_render_ctx_t, CtxBmp> bitmaps;
+    };
+
+    // The rasterised-symbol cache. A compound asset is shared across many
+    // widgets, but the string each encodes is per-widget (its AttrBag), so a
+    // single held bitmap would thrash when two widgets show different codes -
+    // and only ever display the last-painted one. Instead the layer keeps a
+    // small generation-keyed cache: each distinct (text, size, colours, ecc,
+    // quiet) combination owns its own buffer + uploads, so N widgets render N
+    // different QR codes from one shared layer. FIFO-capped to bound memory.
+    // `mutable` - a lazy memoization built during paint (which holds a const
+    // CompoundLayer&); it does not change the layer's logical state.
+    mutable std::vector<std::unique_ptr<QrSymbol>> qr_cache;
+
     // Bindings per property name.
     std::unordered_map<std::string, CompoundBinding> bindings;
   };
@@ -159,6 +205,10 @@ namespace neui_detail
 
   // ---- Layer table management ---------------------------------------------
 
+  // Defined further down (Template parsing section); forward-declared here so
+  // compound_add_layer can stamp the QR layer's default "{value}" template.
+  inline std::vector<TextSegment> parse_template(const char* src);
+
   inline uint32_t compound_add_layer(CompoundAsset& ca,
                                       neui_compound_layer_kind_t kind,
                                       int z)
@@ -166,6 +216,12 @@ namespace neui_detail
     auto layer = std::make_unique<CompoundLayer>();
     layer->kind = kind;
     layer->z    = z;
+    // QR layers default to encoding the "{value}" attr; a client can override
+    // the template via set_string(..., "text", ...) or supply NEUI_ATTR_QRCODE.
+    if (kind == NEUI_COMPOUND_LAYER_QR) {
+      layer->text_template = "{value}";
+      layer->text_segments = parse_template("{value}");
+    }
     uint32_t slot;
     if (!ca.free_slots.empty()) {
       slot = ca.free_slots.back();
@@ -192,6 +248,32 @@ namespace neui_detail
     ca.layers.clear();
     ca.free_slots.clear();
   }
+
+  // Destroy the cached GPU upload of every QR layer's internally-held bitmap
+  // for `ctx`, invoking `destroy(void* bmp)` per handle. Called by the asset
+  // store's release_context / clear so a window's QR-layer uploads are freed
+  // alongside the ordinary asset uploads when its render context dies.
+  // `destroy` is the backend's destroy_bitmap bound to ctx by the caller.
+  template <typename DestroyFn>
+  inline void compound_release_ctx_bitmaps(CompoundAsset& ca,
+                                           neui_render_ctx_t ctx,
+                                           DestroyFn destroy)
+  {
+    for (auto& layer : ca.layers) {
+      if (!layer) continue;
+      for (auto& sym : layer->qr_cache) {
+        if (!sym) continue;
+        auto it = sym->bitmaps.find(ctx);
+        if (it == sym->bitmaps.end()) continue;
+        if (it->second.bmp) destroy(it->second.bmp);
+        sym->bitmaps.erase(it);
+      }
+    }
+  }
+
+  // Upper bound on the per-layer rasterised-symbol cache (distinct QR values
+  // a single shared layer keeps live). Oldest entries are evicted FIFO.
+  inline constexpr size_t k_qr_cache_max = 16;
 
   inline CompoundLayer* compound_get_layer(CompoundAsset& ca, uint32_t slot)
   {
@@ -427,6 +509,18 @@ namespace neui_detail
       if (prop == "tint")  { L.tint  = static_cast<uint32_t>(v); return true; }
       if (prop == "frame") { L.frame = v; return true; }
     }
+    if (L.kind == NEUI_COMPOUND_LAYER_QR) {
+      if (prop == "fill_color") { L.qr_dark       = static_cast<uint32_t>(v); return true; }
+      if (prop == "background") { L.qr_background = static_cast<uint32_t>(v); return true; }
+      if (prop == "ecc") {
+        L.qr_ecc = (v < 0) ? 0 : (v > 3 ? 3 : v);
+        return true;
+      }
+      if (prop == "quiet_zone") {
+        L.qr_quiet = (v < 0) ? 0 : (v > 16 ? 16 : v);
+        return true;
+      }
+    }
     return false;
   }
 
@@ -464,6 +558,13 @@ namespace neui_detail
     if (L.kind == NEUI_COMPOUND_LAYER_TEXT && prop == "family") {
       L.text_family_template = v ? v : "";
       L.text_family_segments = parse_template(v);
+      return true;
+    }
+    // QR layer reuses the text-template machinery for its "text" prop - the
+    // string to encode, with {key} substitution against the widget AttrBag.
+    if (L.kind == NEUI_COMPOUND_LAYER_QR && prop == "text") {
+      L.text_template = v ? v : "";
+      L.text_segments = parse_template(v);
       return true;
     }
     return false;

@@ -110,6 +110,12 @@ endif()
 # the C registry; CMake compiles each TU in its own language.
 add_library(neui src/neui.c src/mujson.cpp)
 
+# Vendored QR Code generator (Project Nayuki, MIT). Compiled into a small
+# static lib the host libs link; backs the QR compound layer kind. Added
+# before the host subdirectories so the neui-qrcodegen target exists when
+# they reference it.
+add_subdirectory("third_party/qrcode")
+
 # Per-platform host + backend selection.
 #   Windows : neui-win32host (native HWND host) + neui-xplhost (D2D-rendered)
 #   macOS   : neui-xplhost (CoreGraphics-rendered) - neui-win32host is omitted

@@ -100,7 +100,18 @@ extern "C" {
     NEUI_COMPOUND_LAYER_ASSET = 2,
     NEUI_COMPOUND_LAYER_RECT  = 3,
     NEUI_COMPOUND_LAYER_PATH  = 4,
+    NEUI_COMPOUND_LAYER_QR    = 5,
   } neui_compound_layer_kind_t;
+
+  // QR error-correction levels for NEUI_COMPOUND_LAYER_QR's "ecc" prop.
+  // Numerically match qrcodegen::QrCode::Ecc. Higher = more redundancy
+  // (scannable when partly obscured) at the cost of a denser symbol.
+  typedef enum neui_qr_ecc {
+    NEUI_QR_ECC_LOW      = 0,  // ~7%  recovery
+    NEUI_QR_ECC_MEDIUM   = 1,  // ~15% recovery (default)
+    NEUI_QR_ECC_QUARTILE = 2,  // ~25% recovery
+    NEUI_QR_ECC_HIGH     = 3,  // ~30% recovery
+  } neui_qr_ecc_t;
 
   // Path-layer command kinds. The layer carries a sequence of these
   // assigned via set_path; the painter replays them against the
@@ -217,6 +228,28 @@ extern "C" {
     //                         light / dark on monochrome icons; bind to
     //                         a state-tracking attr to swap on hover /
     //                         press without per-state asset uploads.
+    //   qr layer props:
+    //     "text"        string  template (same {key} substitution as the
+    //                           text layer) for the string to encode.
+    //                           Default "{value}". OVERRIDDEN when the
+    //                           widget's AttrBag carries a non-empty string
+    //                           attr "neui.attr.qrcode" (NEUI_ATTR_QRCODE) -
+    //                           that value is then encoded verbatim.
+    //     "fill_color"  int     ARGB of the dark modules. 0 (default) =
+    //                           the active theme's text_primary (tracks
+    //                           light / dark mode automatically).
+    //     "background"  int     ARGB behind the modules + quiet zone.
+    //                           0 (default) = transparent (the widget /
+    //                           layers below show through).
+    //     "ecc"         int     error-correction level, neui_qr_ecc_t
+    //                           (0=LOW..3=HIGH). Default 1 (MEDIUM).
+    //     "quiet_zone"  int     light-margin width in modules around the
+    //                           symbol. Default 4 (the QR spec minimum).
+    //                           Clamped to [0, 16].
+    //     The symbol is rasterised once into an internally-held bitmap
+    //     (regenerated only when the resolved text / size / colours / ecc
+    //     change) and blitted at native resolution, centred + letterboxed
+    //     to stay square and crisp within the layer rect.
     //   rect layer props:
     //     "fill_color"    int   ARGB; 0 = no fill (alpha 0)
     //     "stroke_color"  int   ARGB; 0 = no stroke (alpha 0)
