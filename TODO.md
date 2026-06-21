@@ -84,8 +84,7 @@ is a real initiative, not trivial; together they form one programme.
 
 ## Grid sort follow-ups
 
-Multi-column sort shipped (`plans/grid-sorting.md`); a handful of
-extensions are deferred:
+Multi-column sort shipped; a handful of extensions are deferred:
 
 - **Locale-aware STRING compare.** v1 uses byte-level `strcmp`. Switch
   to ICU `ucol_strcoll` or `std::collate` once a client needs
@@ -103,8 +102,8 @@ extensions are deferred:
 `text/plain`, `text/html`, `text/uri-list`, and arbitrary MIME passthrough
 are wired for both clipboard and drag&drop (drop-target **and**
 drag-source on all three hosts, with custom drag-preview image on
-macOS + Win32). See `plans/clipboard-and-dnd.md` and
-`plans/dnd-drag-source-fixes.md` for the handoff. Remaining:
+macOS + Win32). Shipped — design rationale in `docs/design-notes.md`.
+Remaining:
 
 - **`image/tiff` (and other bitmap MIMEs).** `image/png` ships on all
   three hosts (Win32 publishes as `CF_DIBV5` alongside the registered
@@ -167,16 +166,14 @@ macOS + Win32). See `plans/clipboard-and-dnd.md` and
 
 ## Plans
 
+Only open/deferred plans live in `plans/`. Completed plans were removed once
+shipped — their full text is in git history, and the distilled design rationale
+for shipped features lives in `docs/design-notes.md`.
+
 | File | Status |
 |---|---|
-| `plans/painter-and-asset-api.md` | Shipped (curated `neui_painter_t` + asset API). |
-| `plans/render-to-surface.md` | Shipped (`NEUI_ASSET_KIND_SURFACE` + `paint_surface`). |
-| `plans/backend-tint-effect.md` | Shipped (D2D `CLSID_D2D1Tint` + CG mask-clip + multiply). |
-| `plans/grid-macos-port.md` | Shipped (GRID macOS native port). |
-| `plans/grid-sorting.md` | Shipped (multi-column sort + per-column kind/sortable + visual nav). |
-| `plans/clipboard-and-dnd.md` | Shipped (unified data-item, multi-format clipboard, DnD drop targets). |
-| `plans/dnd-drag-source-fixes.md` | Shipped (drag-source + custom preview on all three hosts). |
+| `plans/win32-pointer-and-directmanipulation.md` | Deferred. WM_POINTER pen/touch + DirectManipulation smooth-scroll; binding spec for when it lands. |
 | `plans/winui3-host.md` | Feasibility analysis; deferred indefinitely. |
 | `plans/wasm-host.md` | Feasibility analysis; deferred. |
+| `plans/lvgl-port.md` | Feasibility investigation (neui-on-LVGL); no implementation proposed. |
 | `plans/how-to-port.md` | Reference playbook for new platform ports. |
-| `plans/crossplatform-host-sketch.md` | Archival - superseded by the shipped xpl host. |

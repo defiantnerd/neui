@@ -11,7 +11,7 @@
 #ifdef _WIN32
 // Win32-specific helpers used directly from the host's API entry points
 // (icon application, accel-table build/translate). The macOS port replaces
-// these with platform_* shims (see plans/macos-port.md).
+// these with platform_* shims.
 #include "../shared/win32/icon_win32.h"
 #include "../shared/win32/accel_table_win32.h"
 #endif
@@ -1210,8 +1210,8 @@ namespace xpl_host
         mb.native_accel = nullptr;
       }
 #else
-      // TODO(macos): NSMenuItem.keyEquivalent is set per-item; nothing
-      // to tear down here. See plans/macos-port.md.
+      // macOS: NSMenuItem.keyEquivalent is set per-item; nothing
+      // to tear down here.
       mb.native_accel = nullptr;
 #endif
       platform_menubar_destroy(mb.hmenu);
@@ -1381,7 +1381,7 @@ namespace xpl_host
 #else
     // macOS: NSMenuItem.keyEquivalent triggers the action selector directly,
     // there's no separate accel-table to translate. The platform layer hands
-    // the keystroke to the menu before the responder chain. See plans/macos-port.md.
+    // the keystroke to the menu before the responder chain.
     (void)msg_ptr;
     return false;
 #endif

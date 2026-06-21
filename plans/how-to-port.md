@@ -492,4 +492,4 @@ When the seams change (a function added to `neui_render_backend_t`, a new `platf
 3. Update the matching table above so a future port sees the new requirement.
 4. Add a one-line "Recent architecture decisions" entry to `CLAUDE.md`.
 
-`plans/painter-and-asset-api.md` is the closest worked example still on disk - design rationale for an API extension that crossed all hosts. Two previous worked examples (`macos-port.md`, `native-macos-host.md`) shipped and were retired; their effective summary lives in CLAUDE.md.
+Worked examples of shipped cross-host extensions have been retired from `plans/` now that they shipped; their effective summaries live in `CLAUDE.md`, and the distilled design rationale (painter/asset API, render-to-surface, fonts, the Linux port, etc.) lives in `docs/design-notes.md`. Full verbatim plan text remains in git history.

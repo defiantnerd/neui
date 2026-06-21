@@ -2,7 +2,7 @@
 
 Behavioral quirks and accepted compromises that are NOT bugs to fix but are
 worth knowing about. Open *work* lives in `TODO.md`; design rationale lives in
-`CLAUDE.md` / `plans/`. Each entry states the behavior, why it is the way it
+`CLAUDE.md` / `docs/design-notes.md`. Each entry states the behavior, why it is the way it
 is, and what (if anything) would change it.
 
 ## Linux: disabled menu items swallow their keyboard accelerator
