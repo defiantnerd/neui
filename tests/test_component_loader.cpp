@@ -39,9 +39,11 @@ namespace
     std::map<std::string, std::string>  strs;
   };
 
-  std::vector<LayerRec>    g_layers;
-  std::vector<HandlerRec>  g_handlers;
-  std::vector<std::string> g_loaded_files;
+  struct FrameLayoutRec { uint32_t cols, rows, gutter; };
+  std::vector<LayerRec>              g_layers;
+  std::vector<HandlerRec>            g_handlers;
+  std::vector<std::string>           g_loaded_files;
+  std::map<uint32_t, FrameLayoutRec> g_frame_layouts;   // asset id -> grid
   bool                     g_compound_created = false;
   bool                     g_behavior_created = false;
 
@@ -50,6 +52,7 @@ namespace
     g_layers.clear();
     g_handlers.clear();
     g_loaded_files.clear();
+    g_frame_layouts.clear();
     g_compound_created = false;
     g_behavior_created = false;
   }
@@ -65,6 +68,9 @@ namespace
     neui_asset_t a; a.id = 1000u + static_cast<uint32_t>(g_loaded_files.size());
     return a;
   }
+  bool NEUI_ABI fake_set_frame_layout(neui_session_t, neui_asset_t a,
+                                      uint32_t cols, uint32_t rows, uint32_t gutter)
+  { g_frame_layouts[a.id] = { cols, rows, gutter }; return true; }
 
   // --- fake compound api ---------------------------------------------------
   neui_compound_layer_t NEUI_ABI fake_add_layer(neui_session_t, neui_asset_t,
@@ -123,9 +129,10 @@ namespace
                                neui_behavior_api_t& b)
   {
     a = neui_asset_api_t{};
-    a.create_compound  = fake_create_compound;
-    a.create_behavior  = fake_create_behavior;
-    a.create_from_file = fake_create_from_file;
+    a.create_compound   = fake_create_compound;
+    a.create_behavior   = fake_create_behavior;
+    a.create_from_file  = fake_create_from_file;
+    a.set_frame_layout  = fake_set_frame_layout;
 
     c = neui_compound_api_t{};
     c.add_layer   = fake_add_layer;
@@ -256,6 +263,56 @@ TEST_CASE("component_loader: anchors, fill, offset, bind")
   CHECK(ind->binds.at("rotation").scale > 4.7f && ind->binds.at("rotation").scale < 4.72f);
 }
 
+TEST_CASE("component_loader: asset layer frame prop (static + bound) round-trips")
+{
+  const char* json = R"json({
+    "size": [80, 80],
+    "layers": [
+      { "kind": "asset", "asset": "strip", "frame": 7 },
+      { "kind": "asset", "asset": "strip",
+        "bind": { "frame": { "attr": "neui.param.value", "scale": 63, "offset": 0 } } }
+    ]
+  })json";
+  BuiltComponent built = run_loader(json);
+  (void)built;
+
+  const LayerRec* a0 = layer_of_kind(NEUI_COMPOUND_LAYER_ASSET, 0);
+  const LayerRec* a1 = layer_of_kind(NEUI_COMPOUND_LAYER_ASSET, 1);
+  REQUIRE(a0); REQUIRE(a1);
+  CHECK(a0->ints.at("frame") == 7);             // static frame parsed
+  REQUIRE(a1->binds.count("frame") == 1);       // bound frame parsed
+  CHECK(a1->binds.at("frame").attr == "neui.param.value");
+  CHECK(a1->binds.at("frame").scale == 63.0f);
+  CHECK(a0->ints.count("frame") == 1 && a1->ints.count("frame") == 0);
+}
+
+TEST_CASE("component_loader: frame_layout tags the resolved asset")
+{
+  const char* json = R"json({
+    "size": [80, 80],
+    "assets": { "strip": "knob_100.png" },
+    "layers": [
+      { "kind": "asset", "asset": "strip",
+        "frame_layout": { "frames": 100, "orientation": "vertical" },
+        "bind": { "frame": { "attr": "neui.param.value", "scale": 99 } } }
+    ]
+  })json";
+  run_loader(json);
+
+  // The asset layer resolved "strip" to a create_from_file handle; the loader
+  // tagged that handle with the frame grid via set_frame_layout.
+  const LayerRec* a0 = layer_of_kind(NEUI_COMPOUND_LAYER_ASSET, 0);
+  REQUIRE(a0);
+  REQUIRE(a0->assets.count("asset") == 1);
+  uint32_t aid = a0->assets.at("asset");
+  REQUIRE(g_frame_layouts.count(aid) == 1);
+  CHECK_EQ((int)g_frame_layouts.at(aid).cols, 1);
+  CHECK_EQ((int)g_frame_layouts.at(aid).rows, 100);
+  // frame bind round-trips through the generic numeric-bind path.
+  REQUIRE(a0->binds.count("frame") == 1);
+  CHECK(a0->binds.at("frame").scale == 99.0f);
+}
+
 TEST_CASE("component_loader: text props, colors, show_when")
 {
   run_loader(kKnobJson);
@@ -355,6 +412,7 @@ namespace
     std::string   name = "knob";
     std::vector<std::pair<std::string, std::string>> anames;
     std::vector<std::pair<uint32_t, std::string>>    hnames;
+    std::vector<std::pair<uint32_t, FilmstripLayout>> flayouts;
   };
 
   HandBuilt make_handbuilt()
@@ -362,6 +420,8 @@ namespace
     HandBuilt hb;
     hb.anames = { { "bg", "knob_bg.png" }, { "indicator", "knob_move.png" } };
     hb.hnames = { { 1001u, "bg" }, { 1002u, "indicator" } };
+    // The bg asset is a 100-frame vertical strip (recorded at build time).
+    hb.flayouts = { { 1001u, FilmstripLayout{ 1u, 100u, 0u } } };
 
     // bg asset layer (z 0), fill, centered
     uint32_t s0 = compound_add_layer(hb.ca, NEUI_COMPOUND_LAYER_ASSET, 0);
@@ -401,6 +461,7 @@ namespace
     in.width = 110.0f; in.height = 110.0f;
     in.asset_names = &hb.anames;
     in.asset_handle_names = &hb.hnames;
+    in.asset_frame_layouts = &hb.flayouts;
     in.compound = &hb.ca;
     in.behavior = &hb.ba;
     return in;
@@ -469,6 +530,39 @@ TEST_CASE("serialize_component: round-trips through the loader")
   CHECK(g_handlers[0].flts.count("min") == 0);
   CHECK(g_handlers[0].flts.count("max") == 0);
   CHECK(g_handlers[0].flts.count("deadzone") == 0);
+
+  // The bg asset's frame-strip layout survived the round-trip: serialize
+  // re-emitted "frame_layout" and the reload re-tagged the asset (1 x 100).
+  REQUIRE(g_frame_layouts.size() == 1);
+  const auto& fl = g_frame_layouts.begin()->second;
+  CHECK_EQ((int)fl.cols, 1);
+  CHECK_EQ((int)fl.rows, 100);
+}
+
+TEST_CASE("serialize_component: re-emits frame_layout for a tagged asset")
+{
+  HandBuilt hb = make_handbuilt();
+  std::string json = serialize_component(input_for(hb), 0);
+
+  auto root = neui::mujson::parse(json);
+  REQUIRE(!root.empty());
+  const auto* layers = cl_detail::obj_get(root, "layers");
+  REQUIRE(layers && std::holds_alternative<neui::mujson::array_t>(layers->value));
+
+  // Exactly one asset layer (the bg) carries a frame_layout { frames: 100 };
+  // the indicator asset layer (no recorded layout) carries none.
+  int frame_layout_count = 0;
+  for (const auto& ln : std::get<neui::mujson::array_t>(layers->value)) {
+    const auto* fl = cl_detail::obj_get(std::get<neui::mujson::object_t>(ln.value),
+                                        "frame_layout");
+    if (!fl) continue;
+    ++frame_layout_count;
+    const auto& flo = std::get<neui::mujson::object_t>(fl->value);
+    const auto* frames = cl_detail::obj_get(flo, "frames");
+    REQUIRE(frames != nullptr);
+    CHECK(std::get<int>(frames->value) == 100);
+  }
+  CHECK_EQ(frame_layout_count, 1);
 }
 
 // Regression: a drag_biaxial handler's per-axis Y target must survive JSON

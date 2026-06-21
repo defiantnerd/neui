@@ -196,7 +196,13 @@ extern "C" {
     //     "align_x"   int     0 = start (left), 1 = center, 2 = end (right)
     //     "align_y"   int     0 = top, 1 = center, 2 = bottom
     //   asset layer props:
-    //     "asset"     asset   bitmap handle (v1)
+    //     "asset"     asset   bitmap / filmstrip handle (v1)
+    //     "frame"     int     filmstrip cell to draw (row-major), default 0.
+    //                         Ignored when the asset has no frame layout (an
+    //                         ordinary bitmap draws whole). Commonly bound to
+    //                         a value attr - bind("frame", "neui.param.value",
+    //                         frame_count - 1, 0) - so a knob/fader value
+    //                         scrubs the strip. Negative results clamp to 0.
     //     "rotation"  float   radians, clockwise
     //     "tint"      int     ARGB multiplicative tint. Default 0xFFFFFFFF
     //                         is the passthrough sentinel (no tint, hot

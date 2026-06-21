@@ -19,6 +19,7 @@ add_executable(neui_tests
   test_shortcut_format.cpp
   test_clipboard_item.cpp
   test_asset_font.cpp
+  test_asset_filmstrip.cpp
   test_tabview.cpp
   test_mujson.cpp
   test_component_loader.cpp

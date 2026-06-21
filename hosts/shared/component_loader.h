@@ -19,6 +19,8 @@
 // serialize_component to introspect a built component back to JSON.
 #include "compound.h"
 #include "behavior.h"
+#include "filmstrip_recognize.h"  // filmstrip_layout_from_object
+#include "mujson_accessors.h"     // obj_get / as_obj / as_arr / as_str / as_num / as_bool
 
 // mujson lives in the core lib (src/). Hosts reach hosts/shared via relative
 // includes and don't carry src/ on their include path, so reference it
@@ -82,6 +84,10 @@ namespace neui_detail
     std::string                                      name;
     std::vector<std::pair<std::string, std::string>> asset_names;
     std::vector<std::pair<uint32_t, std::string>>    asset_handle_names;
+    // Frame-strip layout applied to a layer asset via a "frame_layout" block,
+    // keyed by the resolved asset handle id (deduped). The layout lives on the
+    // asset, not the layer, so serialize_component re-emits it from here.
+    std::vector<std::pair<uint32_t, FilmstripLayout>> asset_frame_layouts;
   };
 
   // The api vtables the loader drives. The host passes its own pointers.
@@ -96,39 +102,18 @@ namespace neui_detail
   {
     using mj = neui::mujson;
 
-    // --- mujson value accessors (the only parser-coupled helpers) ----------
+    // The generic mujson value accessors (obj_get / as_obj / as_arr / as_str /
+    // as_num / as_bool) live in neui_detail (mujson_accessors.h) and are shared
+    // with filmstrip_recognize.h. Re-export them through cl_detail so existing
+    // cl_detail::-qualified call sites keep resolving; only the
+    // component-specific interpreters are defined here.
+    using neui_detail::obj_get;
+    using neui_detail::as_obj;
+    using neui_detail::as_arr;
+    using neui_detail::as_str;
+    using neui_detail::as_num;
+    using neui_detail::as_bool;
 
-    inline const mj::node* obj_get(const mj::object_t& o, const char* key)
-    {
-      for (const auto& kv : o)
-        if (kv.first == key) return &kv.second;
-      return nullptr;
-    }
-    inline const mj::object_t* as_obj(const mj::node* n)
-    {
-      return n ? std::get_if<mj::object_t>(&n->value) : nullptr;
-    }
-    inline const mj::array_t* as_arr(const mj::node* n)
-    {
-      return n ? std::get_if<mj::array_t>(&n->value) : nullptr;
-    }
-    inline const std::string* as_str(const mj::node* n)
-    {
-      return n ? std::get_if<std::string>(&n->value) : nullptr;
-    }
-    // Accept BOTH int and double arms (bare 0 -> int, 0.5 -> double).
-    inline bool as_num(const mj::node* n, double& out)
-    {
-      if (!n) return false;
-      if (auto* i = std::get_if<int>(&n->value))    { out = *i; return true; }
-      if (auto* d = std::get_if<double>(&n->value)) { out = *d; return true; }
-      return false;
-    }
-    inline bool as_bool(const mj::node* n, bool def)
-    {
-      if (n) if (auto* b = std::get_if<bool>(&n->value)) return *b;
-      return def;
-    }
     // Color: "#AARRGGBB" string arm, or a bare int arm.
     inline bool as_color(const mj::node* n, int& out)
     {
@@ -502,10 +487,29 @@ namespace neui_detail
           if (as_num(obj_get(*lo, "weight"), wt))
             apis.compound->set_int(session, cs, layer, "weight", static_cast<int>(std::lround(wt)));
         } else if (kind == NEUI_COMPOUND_LAYER_ASSET) {
+          neui_asset_t layer_asset = asset_none;
           if (auto* name = as_str(obj_get(*lo, "asset"))) {
-            neui_asset_t a = resolve_asset(*name);
-            if (a.id != asset_none.id)
-              apis.compound->set_asset(session, cs, layer, "asset", a);
+            layer_asset = resolve_asset(*name);
+            if (layer_asset.id != asset_none.id)
+              apis.compound->set_asset(session, cs, layer, "asset", layer_asset);
+          }
+          // "frame_layout": tag the resolved asset as a filmstrip so a later
+          // "frame" prop / bind selects a cell. Same object shape as the file
+          // sidecar ({frames,orientation,gutter} or {cols,rows,gutter}). The
+          // applied layout is recorded (deduped by handle) so serialize_component
+          // can re-emit it - the layout lives on the asset, not the layer.
+          if (layer_asset.id != asset_none.id && apis.asset->set_frame_layout) {
+            if (const mj::object_t* fl = as_obj(obj_get(*lo, "frame_layout"))) {
+              FilmstripLayout lay;
+              if (filmstrip_layout_from_object(*fl, lay)) {
+                apis.asset->set_frame_layout(session, layer_asset,
+                                             lay.cols, lay.rows, lay.gutter);
+                bool seen = false;
+                for (const auto& e : out.asset_frame_layouts)
+                  if (e.first == layer_asset.id) { seen = true; break; }
+                if (!seen) out.asset_frame_layouts.emplace_back(layer_asset.id, lay);
+              }
+            }
           }
           double rot;
           if (as_num(obj_get(*lo, "rotation"), rot))
@@ -513,6 +517,10 @@ namespace neui_detail
           int tint;
           if (as_color(obj_get(*lo, "tint"), tint))
             apis.compound->set_int(session, cs, layer, "tint", tint);
+          double frame_d;
+          if (as_num(obj_get(*lo, "frame"), frame_d))
+            apis.compound->set_int(session, cs, layer, "frame",
+                                   static_cast<int>(std::lround(frame_d)));
         } else if (kind == NEUI_COMPOUND_LAYER_RECT ||
                    kind == NEUI_COMPOUND_LAYER_PATH) {
           int col;
@@ -628,6 +636,7 @@ namespace neui_detail
     const std::vector<ComponentParam>*                      params = nullptr;
     const std::vector<std::pair<std::string, std::string>>* asset_names = nullptr;
     const std::vector<std::pair<uint32_t, std::string>>*    asset_handle_names = nullptr;
+    const std::vector<std::pair<uint32_t, FilmstripLayout>>* asset_frame_layouts = nullptr;
     const CompoundAsset*                                    compound = nullptr;
     const BehaviorAsset*                                    behavior = nullptr;
   };
@@ -743,6 +752,31 @@ namespace neui_detail
           }
           if (L->rotation != 0.0f)        lo.emplace_back("rotation", njson_num(L->rotation));
           if (L->tint != defL.tint)       lo.emplace_back("tint", njson_str(hexcolor(L->tint)));
+          if (L->frame != defL.frame)     lo.emplace_back("frame", njson_int(L->frame));
+          // Re-emit the asset's frame-strip layout (recorded at build time) so
+          // a load -> serialize -> reload round-trip keeps the strip tagged.
+          // Emitted in the convention-matching shape: a single-axis grid as
+          // { frames[, orientation] }, a true 2D grid as { cols, rows }.
+          if (in.asset_frame_layouts && L->asset.id != asset_none.id) {
+            for (const auto& fl : *in.asset_frame_layouts) {
+              if (fl.first != L->asset.id) continue;
+              const FilmstripLayout& lay = fl.second;
+              mj::object_t flo;
+              if (lay.cols == 1u) {
+                flo.emplace_back("frames", njson_int(static_cast<int>(lay.rows)));
+              } else if (lay.rows == 1u) {
+                flo.emplace_back("frames", njson_int(static_cast<int>(lay.cols)));
+                flo.emplace_back("orientation", njson_str("horizontal"));
+              } else {
+                flo.emplace_back("cols", njson_int(static_cast<int>(lay.cols)));
+                flo.emplace_back("rows", njson_int(static_cast<int>(lay.rows)));
+              }
+              if (lay.gutter != 0u)
+                flo.emplace_back("gutter", njson_int(static_cast<int>(lay.gutter)));
+              lo.emplace_back("frame_layout", njson_obj(std::move(flo)));
+              break;
+            }
+          }
         } else if (L->kind == NEUI_COMPOUND_LAYER_RECT ||
                    L->kind == NEUI_COMPOUND_LAYER_PATH) {
           if (L->fill_color)   lo.emplace_back("fill_color",   njson_str(hexcolor(L->fill_color)));

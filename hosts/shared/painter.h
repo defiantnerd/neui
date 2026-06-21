@@ -33,36 +33,41 @@ namespace neui_detail {
   // on Windows, blend-mode multiply on macOS). 0xFFFFFFFFu is the
   // passthrough sentinel: the backend bypasses tint setup entirely and
   // the draw stays byte-for-byte identical to untinted code paths.
+  // Sentinel `frame` value meaning "draw the whole bitmap" rather than a
+  // single filmstrip cell. painter_draw_asset / _tinted pass this; the
+  // frame-aware painter_draw_asset_frame / _tinted pass a real frame index.
+  // A filmstrip-tagged asset drawn with this sentinel shows the entire strip
+  // (back-compat: plain draw_asset on a tagged asset draws the whole image).
+  inline constexpr uint32_t k_draw_asset_whole = 0xFFFFFFFFu;
+
+  // Thunk that resolves a neui_asset_t against a host-specific manager and
+  // draws it. `frame` selects a filmstrip cell, or k_draw_asset_whole for the
+  // whole bitmap. Hosts install one of these per paint via the painter struct
+  // below.
   using draw_asset_thunk_t = void (NEUI_ABI *)(
       void* host_token,
       neui_render_backend_t* backend,
       neui_render_ctx_t ctx,
       neui_asset_t asset,
       float x, float y, float w, float h,
+      uint32_t frame,
       uint32_t tint);
 
-  // Shared body for the per-host draw_asset thunks: lazy GPU upload for
-  // the (entry, ctx) pair with device-loss check, then draw. If the
-  // backend has bumped its per-ctx generation (D2D after
-  // D2DERR_RECREATE_TARGET) any cached handle is dangling - drop it and
-  // re-upload against the new target. `tint` routes straight to the
-  // backend's draw_bitmap (0xFFFFFFFFu = untinted passthrough).
+  // Lazy GPU upload for the (entry, ctx) pair with device-loss check.
+  // Returns the cached/freshly-uploaded backend bitmap handle, or nullptr
+  // if the backend can't create one. If the backend has bumped its per-ctx
+  // generation (D2D after D2DERR_RECREATE_TARGET) the cached handle is
+  // dangling - it's dropped and re-uploaded against the new target.
   //
   // EntryT is each host's asset-entry type; it needs `bitmaps` (an
   // unordered_map<neui_render_ctx_t, {void* bmp; uint32_t generation;}>),
-  // `width_px`, `height_px`, `pixels`, `scale`. The host thunk keeps the
-  // host-specific part (session cast + cross-session validation + slot
-  // resolution) and forwards the entry here.
+  // `width_px`, `height_px`, `pixels`, `scale`.
   template <typename EntryT>
-  inline void painter_draw_entry_cached(neui_render_backend_t* backend,
-                                         neui_render_ctx_t ctx,
-                                         EntryT* entry,
-                                         float x, float y, float w, float h,
-                                         uint32_t tint)
+  inline void* upload_entry_bitmap(neui_render_backend_t* backend,
+                                    neui_render_ctx_t ctx, EntryT* entry)
   {
     using CtxBitmapT =
       typename std::decay<decltype(entry->bitmaps)>::type::mapped_type;
-    if (!backend || !ctx || !entry) return;
     const uint32_t gen = backend->get_context_generation
       ? backend->get_context_generation(ctx) : 0u;
     auto it = entry->bitmaps.find(ctx);
@@ -73,18 +78,107 @@ namespace neui_detail {
       it = entry->bitmaps.end();
     }
     if (it == entry->bitmaps.end()) {
-      if (!backend->create_bitmap) return;
+      if (!backend->create_bitmap) return nullptr;
       void* bmp = backend->create_bitmap(ctx,
                                           entry->width_px, entry->height_px,
                                           entry->pixels.data(),
                                           entry->scale);
-      if (!bmp) return;
+      if (!bmp) return nullptr;
       it = entry->bitmaps.emplace(ctx, CtxBitmapT{ bmp, gen }).first;
     }
-    if (backend->draw_bitmap)
-      backend->draw_bitmap(ctx, it->second.bmp,
+    return it->second.bmp;
+  }
+
+  // Compute the physical-px source rect of frame `frame` within a frame
+  // strip laid out as a `cols`-wide row-major grid of `frame_w_px` x
+  // `frame_h_px` cells separated by `gutter_px`. `frame` clamps into
+  // [0, frame_count) so a value past the end pins to the last frame
+  // (mirrors a knob value of 1.0 mapping to the final frame). Single
+  // source of truth shared by the draw path and the store's frame_src_rect.
+  inline void filmstrip_src_rect(uint32_t frame_count, uint32_t cols,
+                                 uint32_t frame_w_px, uint32_t frame_h_px,
+                                 uint32_t gutter_px, uint32_t frame,
+                                 float& sx, float& sy, float& sw, float& sh)
+  {
+    const uint32_t fc = frame_count ? frame_count : 1u;
+    if (frame >= fc) frame = fc - 1u;
+    const uint32_t c   = cols ? cols : 1u;
+    const uint32_t col = frame % c;
+    const uint32_t row = frame / c;
+    sx = static_cast<float>(col * (frame_w_px + gutter_px));
+    sy = static_cast<float>(row * (frame_h_px + gutter_px));
+    sw = static_cast<float>(frame_w_px);
+    sh = static_cast<float>(frame_h_px);
+  }
+
+  // Shared body for the per-host draw_asset thunks: lazy GPU upload for the
+  // (entry, ctx) pair, then draw the whole bitmap. `tint` routes straight to
+  // the backend's draw_bitmap (0xFFFFFFFFu = untinted passthrough). The host
+  // thunk keeps the host-specific part (session cast + cross-session
+  // validation + slot resolution) and forwards the entry here.
+  template <typename EntryT>
+  inline void painter_draw_entry_cached(neui_render_backend_t* backend,
+                                         neui_render_ctx_t ctx,
+                                         EntryT* entry,
+                                         float x, float y, float w, float h,
+                                         uint32_t tint)
+  {
+    if (!backend || !ctx || !entry) return;
+    void* bmp = upload_entry_bitmap(backend, ctx, entry);
+    if (bmp && backend->draw_bitmap)
+      backend->draw_bitmap(ctx, bmp,
                             0.0f, 0.0f, 0.0f, 0.0f,    // full bitmap
                             x, y, w, h, tint);
+  }
+
+  // Frame-aware sibling of painter_draw_entry_cached: draws frame `frame` of
+  // a filmstrip-tagged entry into the dest rect, sampling the cell sub-rect
+  // from the single cached upload of the whole strip. If the entry carries no
+  // `filmstrip` layout this draws the whole bitmap, so it degrades to
+  // painter_draw_entry_cached. EntryT additionally needs a `filmstrip` member
+  // convertible to bool exposing { frame_count, cols, frame_w_px, frame_h_px,
+  // gutter_px } (neui_detail::FilmstripInfo*, null = plain bitmap).
+  template <typename EntryT>
+  inline void painter_draw_entry_frame_cached(neui_render_backend_t* backend,
+                                               neui_render_ctx_t ctx,
+                                               EntryT* entry, uint32_t frame,
+                                               float x, float y, float w, float h,
+                                               uint32_t tint)
+  {
+    if (!backend || !ctx || !entry) return;
+    void* bmp = upload_entry_bitmap(backend, ctx, entry);
+    if (!bmp || !backend->draw_bitmap) return;
+    float sx = 0.0f, sy = 0.0f, sw = 0.0f, sh = 0.0f;  // 0,0,0,0 = full bitmap
+    if (entry->filmstrip) {
+      const auto& fs = *entry->filmstrip;
+      filmstrip_src_rect(fs.frame_count, fs.cols, fs.frame_w_px, fs.frame_h_px,
+                         fs.gutter_px, frame, sx, sy, sw, sh);
+      // filmstrip_src_rect yields PHYSICAL px; draw_bitmap's source rect is in
+      // the bitmap's LOGICAL space (every backend re-applies the bitmap scale
+      // internally), so divide out the scale here. At scale 1.0 this is a
+      // no-op; without it an @2x / HiDPI strip samples the wrong cell.
+      const float inv = (entry->scale > 0.0f) ? (1.0f / entry->scale) : 1.0f;
+      sx *= inv; sy *= inv; sw *= inv; sh *= inv;
+    }
+    backend->draw_bitmap(ctx, bmp, sx, sy, sw, sh, x, y, w, h, tint);
+  }
+
+  // Sentinel-aware dispatch shared by every host's draw_asset thunk: the
+  // k_draw_asset_whole sentinel routes to the whole-bitmap draw, any real
+  // frame index to the cell sampler (which itself degrades to a whole-bitmap
+  // draw on an untagged entry). Keeps the whole-vs-cell rule in one place so a
+  // future change can't silently diverge across hosts.
+  template <typename EntryT>
+  inline void painter_draw_entry_dispatch(neui_render_backend_t* backend,
+                                          neui_render_ctx_t ctx,
+                                          EntryT* entry, uint32_t frame,
+                                          float x, float y, float w, float h,
+                                          uint32_t tint)
+  {
+    if (frame == k_draw_asset_whole)
+      painter_draw_entry_cached(backend, ctx, entry, x, y, w, h, tint);
+    else
+      painter_draw_entry_frame_cached(backend, ctx, entry, frame, x, y, w, h, tint);
   }
 
 } // namespace neui_detail
@@ -179,20 +273,49 @@ namespace neui_detail {
   {
     if (!p || !p->draw_asset_thunk) return;
     p->draw_asset_thunk(p->host_token, p->backend, p->ctx, asset,
-                          x, y, w, h, 0xFFFFFFFFu);
+                          x, y, w, h, k_draw_asset_whole, 0xFFFFFFFFu);
   }
 
-  // Tinted variant - bypasses the public painter API (which does not
-  // expose `tint`) and reaches the thunk directly. Used by the compound
-  // asset-layer paint path; clients of NEUI_W_CUSTOMDRAW continue to use
-  // k_painter_api.draw_asset.
+  // Frame-aware draw: renders cell `frame` of a filmstrip asset. On an asset
+  // with no frame layout this draws the whole bitmap (== draw_asset).
+  inline void painter_draw_asset_frame(neui_painter_t* p, neui_asset_t asset,
+                                        uint32_t frame,
+                                        float x, float y, float w, float h)
+  {
+    if (!p || !p->draw_asset_thunk) return;
+    // k_draw_asset_whole (UINT32_MAX) is the "draw the whole bitmap" sentinel.
+    // A caller asking to draw that exact frame index means the LAST frame, so
+    // nudge it onto the cell path (filmstrip_src_rect clamps any out-of-range
+    // index to the last cell) instead of silently drawing the whole strip.
+    if (frame == k_draw_asset_whole) frame = k_draw_asset_whole - 1u;
+    p->draw_asset_thunk(p->host_token, p->backend, p->ctx, asset,
+                          x, y, w, h, frame, 0xFFFFFFFFu);
+  }
+
+  // Tinted variants - bypass the public painter API (which does not expose
+  // `tint`) and reach the thunk directly. Used by the compound asset-layer
+  // paint path; clients of NEUI_W_CUSTOMDRAW use k_painter_api.draw_asset /
+  // draw_asset_frame.
   inline void painter_draw_asset_tinted(neui_painter_t* p, neui_asset_t asset,
                                           float x, float y, float w, float h,
                                           uint32_t tint)
   {
     if (!p || !p->draw_asset_thunk) return;
     p->draw_asset_thunk(p->host_token, p->backend, p->ctx, asset,
-                          x, y, w, h, tint);
+                          x, y, w, h, k_draw_asset_whole, tint);
+  }
+
+  inline void painter_draw_asset_frame_tinted(neui_painter_t* p, neui_asset_t asset,
+                                               uint32_t frame,
+                                               float x, float y, float w, float h,
+                                               uint32_t tint)
+  {
+    if (!p || !p->draw_asset_thunk) return;
+    // See painter_draw_asset_frame: keep the whole-bitmap sentinel out of the
+    // frame value domain so frame == UINT32_MAX clamps to the last cell.
+    if (frame == k_draw_asset_whole) frame = k_draw_asset_whole - 1u;
+    p->draw_asset_thunk(p->host_token, p->backend, p->ctx, asset,
+                          x, y, w, h, frame, tint);
   }
 
   inline void painter_push_alpha(neui_painter_t* p, float factor)
@@ -235,6 +358,7 @@ namespace neui_detail {
     painter_pop_alpha,
     painter_push_font,
     painter_pop_font,
+    painter_draw_asset_frame,
   };
 
 } // namespace neui_detail

@@ -135,6 +135,7 @@ namespace macos_host {
                                                  neui_asset_t asset,
                                                  float x, float y,
                                                  float w, float h,
+                                                 uint32_t frame,
                                                  uint32_t tint);
 
   // Blocking popup menu. Builds an NSMenu from the NULL-terminated UTF-8
@@ -1454,12 +1455,12 @@ static float neui_snap_to_steps(float v, int steps)
             backend->translate(render_ctx, -dw * 0.5f, -dh * 0.5f);
             macos_host::macos_painter_draw_asset_thunk(
               sess, backend, render_ctx, wd->image_asset, 0, 0, dw, dh,
-              0xFFFFFFFFu);
+              neui_detail::k_draw_asset_whole, 0xFFFFFFFFu);
             backend->pop_transform(render_ctx);
           } else {
             macos_host::macos_painter_draw_asset_thunk(
               sess, backend, render_ctx, wd->image_asset, dx, dy, dw, dh,
-              0xFFFFFFFFu);
+              neui_detail::k_draw_asset_whole, 0xFFFFFFFFu);
           }
         }
       }
@@ -2665,6 +2666,7 @@ namespace macos_host {
                                                  neui_asset_t asset,
                                                  float x, float y,
                                                  float w, float h,
+                                                 uint32_t frame,
                                                  uint32_t tint)
   {
     auto* s = static_cast<Session*>(host_token);
@@ -2675,9 +2677,11 @@ namespace macos_host {
     auto* entry = s->_asset_manager.get_slot(slot);
     if (!entry) return;
     // Cache-walk + lazy GPU upload + draw shared with the other hosts
-    // (hosts/shared/painter.h).
-    neui_detail::painter_draw_entry_cached(backend, ctx, entry,
-                                            x, y, w, h, tint);
+    // (hosts/shared/painter.h). The dispatch helper owns the whole-vs-cell
+    // rule (k_draw_asset_whole draws the whole bitmap; a frame index samples
+    // one filmstrip cell).
+    neui_detail::painter_draw_entry_dispatch(backend, ctx, entry, frame,
+                                             x, y, w, h, tint);
   }
 }
 

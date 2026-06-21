@@ -101,6 +101,7 @@ namespace ios_host
                                              neui_render_ctx_t ctx,
                                              neui_asset_t asset,
                                              float x, float y, float w, float h,
+                                             uint32_t frame,
                                              uint32_t tint);
 
   // A TABPAGE is a chip-less SECTION: the section attr handlers (background /
@@ -1616,6 +1617,7 @@ namespace ios_host
     in.params = &e->comp_params;
     in.asset_names = &e->comp_asset_names;
     in.asset_handle_names = &e->comp_asset_handle_names;
+    in.asset_frame_layouts = &e->comp_asset_frame_layouts;
     auto* cce = s->_asset_manager.get_slot(e->comp_compound.id & 0xffff);
     auto* bbe = s->_asset_manager.get_slot(e->comp_behavior.id & 0xffff);
     in.compound = (cce && cce->compound) ? cce->compound.get() : nullptr;
@@ -1630,6 +1632,35 @@ namespace ios_host
     return full;
   }
 
+  static bool NEUI_ABI as_set_frame_layout(neui_session_t session, neui_asset_t asset,
+                                            uint32_t cols, uint32_t rows, uint32_t gutter_px)
+  {
+    auto* s = get_session(session);
+    if (!s || asset.id == asset_none.id) return false;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return false;
+    return s->_asset_manager.set_frame_layout(asset.id & 0xffff, cols, rows, gutter_px);
+  }
+  static neui_asset_t NEUI_ABI as_create_filmstrip_from_file(
+      neui_session_t session, const char* path, uint32_t frame_count,
+      neui_filmstrip_orientation_t orientation)
+  {
+    auto* s = get_session(session);
+    if (!s || !path) return asset_none;
+    float scale = (float)UIScreen.mainScreen.scale;
+    if (scale <= 0) scale = 1.0f;
+    uint32_t slot = s->_asset_manager.allocate_filmstrip_from_file(
+        path, scale, frame_count, orientation == NEUI_FILMSTRIP_HORIZONTAL,
+        neui_cg_backend::get_backend());
+    return slot ? pack_asset_ios(s->session_id(), slot) : asset_none;
+  }
+  static uint32_t NEUI_ABI as_get_frame_count(neui_session_t session, neui_asset_t asset)
+  {
+    auto* s = get_session(session);
+    if (!s || asset.id == asset_none.id) return 0;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return 0;
+    return s->_asset_manager.frame_count(asset.id & 0xffff);
+  }
+
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
     as_create_bitmap, as_create_from_file, as_destroy,
@@ -1642,6 +1673,9 @@ namespace ios_host
     as_component_param_count,
     as_component_param_at,
     as_serialize_component,
+    as_set_frame_layout,
+    as_create_filmstrip_from_file,
+    as_get_frame_count,
   };
 
   // -------------------------------------------------------------------------

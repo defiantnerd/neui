@@ -750,6 +750,7 @@ namespace win32_host
       neui_render_ctx_t ctx,
       neui_asset_t asset,
       float x, float y, float w, float h,
+      uint32_t frame,
       uint32_t tint)
   {
     auto* s = static_cast<Session*>(host_token);
@@ -760,9 +761,11 @@ namespace win32_host
     auto* entry = s->_asset_manager.get_slot(slot);
     if (!entry) return;
     // Cache-walk + lazy GPU upload + draw shared with the other hosts
-    // (hosts/shared/painter.h).
-    neui_detail::painter_draw_entry_cached(backend, ctx, entry,
-                                            x, y, w, h, tint);
+    // (hosts/shared/painter.h). The dispatch helper owns the whole-vs-cell
+    // rule (k_draw_asset_whole draws the whole bitmap; a frame index samples
+    // one filmstrip cell).
+    neui_detail::painter_draw_entry_dispatch(backend, ctx, entry, frame,
+                                             x, y, w, h, tint);
   }
 
   // Invalidate the widget's HWND if it hosts a CUSTOMDRAW compound whose
@@ -5132,14 +5135,9 @@ namespace win32_host
     return pack_asset_w32(s->session_id(), slot);
   }
 
-  static neui_asset_t NEUI_ABI as_create_from_file(neui_session_t session,
-                                                     const char* path_utf8)
+  // Best-guess @Nx scale for a file load: the screen DPI. Falls back to 1.0.
+  static float best_asset_scale_w32()
   {
-    auto* s = get_session(session);
-    if (!s || !path_utf8) return asset_none;
-    // Pick the highest DPI scale across the session's frames as the
-    // preference for @Nx variant resolution. Falls back to 1.0 if no
-    // frame HWND has been created yet (deferred-show case).
     float scale = 1.0f;
     HDC screen = GetDC(nullptr);
     if (screen) {
@@ -5150,7 +5148,16 @@ namespace win32_host
         if (s_now > scale) scale = s_now;
       }
     }
-    uint32_t slot = s->_asset_manager.allocate_from_file(path_utf8, scale);
+    return scale;
+  }
+
+  static neui_asset_t NEUI_ABI as_create_from_file(neui_session_t session,
+                                                     const char* path_utf8)
+  {
+    auto* s = get_session(session);
+    if (!s || !path_utf8) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_from_file(path_utf8,
+                                                         best_asset_scale_w32());
     if (slot == 0) return asset_none;
     return pack_asset_w32(s->session_id(), slot);
   }
@@ -5407,6 +5414,7 @@ namespace win32_host
     in.params = &e->comp_params;
     in.asset_names = &e->comp_asset_names;
     in.asset_handle_names = &e->comp_asset_handle_names;
+    in.asset_frame_layouts = &e->comp_asset_frame_layouts;
     auto* cce = s->_asset_manager.get_slot(e->comp_compound.id & 0xffff);
     auto* bbe = s->_asset_manager.get_slot(e->comp_behavior.id & 0xffff);
     in.compound = (cce && cce->compound) ? cce->compound.get() : nullptr;
@@ -5419,6 +5427,41 @@ namespace win32_host
       out_buf[n] = '\0';
     }
     return full;
+  }
+
+  static bool NEUI_ABI as_set_frame_layout(neui_session_t session,
+                                           neui_asset_t asset,
+                                           uint32_t cols, uint32_t rows,
+                                           uint32_t gutter_px)
+  {
+    auto* s = get_session(session);
+    if (!s || asset.id == asset_none.id) return false;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return false;
+    return s->_asset_manager.set_frame_layout(asset.id & 0xffff,
+                                              cols, rows, gutter_px);
+  }
+
+  static neui_asset_t NEUI_ABI as_create_filmstrip_from_file(
+      neui_session_t session, const char* path_utf8,
+      uint32_t frame_count, neui_filmstrip_orientation_t orientation)
+  {
+    auto* s = get_session(session);
+    if (!s || !path_utf8) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_filmstrip_from_file(
+        path_utf8, best_asset_scale_w32(), frame_count,
+        orientation == NEUI_FILMSTRIP_HORIZONTAL,
+        neui_d2d_backend::get_backend());
+    if (slot == 0) return asset_none;
+    return pack_asset_w32(s->session_id(), slot);
+  }
+
+  static uint32_t NEUI_ABI as_get_frame_count(neui_session_t session,
+                                              neui_asset_t asset)
+  {
+    auto* s = get_session(session);
+    if (!s || asset.id == asset_none.id) return 0;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return 0;
+    return s->_asset_manager.frame_count(asset.id & 0xffff);
   }
 
   neui_asset_api_t asset_api = {
@@ -5440,6 +5483,9 @@ namespace win32_host
     as_component_param_count,
     as_component_param_at,
     as_serialize_component,
+    as_set_frame_layout,
+    as_create_filmstrip_from_file,
+    as_get_frame_count,
   };
 
   // ---------------------------------------------------------------------------

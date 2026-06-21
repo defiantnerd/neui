@@ -1916,15 +1916,12 @@ namespace xpl_host
     return pack_asset(s->_session_id, slot);
   }
 
-  static neui_asset_t NEUI_ABI as_create_from_file(neui_session_t session,
-                                                     const char* path_utf8)
+  // Best-guess @Nx scale for a file load: the highest DPI of any frame in
+  // this session. Falls back to 1.0 if no frames are realized yet.
+  static float best_asset_scale(Session* s)
   {
-    auto* s = get_session(session);
-    if (!s || !path_utf8) return asset_none;
-    // Use the highest DPI of any frame in this session as a best-guess
-    // for which @Nx variant to prefer. Falls back to 1.0 if no frames yet.
     float scale = 1.0f;
-    if (s->_backend && s->_backend->get_scale_factor) {
+    if (s && s->_backend && s->_backend->get_scale_factor) {
       uint32_t child = s->_widgets.child(0);
       while (child != 0) {
         if (s->_widgets.exists(child)) {
@@ -1937,7 +1934,16 @@ namespace xpl_host
         child = s->_widgets.next(child);
       }
     }
-    uint32_t slot = s->_asset_manager.allocate_from_file(path_utf8, scale);
+    return scale;
+  }
+
+  static neui_asset_t NEUI_ABI as_create_from_file(neui_session_t session,
+                                                     const char* path_utf8)
+  {
+    auto* s = get_session(session);
+    if (!s || !path_utf8) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_from_file(path_utf8,
+                                                         best_asset_scale(s));
     if (slot == 0) return asset_none;
     return pack_asset(s->_session_id, slot);
   }
@@ -2009,6 +2015,7 @@ namespace xpl_host
       neui_render_ctx_t ctx,
       neui_asset_t asset,
       float x, float y, float w, float h,
+      uint32_t frame,
       uint32_t tint);
 
   static neui_asset_t NEUI_ABI as_create_surface(neui_session_t session,
@@ -2190,6 +2197,7 @@ namespace xpl_host
     in.params             = &e->comp_params;
     in.asset_names        = &e->comp_asset_names;
     in.asset_handle_names = &e->comp_asset_handle_names;
+    in.asset_frame_layouts = &e->comp_asset_frame_layouts;
     auto* ce = s->_asset_manager.get_slot(e->comp_compound.id & 0xffff);
     auto* be = s->_asset_manager.get_slot(e->comp_behavior.id & 0xffff);
     in.compound = (ce && ce->compound) ? ce->compound.get() : nullptr;
@@ -2255,6 +2263,40 @@ namespace xpl_host
     return w;
   }
 
+  static bool NEUI_ABI as_set_frame_layout(neui_session_t session,
+                                           neui_asset_t asset,
+                                           uint32_t cols, uint32_t rows,
+                                           uint32_t gutter_px)
+  {
+    auto* s = get_session(session);
+    if (!s || asset.id == asset_none.id) return false;
+    if (((asset.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return false;
+    return s->_asset_manager.set_frame_layout(asset.id & 0xffff,
+                                              cols, rows, gutter_px);
+  }
+
+  static neui_asset_t NEUI_ABI as_create_filmstrip_from_file(
+      neui_session_t session, const char* path_utf8,
+      uint32_t frame_count, neui_filmstrip_orientation_t orientation)
+  {
+    auto* s = get_session(session);
+    if (!s || !path_utf8) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_filmstrip_from_file(
+        path_utf8, best_asset_scale(s), frame_count,
+        orientation == NEUI_FILMSTRIP_HORIZONTAL, s->_backend);
+    if (slot == 0) return asset_none;
+    return pack_asset(s->_session_id, slot);
+  }
+
+  static uint32_t NEUI_ABI as_get_frame_count(neui_session_t session,
+                                              neui_asset_t asset)
+  {
+    auto* s = get_session(session);
+    if (!s || asset.id == asset_none.id) return 0;
+    if (((asset.id >> 16) & 0xffff) != (s->_session_id & 0xffff)) return 0;
+    return s->_asset_manager.frame_count(asset.id & 0xffff);
+  }
+
   neui_asset_api_t asset_api = {
     NEUI_VERSION,
     as_create_bitmap,
@@ -2274,6 +2316,9 @@ namespace xpl_host
     as_component_param_count,
     as_component_param_at,
     as_serialize_component,
+    as_set_frame_layout,
+    as_create_filmstrip_from_file,
+    as_get_frame_count,
   };
 
   // ===========================================================================

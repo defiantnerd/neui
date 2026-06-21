@@ -14,6 +14,7 @@
 #include "behavior.h"
 #include "painter.h"  // draw_asset_thunk_t + neui_painter + k_painter_api
 #include "component_loader.h"  // BuiltComponent / ComponentDefaultAttr / ComponentParam
+#include "filmstrip_recognize.h"  // FilmstripLayout + sidecar/filename discovery
 
 // Session-scoped asset slot table shared by all three hosts. Each host
 // previously carried a near-identical manager (xpl AssetManager, win32
@@ -47,6 +48,24 @@ namespace neui_detail
     uint32_t generation = 0;
   };
 
+  // Frame-strip ("filmstrip" / "stitchmap" / "sprite strip") layout for a
+  // BITMAP / SURFACE asset whose pixels pack N evenly-spaced frames in a
+  // cols x rows row-major grid (the audio-plugin convention: a single column
+  // of N stacked frames, value -> frame). Present (non-null on AssetEntry)
+  // only when the asset has been tagged via set_frame_layout; the kind stays
+  // BITMAP / SURFACE so every other consumer treats it as an ordinary
+  // bitmap. frame_w_px / frame_h_px are derived once at tag time so the draw
+  // path does no division per frame.
+  struct FilmstripInfo
+  {
+    uint32_t frame_count = 0;   // cols * rows
+    uint32_t cols        = 1;   // grid columns (vertical strip = 1)
+    uint32_t rows        = 0;   // grid rows
+    uint32_t gutter_px   = 0;   // physical px between cells (0 = tight pack)
+    uint32_t frame_w_px  = 0;   // physical px per cell
+    uint32_t frame_h_px  = 0;
+  };
+
   // A single loaded asset: kind discriminator, CPU pixels (for bitmap
   // kinds) and per-render-context GPU bitmap cache. Future kinds (SVG /
   // vector) will reuse the slot table but populate a different storage
@@ -64,6 +83,10 @@ namespace neui_detail
     // draw_bitmap tint param handles colourisation at draw time, so the
     // per-(asset, ctx) entry stays single-source-of-truth.
     std::unordered_map<neui_render_ctx_t, CtxBitmap> bitmaps;
+
+    // Populated when a BITMAP / SURFACE asset has been tagged as a frame
+    // strip via set_frame_layout; null = ordinary single-image bitmap.
+    std::unique_ptr<FilmstripInfo> filmstrip;
 
     // Populated for NEUI_ASSET_KIND_COMPOUND entries; null otherwise.
     std::unique_ptr<CompoundAsset> compound;
@@ -107,6 +130,7 @@ namespace neui_detail
     std::string                                      comp_name;
     std::vector<std::pair<std::string, std::string>> comp_asset_names;
     std::vector<std::pair<uint32_t, std::string>>    comp_asset_handle_names;
+    std::vector<std::pair<uint32_t, FilmstripLayout>> comp_asset_frame_layouts;
   };
 
   template <typename Loader>
@@ -161,6 +185,120 @@ namespace neui_detail
       return alloc_slot(std::move(entry));
     }
 
+    // Tag a BITMAP / SURFACE slot with a frame-strip layout: a cols x rows
+    // row-major grid of equal cells separated by gutter_px (vertical strip =
+    // cols 1). Cell size is floor((dim - (n-1)*gutter) / n) so the grid is
+    // guaranteed to stay within the bitmap bounds. Returns false (leaving the
+    // asset an untagged plain bitmap) for a non-bitmap kind, cols/rows < 1, a
+    // zero-size bitmap, or a grid that can't fit at least 1 px per cell - so a
+    // mis-tag can never produce an out-of-bounds source rect. Re-tagging
+    // overwrites a prior layout; cols == rows == 1 leaves a single-frame
+    // entry (frame_count 1), still drawable via the frame path.
+    bool set_frame_layout(uint32_t slot, uint32_t cols, uint32_t rows,
+                          uint32_t gutter_px)
+    {
+      AssetEntry* e = get_slot(slot);
+      if (!e) return false;
+      if (e->kind != NEUI_ASSET_KIND_BITMAP && e->kind != NEUI_ASSET_KIND_SURFACE)
+        return false;
+      if (cols < 1 || rows < 1) return false;
+      if (e->width_px == 0 || e->height_px == 0) return false;
+
+      const uint64_t gutters_x = static_cast<uint64_t>(cols - 1) * gutter_px;
+      const uint64_t gutters_y = static_cast<uint64_t>(rows - 1) * gutter_px;
+      if (gutters_x >= e->width_px || gutters_y >= e->height_px) return false;
+      const uint32_t fw = static_cast<uint32_t>((e->width_px  - gutters_x) / cols);
+      const uint32_t fh = static_cast<uint32_t>((e->height_px - gutters_y) / rows);
+      if (fw == 0 || fh == 0) return false;
+      // frame_count must stay addressable as a uint32 - guard the product so a
+      // pathological grid can't wrap to a small bogus count (the comment above
+      // promises a mis-tag never yields an out-of-bounds source rect).
+      const uint64_t fc = static_cast<uint64_t>(cols) * rows;
+      if (fc > 0xFFFFFFFFull) return false;
+
+      auto fs = std::make_unique<FilmstripInfo>();
+      fs->cols        = cols;
+      fs->rows        = rows;
+      fs->gutter_px   = gutter_px;
+      fs->frame_w_px  = fw;
+      fs->frame_h_px  = fh;
+      fs->frame_count = static_cast<uint32_t>(fc);
+      e->filmstrip = std::move(fs);
+      return true;
+    }
+
+    // Frame layout for a slot, or nullptr if the slot is invalid / untagged.
+    // Borrowed; valid until the next mutating call.
+    const FilmstripInfo* frame_info(uint32_t slot)
+    {
+      AssetEntry* e = get_slot(slot);
+      return (e && e->filmstrip) ? e->filmstrip.get() : nullptr;
+    }
+
+    // Frame count for a slot, or 0 if it isn't a frame strip.
+    uint32_t frame_count(uint32_t slot)
+    {
+      const FilmstripInfo* fs = frame_info(slot);
+      return fs ? fs->frame_count : 0u;
+    }
+
+    // Physical-px source rect of frame `frame` within a tagged slot (row
+    // major; frame clamps into [0, frame_count)). Returns false for an
+    // untagged / invalid slot, leaving the out params untouched.
+    bool frame_src_rect(uint32_t slot, uint32_t frame,
+                        float* sx, float* sy, float* sw, float* sh)
+    {
+      const FilmstripInfo* fs = frame_info(slot);
+      if (!fs) return false;
+      float x = 0, y = 0, w = 0, h = 0;
+      filmstrip_src_rect(fs->frame_count, fs->cols, fs->frame_w_px,
+                         fs->frame_h_px, fs->gutter_px, frame, x, y, w, h);
+      if (sx) *sx = x;
+      if (sy) *sy = y;
+      if (sw) *sw = w;
+      if (sh) *sh = h;
+      return true;
+    }
+
+    // Load a bitmap from a file (allocate_from_file, incl. @2x/@3x resolution)
+    // and tag it with an explicit cols x rows (+ gutter) frame grid. On tag
+    // failure the freshly-loaded slot is released so a partial untagged asset
+    // never leaks. Returns 0 on load failure / unfittable grid.
+    uint32_t allocate_filmstrip_grid_from_file(const std::string& name, float scale,
+                                               uint32_t cols, uint32_t rows,
+                                               uint32_t gutter_px,
+                                               neui_render_backend_t* backend)
+    {
+      uint32_t slot = allocate_from_file(name, scale);
+      if (slot == 0) return 0;
+      if (!set_frame_layout(slot, cols, rows, gutter_px)) {
+        release_slot(slot, backend);
+        return 0;
+      }
+      return slot;
+    }
+
+    // Convenience: load + tag a frame_count-frame strip - a single column
+    // (horizontal == false) or single row (horizontal == true). When
+    // frame_count == 0, DISCOVER the layout from a "<path>.json" / "<base>.json"
+    // sidecar or a "<N>frames" / "-<N>" filename token (filmstrip_recognize.h);
+    // `horizontal` then picks the axis for the filename branch. Returns 0 on
+    // bad/undiscoverable layout, load failure, or an unfittable strip.
+    uint32_t allocate_filmstrip_from_file(const std::string& name, float scale,
+                                           uint32_t frame_count, bool horizontal,
+                                           neui_render_backend_t* backend)
+    {
+      if (frame_count == 0) {
+        FilmstripLayout lay;
+        if (!filmstrip_discover_from_path(name, horizontal, lay)) return 0;
+        return allocate_filmstrip_grid_from_file(name, scale, lay.cols, lay.rows,
+                                                 lay.gutter, backend);
+      }
+      const uint32_t cols = horizontal ? frame_count : 1u;
+      const uint32_t rows = horizontal ? 1u : frame_count;
+      return allocate_filmstrip_grid_from_file(name, scale, cols, rows, 0, backend);
+    }
+
     // Allocate a slot holding an empty CompoundAsset. Mutated via
     // NEUI_API_COMPOUND. Returns 0 on failure.
     uint32_t allocate_compound()
@@ -201,6 +339,7 @@ namespace neui_detail
       entry->comp_name              = built.name;
       entry->comp_asset_names       = built.asset_names;
       entry->comp_asset_handle_names = built.asset_handle_names;
+      entry->comp_asset_frame_layouts = built.asset_frame_layouts;
       return alloc_slot(std::move(entry));
     }
 
