@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <type_traits>
 #include <vector>
@@ -89,26 +90,51 @@ namespace neui_detail {
     return it->second.bmp;
   }
 
-  // Compute the physical-px source rect of frame `frame` within a frame
-  // strip laid out as a `cols`-wide row-major grid of `frame_w_px` x
-  // `frame_h_px` cells separated by `gutter_px`. `frame` clamps into
-  // [0, frame_count) so a value past the end pins to the last frame
-  // (mirrors a knob value of 1.0 mapping to the final frame). Single
-  // source of truth shared by the draw path and the store's frame_src_rect.
-  inline void filmstrip_src_rect(uint32_t frame_count, uint32_t cols,
-                                 uint32_t frame_w_px, uint32_t frame_h_px,
+  // Compute the physical-px source rect of frame `frame` within a frame strip
+  // laid out as a `cols` x `rows` row-major grid that fills a `total_w_px` x
+  // `total_h_px` bitmap, with `gutter_px` between cells. `frame` clamps into
+  // [0, frame_count) so a value past the end pins to the last frame (mirrors a
+  // knob value of 1.0 mapping to the final frame). Single source of truth
+  // shared by the draw path and the store's frame_src_rect.
+  //
+  // Each axis is partitioned so the cells tile the full dimension EXACTLY, with
+  // the ideal (possibly fractional) cell boundaries rounded to whole pixels.
+  // This keeps every cell aligned to the source artwork even when a dimension
+  // isn't an exact multiple of the count: a floored constant pitch drifted ~1px
+  // further off the artwork with each successive cell. Adjacent cells share a
+  // rounded boundary (no gaps / overlaps), cell sizes differ by at most 1px,
+  // and the grid never exceeds the bitmap bounds.
+  inline void filmstrip_src_rect(uint32_t frame_count, uint32_t cols, uint32_t rows,
+                                 uint32_t total_w_px, uint32_t total_h_px,
                                  uint32_t gutter_px, uint32_t frame,
                                  float& sx, float& sy, float& sw, float& sh)
   {
     const uint32_t fc = frame_count ? frame_count : 1u;
     if (frame >= fc) frame = fc - 1u;
     const uint32_t c   = cols ? cols : 1u;
+    const uint32_t r   = rows ? rows : 1u;
     const uint32_t col = frame % c;
     const uint32_t row = frame / c;
-    sx = static_cast<float>(col * (frame_w_px + gutter_px));
-    sy = static_cast<float>(row * (frame_h_px + gutter_px));
-    sw = static_cast<float>(frame_w_px);
-    sh = static_cast<float>(frame_h_px);
+
+    // Origin + size of cell `idx` along an axis of `total` px split into `n`
+    // equal cells separated by `gutter` px.
+    auto axis = [](uint32_t total, uint32_t n, uint32_t gutter, uint32_t idx,
+                   double& origin, double& size) {
+      const uint64_t gutters = static_cast<uint64_t>(gutter) * (n - 1);
+      const double avail = (gutters < total)
+          ? static_cast<double>(total - gutters) : 0.0;
+      const double a = std::floor(avail * idx       / n + 0.5);
+      const double b = std::floor(avail * (idx + 1) / n + 0.5);
+      origin = a + static_cast<double>(gutter) * idx;
+      size   = b - a;
+    };
+    double ox, oy, ow, oh;
+    axis(total_w_px, c, gutter_px, col, ox, ow);
+    axis(total_h_px, r, gutter_px, row, oy, oh);
+    sx = static_cast<float>(ox);
+    sy = static_cast<float>(oy);
+    sw = static_cast<float>(ow);
+    sh = static_cast<float>(oh);
   }
 
   // Shared body for the per-host draw_asset thunks: lazy GPU upload for the
@@ -151,7 +177,8 @@ namespace neui_detail {
     float sx = 0.0f, sy = 0.0f, sw = 0.0f, sh = 0.0f;  // 0,0,0,0 = full bitmap
     if (entry->filmstrip) {
       const auto& fs = *entry->filmstrip;
-      filmstrip_src_rect(fs.frame_count, fs.cols, fs.frame_w_px, fs.frame_h_px,
+      filmstrip_src_rect(fs.frame_count, fs.cols, fs.rows,
+                         entry->width_px, entry->height_px,
                          fs.gutter_px, frame, sx, sy, sw, sh);
       // filmstrip_src_rect yields PHYSICAL px; draw_bitmap's source rect is in
       // the bitmap's LOGICAL space (every backend re-applies the bitmap scale

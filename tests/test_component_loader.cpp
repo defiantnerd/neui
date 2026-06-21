@@ -46,6 +46,7 @@ namespace
   std::map<uint32_t, FrameLayoutRec> g_frame_layouts;   // asset id -> grid
   bool                     g_compound_created = false;
   bool                     g_behavior_created = false;
+  bool                     g_frame_layout_ok  = true;   // fake set_frame_layout result
 
   void reset_recorders()
   {
@@ -55,6 +56,7 @@ namespace
     g_frame_layouts.clear();
     g_compound_created = false;
     g_behavior_created = false;
+    g_frame_layout_ok  = true;
   }
 
   // --- fake asset api ------------------------------------------------------
@@ -70,7 +72,11 @@ namespace
   }
   bool NEUI_ABI fake_set_frame_layout(neui_session_t, neui_asset_t a,
                                       uint32_t cols, uint32_t rows, uint32_t gutter)
-  { g_frame_layouts[a.id] = { cols, rows, gutter }; return true; }
+  {
+    if (!g_frame_layout_ok) return false;   // simulate a layout that won't fit
+    g_frame_layouts[a.id] = { cols, rows, gutter };
+    return true;
+  }
 
   // --- fake compound api ---------------------------------------------------
   neui_compound_layer_t NEUI_ABI fake_add_layer(neui_session_t, neui_asset_t,
@@ -311,6 +317,32 @@ TEST_CASE("component_loader: frame_layout tags the resolved asset")
   // frame bind round-trips through the generic numeric-bind path.
   REQUIRE(a0->binds.count("frame") == 1);
   CHECK(a0->binds.at("frame").scale == 99.0f);
+}
+
+TEST_CASE("component_loader: a frame_layout the asset rejects is not recorded")
+{
+  // When set_frame_layout fails (a grid that doesn't fit the bitmap), the asset
+  // stays an untagged plain bitmap, so the loader must NOT record the layout -
+  // otherwise serialize would re-emit a frame_layout the runtime dropped.
+  reset_recorders();
+  neui_asset_api_t a; neui_compound_api_t c; neui_behavior_api_t b;
+  ComponentApis apis = make_fake_apis(a, c, b);
+  g_frame_layout_ok = false;
+
+  std::string json = R"json({
+    "size": [80, 80],
+    "assets": { "strip": "knob.png" },
+    "layers": [
+      { "kind": "asset", "asset": "strip", "frame_layout": { "frames": 700 } }
+    ]
+  })json";
+  neui_session_t sess; sess.session = 1;
+  BuiltComponent built = build_component(sess, json.c_str(), (uint32_t)json.size(),
+                                         nullptr, apis);
+  CHECK(built.ok);
+  CHECK(g_frame_layouts.empty());             // tag attempted, asset refused it
+  CHECK(built.asset_frame_layouts.empty());   // so nothing is recorded for re-emit
+  g_frame_layout_ok = true;                   // restore for later test cases
 }
 
 TEST_CASE("component_loader: text props, colors, show_when")
@@ -562,6 +594,35 @@ TEST_CASE("serialize_component: re-emits frame_layout for a tagged asset")
     REQUIRE(frames != nullptr);
     CHECK(std::get<int>(frames->value) == 100);
   }
+  CHECK_EQ(frame_layout_count, 1);
+}
+
+TEST_CASE("serialize_component: frame_layout is emitted once when layers share an asset")
+{
+  // Two asset layers reference the SAME tagged asset (id 1001). The layout
+  // lives on the asset, so it must be re-emitted on exactly ONE layer - not
+  // duplicated onto every layer that happens to draw that asset (which would
+  // bloat the round-trip document).
+  HandBuilt hb;
+  hb.anames   = { { "strip", "knob_100.png" } };
+  hb.hnames   = { { 1001u, "strip" } };
+  hb.flayouts = { { 1001u, FilmstripLayout{ 1u, 100u, 0u } } };
+
+  uint32_t s0 = compound_add_layer(hb.ca, NEUI_COMPOUND_LAYER_ASSET, 0);
+  compound_get_layer(hb.ca, s0)->asset = neui_asset_t{ 1001u };
+  uint32_t s1 = compound_add_layer(hb.ca, NEUI_COMPOUND_LAYER_ASSET, 1);
+  compound_get_layer(hb.ca, s1)->asset = neui_asset_t{ 1001u };  // same asset
+
+  std::string json = serialize_component(input_for(hb), 0);
+  auto root = neui::mujson::parse(json);
+  REQUIRE(!root.empty());
+  const auto* layers = cl_detail::obj_get(root, "layers");
+  REQUIRE(layers && std::holds_alternative<neui::mujson::array_t>(layers->value));
+
+  int frame_layout_count = 0;
+  for (const auto& ln : std::get<neui::mujson::array_t>(layers->value))
+    if (cl_detail::obj_get(std::get<neui::mujson::object_t>(ln.value), "frame_layout"))
+      ++frame_layout_count;
   CHECK_EQ(frame_layout_count, 1);
 }
 

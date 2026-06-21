@@ -67,10 +67,14 @@ namespace neui_detail
   }
 
   // Build a layout from a parsed object. Accepts { cols, rows, gutter? } OR
-  // { frames, orientation?, gutter? } (orientation "horizontal"/"h" => row
-  // strip, else column strip). Returns false if neither shape is present.
+  // { frames, orientation?, gutter? }. An explicit "orientation"
+  // ("horizontal"/"h" => row strip, else column strip) always wins; a bare
+  // "frames" with no "orientation" key falls back to `default_horizontal` (so a
+  // caller's create_filmstrip_from_file orientation arg is honoured rather than
+  // forced vertical). Returns false if neither shape is present.
   inline bool filmstrip_layout_from_object(const neui::mujson::object_t& o,
-                                           FilmstripLayout& out)
+                                           FilmstripLayout& out,
+                                           bool default_horizontal = false)
   {
     const uint32_t gutter = fr_gutter(o);
 
@@ -82,7 +86,8 @@ namespace neui_detail
     uint32_t frames = 0;
     if (fr_count(o, "frames", frames)) {
       const std::string* ori = as_str(obj_get(o, "orientation"));
-      const bool horiz = ori && (*ori == "horizontal" || *ori == "h");
+      const bool horiz = ori ? (*ori == "horizontal" || *ori == "h")
+                             : default_horizontal;
       out.cols = horiz ? frames : 1u;
       out.rows = horiz ? 1u : frames;
       out.gutter = gutter;
@@ -91,11 +96,12 @@ namespace neui_detail
     return false;
   }
 
-  inline bool filmstrip_parse_sidecar(const std::string& json, FilmstripLayout& out)
+  inline bool filmstrip_parse_sidecar(const std::string& json, FilmstripLayout& out,
+                                      bool default_horizontal = false)
   {
     neui::mujson::object_t o = neui::mujson::parse(json);
     if (o.empty()) return false;
-    return filmstrip_layout_from_object(o, out);
+    return filmstrip_layout_from_object(o, out, default_horizontal);
   }
 
   // Parse a trailing frame-count token from a base filename (no directory, no
@@ -119,14 +125,22 @@ namespace neui_detail
 
     // Strip the required trailing keyword (longest first). No keyword => not a
     // strip filename.
+    bool short_f = false;
     if      (ends_with(s, "frames")) s.erase(s.size() - 6);
     else if (ends_with(s, "frame"))  s.erase(s.size() - 5);
-    else if (ends_with(s, "f"))      s.erase(s.size() - 1);
+    else if (ends_with(s, "f"))    { s.erase(s.size() - 1); short_f = true; }
     else return false;
 
     size_t i = s.size();
     while (i > 0 && s[i - 1] >= '0' && s[i - 1] <= '9') --i;
     if (i == s.size()) return false;                 // keyword not preceded by a number
+    // The single-char 'f' keyword is far too common a name suffix to slice on a
+    // bare digit run glued to letters ("mix2f", "reverb3f"). Require the digits
+    // to start the name or follow a separator, so "fader-128f" / "knob_100f"
+    // still match but an incidental "<word><digit>f" does not. (The unambiguous
+    // "frames" / "frame" keywords carry no such restriction - "spinner24frames"
+    // is fine.) s[i-1] here is never a digit; reject only when it is a letter.
+    if (short_f && i > 0 && s[i - 1] >= 'a' && s[i - 1] <= 'z') return false;
     const long n = std::strtol(s.c_str() + i, nullptr, 10);
     if (n < 2) return false;
     count_out = static_cast<uint32_t>(n);
@@ -146,7 +160,7 @@ namespace neui_detail
       if (!f) return false;
       std::ostringstream ss;
       ss << f.rdbuf();
-      return filmstrip_parse_sidecar(ss.str(), out);
+      return filmstrip_parse_sidecar(ss.str(), out, default_horizontal);
     };
     if (try_sidecar(path + ".json")) return true;
 

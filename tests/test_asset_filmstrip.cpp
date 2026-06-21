@@ -183,6 +183,32 @@ TEST_CASE("filmstrip: out-of-range frame clamps to last")
   CHECK_EQ((int)sy, 9 * 64);                       // pinned to frame 9
 }
 
+TEST_CASE("filmstrip: cells tile a non-exact-multiple dimension without drift")
+{
+  AssetStore<FakeLoader> store;
+  // 99 px / 10 cells doesn't divide evenly (floored cell = 9 px). Cells must
+  // still tile the full 99 px - a floored constant pitch (9 px) would stop at
+  // 90 px and drift ~1 px off the artwork by the last cell.
+  uint32_t slot = make_bitmap(store, 64, 99);
+  REQUIRE(store.set_frame_layout(slot, 1, 10, 0));
+
+  float sx, sy, sw, sh;
+  store.frame_src_rect(slot, 0, &sx, &sy, &sw, &sh);
+  CHECK_EQ((int)sy, 0);                              // first cell at the top
+  store.frame_src_rect(slot, 9, &sx, &sy, &sw, &sh);
+  CHECK_EQ((int)(sy + sh), 99);                      // last cell reaches the bottom
+
+  // Cells are contiguous: each cell starts exactly where the previous ended.
+  float prev_bottom = 0.0f;
+  for (uint32_t i = 0; i < 10; ++i) {
+    store.frame_src_rect(slot, i, &sx, &sy, &sw, &sh);
+    CHECK_EQ((int)sy, (int)prev_bottom);             // no gap / overlap
+    CHECK(sh >= 9.0f);                               // cells are 9 or 10 px
+    CHECK(sh <= 10.0f);
+    prev_bottom = sy + sh;
+  }
+}
+
 TEST_CASE("filmstrip: bad layouts are rejected, asset stays a plain bitmap")
 {
   AssetStore<FakeLoader> store;
@@ -387,8 +413,10 @@ TEST_CASE("filmstrip: parse_filename accepts a number + frame keyword")
   uint32_t n = 0;
   CHECK(filmstrip_parse_filename("knob_100frames", n)); CHECK_EQ((int)n, 100);
   CHECK(filmstrip_parse_filename("KNOB_64FRAME",  n)); CHECK_EQ((int)n, 64);   // case-insensitive, singular
-  CHECK(filmstrip_parse_filename("fader-128f",    n)); CHECK_EQ((int)n, 128);  // short 'f' keyword
-  CHECK(filmstrip_parse_filename("spinner24frames", n)); CHECK_EQ((int)n, 24); // no separator needed
+  CHECK(filmstrip_parse_filename("fader-128f",    n)); CHECK_EQ((int)n, 128);  // short 'f', digits after separator
+  CHECK(filmstrip_parse_filename("knob_100f",     n)); CHECK_EQ((int)n, 100);  // short 'f', '_' separator
+  CHECK(filmstrip_parse_filename("128f",          n)); CHECK_EQ((int)n, 128);  // short 'f', digits at name start
+  CHECK(filmstrip_parse_filename("spinner24frames", n)); CHECK_EQ((int)n, 24); // "frames": no separator needed
 }
 
 TEST_CASE("filmstrip: parse_filename rejects unmarked / ambiguous names")
@@ -405,6 +433,12 @@ TEST_CASE("filmstrip: parse_filename rejects unmarked / ambiguous names")
   CHECK_FALSE(filmstrip_parse_filename("filmstrip256",  n));
   CHECK_FALSE(filmstrip_parse_filename("airstrip5",     n));
   CHECK_FALSE(filmstrip_parse_filename("knob_f64",      n)); // 'f' before the number
+  // The short 'f' keyword needs the digits to start the name or follow a
+  // separator - a digit+'f' glued to letters is an incidental suffix, not a
+  // strip marker.
+  CHECK_FALSE(filmstrip_parse_filename("mix2f",    n));
+  CHECK_FALSE(filmstrip_parse_filename("reverb3f", n));
+  CHECK_FALSE(filmstrip_parse_filename("track3f",  n));
   // No digit before the keyword / no digits / count < 2.
   CHECK_FALSE(filmstrip_parse_filename("wolf",   n));   // ends 'f' but no number
   CHECK_FALSE(filmstrip_parse_filename("shelf3", n));   // ends with a digit, no keyword
@@ -428,6 +462,25 @@ TEST_CASE("filmstrip: parse_sidecar reads frames/orientation and cols/rows/gutte
   // Junk / missing keys -> not a layout.
   CHECK_FALSE(filmstrip_parse_sidecar(R"({ "hello": 1 })", l));
   CHECK_FALSE(filmstrip_parse_sidecar("not json at all", l));
+}
+
+TEST_CASE("filmstrip: parse_sidecar honours the caller axis default for a bare frames count")
+{
+  FilmstripLayout l;
+  // A bare "frames" with no "orientation" key falls back to the caller's axis
+  // default (so create_filmstrip_from_file's orientation arg isn't ignored on
+  // the sidecar path). Default vertical unless asked otherwise.
+  REQUIRE(filmstrip_parse_sidecar(R"({ "frames": 8 })", l, /*default_horizontal=*/true));
+  CHECK_EQ((int)l.cols, 8); CHECK_EQ((int)l.rows, 1);
+  REQUIRE(filmstrip_parse_sidecar(R"({ "frames": 8 })", l, /*default_horizontal=*/false));
+  CHECK_EQ((int)l.cols, 1); CHECK_EQ((int)l.rows, 8);
+
+  // An explicit "orientation" key still wins over the caller default.
+  REQUIRE(filmstrip_parse_sidecar(R"({ "frames": 8, "orientation": "vertical" })", l, true));
+  CHECK_EQ((int)l.cols, 1); CHECK_EQ((int)l.rows, 8);
+  // A 2D { cols, rows } shape ignores the axis default entirely.
+  REQUIRE(filmstrip_parse_sidecar(R"({ "cols": 3, "rows": 2 })", l, true));
+  CHECK_EQ((int)l.cols, 3); CHECK_EQ((int)l.rows, 2);
 }
 
 TEST_CASE("filmstrip: parse_sidecar rejects out-of-range / non-positive counts")
