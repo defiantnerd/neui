@@ -122,22 +122,28 @@ extern "C" {
   // the resolved layer rect before replaying, so authoring a 24x24
   // icon does not require knowing the widget's size.
   //
-  // The five-float `args` slot interprets per kind:
-  //   MOVE_TO: args[0] = x, args[1] = y
-  //   LINE_TO: args[0] = x, args[1] = y
-  //   ARC:     args[0] = cx, args[1] = cy, args[2] = r,
-  //            args[3] = a_start (radians), args[4] = a_end (radians)
-  //   CLOSE:   args ignored
+  // The six-float `args` slot interprets per kind:
+  //   MOVE_TO:  args[0] = x, args[1] = y
+  //   LINE_TO:  args[0] = x, args[1] = y
+  //   ARC:      args[0] = cx, args[1] = cy, args[2] = r,
+  //             args[3] = a_start (radians), args[4] = a_end (radians)
+  //   CUBIC_TO: args[0] = c1x, args[1] = c1y, args[2] = c2x,
+  //             args[3] = c2y, args[4] = x, args[5] = y
+  //   QUAD_TO:  args[0] = cx, args[1] = cy, args[2] = x, args[3] = y
+  //   CLOSE:    args ignored
   typedef enum neui_path_cmd_kind {
-    NEUI_PATH_CMD_MOVE_TO = 0,
-    NEUI_PATH_CMD_LINE_TO = 1,
-    NEUI_PATH_CMD_ARC     = 2,
-    NEUI_PATH_CMD_CLOSE   = 3,
+    NEUI_PATH_CMD_MOVE_TO  = 0,
+    NEUI_PATH_CMD_LINE_TO  = 1,
+    NEUI_PATH_CMD_ARC      = 2,
+    NEUI_PATH_CMD_CLOSE    = 3,
+    NEUI_PATH_CMD_CUBIC_TO = 4,
+    NEUI_PATH_CMD_QUAD_TO  = 5,
   } neui_path_cmd_kind_t;
 
+  // args is six floats: a cubic Bézier needs six (two control points + end).
   typedef struct neui_path_cmd {
     uint32_t kind;
-    float    args[5];
+    float    args[6];
   } neui_path_cmd_t;
 
   // 9-point anchor system. Layer geometry: a layer's `self_anchor` point

@@ -74,6 +74,7 @@ namespace neui_cairo_backend
     bool            use_shm = false;
 
     bool is_offscreen = false;            // backs NEUI_ASSET_KIND_SURFACE
+    bool eo_fill      = false;            // even-odd fill rule (reset on begin_path)
   };
 
   // --------------------------------------------------------------------------
@@ -705,6 +706,7 @@ namespace neui_cairo_backend
     auto* st = static_cast<CairoCtx*>(raw);
     if (!st || !st->cr) return;
     cairo_new_path(st->cr);
+    st->eo_fill = false;
   }
 
   static void cairo_move_to_fn(neui_render_ctx_t raw, float x, float y)
@@ -750,6 +752,8 @@ namespace neui_cairo_backend
     if (!st || !st->cr) return;
     double rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     cairo_set_source_rgba(st->cr, rgba[0], rgba[1], rgba[2], rgba[3]);
+    cairo_set_fill_rule(st->cr, st->eo_fill ? CAIRO_FILL_RULE_EVEN_ODD
+                                            : CAIRO_FILL_RULE_WINDING);
     cairo_fill_preserve(st->cr);  // keep path so a later stroke_path works
   }
 
@@ -762,6 +766,61 @@ namespace neui_cairo_backend
     cairo_set_source_rgba(st->cr, rgba[0], rgba[1], rgba[2], rgba[3]);
     cairo_set_line_width(st->cr, stroke_width);
     cairo_stroke_preserve(st->cr);
+  }
+
+  static void cairo_cubic_to(neui_render_ctx_t raw, float c1x, float c1y,
+                             float c2x, float c2y, float x, float y)
+  {
+    auto* st = static_cast<CairoCtx*>(raw);
+    if (!st || !st->cr) return;
+    cairo_curve_to(st->cr, c1x, c1y, c2x, c2y, x, y);
+  }
+
+  static void cairo_quad_to(neui_render_ctx_t raw, float cx, float cy, float x, float y)
+  {
+    auto* st = static_cast<CairoCtx*>(raw);
+    if (!st || !st->cr) return;
+    // Cairo has no native quadratic; elevate to a cubic about the current
+    // point (cairo_curve_to also starts a sub-path at (0,0) if none, matching
+    // the elevation when there is no current point).
+    double curx = 0.0, cury = 0.0;
+    if (cairo_has_current_point(st->cr))
+      cairo_get_current_point(st->cr, &curx, &cury);
+    double c1[2], c2[2];
+    neui_detail::quad_to_cubic<double>(curx, cury, cx, cy, x, y, c1, c2);
+    cairo_curve_to(st->cr, c1[0], c1[1], c2[0], c2[1], x, y);
+  }
+
+  static void cairo_set_fill_rule_fn(neui_render_ctx_t raw, neui_fill_rule_t rule)
+  {
+    auto* st = static_cast<CairoCtx*>(raw);
+    if (st) st->eo_fill = (rule == NEUI_FILL_RULE_EVENODD);
+  }
+
+  static void cairo_stroke_path_styled(neui_render_ctx_t raw, float stroke_width,
+                                       uint32_t argb, const neui_stroke_style_t* style)
+  {
+    auto* st = static_cast<CairoCtx*>(raw);
+    if (!st || !st->cr) return;
+    if (!style) { cairo_stroke_path(raw, stroke_width, argb); return; }
+    double rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
+    cairo_save(st->cr);   // line cap/join/miter/dash are cr state
+    cairo_set_source_rgba(st->cr, rgba[0], rgba[1], rgba[2], rgba[3]);
+    cairo_set_line_width(st->cr, stroke_width);
+    cairo_set_line_cap(st->cr,
+      style->cap == NEUI_LINE_CAP_ROUND  ? CAIRO_LINE_CAP_ROUND  :
+      style->cap == NEUI_LINE_CAP_SQUARE ? CAIRO_LINE_CAP_SQUARE : CAIRO_LINE_CAP_BUTT);
+    cairo_set_line_join(st->cr,
+      style->join == NEUI_LINE_JOIN_ROUND ? CAIRO_LINE_JOIN_ROUND :
+      style->join == NEUI_LINE_JOIN_BEVEL ? CAIRO_LINE_JOIN_BEVEL : CAIRO_LINE_JOIN_MITER);
+    cairo_set_miter_limit(st->cr, style->miter_limit > 0.0f ? style->miter_limit : 4.0);
+    if (style->dash_array && style->dash_count > 0) {
+      std::vector<double> dashes(style->dash_count);
+      for (uint32_t i = 0; i < style->dash_count; ++i) dashes[i] = style->dash_array[i];
+      cairo_set_dash(st->cr, dashes.data(), static_cast<int>(dashes.size()), style->dash_offset);
+    }
+    cairo_stroke_preserve(st->cr);
+    cairo_restore(st->cr);
   }
 
   // --------------------------------------------------------------------------
@@ -825,6 +884,8 @@ namespace neui_cairo_backend
     cairo_pattern_t* pat = cairo_make_gradient(st, g);
     if (!pat) return;
     cairo_set_source(st->cr, pat);
+    cairo_set_fill_rule(st->cr, st->eo_fill ? CAIRO_FILL_RULE_EVEN_ODD
+                                            : CAIRO_FILL_RULE_WINDING);
     cairo_fill_preserve(st->cr);  // keep path so a later stroke_path works
     cairo_pattern_destroy(pat);
   }
@@ -1108,6 +1169,10 @@ namespace neui_cairo_backend
     cairo_unregister_font,
     cairo_fill_rect_gradient,
     cairo_fill_path_gradient,
+    cairo_cubic_to,
+    cairo_quad_to,
+    cairo_set_fill_rule_fn,
+    cairo_stroke_path_styled,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

@@ -49,6 +49,10 @@ namespace neui_null_backend
   static void  null_unregister_font(uint64_t) {}
   static void  null_fill_rect_gradient(neui_render_ctx_t, float, float, float, float, const neui_gradient_t*) {}
   static void  null_fill_path_gradient(neui_render_ctx_t, const neui_gradient_t*) {}
+  static void  null_cubic_to(neui_render_ctx_t, float, float, float, float, float, float) {}
+  static void  null_quad_to(neui_render_ctx_t, float, float, float, float) {}
+  static void  null_set_fill_rule(neui_render_ctx_t, neui_fill_rule_t) {}
+  static void  null_stroke_path_styled(neui_render_ctx_t, float, uint32_t, const neui_stroke_style_t*) {}
 
   static neui_render_backend_t backend = {
     NEUI_VERSION,
@@ -92,6 +96,10 @@ namespace neui_null_backend
     null_unregister_font,
     null_fill_rect_gradient,
     null_fill_path_gradient,
+    null_cubic_to,
+    null_quad_to,
+    null_set_fill_rule,
+    null_stroke_path_styled,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

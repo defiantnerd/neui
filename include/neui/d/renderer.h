@@ -1,6 +1,7 @@
 #pragma once
 #include "api.h"
 #include "gradient.h"
+#include "path_style.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -311,6 +312,24 @@ typedef struct neui_render_backend {
                                       const neui_gradient_t* grad);
   void (NEUI_ABI *fill_path_gradient)(neui_render_ctx_t ctx,
                                       const neui_gradient_t* grad);
+
+  // --- Path curves + fill-rule + stroke style (vtable-appended) ----------
+  //
+  // cubic_to / quad_to append Bézier segments to the current path (like
+  // line_to). set_fill_rule selects nonzero / even-odd for the next
+  // fill_path / fill_path_gradient; it is path state, resets to NONZERO on
+  // begin_path, and must be set before the first path verb (D2D fixes the
+  // sink fill mode at begin_path). stroke_path_styled strokes with caps /
+  // joins / miter / dashes; a NULL style equals stroke_path. Coordinates are
+  // logical pixels at 96 DPI.
+  void (NEUI_ABI *cubic_to)(neui_render_ctx_t ctx, float c1x, float c1y,
+                            float c2x, float c2y, float x, float y);
+  void (NEUI_ABI *quad_to) (neui_render_ctx_t ctx, float cx, float cy,
+                            float x, float y);
+  void (NEUI_ABI *set_fill_rule)(neui_render_ctx_t ctx, neui_fill_rule_t rule);
+  void (NEUI_ABI *stroke_path_styled)(neui_render_ctx_t ctx, float stroke_width,
+                                      uint32_t argb,
+                                      const neui_stroke_style_t* style);
 
 } neui_render_backend_t;
 

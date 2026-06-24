@@ -5,6 +5,7 @@
 #include "api.h"
 #include "assets.h"
 #include "gradient.h"
+#include "path_style.h"
 
 // Painter API - curated drawing surface handed to NEUI_W_CUSTOMDRAW
 // widgets during NEUI_EVENT_WIDGET_PAINT. The painter forwards to the
@@ -168,6 +169,24 @@ extern "C" {
                                         const neui_gradient_t* grad);
     void (NEUI_ABI *fill_path_gradient)(neui_painter_t* p,
                                         const neui_gradient_t* grad);
+
+    // ---- Path curves + fill-rule + stroke style ----------------------------
+    // (Vtable-appended; check the api version / pointer before calling.)
+    //
+    // cubic_to / quad_to append Bézier segments to the current path (built via
+    // begin_path / move_to / ...), same as line_to. set_fill_rule selects how
+    // the next fill_path / fill_path_gradient resolves overlap; it is path
+    // state, resets to NONZERO on begin_path, and must be set before the first
+    // path verb. stroke_path_styled strokes with caps / joins / miter / dashes
+    // (NULL style == stroke_path: butt cap, miter join, solid).
+    void (NEUI_ABI *cubic_to)(neui_painter_t* p, float c1x, float c1y,
+                              float c2x, float c2y, float x, float y);
+    void (NEUI_ABI *quad_to) (neui_painter_t* p, float cx, float cy,
+                              float x, float y);
+    void (NEUI_ABI *set_fill_rule)(neui_painter_t* p, neui_fill_rule_t rule);
+    void (NEUI_ABI *stroke_path_styled)(neui_painter_t* p, float stroke_width,
+                                        uint32_t argb,
+                                        const neui_stroke_style_t* style);
   } neui_painter_api_t;
 
 #ifdef __cplusplus

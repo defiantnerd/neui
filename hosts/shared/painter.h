@@ -364,6 +364,18 @@ namespace neui_detail {
                                          const neui_gradient_t* grad)
   { if (p && p->backend && p->backend->fill_path_gradient)
       p->backend->fill_path_gradient(p->ctx, grad); }
+  inline void painter_cubic_to(neui_painter_t* p, float c1x, float c1y,
+                               float c2x, float c2y, float x, float y)
+  { if (p && p->backend && p->backend->cubic_to)
+      p->backend->cubic_to(p->ctx, c1x, c1y, c2x, c2y, x, y); }
+  inline void painter_quad_to(neui_painter_t* p, float cx, float cy, float x, float y)
+  { if (p && p->backend && p->backend->quad_to) p->backend->quad_to(p->ctx, cx, cy, x, y); }
+  inline void painter_set_fill_rule(neui_painter_t* p, neui_fill_rule_t rule)
+  { if (p && p->backend && p->backend->set_fill_rule) p->backend->set_fill_rule(p->ctx, rule); }
+  inline void painter_stroke_path_styled(neui_painter_t* p, float stroke_w, uint32_t argb,
+                                         const neui_stroke_style_t* style)
+  { if (p && p->backend && p->backend->stroke_path_styled)
+      p->backend->stroke_path_styled(p->ctx, stroke_w, argb, style); }
 
   // The static api table. Each host extern-references this from its
   // paint dispatch and stamps it into neui_event_paint_t::painter_api.
@@ -398,6 +410,10 @@ namespace neui_detail {
     painter_draw_asset_frame,
     painter_fill_rect_gradient,
     painter_fill_path_gradient,
+    painter_cubic_to,
+    painter_quad_to,
+    painter_set_fill_rule,
+    painter_stroke_path_styled,
   };
 
 } // namespace neui_detail

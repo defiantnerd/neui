@@ -98,6 +98,64 @@ int main()
   check(adv > 0.0f && adv < 200.0f, "measure_text plausible (>0, <200)");
 
   if (bmp) be->destroy_bitmap(ctx, bmp);
+
+  // --- Path-API extensions: fill-rule, Bézier curves, styled strokes. -------
+  const float TWO_PI = 6.28318530717958647692f;
+
+  // Frame A: even-odd ring - two concentric circles cancel to a hole.
+  be->begin_frame(ctx, 0xFF000000u);
+  be->begin_path(ctx);
+  be->set_fill_rule(ctx, NEUI_FILL_RULE_EVENODD);
+  be->arc(ctx, 32, 32, 20, 0.0f, TWO_PI);   // outer
+  be->arc(ctx, 32, 32, 10, 0.0f, TWO_PI);   // inner -> hole
+  be->fill_path(ctx, 0xFF00FF00u);          // green
+  be->end_frame(ctx);
+  be->read_pixels_bgra(ctx, out.data());
+  {
+    const uint8_t* hole = px(out, W, 32, 32);          // inside inner radius
+    check(hole[1] == 0, "even-odd: ring centre is a hole (not green)");
+    const uint8_t* ring = px(out, W, 32, 17);          // between r=10 and r=20
+    check(ring[1] > 200, "even-odd: ring band is green");
+  }
+
+  // Frame B: cubic + quadratic Bézier closed shape filled - centre is inside.
+  be->begin_frame(ctx, 0xFF000000u);
+  be->begin_path(ctx);
+  be->move_to(ctx, 10, 32);
+  be->cubic_to(ctx, 10, 8, 54, 8, 54, 32);   // bulging top (cubic)
+  be->quad_to (ctx, 32, 56, 10, 32);         // bottom (quad)
+  be->close_path(ctx);
+  be->fill_path(ctx, 0xFF00FF00u);
+  be->end_frame(ctx);
+  be->read_pixels_bgra(ctx, out.data());
+  {
+    const uint8_t* mid = px(out, W, 32, 32);
+    check(mid[1] > 200, "cubic+quad: filled shape covers its interior");
+  }
+
+  // Frame C: dashed horizontal stroke. Dash [6 on from x=4, then 12 off]; a
+  // butt cap keeps dash ends flush so the gap is unambiguous.
+  be->begin_frame(ctx, 0xFF000000u);
+  be->begin_path(ctx);
+  be->move_to(ctx, 4, 40);
+  be->line_to(ctx, 60, 40);
+  {
+    const float dashes[2] = { 6.0f, 12.0f };
+    neui_stroke_style_t style;
+    std::memset(&style, 0, sizeof(style));
+    style.cap = NEUI_LINE_CAP_BUTT; style.join = NEUI_LINE_JOIN_ROUND;
+    style.miter_limit = 4.0f; style.dash_array = dashes; style.dash_count = 2;
+    be->stroke_path_styled(ctx, 4.0f, 0xFF0000FFu, &style);   // blue
+  }
+  be->end_frame(ctx);
+  be->read_pixels_bgra(ctx, out.data());
+  {
+    const uint8_t* on  = px(out, W, 6,  40);   // within first dash [4,10)
+    const uint8_t* off = px(out, W, 15, 40);   // within the gap    [10,22)
+    check(on[0]  > 200, "dash: pixel on a dash run is blue");
+    check(off[0] == 0,  "dash: pixel in a gap is background");
+  }
+
   be->destroy_context(ctx);
 
   std::printf(g_failures ? "\nSMOKE FAILED (%d)\n" : "\nSMOKE OK\n", g_failures);

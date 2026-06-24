@@ -562,9 +562,11 @@ namespace neui_detail
                       double d; if (as_num(&(*a)[i], d)) cmd.args[i] = static_cast<float>(d);
                     }
                 };
-                if (op == "m")      { cmd.kind = NEUI_PATH_CMD_MOVE_TO; read_args(2); }
-                else if (op == "l") { cmd.kind = NEUI_PATH_CMD_LINE_TO; read_args(2); }
-                else if (op == "a") { cmd.kind = NEUI_PATH_CMD_ARC;     read_args(5); }
+                if (op == "m")      { cmd.kind = NEUI_PATH_CMD_MOVE_TO;  read_args(2); }
+                else if (op == "l") { cmd.kind = NEUI_PATH_CMD_LINE_TO;  read_args(2); }
+                else if (op == "a") { cmd.kind = NEUI_PATH_CMD_ARC;      read_args(5); }
+                else if (op == "c") { cmd.kind = NEUI_PATH_CMD_CUBIC_TO; read_args(6); }
+                else if (op == "q") { cmd.kind = NEUI_PATH_CMD_QUAD_TO;  read_args(4); }
                 else if (op == "z") { cmd.kind = NEUI_PATH_CMD_CLOSE; }
                 else continue;
                 cmds.push_back(cmd);
@@ -821,6 +823,12 @@ namespace neui_detail
                 case NEUI_PATH_CMD_ARC:
                   for (int i = 0; i < 5; ++i) a.push_back(njson_num(c.args[i]));
                   co.emplace_back("a", njson_arr(std::move(a))); break;
+                case NEUI_PATH_CMD_CUBIC_TO:
+                  for (int i = 0; i < 6; ++i) a.push_back(njson_num(c.args[i]));
+                  co.emplace_back("c", njson_arr(std::move(a))); break;
+                case NEUI_PATH_CMD_QUAD_TO:
+                  for (int i = 0; i < 4; ++i) a.push_back(njson_num(c.args[i]));
+                  co.emplace_back("q", njson_arr(std::move(a))); break;
                 case NEUI_PATH_CMD_CLOSE:
                   co.emplace_back("z", njson_bool(true)); break;
                 default: continue;

@@ -57,6 +57,7 @@ namespace neui_cg_backend
     uint32_t         dpi           = 96;       // 96 * backing_scale, kept in sync via update_dpi
     CGMutablePathRef path          = nullptr;  // current path under construction
     CGPoint          cursor        = CGPointZero;
+    bool             eo_fill       = false;     // even-odd fill rule (reset on begin_path)
 
     // Alpha stack. back() = effective cumulative opacity. Empty = 1.0.
     // Multiplied into the alpha component of every draw colour. Reset on
@@ -630,8 +631,9 @@ namespace neui_cg_backend
     auto* st = static_cast<CGContextState*>(raw);
     if (!st) return;
     if (st->path) { CGPathRelease(st->path); st->path = nullptr; }
-    st->path   = CGPathCreateMutable();
-    st->cursor = CGPointZero;
+    st->path    = CGPathCreateMutable();
+    st->cursor  = CGPointZero;
+    st->eo_fill = false;
   }
 
   static void cg_move_to(neui_render_ctx_t raw, float x, float y)
@@ -682,7 +684,8 @@ namespace neui_cg_backend
     CGFloat rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     CGContextSetRGBFillColor(st->cg_ctx, rgba[0], rgba[1], rgba[2], rgba[3]);
     CGContextAddPath(st->cg_ctx, st->path);
-    CGContextFillPath(st->cg_ctx);
+    if (st->eo_fill) CGContextEOFillPath(st->cg_ctx);
+    else             CGContextFillPath(st->cg_ctx);
   }
 
   static void cg_stroke_path(neui_render_ctx_t raw,
@@ -695,6 +698,57 @@ namespace neui_cg_backend
     CGContextSetLineWidth(st->cg_ctx, stroke_width);
     CGContextAddPath(st->cg_ctx, st->path);
     CGContextStrokePath(st->cg_ctx);
+  }
+
+  static void cg_cubic_to(neui_render_ctx_t raw, float c1x, float c1y,
+                          float c2x, float c2y, float x, float y)
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    if (!st || !st->path) return;
+    CGPathAddCurveToPoint(st->path, NULL, c1x, c1y, c2x, c2y, x, y);
+    st->cursor = CGPointMake(x, y);
+  }
+
+  static void cg_quad_to(neui_render_ctx_t raw, float cx, float cy, float x, float y)
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    if (!st || !st->path) return;
+    CGPathAddQuadCurveToPoint(st->path, NULL, cx, cy, x, y);
+    st->cursor = CGPointMake(x, y);
+  }
+
+  static void cg_set_fill_rule(neui_render_ctx_t raw, neui_fill_rule_t rule)
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    if (st) st->eo_fill = (rule == NEUI_FILL_RULE_EVENODD);
+  }
+
+  static void cg_stroke_path_styled(neui_render_ctx_t raw, float stroke_width,
+                                    uint32_t argb, const neui_stroke_style_t* style)
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    if (!st || !st->cg_ctx || !st->path) return;
+    if (!style) { cg_stroke_path(raw, stroke_width, argb); return; }
+
+    CGFloat rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
+    CGContextSaveGState(st->cg_ctx);   // line cap/join/miter/dash are ctx state
+    CGContextSetRGBStrokeColor(st->cg_ctx, rgba[0], rgba[1], rgba[2], rgba[3]);
+    CGContextSetLineWidth(st->cg_ctx, stroke_width);
+    CGContextSetLineCap(st->cg_ctx,
+      style->cap == NEUI_LINE_CAP_ROUND  ? kCGLineCapRound  :
+      style->cap == NEUI_LINE_CAP_SQUARE ? kCGLineCapSquare : kCGLineCapButt);
+    CGContextSetLineJoin(st->cg_ctx,
+      style->join == NEUI_LINE_JOIN_ROUND ? kCGLineJoinRound :
+      style->join == NEUI_LINE_JOIN_BEVEL ? kCGLineJoinBevel : kCGLineJoinMiter);
+    CGContextSetMiterLimit(st->cg_ctx, style->miter_limit > 0.0f ? style->miter_limit : 4.0f);
+    if (style->dash_array && style->dash_count > 0) {
+      std::vector<CGFloat> dashes(style->dash_count);
+      for (uint32_t i = 0; i < style->dash_count; ++i) dashes[i] = style->dash_array[i];
+      CGContextSetLineDash(st->cg_ctx, style->dash_offset, dashes.data(), dashes.size());
+    }
+    CGContextAddPath(st->cg_ctx, st->path);
+    CGContextStrokePath(st->cg_ctx);
+    CGContextRestoreGState(st->cg_ctx);
   }
 
   // ---------------------------------------------------------------------------
@@ -770,7 +824,8 @@ namespace neui_cg_backend
     // our retained st->path untouched, so a later fill_path / stroke_path on
     // the same geometry still works (matches cg_fill_path's preserve semantics).
     CGContextAddPath(st->cg_ctx, st->path);
-    CGContextClip(st->cg_ctx);
+    if (st->eo_fill) CGContextEOClip(st->cg_ctx);
+    else             CGContextClip(st->cg_ctx);
     cg_draw_gradient(st, g);
     CGContextRestoreGState(st->cg_ctx);
   }
@@ -1159,6 +1214,10 @@ namespace neui_cg_backend
     cg_unregister_font,
     cg_fill_rect_gradient,
     cg_fill_path_gradient,
+    cg_cubic_to,
+    cg_quad_to,
+    cg_set_fill_rule,
+    cg_stroke_path_styled,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }
