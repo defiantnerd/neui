@@ -23,6 +23,21 @@ namespace neui_detail
     out[3] = static_cast<F>(static_cast<float>((argb >> 24) & 0xFF) / 255.0f * alpha_mul);  // A
   }
 
+  // Elevate a quadratic Bézier (current point + one control + end) to the
+  // equivalent cubic (two controls + end), for backends with no native quad
+  // (Cairo). CP1 = cur + 2/3 (ctrl - cur); CP2 = end + 2/3 (ctrl - end). The
+  // resulting cubic is geometrically identical to the quadratic. Outputs the
+  // two cubic control points; the end point is unchanged.
+  template <typename F>
+  inline void quad_to_cubic(F cur_x, F cur_y, F ctrl_x, F ctrl_y, F end_x, F end_y,
+                            F out_c1[2], F out_c2[2])
+  {
+    out_c1[0] = cur_x + static_cast<F>(2.0 / 3.0) * (ctrl_x - cur_x);
+    out_c1[1] = cur_y + static_cast<F>(2.0 / 3.0) * (ctrl_y - cur_y);
+    out_c2[0] = end_x + static_cast<F>(2.0 / 3.0) * (ctrl_x - end_x);
+    out_c2[1] = end_y + static_cast<F>(2.0 / 3.0) * (ctrl_y - end_y);
+  }
+
   // Cumulative-opacity stack semantics (renderer.h push_alpha/pop_alpha):
   // each push multiplies onto the previous top; empty = fully opaque.
   // Clamping happens at push so a single bad factor can't poison the
