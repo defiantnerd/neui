@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include "api.h"
 #include "assets.h"
+#include "gradient.h"
 
 // Painter API - curated drawing surface handed to NEUI_W_CUSTOMDRAW
 // widgets during NEUI_EVENT_WIDGET_PAINT. The painter forwards to the
@@ -152,6 +153,21 @@ extern "C" {
     void (NEUI_ABI *draw_asset_frame)(neui_painter_t* p, neui_asset_t asset,
                                        uint32_t frame,
                                        float x, float y, float w, float h);
+
+    // ---- Gradient fills ----------------------------------------------------
+    // (Vtable-appended; check the api version / pointer before calling.)
+    //
+    // Fill a rectangle / the current path with a linear or radial colour
+    // gradient (see <neui/d/gradient.h>). Gradient geometry is in the same
+    // logical-pixel space as the fill and follows the active transform; each
+    // stop's alpha is multiplied by the painter alpha stack. fill_path_gradient
+    // consumes the path built via begin_path / move_to / ... exactly as
+    // fill_path does (the path stays valid for a follow-up stroke_path).
+    void (NEUI_ABI *fill_rect_gradient)(neui_painter_t* p,
+                                        float x, float y, float w, float h,
+                                        const neui_gradient_t* grad);
+    void (NEUI_ABI *fill_path_gradient)(neui_painter_t* p,
+                                        const neui_gradient_t* grad);
   } neui_painter_api_t;
 
 #ifdef __cplusplus

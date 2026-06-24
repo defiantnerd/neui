@@ -355,6 +355,16 @@ namespace neui_detail {
   inline void painter_pop_font(neui_painter_t* p)
   { if (p && p->backend && p->backend->pop_font)  p->backend->pop_font(p->ctx); }
 
+  inline void painter_fill_rect_gradient(neui_painter_t* p,
+                                         float x, float y, float w, float h,
+                                         const neui_gradient_t* grad)
+  { if (p && p->backend && p->backend->fill_rect_gradient)
+      p->backend->fill_rect_gradient(p->ctx, x, y, w, h, grad); }
+  inline void painter_fill_path_gradient(neui_painter_t* p,
+                                         const neui_gradient_t* grad)
+  { if (p && p->backend && p->backend->fill_path_gradient)
+      p->backend->fill_path_gradient(p->ctx, grad); }
+
   // The static api table. Each host extern-references this from its
   // paint dispatch and stamps it into neui_event_paint_t::painter_api.
   // `inline` storage makes this ODR-safe across the two TUs that include
@@ -386,6 +396,8 @@ namespace neui_detail {
     painter_push_font,
     painter_pop_font,
     painter_draw_asset_frame,
+    painter_fill_rect_gradient,
+    painter_fill_path_gradient,
   };
 
 } // namespace neui_detail

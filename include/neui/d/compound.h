@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include "api.h"
 #include "assets.h"
+#include "gradient.h"
 
 // Compound drawable API - reached via
 //   neui_compound_api_t* co = (neui_compound_api_t*)
@@ -256,12 +257,15 @@ extern "C" {
     //     "stroke_width"  float px; 0 (default) = no stroke
     //     "corner_radius" float px; 0 (default) = sharp corners. Clamped to
     //                              min(width, height) / 2 at paint time.
+    //     A gradient fill (overriding fill_color) is set via set_gradient
+    //     (below); the stroke stays solid. Honours corner_radius.
     //   path layer props:
     //     "fill_color"    int   ARGB; 0 = no fill. Same semantics as rect.
     //     "stroke_color"  int   ARGB; 0 = no stroke. Same semantics as rect.
     //     "stroke_width"  float px; 0 (default) = no stroke. Same as rect.
     //     The path geometry itself is assigned via set_path (below); it
-    //     replaces any previous geometry on the layer.
+    //     replaces any previous geometry on the layer. A gradient fill is
+    //     available via set_gradient, same as rect.
     //   any layer:
     //     "offset_x"  int     px, relative to anchor
     //     "offset_y"  int     px, relative to anchor
@@ -325,6 +329,24 @@ extern "C" {
     void (NEUI_ABI *set_path)(neui_session_t session, neui_asset_t asset,
                                 neui_compound_layer_t layer,
                                 const neui_path_cmd_t* cmds, uint32_t count);
+
+    // Set (or clear) a gradient fill on a RECT or PATH layer. When `grad`
+    // is non-NULL and carries >= 2 stops, the layer's FILL is painted with
+    // that gradient instead of the solid "fill_color" (the stroke is
+    // unaffected, and corner_radius / path geometry still apply). Passing
+    // NULL, or a gradient with fewer than two stops, clears it so the layer
+    // reverts to the solid fill_color. No-op on other layer kinds.
+    //
+    // Coordinate convention (differs from the render/painter gradient API,
+    // which is absolute): inside a compound layer the gradient geometry is
+    // NORMALISED to the resolved layer rect. start/end/focal x,y are [0,1]
+    // fractions of the rect (0,0 = top-left, 1,1 = bottom-right) and
+    // `radius` (radial) is a fraction of the rect's larger dimension, so
+    // the gradient scales with the layer regardless of widget size. The
+    // stop array is copied; the caller need not keep it alive.
+    void (NEUI_ABI *set_gradient)(neui_session_t session, neui_asset_t asset,
+                                  neui_compound_layer_t layer,
+                                  const neui_gradient_t* grad);
   } neui_compound_api_t;
 
 #ifdef __cplusplus

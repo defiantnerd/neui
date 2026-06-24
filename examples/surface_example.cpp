@@ -54,10 +54,12 @@ struct AppState
   uint32_t           canvas_id  = 0;
   uint32_t           randomise_id = 0;
   uint32_t           rerender_id  = 0;
+  uint32_t           gradient_chk = 0;
 
   neui_asset_t       surface = asset_none;
   std::vector<float> bars;   // 24 normalised heights, drawn into the surface
   int                paint_seq = 0;
+  bool               use_gradient = false;  // toggled by the checkbox
 };
 
 // Client paint callback - same painter_api / shape as WIDGET_PAINT, just
@@ -71,7 +73,28 @@ static void NEUI_ABI draw_diag(neui_painter_t*     p,
 {
   auto* a = static_cast<AppState*>(user);
 
-  api->fill_rect(p, 0, 0, w, h, 0xFF101820);
+  if (a->use_gradient) {
+    // Radial backdrop: a soft glow centred near the top, demonstrating
+    // NEUI_GRADIENT_RADIAL. The 0.0 stop sits at the centre, the 1.0 stop
+    // on the circle of `radius`, with CLAMP filling the corners.
+    neui_gradient_stop_t bg_stops[2] = {
+      { 0.0f, 0xFF243044 },
+      { 1.0f, 0xFF0A0E14 },
+    };
+    neui_gradient_t bg{};
+    bg.kind       = NEUI_GRADIENT_RADIAL;
+    bg.stops      = bg_stops;
+    bg.stop_count = 2;
+    bg.extend     = NEUI_GRADIENT_EXTEND_CLAMP;
+    bg.start_x    = w * 0.5f;   // centre
+    bg.start_y    = h * 0.25f;
+    bg.end_x      = w * 0.5f;   // focal == centre -> plain concentric radial
+    bg.end_y      = h * 0.25f;
+    bg.radius     = (w > h ? w : h) * 0.75f;
+    api->fill_rect_gradient(p, 0, 0, w, h, &bg);
+  } else {
+    api->fill_rect(p, 0, 0, w, h, 0xFF101820);
+  }
   api->draw_rect(p, 0.5f, 0.5f, w - 1.0f, h - 1.0f, 1.0f, 0xFF304050);
 
   const float pad     = 12.0f;
@@ -82,6 +105,23 @@ static void NEUI_ABI draw_diag(neui_painter_t*     p,
   const int   n       = static_cast<int>(a->bars.size());
   const float bar_w   = (chart_w - bar_gap * (n - 1)) / static_cast<float>(n);
 
+  // One vertical gradient defined over the whole chart height: warm orange at
+  // the top, cool blue at the floor. Every bar samples the SAME axis so the
+  // colour at a given height is consistent across bars - each bar is a window
+  // onto this shared linear gradient (NEUI_GRADIENT_LINEAR).
+  neui_gradient_stop_t bar_stops[3] = {
+    { 0.0f, 0xFFFF8030 },   // top of chart - warm
+    { 0.5f, 0xFFB060C0 },   // mid - violet
+    { 1.0f, 0xFF40C0FF },   // floor - cool
+  };
+  neui_gradient_t bar_grad{};
+  bar_grad.kind       = NEUI_GRADIENT_LINEAR;
+  bar_grad.stops      = bar_stops;
+  bar_grad.stop_count = 3;
+  bar_grad.extend     = NEUI_GRADIENT_EXTEND_CLAMP;
+  bar_grad.start_x    = 0.0f;  bar_grad.start_y = top;
+  bar_grad.end_x      = 0.0f;  bar_grad.end_y   = top + chart_h;
+
   for (int i = 0; i < n; ++i) {
     float v  = a->bars[i];
     if (v < 0.0f) v = 0.0f;
@@ -89,17 +129,21 @@ static void NEUI_ABI draw_diag(neui_painter_t*     p,
     float bh = v * chart_h;
     float bx = pad + i * (bar_w + bar_gap);
     float by = top + (chart_h - bh);
-    // Colour ramp from cool blue at the floor to warm orange at the top.
-    uint8_t r = static_cast<uint8_t>(64  + 191 * v);
-    uint8_t g = static_cast<uint8_t>(128 + 32  * v);
-    uint8_t b = static_cast<uint8_t>(224 - 160 * v);
-    uint32_t argb = 0xFF000000 | (r << 16) | (g << 8) | b;
-    api->fill_rect(p, bx, by, bar_w, bh, argb);
+    if (a->use_gradient) {
+      api->fill_rect_gradient(p, bx, by, bar_w, bh, &bar_grad);
+    } else {
+      // Colour ramp from cool blue at the floor to warm orange at the top.
+      uint8_t r = static_cast<uint8_t>(64  + 191 * v);
+      uint8_t g = static_cast<uint8_t>(128 + 32  * v);
+      uint8_t b = static_cast<uint8_t>(224 - 160 * v);
+      uint32_t argb = 0xFF000000 | (r << 16) | (g << 8) | b;
+      api->fill_rect(p, bx, by, bar_w, bh, argb);
+    }
   }
 
-  char title[64];
-  snprintf(title, sizeof(title), "Diagnostic surface  (paint #%d)",
-            a->paint_seq);
+  char title[80];
+  snprintf(title, sizeof(title), "Diagnostic surface  (paint #%d, %s)",
+            a->paint_seq, a->use_gradient ? "gradient" : "solid");
   api->draw_text(p, pad, 4, w - pad * 2.0f, 20,
                   title, 13.0f, 0xFFE0E8F0);
 }
@@ -179,6 +223,15 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
       break;
     }
 
+    case NEUI_EVENT_CHECKBOX_CHANGED: {
+      if (event->data.checkbox.widget.id == a->gradient_chk) {
+        a->use_gradient = (event->data.checkbox.state == NEUI_CHECK_CHECKED);
+        repaint_surface(a);
+        return true;
+      }
+      break;
+    }
+
     default:
       break;
   }
@@ -248,6 +301,12 @@ int main(int /*argc*/, char* /*argv*/[])
                                                 188, 412, 160, 28, nullptr);
   app.widgets->set_text(app.session, btn_re, "Re-render (no change)");
   app.rerender_id = btn_re.id;
+
+  // Toggle between solid fills and the new gradient fills.
+  neui_widget_t chk_grad = app.widgets->create(app.session, win, NEUI_W_CHECKBOX,
+                                                 372, 416, 200, 22, nullptr);
+  app.widgets->set_text(app.session, chk_grad, "Gradient fill");
+  app.gradient_chk = chk_grad.id;
 
   // First render so the canvas shows something before the user clicks.
   repaint_surface(&app);

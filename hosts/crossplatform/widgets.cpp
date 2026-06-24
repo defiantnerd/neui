@@ -2519,6 +2519,17 @@ namespace xpl_host
     invalidate_widgets_using(s, asset.id & 0xffff);
   }
 
+  static void NEUI_ABI co_set_gradient(neui_session_t session, neui_asset_t asset,
+                                       neui_compound_layer_t layer,
+                                       const neui_gradient_t* grad)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer(session, asset, layer, s);
+    if (!L) return;
+    neui_detail::apply_set_gradient(*L, grad);
+    invalidate_widgets_using(s, asset.id & 0xffff);
+  }
+
   neui_compound_api_t compound_api = {
     NEUI_VERSION,
     co_add_layer,
@@ -2534,6 +2545,7 @@ namespace xpl_host
     co_bind_asset,
     co_unbind,
     co_set_path,
+    co_set_gradient,
   };
 
   // Recursive walk: collect frame native handles that own at least one

@@ -120,6 +120,26 @@ namespace neui_detail
     float                    stroke_width  = 0.0f;
     float                    corner_radius = 0.0f;
 
+    // Optional gradient fill for RECT / PATH layers (set via the compound
+    // API's set_gradient). When `enabled` with >= 2 stops the layer's FILL
+    // uses this gradient instead of the solid fill_color; the stroke is
+    // unaffected. Geometry is stored as normalised [0,1] fractions of the
+    // resolved layer rect (so it scales with the layer) and mapped to
+    // absolute pixels at paint time; `radius` (radial only) is a fraction
+    // of the layer rect's larger dimension. `stops` is the owned copy of
+    // the client's stop array (the public neui_gradient_t::stops is
+    // borrowed, so we snapshot it here, same as set_path snapshots cmds).
+    struct GradientFill {
+      bool                   enabled = false;
+      neui_gradient_kind_t   kind    = NEUI_GRADIENT_LINEAR;
+      neui_gradient_extend_t extend  = NEUI_GRADIENT_EXTEND_CLAMP;
+      float start_x = 0.0f, start_y = 0.0f;   // default axis: top ...
+      float end_x   = 0.0f, end_y   = 1.0f;   // ... to bottom (vertical)
+      float radius  = 0.5f;                    // radial: fraction of max(w,h)
+      std::vector<neui_gradient_stop_t> stops;
+    };
+    GradientFill             fill_gradient;
+
     // Path-layer geometry. Mirror of the public neui_path_cmd_t layout
     // so set_path can memcpy. Empty vector = no path (layer paints
     // nothing). Replayed in declaration order against the painter's
@@ -605,6 +625,30 @@ namespace neui_detail
   inline void apply_unbind(CompoundLayer& L, const std::string& prop)
   {
     L.bindings.erase(prop);
+  }
+
+  // Set / clear a RECT or PATH layer's gradient fill. No-op on other kinds
+  // (mirrors apply_set_path's "wrong kind = silently ignored"). A null
+  // gradient, or one with fewer than two stops, clears any existing
+  // gradient so the layer reverts to its solid fill_color. The stop array
+  // is copied (the public neui_gradient_t borrows it).
+  inline void apply_set_gradient(CompoundLayer& L, const neui_gradient_t* g)
+  {
+    if (L.kind != NEUI_COMPOUND_LAYER_RECT && L.kind != NEUI_COMPOUND_LAYER_PATH)
+      return;
+    auto& fg = L.fill_gradient;
+    if (!g || !g->stops || g->stop_count < 2) {
+      fg.enabled = false;
+      fg.stops.clear();
+      return;
+    }
+    fg.enabled = true;
+    fg.kind    = g->kind;
+    fg.extend  = g->extend;
+    fg.start_x = g->start_x; fg.start_y = g->start_y;
+    fg.end_x   = g->end_x;   fg.end_y   = g->end_y;
+    fg.radius  = g->radius;
+    fg.stops.assign(g->stops, g->stops + g->stop_count);
   }
 
   // Replace the path-layer's command list. No-op on non-PATH layers

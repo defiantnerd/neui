@@ -47,6 +47,8 @@ namespace neui_null_backend
   static bool  null_register_font_file(const char*, char* of, uint32_t cap, uint64_t* ot)
   { if (of && cap) of[0] = '\0'; if (ot) *ot = 0; return false; }
   static void  null_unregister_font(uint64_t) {}
+  static void  null_fill_rect_gradient(neui_render_ctx_t, float, float, float, float, const neui_gradient_t*) {}
+  static void  null_fill_path_gradient(neui_render_ctx_t, const neui_gradient_t*) {}
 
   static neui_render_backend_t backend = {
     NEUI_VERSION,
@@ -88,6 +90,8 @@ namespace neui_null_backend
     null_register_font,
     null_register_font_file,
     null_unregister_font,
+    null_fill_rect_gradient,
+    null_fill_path_gradient,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

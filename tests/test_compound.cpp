@@ -270,6 +270,51 @@ TEST_CASE("apply_set_path: silently no-ops on non-PATH layers")
   CHECK(R.path_cmds.empty());
 }
 
+TEST_CASE("apply_set_gradient: sets / clears a gradient on RECT + PATH layers")
+{
+  neui_gradient_stop_t stops[2] = { { 0.0f, 0xFF000000 }, { 1.0f, 0xFFFFFFFF } };
+  neui_gradient_t g{};
+  g.kind = NEUI_GRADIENT_LINEAR;
+  g.stops = stops; g.stop_count = 2;
+  g.extend = NEUI_GRADIENT_EXTEND_MIRROR;
+  g.start_x = 0.0f; g.start_y = 0.0f; g.end_x = 1.0f; g.end_y = 1.0f;
+
+  CompoundLayer R; R.kind = NEUI_COMPOUND_LAYER_RECT;
+  apply_set_gradient(R, &g);
+  CHECK(R.fill_gradient.enabled);
+  CHECK_EQ((int)R.fill_gradient.stops.size(), 2);
+  CHECK_EQ((int)R.fill_gradient.kind, (int)NEUI_GRADIENT_LINEAR);
+  CHECK_EQ((int)R.fill_gradient.extend, (int)NEUI_GRADIENT_EXTEND_MIRROR);
+  CHECK_APPROX(R.fill_gradient.end_x, 1.0);
+
+  // The stop array is copied (not aliased) - mutating the caller's array
+  // after the call must not change the stored gradient.
+  stops[0].argb = 0xDEADBEEF;
+  CHECK_EQ((unsigned)R.fill_gradient.stops[0].argb, 0xFF000000u);
+
+  // PATH layers accept it too.
+  CompoundLayer P; P.kind = NEUI_COMPOUND_LAYER_PATH;
+  apply_set_gradient(P, &g);
+  CHECK(P.fill_gradient.enabled);
+
+  // NULL or < 2 stops clears.
+  apply_set_gradient(R, nullptr);
+  CHECK_FALSE(R.fill_gradient.enabled);
+  CHECK(R.fill_gradient.stops.empty());
+  neui_gradient_t one{}; one.stops = stops; one.stop_count = 1;
+  apply_set_gradient(P, &one);
+  CHECK_FALSE(P.fill_gradient.enabled);
+}
+
+TEST_CASE("apply_set_gradient: silently no-ops on non-fill layers")
+{
+  neui_gradient_stop_t stops[2] = { { 0.0f, 0xFF000000 }, { 1.0f, 0xFFFFFFFF } };
+  neui_gradient_t g{}; g.stops = stops; g.stop_count = 2;
+  CompoundLayer T; T.kind = NEUI_COMPOUND_LAYER_TEXT;
+  apply_set_gradient(T, &g);
+  CHECK_FALSE(T.fill_gradient.enabled);
+}
+
 TEST_CASE("apply_set_int: PATH layers accept fill_color / stroke_color")
 {
   CompoundLayer P; P.kind = NEUI_COMPOUND_LAYER_PATH;

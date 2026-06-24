@@ -1,5 +1,6 @@
 #pragma once
 #include "api.h"
+#include "gradient.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -292,6 +293,24 @@ typedef struct neui_render_backend {
   // not fully release a face still referenced by a cached text format; that
   // is acceptable - the name stops resolving for new draws. No-op on token 0.
   void (NEUI_ABI *unregister_font)(uint64_t token);
+
+  // --- Gradient fills (vtable-appended) ----------------------------------
+  //
+  // Fill a rectangle / the current path with the linear or radial colour
+  // gradient described by `grad` (see <neui/d/gradient.h>). Gradient
+  // geometry is in the same logical-pixel space as the fill region and is
+  // subject to the active transform; each stop's ARGB alpha is multiplied
+  // by the current alpha-stack top, matching fill_rect / fill_path.
+  //
+  // A null `grad`, fewer than two stops, or a backend without gradient
+  // support (null) draws nothing. Like fill_path, fill_path_gradient leaves
+  // the path valid so a subsequent stroke_path / fill_path still works.
+  // Coordinates are logical pixels at 96 DPI; colours are 0xAARRGGBB.
+  void (NEUI_ABI *fill_rect_gradient)(neui_render_ctx_t ctx,
+                                      float x, float y, float w, float h,
+                                      const neui_gradient_t* grad);
+  void (NEUI_ABI *fill_path_gradient)(neui_render_ctx_t ctx,
+                                      const neui_gradient_t* grad);
 
 } neui_render_backend_t;
 

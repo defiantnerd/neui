@@ -5673,6 +5673,17 @@ namespace win32_host
     s->invalidate_widgets_with_compound(asset.id);
   }
 
+  static void NEUI_ABI co_set_gradient(neui_session_t session, neui_asset_t asset,
+                                       neui_compound_layer_t layer,
+                                       const neui_gradient_t* grad)
+  {
+    Session* s = nullptr;
+    auto* L = resolve_layer_w32(session, asset, layer, s);
+    if (!L) return;
+    neui_detail::apply_set_gradient(*L, grad);
+    s->invalidate_widgets_with_compound(asset.id);
+  }
+
   neui_compound_api_t compound_api = {
     NEUI_VERSION,
     co_add_layer,
@@ -5688,6 +5699,7 @@ namespace win32_host
     co_bind_asset,
     co_unbind,
     co_set_path,
+    co_set_gradient,
   };
 
   // ---------------------------------------------------------------------------

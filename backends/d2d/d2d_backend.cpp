@@ -1320,6 +1320,92 @@ namespace neui_d2d_backend
   }
 
   // ---------------------------------------------------------------------------
+  // Gradient fills (NEUI_ASSET_KIND none - immediate-mode brush).
+
+  static D2D1_EXTEND_MODE d2d_extend_mode(neui_gradient_extend_t e)
+  {
+    switch (e) {
+      case NEUI_GRADIENT_EXTEND_REPEAT: return D2D1_EXTEND_MODE_WRAP;
+      case NEUI_GRADIENT_EXTEND_MIRROR: return D2D1_EXTEND_MODE_MIRROR;
+      default:                          return D2D1_EXTEND_MODE_CLAMP;
+    }
+  }
+
+  // Build a one-shot gradient brush from `g`. Caller owns the returned brush
+  // and must Release() it. The stop colours fold in the alpha stack so a
+  // gradient fill respects push_alpha exactly like a solid fill. Returns null
+  // on a malformed gradient or allocation failure.
+  static ID2D1Brush* d2d_make_gradient_brush(D2DContext* ctx,
+                                              const neui_gradient_t* g)
+  {
+    if (!ctx || !ctx->target || !g || !g->stops || g->stop_count < 2)
+      return nullptr;
+
+    const float alpha = current_alpha(ctx);
+    std::vector<D2D1_GRADIENT_STOP> stops(g->stop_count);
+    for (uint32_t i = 0; i < g->stop_count; ++i) {
+      float off = g->stops[i].offset;
+      if (off < 0.0f) off = 0.0f; else if (off > 1.0f) off = 1.0f;
+      stops[i].position = off;
+      stops[i].color    = argb_to_color(g->stops[i].argb, alpha);
+    }
+
+    ID2D1GradientStopCollection* coll = nullptr;
+    HRESULT hr = ctx->target->CreateGradientStopCollection(
+      stops.data(), g->stop_count, D2D1_GAMMA_2_2,
+      d2d_extend_mode(g->extend), &coll);
+    if (FAILED(hr) || !coll) return nullptr;
+
+    ID2D1Brush* brush = nullptr;
+    if (g->kind == NEUI_GRADIENT_RADIAL) {
+      ID2D1RadialGradientBrush* rb = nullptr;
+      // gradientOriginOffset is the focal point relative to the centre.
+      hr = ctx->target->CreateRadialGradientBrush(
+        D2D1::RadialGradientBrushProperties(
+          D2D1::Point2F(g->start_x, g->start_y),
+          D2D1::Point2F(g->end_x - g->start_x, g->end_y - g->start_y),
+          g->radius, g->radius),
+        coll, &rb);
+      brush = rb;
+    } else {
+      ID2D1LinearGradientBrush* lb = nullptr;
+      hr = ctx->target->CreateLinearGradientBrush(
+        D2D1::LinearGradientBrushProperties(
+          D2D1::Point2F(g->start_x, g->start_y),
+          D2D1::Point2F(g->end_x,   g->end_y)),
+        coll, &lb);
+      brush = lb;
+    }
+    coll->Release();  // the brush holds its own reference
+    if (FAILED(hr)) { if (brush) brush->Release(); return nullptr; }
+    return brush;
+  }
+
+  static void d2d_fill_rect_gradient(neui_render_ctx_t raw,
+                                     float x, float y, float w, float h,
+                                     const neui_gradient_t* g)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx || !ctx->target) return;
+    ID2D1Brush* br = d2d_make_gradient_brush(ctx, g);
+    if (!br) return;
+    ctx->target->FillRectangle(D2D1::RectF(x, y, x + w, y + h), br);
+    br->Release();
+  }
+
+  static void d2d_fill_path_gradient(neui_render_ctx_t raw,
+                                     const neui_gradient_t* g)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx || !ctx->target || !ctx->path) return;
+    ID2D1Brush* br = d2d_make_gradient_brush(ctx, g);
+    if (!br) return;
+    finalise_path(ctx);
+    ctx->target->FillGeometry(ctx->path, br);
+    br->Release();
+  }
+
+  // ---------------------------------------------------------------------------
   // Off-screen contexts (NEUI_ASSET_KIND_SURFACE).
 
   static neui_render_ctx_t d2d_create_offscreen_context(
@@ -1465,6 +1551,8 @@ namespace neui_d2d_backend
     d2d_register_font,
     d2d_register_font_file,
     d2d_unregister_font,
+    d2d_fill_rect_gradient,
+    d2d_fill_path_gradient,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

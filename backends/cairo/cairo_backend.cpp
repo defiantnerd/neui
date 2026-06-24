@@ -765,6 +765,71 @@ namespace neui_cairo_backend
   }
 
   // --------------------------------------------------------------------------
+  // Gradient fills
+
+  // Build a one-shot cairo gradient pattern from `g`, alpha-stack folded into
+  // each stop. Caller owns the returned pattern (cairo_pattern_destroy).
+  // Returns null on a malformed gradient. Cairo honours all three extend
+  // modes natively (PAD / REPEAT / REFLECT).
+  static cairo_pattern_t* cairo_make_gradient(CairoCtx* st,
+                                              const neui_gradient_t* g)
+  {
+    if (!st || !g || !g->stops || g->stop_count < 2) return nullptr;
+
+    cairo_pattern_t* pat =
+      (g->kind == NEUI_GRADIENT_RADIAL)
+        ? cairo_pattern_create_radial(g->end_x, g->end_y, 0.0,
+                                       g->start_x, g->start_y, g->radius)
+        : cairo_pattern_create_linear(g->start_x, g->start_y,
+                                       g->end_x,   g->end_y);
+    if (!pat || cairo_pattern_status(pat) != CAIRO_STATUS_SUCCESS) {
+      if (pat) cairo_pattern_destroy(pat);
+      return nullptr;
+    }
+
+    const float alpha = current_alpha(st);
+    for (uint32_t i = 0; i < g->stop_count; ++i) {
+      double rgba[4]; argb_to_rgba(g->stops[i].argb, rgba, alpha);
+      double off = g->stops[i].offset;
+      if (off < 0.0) off = 0.0; else if (off > 1.0) off = 1.0;
+      cairo_pattern_add_color_stop_rgba(pat, off,
+                                        rgba[0], rgba[1], rgba[2], rgba[3]);
+    }
+
+    cairo_extend_t ext = CAIRO_EXTEND_PAD;            // CLAMP
+    if (g->extend == NEUI_GRADIENT_EXTEND_REPEAT)      ext = CAIRO_EXTEND_REPEAT;
+    else if (g->extend == NEUI_GRADIENT_EXTEND_MIRROR) ext = CAIRO_EXTEND_REFLECT;
+    cairo_pattern_set_extend(pat, ext);
+    return pat;
+  }
+
+  static void cairo_fill_rect_gradient(neui_render_ctx_t raw,
+                                       float x, float y, float w, float h,
+                                       const neui_gradient_t* g)
+  {
+    auto* st = static_cast<CairoCtx*>(raw);
+    if (!st || !st->cr) return;
+    cairo_pattern_t* pat = cairo_make_gradient(st, g);
+    if (!pat) return;
+    cairo_set_source(st->cr, pat);
+    cairo_rectangle(st->cr, x, y, w, h);
+    cairo_fill(st->cr);
+    cairo_pattern_destroy(pat);
+  }
+
+  static void cairo_fill_path_gradient(neui_render_ctx_t raw,
+                                       const neui_gradient_t* g)
+  {
+    auto* st = static_cast<CairoCtx*>(raw);
+    if (!st || !st->cr) return;
+    cairo_pattern_t* pat = cairo_make_gradient(st, g);
+    if (!pat) return;
+    cairo_set_source(st->cr, pat);
+    cairo_fill_preserve(st->cr);  // keep path so a later stroke_path works
+    cairo_pattern_destroy(pat);
+  }
+
+  // --------------------------------------------------------------------------
   // Transform stack - cairo_save/restore covers both CTM and clip.
 
   static void cairo_push_transform(neui_render_ctx_t raw)
@@ -1041,6 +1106,8 @@ namespace neui_cairo_backend
     cairo_register_font,
     cairo_register_font_file,
     cairo_unregister_font,
+    cairo_fill_rect_gradient,
+    cairo_fill_path_gradient,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

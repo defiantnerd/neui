@@ -698,6 +698,84 @@ namespace neui_cg_backend
   }
 
   // ---------------------------------------------------------------------------
+  // Gradient fills
+
+  // Build a CGGradient from the stops (alpha-stack folded in) and draw it into
+  // whatever clip region the caller has set up. The gradient points are in the
+  // same user space as every other draw call (the isFlipped CTM applies
+  // globally), so no extra Y handling is needed. CoreGraphics only offers a
+  // clamp-style extend (the drawsBefore/After options) - REPEAT / MIRROR
+  // degrade to CLAMP, matching the documented contract in gradient.h.
+  static void cg_draw_gradient(CGContextState* st, const neui_gradient_t* g)
+  {
+    if (!g || !g->stops || g->stop_count < 2) return;
+
+    const float alpha = current_alpha(st);
+    std::vector<CGFloat> comps(static_cast<size_t>(g->stop_count) * 4);
+    std::vector<CGFloat> locs(g->stop_count);
+    for (uint32_t i = 0; i < g->stop_count; ++i) {
+      CGFloat rgba[4]; argb_to_rgba(g->stops[i].argb, rgba, alpha);
+      comps[i * 4 + 0] = rgba[0];
+      comps[i * 4 + 1] = rgba[1];
+      comps[i * 4 + 2] = rgba[2];
+      comps[i * 4 + 3] = rgba[3];
+      float off = g->stops[i].offset;
+      if (off < 0.0f) off = 0.0f; else if (off > 1.0f) off = 1.0f;
+      locs[i] = off;
+    }
+
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGGradientRef grad = CGGradientCreateWithColorComponents(
+      cs, comps.data(), locs.data(), g->stop_count);
+    CGColorSpaceRelease(cs);
+    if (!grad) return;
+
+    const CGGradientDrawingOptions opts =
+      kCGGradientDrawsBeforeStartLocation | kCGGradientDrawsAfterEndLocation;
+    if (g->kind == NEUI_GRADIENT_RADIAL) {
+      // 0.0 stop emanates from the focal point at radius 0; 1.0 stop sits on
+      // the circle of `radius` centred at (start_x, start_y).
+      CGContextDrawRadialGradient(st->cg_ctx, grad,
+        CGPointMake(g->end_x, g->end_y), 0.0f,
+        CGPointMake(g->start_x, g->start_y), g->radius, opts);
+    } else {
+      CGContextDrawLinearGradient(st->cg_ctx, grad,
+        CGPointMake(g->start_x, g->start_y),
+        CGPointMake(g->end_x,   g->end_y), opts);
+    }
+    CGGradientRelease(grad);
+  }
+
+  static void cg_fill_rect_gradient(neui_render_ctx_t raw,
+                                    float x, float y, float w, float h,
+                                    const neui_gradient_t* g)
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    if (!st || !st->cg_ctx || !g || !g->stops || g->stop_count < 2) return;
+    CGContextSaveGState(st->cg_ctx);
+    CGContextClipToRect(st->cg_ctx, CGRectMake(x, y, w, h));
+    cg_draw_gradient(st, g);
+    CGContextRestoreGState(st->cg_ctx);
+  }
+
+  static void cg_fill_path_gradient(neui_render_ctx_t raw,
+                                    const neui_gradient_t* g)
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    if (!st || !st->cg_ctx || !st->path || !g || !g->stops || g->stop_count < 2)
+      return;
+    CGContextSaveGState(st->cg_ctx);
+    // Clip to the path, then paint the gradient through it. Adding the path to
+    // the context and clipping clears the context's current path but leaves
+    // our retained st->path untouched, so a later fill_path / stroke_path on
+    // the same geometry still works (matches cg_fill_path's preserve semantics).
+    CGContextAddPath(st->cg_ctx, st->path);
+    CGContextClip(st->cg_ctx);
+    cg_draw_gradient(st, g);
+    CGContextRestoreGState(st->cg_ctx);
+  }
+
+  // ---------------------------------------------------------------------------
   // Transform stack - CGContextSaveGState/RestoreGState saves+restores both
   // the CTM and the clip stack atomically. Widget code never interleaves
   // push_clip / push_transform pairs, so a single save/restore stack is fine.
@@ -1079,6 +1157,8 @@ namespace neui_cg_backend
     cg_register_font,
     cg_register_font_file,
     cg_unregister_font,
+    cg_fill_rect_gradient,
+    cg_fill_path_gradient,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

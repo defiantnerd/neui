@@ -93,6 +93,30 @@ namespace neui_detail
                                 eff_w, eff_h);
   }
 
+  // Map a layer's stored (normalised) gradient onto an absolute neui_gradient_t
+  // for a given draw origin + size. RECT fills draw in widget-local space with
+  // no transform, so pass the layer rect's origin; PATH fills draw under a
+  // translate(r.x, r.y), so pass origin (0, 0). `radius` (radial) is taken as
+  // a fraction of the larger dimension. The returned gradient borrows the
+  // layer's stop vector (stable for the paint call).
+  inline neui_gradient_t resolve_layer_gradient(
+      const CompoundLayer::GradientFill& g,
+      float ox, float oy, float w, float h)
+  {
+    neui_gradient_t out{};
+    out.kind       = g.kind;
+    out.stops      = g.stops.data();
+    out.stop_count = static_cast<uint32_t>(g.stops.size());
+    out.extend     = g.extend;
+    out.start_x = ox + g.start_x * w;
+    out.start_y = oy + g.start_y * h;
+    out.end_x   = ox + g.end_x   * w;
+    out.end_y   = oy + g.end_y   * h;
+    const float maxdim = (w > h) ? w : h;
+    out.radius  = g.radius * maxdim;
+    return out;
+  }
+
   // ---- QR layer -----------------------------------------------------------
 
   // Resolve a QR layer's source string: NEUI_ATTR_QRCODE on the widget's
@@ -337,8 +361,10 @@ namespace neui_detail
         float    sw     = effective_float(L, "stroke_width",  L.stroke_width,  bag);
         if (sw < 0.0f) sw = 0.0f;
 
-        bool has_fill   = ((fill   >> 24) & 0xffu) != 0u;
-        bool has_stroke = sw > 0.0f && ((stroke >> 24) & 0xffu) != 0u;
+        bool grad_fill   = L.fill_gradient.enabled && L.fill_gradient.stops.size() >= 2;
+        bool solid_fill  = ((fill   >> 24) & 0xffu) != 0u;
+        bool has_fill    = grad_fill || solid_fill;
+        bool has_stroke  = sw > 0.0f && ((stroke >> 24) & 0xffu) != 0u;
         if (!has_fill && !has_stroke) break;
 
         // Replay path commands in layer-local space - push a transform so
@@ -366,7 +392,13 @@ namespace neui_detail
               break;  // unknown kind, skip
           }
         }
-        if (has_fill)   k_painter_api.fill_path  (p, fill);
+        // Path is in the translated frame, so the gradient is too: origin (0,0).
+        if (grad_fill) {
+          neui_gradient_t g = resolve_layer_gradient(L.fill_gradient, 0.0f, 0.0f, r.w, r.h);
+          k_painter_api.fill_path_gradient(p, &g);
+        } else if (solid_fill) {
+          k_painter_api.fill_path(p, fill);
+        }
         if (has_stroke) k_painter_api.stroke_path(p, sw, stroke);
         k_painter_api.pop_transform(p);
         break;
@@ -381,16 +413,30 @@ namespace neui_detail
         if (sw < 0.0f) sw = 0.0f;
         if (radius < 0.0f) radius = 0.0f;
 
-        bool has_fill   = ((fill   >> 24) & 0xffu) != 0u;
-        bool has_stroke = sw > 0.0f && ((stroke >> 24) & 0xffu) != 0u;
+        bool grad_fill   = L.fill_gradient.enabled && L.fill_gradient.stops.size() >= 2;
+        bool solid_fill  = ((fill   >> 24) & 0xffu) != 0u;
+        bool has_fill    = grad_fill || solid_fill;
+        bool has_stroke  = sw > 0.0f && ((stroke >> 24) & 0xffu) != 0u;
         if (!has_fill && !has_stroke) break;
 
         if (radius <= 0.0f) {
-          if (has_fill)   k_painter_api.fill_rect(p, r.x, r.y, r.w, r.h, fill);
+          // RECT fills draw with no transform pushed, so the gradient is in
+          // absolute widget-local space: origin = the layer rect's top-left.
+          if (grad_fill) {
+            neui_gradient_t g = resolve_layer_gradient(L.fill_gradient, r.x, r.y, r.w, r.h);
+            k_painter_api.fill_rect_gradient(p, r.x, r.y, r.w, r.h, &g);
+          } else if (solid_fill) {
+            k_painter_api.fill_rect(p, r.x, r.y, r.w, r.h, fill);
+          }
           if (has_stroke) k_painter_api.draw_rect(p, r.x, r.y, r.w, r.h, sw, stroke);
         } else {
           build_rounded_rect_path(p, r.x, r.y, r.w, r.h, radius);
-          if (has_fill)   k_painter_api.fill_path  (p, fill);
+          if (grad_fill) {
+            neui_gradient_t g = resolve_layer_gradient(L.fill_gradient, r.x, r.y, r.w, r.h);
+            k_painter_api.fill_path_gradient(p, &g);
+          } else if (solid_fill) {
+            k_painter_api.fill_path(p, fill);
+          }
           if (has_stroke) k_painter_api.stroke_path(p, sw, stroke);
         }
         break;
