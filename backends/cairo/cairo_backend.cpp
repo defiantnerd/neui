@@ -755,6 +755,9 @@ namespace neui_cairo_backend
     cairo_set_fill_rule(st->cr, st->eo_fill ? CAIRO_FILL_RULE_EVEN_ODD
                                             : CAIRO_FILL_RULE_WINDING);
     cairo_fill_preserve(st->cr);  // keep path so a later stroke_path works
+    // The fill rule is persistent context state; restore WINDING so later
+    // fills (fill_rect, gradients) that don't set it don't inherit even-odd.
+    if (st->eo_fill) cairo_set_fill_rule(st->cr, CAIRO_FILL_RULE_WINDING);
   }
 
   static void cairo_stroke_path(neui_render_ctx_t raw,
@@ -887,6 +890,7 @@ namespace neui_cairo_backend
     cairo_set_fill_rule(st->cr, st->eo_fill ? CAIRO_FILL_RULE_EVEN_ODD
                                             : CAIRO_FILL_RULE_WINDING);
     cairo_fill_preserve(st->cr);  // keep path so a later stroke_path works
+    if (st->eo_fill) cairo_set_fill_rule(st->cr, CAIRO_FILL_RULE_WINDING);
     cairo_pattern_destroy(pat);
   }
 

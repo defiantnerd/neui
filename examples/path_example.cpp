@@ -96,10 +96,18 @@ int main(int, char*[])
   if (!sess.session) return 1;
   app.widgets = (neui_widget_api_t*)host->get_interface(sess, NEUI_API_WIDGETS);
 
+  // The three demos paint to fixed logical coordinates spanning x in [15, 660].
+  // APPWINDOW create W/H is the client area at 96 DPI, but at ~150% DPI the
+  // usable logical client is ~createW/1.5, so size the window so the content
+  // still fits with margin there (1040/1.5 ~= 693 > 660).
   neui_widget_t win = app.widgets->create(sess, neui_widget_t{ UINT32_MAX },
-                                          NEUI_W_APPWINDOW, 120, 120, 960, 360, nullptr);
+                                          NEUI_W_APPWINDOW, 120, 120, 1040, 360, nullptr);
   app.widgets->set_text(sess, win, "neui path example - curves, even-odd, dashes");
-  neui_widget_t canvas = app.widgets->create(sess, win, NEUI_W_CUSTOMDRAW, 0, 0, 960, 360, nullptr);
+  // Fill the actual usable client (excludes any menubar / DPI shrinkage) rather
+  // than re-using the create() size, so the canvas never overflows the client.
+  int cx = 0, cy = 0, cw = 1040, ch = 360;
+  app.widgets->get_client_rect(sess, win, &cx, &cy, &cw, &ch);
+  neui_widget_t canvas = app.widgets->create(sess, win, NEUI_W_CUSTOMDRAW, cx, cy, cw, ch, nullptr);
   (void)canvas;
 
   app.widgets->show(sess, win);

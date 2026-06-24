@@ -8,6 +8,7 @@
 #include <dxgi1_2.h>
 #include <dwrite.h>
 #include <dwrite_3.h>
+#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <cmath>
@@ -98,6 +99,14 @@ namespace neui_d2d_backend
     // (figures_started). begin_path resets to WINDING (= NONZERO default).
     D2D1_FILL_MODE         fill_mode      = D2D1_FILL_MODE_WINDING;
     bool                   figures_started = false;
+
+    // Cache for the most-recently-built styled-stroke ID2D1StrokeStyle. A
+    // CUSTOMDRAW client emitting many identical dashed/styled strokes per frame
+    // would otherwise pay a CreateStrokeStyle + Release on every call; reuse the
+    // object while the resolved properties + dash pattern are unchanged.
+    ID2D1StrokeStyle*               cached_stroke_style = nullptr;
+    D2D1_STROKE_STYLE_PROPERTIES    cached_stroke_props = {};
+    std::vector<float>              cached_stroke_dashes;
 
     // Transform stack. `current` is the active D2D world transform, applied
     // via ID2D1RenderTarget::SetTransform whenever it changes. push pushes
@@ -663,6 +672,10 @@ namespace neui_d2d_backend
     if (!ctx) return;
     if (ctx->sink)   { ctx->sink->Release();   ctx->sink   = nullptr; }
     if (ctx->path)   { ctx->path->Release();   ctx->path   = nullptr; }
+    if (ctx->cached_stroke_style) {
+      ctx->cached_stroke_style->Release();
+      ctx->cached_stroke_style = nullptr;
+    }
     if (ctx->staging_bitmap) {
       ctx->staging_bitmap->Release();
       ctx->staging_bitmap = nullptr;
@@ -1115,7 +1128,7 @@ namespace neui_d2d_backend
     // alternate); set_fill_rule may override before the first figure.
     ctx->fill_mode       = D2D1_FILL_MODE_WINDING;
     ctx->figures_started = false;
-    sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+    sink->SetFillMode(ctx->fill_mode);
   }
 
   static void d2d_move_to(neui_render_ctx_t raw, float x, float y)
@@ -1279,7 +1292,13 @@ namespace neui_d2d_backend
     if (!ctx) return;
     ctx->fill_mode = (rule == NEUI_FILL_RULE_EVENODD)
                        ? D2D1_FILL_MODE_ALTERNATE : D2D1_FILL_MODE_WINDING;
-    // Legal only before the first figure is begun.
+    // D2D fixes the sink fill mode before the first BeginFigure, so the rule
+    // can only be applied while no figure has begun. The documented contract
+    // is "set before the first path verb"; a later call cannot take effect on
+    // D2D (whereas CG/Cairo apply at fill time), so assert in debug builds to
+    // catch the out-of-order misuse rather than silently rendering nonzero.
+    assert((!ctx->figures_started || rule == NEUI_FILL_RULE_NONZERO) &&
+           "set_fill_rule must be called before the first path verb (D2D limitation)");
     if (ctx->sink && !ctx->sink_closed && !ctx->figures_started)
       ctx->sink->SetFillMode(ctx->fill_mode);
   }
@@ -1331,13 +1350,26 @@ namespace neui_d2d_backend
     props.dashStyle  = dashed ? D2D1_DASH_STYLE_CUSTOM : D2D1_DASH_STYLE_SOLID;
     props.dashOffset = dash_off;
 
-    ID2D1StrokeStyle* ss = nullptr;
-    g_factory->CreateStrokeStyle(props,
-                                 dashed ? dashes.data() : nullptr,
-                                 dashed ? static_cast<UINT32>(dashes.size()) : 0,
-                                 &ss);
-    ctx->target->DrawGeometry(ctx->path, ctx->brush, stroke_width, ss);
-    if (ss) ss->Release();
+    // Reuse the cached stroke style if the resolved properties + dash pattern
+    // match the last call; otherwise rebuild and cache (freeing the old one).
+    bool reuse = ctx->cached_stroke_style &&
+                 std::memcmp(&props, &ctx->cached_stroke_props, sizeof(props)) == 0 &&
+                 ctx->cached_stroke_dashes.size() == dashes.size() &&
+                 (dashes.empty() ||
+                  std::memcmp(ctx->cached_stroke_dashes.data(), dashes.data(),
+                              dashes.size() * sizeof(float)) == 0);
+    if (!reuse) {
+      if (ctx->cached_stroke_style) ctx->cached_stroke_style->Release();
+      ctx->cached_stroke_style = nullptr;
+      g_factory->CreateStrokeStyle(props,
+                                   dashed ? dashes.data() : nullptr,
+                                   dashed ? static_cast<UINT32>(dashes.size()) : 0,
+                                   &ctx->cached_stroke_style);
+      ctx->cached_stroke_props  = props;
+      ctx->cached_stroke_dashes = dashes;
+    }
+    ctx->target->DrawGeometry(ctx->path, ctx->brush, stroke_width,
+                              ctx->cached_stroke_style);
   }
 
   // ---------------------------------------------------------------------------

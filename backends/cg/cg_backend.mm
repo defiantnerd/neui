@@ -705,6 +705,12 @@ namespace neui_cg_backend
   {
     auto* st = static_cast<CGContextState*>(raw);
     if (!st || !st->path) return;
+    // CGPathAddCurveToPoint requires a current point. If a curve is the first
+    // verb (no preceding move_to), seed the subpath at the cursor (0,0) so the
+    // curve draws from the origin, matching D2D (auto-BeginFigure at cursor)
+    // and Cairo (curx/cury default 0).
+    if (CGPathIsEmpty(st->path))
+      CGPathMoveToPoint(st->path, NULL, st->cursor.x, st->cursor.y);
     CGPathAddCurveToPoint(st->path, NULL, c1x, c1y, c2x, c2y, x, y);
     st->cursor = CGPointMake(x, y);
   }
@@ -713,6 +719,8 @@ namespace neui_cg_backend
   {
     auto* st = static_cast<CGContextState*>(raw);
     if (!st || !st->path) return;
+    if (CGPathIsEmpty(st->path))
+      CGPathMoveToPoint(st->path, NULL, st->cursor.x, st->cursor.y);
     CGPathAddQuadCurveToPoint(st->path, NULL, cx, cy, x, y);
     st->cursor = CGPointMake(x, y);
   }
