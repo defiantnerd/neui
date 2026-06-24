@@ -283,7 +283,10 @@ namespace neui_detail {
 
   // ---- Pixel-op helpers (premultiplied BGRA8) ------------------------------
 
-  inline float fg_clamp01(float x) { return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x); }
+  // Clamp to [0,1]; the `x > 0` form also maps NaN / -0 to 0 (a NaN passed
+  // straight to fg_to_byte's static_cast<uint8_t> would be UB), so a stray
+  // NaN from a client matrix value / k-coefficient / flood_opacity is scrubbed.
+  inline float fg_clamp01(float x) { return x > 0.0f ? (x > 1.0f ? 1.0f : x) : 0.0f; }
   inline uint8_t fg_to_byte(float x01) { return static_cast<uint8_t>(fg_clamp01(x01) * 255.0f + 0.5f); }
 
   inline void fg_flood(std::vector<uint8_t>& out, uint32_t w, uint32_t h,
@@ -521,10 +524,18 @@ namespace neui_detail {
           for (const std::string& src : P.merge_inputs)
             fg_over_inplace(out, resolve(src), w, h);
           break;
-        default: break;
+        // An unrecognised primitive kind passes its input through unchanged
+        // (identity) instead of leaving `out` zero-filled, which would blank
+        // the surface to transparent black on the final copy-back.
+        default: out = resolve(P.in); break;
       }
       if (P.has_region) fg_region_clip(out, w, h, P, scale);
-      if (!P.result.empty()) results[P.result] = out;
+      // Don't let a primitive's result name clobber the reserved seed inputs
+      // (SourceGraphic / SourceAlpha) that later default/seed resolves rely on.
+      if (!P.result.empty()
+          && P.result != NEUI_FILTER_SRC_GRAPHIC
+          && P.result != NEUI_FILTER_SRC_ALPHA)
+        results[P.result] = out;
       last = std::move(out);
       have_last = true;
     }

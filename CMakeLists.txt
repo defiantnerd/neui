@@ -363,11 +363,12 @@ if(APPLE)
 endif()
 
 # Filter knob example. Bakes a knob's static art (bezel + linear-gradient face)
-# into a SURFACE, then bakes two drop shadows via assets->surface_drop_shadow
-# (SVG feDropShadow numbers: stdDeviation 9 / 18, black @ 25%). A 2-layer
-# compound draws the baked face + a rotating indicator surface; a rotational
-# drag behavior turns the knob. Demonstrates the "bake once, blit many"
-# architecture from plans/svg-adaption.md.
+# into a SURFACE, then bakes in the designer's drop shadow by hand-wiring its
+# fe* chain as a NEUI_API_FILTER graph and applying it with assets->apply_filter
+# (SVG feDropShadow numbers: offset dy 9 / stdDeviation 9, black @ 35%). A
+# 2-layer compound draws the baked face + a rotating indicator surface; a
+# rotational drag behavior turns the knob. Demonstrates the "bake once, blit
+# many" architecture from plans/svg-adaption.md.
 if(MSVC)
   add_executable(neui_filter_knob_example WIN32
     examples/filter_knob_example.cpp

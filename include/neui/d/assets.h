@@ -376,7 +376,8 @@ extern "C" {
     // per frame; a re-paint via paint_surface overwrites the pixels, so
     // re-apply any filter after each paint_surface. All distances are in
     // LOGICAL (96-DPI) px and scale with the surface's backing scale. No-op
-    // on non-SURFACE handles, invalid handles, or a not-yet-painted surface.
+    // on non-SURFACE / invalid handles; on a surface not yet painted they run
+    // over its pixels, which are transparent black until the first paint_surface.
 
     // Gaussian-blur the surface (feGaussianBlur). sigma_x / sigma_y are the
     // per-axis std-deviations; an axis with sigma <= 0 is left unblurred
@@ -406,7 +407,8 @@ extern "C" {
     // replacing them with the final result, then drop cached GPU uploads so
     // the next draw_asset re-uploads. Call after paint_surface populated the
     // surface (re-apply after each re-paint). No-op on a non-SURFACE target,
-    // a non-FILTER filter, an empty graph, or a not-yet-painted surface.
+    // a non-FILTER filter, or an empty graph; on a surface not yet painted it
+    // evaluates over its pixels (transparent black until the first paint_surface).
     void (NEUI_ABI *apply_filter)(neui_session_t session,
                                   neui_asset_t surface, neui_asset_t filter);
 
