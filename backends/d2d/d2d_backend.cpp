@@ -93,6 +93,11 @@ namespace neui_d2d_backend
     bool                   figure_open = false;
     bool                   sink_closed = false;
     D2D1_POINT_2F          cursor_pt   = { 0.0f, 0.0f };
+    // Fill rule for the next fill. D2D fixes the sink fill mode before the
+    // first figure, so set_fill_rule applies only while no figure has begun
+    // (figures_started). begin_path resets to WINDING (= NONZERO default).
+    D2D1_FILL_MODE         fill_mode      = D2D1_FILL_MODE_WINDING;
+    bool                   figures_started = false;
 
     // Transform stack. `current` is the active D2D world transform, applied
     // via ID2D1RenderTarget::SetTransform whenever it changes. push pushes
@@ -1106,6 +1111,11 @@ namespace neui_d2d_backend
     ctx->figure_open = false;
     ctx->sink_closed = false;
     ctx->cursor_pt   = D2D1::Point2F(0.0f, 0.0f);
+    // Default to nonzero/winding deterministically (the sink default is
+    // alternate); set_fill_rule may override before the first figure.
+    ctx->fill_mode       = D2D1_FILL_MODE_WINDING;
+    ctx->figures_started = false;
+    sink->SetFillMode(D2D1_FILL_MODE_WINDING);
   }
 
   static void d2d_move_to(neui_render_ctx_t raw, float x, float y)
@@ -1119,8 +1129,9 @@ namespace neui_d2d_backend
     }
     D2D1_POINT_2F p = D2D1::Point2F(x, y);
     ctx->sink->BeginFigure(p, D2D1_FIGURE_BEGIN_FILLED);
-    ctx->figure_open = true;
-    ctx->cursor_pt   = p;
+    ctx->figure_open     = true;
+    ctx->figures_started = true;
+    ctx->cursor_pt       = p;
   }
 
   static void d2d_line_to(neui_render_ctx_t raw, float x, float y)
@@ -1130,7 +1141,8 @@ namespace neui_d2d_backend
 
     if (!ctx->figure_open) {
       ctx->sink->BeginFigure(ctx->cursor_pt, D2D1_FIGURE_BEGIN_FILLED);
-      ctx->figure_open = true;
+      ctx->figure_open     = true;
+      ctx->figures_started = true;
     }
     D2D1_POINT_2F p = D2D1::Point2F(x, y);
     ctx->sink->AddLine(p);
@@ -1174,7 +1186,8 @@ namespace neui_d2d_backend
 
     if (!ctx->figure_open) {
       ctx->sink->BeginFigure(start, D2D1_FIGURE_BEGIN_FILLED);
-      ctx->figure_open = true;
+      ctx->figure_open     = true;
+      ctx->figures_started = true;
     } else {
       // Bridge from current cursor to the arc start.
       ctx->sink->AddLine(start);
@@ -1226,6 +1239,105 @@ namespace neui_d2d_backend
     finalise_path(ctx);
     ctx->brush->SetColor(argb_to_color(argb, current_alpha(ctx)));
     ctx->target->DrawGeometry(ctx->path, ctx->brush, stroke_width);
+  }
+
+  static void d2d_cubic_to(neui_render_ctx_t raw, float c1x, float c1y,
+                           float c2x, float c2y, float x, float y)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx || !ctx->sink || ctx->sink_closed) return;
+    if (!ctx->figure_open) {
+      ctx->sink->BeginFigure(ctx->cursor_pt, D2D1_FIGURE_BEGIN_FILLED);
+      ctx->figure_open     = true;
+      ctx->figures_started = true;
+    }
+    D2D1_BEZIER_SEGMENT seg = { D2D1::Point2F(c1x, c1y),
+                                D2D1::Point2F(c2x, c2y),
+                                D2D1::Point2F(x, y) };
+    ctx->sink->AddBezier(seg);
+    ctx->cursor_pt = D2D1::Point2F(x, y);
+  }
+
+  static void d2d_quad_to(neui_render_ctx_t raw, float cx, float cy, float x, float y)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx || !ctx->sink || ctx->sink_closed) return;
+    if (!ctx->figure_open) {
+      ctx->sink->BeginFigure(ctx->cursor_pt, D2D1_FIGURE_BEGIN_FILLED);
+      ctx->figure_open     = true;
+      ctx->figures_started = true;
+    }
+    D2D1_QUADRATIC_BEZIER_SEGMENT seg = { D2D1::Point2F(cx, cy),
+                                          D2D1::Point2F(x, y) };
+    ctx->sink->AddQuadraticBezier(seg);
+    ctx->cursor_pt = D2D1::Point2F(x, y);
+  }
+
+  static void d2d_set_fill_rule(neui_render_ctx_t raw, neui_fill_rule_t rule)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx) return;
+    ctx->fill_mode = (rule == NEUI_FILL_RULE_EVENODD)
+                       ? D2D1_FILL_MODE_ALTERNATE : D2D1_FILL_MODE_WINDING;
+    // Legal only before the first figure is begun.
+    if (ctx->sink && !ctx->sink_closed && !ctx->figures_started)
+      ctx->sink->SetFillMode(ctx->fill_mode);
+  }
+
+  static void d2d_stroke_path_styled(neui_render_ctx_t raw, float stroke_width,
+                                     uint32_t argb, const neui_stroke_style_t* style)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx || !ctx->target || !ctx->brush || !ctx->path) return;
+    finalise_path(ctx);
+    ctx->brush->SetColor(argb_to_color(argb, current_alpha(ctx)));
+    if (!style) {
+      ctx->target->DrawGeometry(ctx->path, ctx->brush, stroke_width);
+      return;
+    }
+
+    auto map_cap = [](neui_line_cap_t c) -> D2D1_CAP_STYLE {
+      switch (c) {
+        case NEUI_LINE_CAP_ROUND:  return D2D1_CAP_STYLE_ROUND;
+        case NEUI_LINE_CAP_SQUARE: return D2D1_CAP_STYLE_SQUARE;
+        default:                   return D2D1_CAP_STYLE_FLAT;  // butt
+      }
+    };
+    D2D1_LINE_JOIN join =
+      (style->join == NEUI_LINE_JOIN_ROUND) ? D2D1_LINE_JOIN_ROUND :
+      (style->join == NEUI_LINE_JOIN_BEVEL) ? D2D1_LINE_JOIN_BEVEL :
+                                              D2D1_LINE_JOIN_MITER;
+    float miter = (style->miter_limit > 0.0f) ? style->miter_limit : 4.0f;
+
+    // D2D dash lengths are multiples of the stroke width; SVG/neui dashes are
+    // absolute logical px, so divide by the width (guard width <= 0).
+    const bool dashed = style->dash_array && style->dash_count > 0;
+    std::vector<float> dashes;
+    float dash_off = 0.0f;
+    if (dashed) {
+      const float w = stroke_width > 0.0f ? stroke_width : 1.0f;
+      dashes.reserve(style->dash_count);
+      for (uint32_t i = 0; i < style->dash_count; ++i)
+        dashes.push_back(style->dash_array[i] / w);
+      dash_off = style->dash_offset / w;
+    }
+
+    D2D1_STROKE_STYLE_PROPERTIES props = {};
+    props.startCap   = map_cap(style->cap);
+    props.endCap     = map_cap(style->cap);
+    props.dashCap    = map_cap(style->cap);
+    props.lineJoin   = join;
+    props.miterLimit = miter;
+    props.dashStyle  = dashed ? D2D1_DASH_STYLE_CUSTOM : D2D1_DASH_STYLE_SOLID;
+    props.dashOffset = dash_off;
+
+    ID2D1StrokeStyle* ss = nullptr;
+    g_factory->CreateStrokeStyle(props,
+                                 dashed ? dashes.data() : nullptr,
+                                 dashed ? static_cast<UINT32>(dashes.size()) : 0,
+                                 &ss);
+    ctx->target->DrawGeometry(ctx->path, ctx->brush, stroke_width, ss);
+    if (ss) ss->Release();
   }
 
   // ---------------------------------------------------------------------------
@@ -1553,6 +1665,10 @@ namespace neui_d2d_backend
     d2d_unregister_font,
     d2d_fill_rect_gradient,
     d2d_fill_path_gradient,
+    d2d_cubic_to,
+    d2d_quad_to,
+    d2d_set_fill_rule,
+    d2d_stroke_path_styled,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

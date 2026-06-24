@@ -385,6 +385,13 @@ namespace neui_detail
               k_painter_api.arc(p, cmd.args[0], cmd.args[1], cmd.args[2],
                                   cmd.args[3], cmd.args[4]);
               break;
+            case NEUI_PATH_CMD_CUBIC_TO:
+              k_painter_api.cubic_to(p, cmd.args[0], cmd.args[1], cmd.args[2],
+                                        cmd.args[3], cmd.args[4], cmd.args[5]);
+              break;
+            case NEUI_PATH_CMD_QUAD_TO:
+              k_painter_api.quad_to(p, cmd.args[0], cmd.args[1], cmd.args[2], cmd.args[3]);
+              break;
             case NEUI_PATH_CMD_CLOSE:
               k_painter_api.close_path(p);
               break;

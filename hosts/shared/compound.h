@@ -146,7 +146,7 @@ namespace neui_detail
     // begin_path / move_to / line_to / arc / close_path primitives.
     struct PathCommand {
       uint32_t kind;
-      float    args[5];
+      float    args[6];   // six: a cubic Bézier needs two control points + end
     };
     std::vector<PathCommand> path_cmds;
 
@@ -669,6 +669,7 @@ namespace neui_detail
       c.args[2] = cmds[i].args[2];
       c.args[3] = cmds[i].args[3];
       c.args[4] = cmds[i].args[4];
+      c.args[5] = cmds[i].args[5];
       L.path_cmds.push_back(c);
     }
   }
