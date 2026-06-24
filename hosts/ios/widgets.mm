@@ -1472,6 +1472,23 @@ namespace ios_host
     uint32_t slot = s->_asset_manager.allocate_behavior();
     return slot ? pack_asset_ios(s->session_id(), slot) : asset_none;
   }
+  static neui_asset_t NEUI_ABI as_create_filter(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    if (!s) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_filter();
+    return slot ? pack_asset_ios(s->session_id(), slot) : asset_none;
+  }
+  static void NEUI_ABI as_apply_filter(neui_session_t session,
+                                       neui_asset_t surface, neui_asset_t filter)
+  {
+    auto* s = get_session(session);
+    if (!s || surface.id == asset_none.id || filter.id == asset_none.id) return;
+    if (((surface.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return;
+    if (((filter.id  >> 16) & 0xffff) != (s->session_id() & 0xffff)) return;
+    s->_asset_manager.apply_filter(surface.id & 0xffff, filter.id & 0xffff,
+                                   neui_cg_backend::get_backend());
+  }
   static neui_asset_t NEUI_ABI as_create_surface(neui_session_t session, float wl, float hl, float scale)
   {
     auto* s = get_session(session);
@@ -1491,6 +1508,51 @@ namespace ios_host
                                     neui_cg_backend::get_backend(), s,
                                     &ios_painter_draw_asset_thunk);
   }
+  static void NEUI_ABI as_surface_blur(neui_session_t session, neui_asset_t surface,
+                                       float sigma_x, float sigma_y)
+  {
+    auto* s = get_session(session);
+    if (!s || surface.id == asset_none.id) return;
+    if (((surface.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return;
+    s->_asset_manager.blur_surface(surface.id & 0xffff, sigma_x, sigma_y,
+                                   neui_cg_backend::get_backend());
+  }
+  static void NEUI_ABI as_surface_drop_shadow(neui_session_t session, neui_asset_t surface,
+                                              float dx, float dy, float sigma,
+                                              uint32_t shadow_argb)
+  {
+    auto* s = get_session(session);
+    if (!s || surface.id == asset_none.id) return;
+    if (((surface.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return;
+    s->_asset_manager.drop_shadow_surface(surface.id & 0xffff, dx, dy, sigma, shadow_argb,
+                                          neui_cg_backend::get_backend());
+  }
+#define NEUI_IOS_SURF_GUARD \
+    auto* s = get_session(session); \
+    if (!s || surface.id == asset_none.id) return; \
+    if (((surface.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return
+  static void NEUI_ABI as_surface_inner_shadow(neui_session_t session, neui_asset_t surface,
+        float dx, float dy, float sigma, uint32_t shadow_argb)
+  { NEUI_IOS_SURF_GUARD; s->_asset_manager.inner_shadow_surface(surface.id & 0xffff, dx, dy, sigma,
+                                                                shadow_argb, neui_cg_backend::get_backend()); }
+  static void NEUI_ABI as_surface_glow(neui_session_t session, neui_asset_t surface,
+        float sigma, uint32_t glow_argb)
+  { NEUI_IOS_SURF_GUARD; s->_asset_manager.glow_surface(surface.id & 0xffff, sigma, glow_argb,
+                                                        neui_cg_backend::get_backend()); }
+  static void NEUI_ABI as_surface_tint(neui_session_t session, neui_asset_t surface, uint32_t argb)
+  { NEUI_IOS_SURF_GUARD; s->_asset_manager.tint_surface(surface.id & 0xffff, argb,
+                                                        neui_cg_backend::get_backend()); }
+  static void NEUI_ABI as_surface_desaturate(neui_session_t session, neui_asset_t surface, float amount)
+  { NEUI_IOS_SURF_GUARD; s->_asset_manager.desaturate_surface(surface.id & 0xffff, amount,
+                                                              neui_cg_backend::get_backend()); }
+  static void NEUI_ABI as_surface_elevation(neui_session_t session, neui_asset_t surface, float level)
+  { NEUI_IOS_SURF_GUARD; s->_asset_manager.elevation_surface(surface.id & 0xffff, level,
+                                                             neui_cg_backend::get_backend()); }
+  static void NEUI_ABI as_surface_bevel(neui_session_t session, neui_asset_t surface,
+        float dx, float dy, float sigma, uint32_t light_argb, uint32_t dark_argb)
+  { NEUI_IOS_SURF_GUARD; s->_asset_manager.bevel_surface(surface.id & 0xffff, dx, dy, sigma,
+                                                         light_argb, dark_argb, neui_cg_backend::get_backend()); }
+#undef NEUI_IOS_SURF_GUARD
 
   static neui_asset_t NEUI_ABI as_create_font(neui_session_t session,
                                               const uint8_t* data, uint32_t len)
@@ -1676,6 +1738,16 @@ namespace ios_host
     as_set_frame_layout,
     as_create_filmstrip_from_file,
     as_get_frame_count,
+    as_surface_blur,
+    as_surface_drop_shadow,
+    as_create_filter,
+    as_apply_filter,
+    as_surface_inner_shadow,
+    as_surface_glow,
+    as_surface_tint,
+    as_surface_desaturate,
+    as_surface_elevation,
+    as_surface_bevel,
   };
 
   // -------------------------------------------------------------------------
@@ -1896,6 +1968,105 @@ namespace ios_host
     NEUI_VERSION,
     be_add_handler, be_remove_handler, be_clear,
     be_set_int, be_set_float, be_set_string,
+  };
+
+  // -------------------------------------------------------------------------
+  // Filter API (NEUI_API_FILTER) - shared FilterAsset graph, applied to a
+  // SURFACE via assets->apply_filter.
+  static neui_detail::FilterAsset* resolve_filter_ios(neui_session_t session,
+                                                      neui_asset_t asset, Session*& out)
+  {
+    out = nullptr;
+    auto* s = get_session(session);
+    if (!s || asset.id == asset_none.id) return nullptr;
+    if (((asset.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return nullptr;
+    auto* e = s->_asset_manager.get_slot(asset.id & 0xffff);
+    if (!e || e->kind != NEUI_ASSET_KIND_FILTER || !e->filter) return nullptr;
+    out = s;
+    return e->filter.get();
+  }
+  static neui_detail::FilterPrimitive* resolve_filter_prim_ios(neui_session_t session,
+        neui_asset_t asset, neui_filter_prim_t prim, Session*& out)
+  {
+    auto* fa = resolve_filter_ios(session, asset, out);
+    if (!fa) return nullptr;
+    if (neui_detail::filter_prim_asset_slot(prim) != (asset.id & 0xffff)) return nullptr;
+    return neui_detail::filter_get_prim(*fa, neui_detail::filter_prim_slot(prim));
+  }
+  static neui_filter_prim_t NEUI_ABI fi_add_primitive(neui_session_t session,
+        neui_asset_t asset, neui_filter_prim_kind_t kind)
+  {
+    Session* s = nullptr; auto* fa = resolve_filter_ios(session, asset, s);
+    if (!fa) return filter_prim_none;
+    return neui_detail::pack_filter_prim(asset.id & 0xffff,
+                                         neui_detail::filter_add_primitive(*fa, kind));
+  }
+  static void NEUI_ABI fi_remove_primitive(neui_session_t session, neui_asset_t asset,
+        neui_filter_prim_t prim)
+  {
+    Session* s = nullptr; auto* fa = resolve_filter_ios(session, asset, s);
+    if (!fa || neui_detail::filter_prim_asset_slot(prim) != (asset.id & 0xffff)) return;
+    neui_detail::filter_remove_primitive(*fa, neui_detail::filter_prim_slot(prim));
+  }
+  static void NEUI_ABI fi_clear(neui_session_t session, neui_asset_t asset)
+  {
+    Session* s = nullptr; auto* fa = resolve_filter_ios(session, asset, s);
+    if (fa) neui_detail::filter_clear(*fa);
+  }
+  static void NEUI_ABI fi_set_input(neui_session_t session, neui_asset_t asset,
+        neui_filter_prim_t prim, int slot, const char* source)
+  {
+    Session* s = nullptr; auto* P = resolve_filter_prim_ios(session, asset, prim, s);
+    if (P) neui_detail::apply_filter_set_input(*P, slot, source);
+  }
+  static void NEUI_ABI fi_set_result(neui_session_t session, neui_asset_t asset,
+        neui_filter_prim_t prim, const char* name)
+  {
+    Session* s = nullptr; auto* P = resolve_filter_prim_ios(session, asset, prim, s);
+    if (P) neui_detail::apply_filter_set_result(*P, name);
+  }
+  static void NEUI_ABI fi_set_region(neui_session_t session, neui_asset_t asset,
+        neui_filter_prim_t prim, float x, float y, float w, float h)
+  {
+    Session* s = nullptr; auto* P = resolve_filter_prim_ios(session, asset, prim, s);
+    if (P) neui_detail::apply_filter_set_region(*P, x, y, w, h);
+  }
+  static void NEUI_ABI fi_set_int(neui_session_t session, neui_asset_t asset,
+        neui_filter_prim_t prim, const char* prop, int value)
+  {
+    Session* s = nullptr; auto* P = resolve_filter_prim_ios(session, asset, prim, s);
+    if (P && prop) neui_detail::apply_filter_set_int(*P, prop, value);
+  }
+  static void NEUI_ABI fi_set_float(neui_session_t session, neui_asset_t asset,
+        neui_filter_prim_t prim, const char* prop, float value)
+  {
+    Session* s = nullptr; auto* P = resolve_filter_prim_ios(session, asset, prim, s);
+    if (P && prop) neui_detail::apply_filter_set_float(*P, prop, value);
+  }
+  static void NEUI_ABI fi_set_string(neui_session_t session, neui_asset_t asset,
+        neui_filter_prim_t prim, const char* prop, const char* value)
+  {
+    Session* s = nullptr; auto* P = resolve_filter_prim_ios(session, asset, prim, s);
+    if (P && prop) neui_detail::apply_filter_set_string(*P, prop, value);
+  }
+  static void NEUI_ABI fi_set_floats(neui_session_t session, neui_asset_t asset,
+        neui_filter_prim_t prim, const char* prop, const float* values, uint32_t count)
+  {
+    Session* s = nullptr; auto* P = resolve_filter_prim_ios(session, asset, prim, s);
+    if (P && prop) neui_detail::apply_filter_set_floats(*P, prop, values, count);
+  }
+  static void NEUI_ABI fi_merge_add_input(neui_session_t session, neui_asset_t asset,
+        neui_filter_prim_t prim, const char* source)
+  {
+    Session* s = nullptr; auto* P = resolve_filter_prim_ios(session, asset, prim, s);
+    if (P) neui_detail::apply_filter_merge_add_input(*P, source);
+  }
+  neui_filter_api_t filter_api = {
+    NEUI_VERSION,
+    fi_add_primitive, fi_remove_primitive, fi_clear,
+    fi_set_input, fi_set_result, fi_set_region,
+    fi_set_int, fi_set_float, fi_set_string, fi_set_floats,
+    fi_merge_add_input,
   };
 
   // -------------------------------------------------------------------------

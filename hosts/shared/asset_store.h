@@ -15,6 +15,8 @@
 #include "painter.h"  // draw_asset_thunk_t + neui_painter + k_painter_api
 #include "component_loader.h"  // BuiltComponent / ComponentDefaultAttr / ComponentParam
 #include "filmstrip_recognize.h"  // FilmstripLayout + sidecar/filename discovery
+#include "image_filter.h"  // image_gaussian_blur_bgra
+#include "filter_graph.h"  // FilterAsset + evaluate_filter (SVG fe* engine)
 
 // Session-scoped asset slot table shared by all three hosts. Each host
 // previously carried a near-identical manager (xpl AssetManager, win32
@@ -95,6 +97,9 @@ namespace neui_detail
 
     // Populated for NEUI_ASSET_KIND_BEHAVIOR entries; null otherwise.
     std::unique_ptr<BehaviorAsset> behavior;
+
+    // Populated for NEUI_ASSET_KIND_FILTER entries; null otherwise.
+    std::unique_ptr<FilterAsset> filter;
 
     // Populated for NEUI_ASSET_KIND_SURFACE entries; null otherwise.
     // Owns the off-screen render context for the surface's lifetime.
@@ -323,6 +328,17 @@ namespace neui_detail
       return alloc_slot(std::move(entry));
     }
 
+    // Allocate a slot holding an empty FilterAsset (SVG fe* graph). Mutated
+    // via NEUI_API_FILTER, applied to a SURFACE via apply_filter. Returns 0
+    // on failure.
+    uint32_t allocate_filter()
+    {
+      auto entry = std::make_unique<AssetEntry>();
+      entry->kind   = NEUI_ASSET_KIND_FILTER;
+      entry->filter = std::make_unique<FilterAsset>();
+      return alloc_slot(std::move(entry));
+    }
+
     // Allocate a NEUI_ASSET_KIND_COMPONENT slot wrapping a built component
     // (the compound + behavior + defaults + params + default size produced by
     // build_component). The component takes ownership of the sub-assets and
@@ -502,6 +518,76 @@ namespace neui_detail
       }
       entry->bitmaps.clear();
     }
+
+    // Drop every cached per-window GPU upload of a SURFACE slot so the next
+    // draw_asset re-uploads from the (just-mutated) CPU pixel buffer. Shared
+    // tail of paint_surface / the filter ops below.
+    void drop_surface_gpu_cache(AssetEntry& entry, neui_render_backend_t* backend)
+    {
+      if (backend && backend->destroy_bitmap) {
+        for (auto& [other_ctx, cached] : entry.bitmaps)
+          if (cached.bmp) backend->destroy_bitmap(other_ctx, cached.bmp);
+      }
+      entry.bitmaps.clear();
+    }
+
+    // Evaluate a built FilterAsset in place over a SURFACE slot's pixels at the
+    // surface's backing scale, then drop the GPU cache. The shared tail of
+    // apply_filter + every surface_* convenience method. No-op unless `slot` is
+    // a SURFACE with populated pixels.
+    void apply_filter_asset(uint32_t slot, const FilterAsset& fa,
+                            neui_render_backend_t* backend)
+    {
+      if (slot == 0 || slot >= _handles.size()) return;
+      auto& entry = _handles[slot];
+      if (!entry || entry->kind != NEUI_ASSET_KIND_SURFACE) return;
+      if (entry->pixels.empty() || entry->width_px == 0 || entry->height_px == 0) return;
+      const float s = entry->scale > 0.0f ? entry->scale : 1.0f;
+      evaluate_filter(fa, entry->pixels.data(), entry->width_px, entry->height_px, s);
+      drop_surface_gpu_cache(*entry, backend);
+    }
+
+    // Evaluate a stored FILTER graph over a SURFACE (the public apply_filter).
+    // No-op unless both slots are valid (SURFACE with pixels + FILTER graph).
+    void apply_filter(uint32_t surface_slot, uint32_t filter_slot,
+                      neui_render_backend_t* backend)
+    {
+      if (filter_slot == 0 || filter_slot >= _handles.size()) return;
+      auto& filt = _handles[filter_slot];
+      if (!filt || filt->kind != NEUI_ASSET_KIND_FILTER || !filt->filter) return;
+      apply_filter_asset(surface_slot, *filt->filter, backend);
+    }
+
+    // Convenience surface filters - each builds the matching recipe graph
+    // (filter_graph.h filter_build_*) and runs it through apply_filter_asset,
+    // so there is one code path. All distances are LOGICAL px. No-op on
+    // non-SURFACE slots.
+    void blur_surface(uint32_t slot, float sigma_x, float sigma_y, neui_render_backend_t* backend)
+    { FilterAsset fa; filter_build_blur(fa, sigma_x, sigma_y); apply_filter_asset(slot, fa, backend); }
+
+    void drop_shadow_surface(uint32_t slot, float dx, float dy, float sigma,
+                             uint32_t shadow_argb, neui_render_backend_t* backend)
+    { FilterAsset fa; filter_build_drop_shadow(fa, dx, dy, sigma, shadow_argb); apply_filter_asset(slot, fa, backend); }
+
+    void inner_shadow_surface(uint32_t slot, float dx, float dy, float sigma,
+                              uint32_t shadow_argb, neui_render_backend_t* backend)
+    { FilterAsset fa; filter_build_inner_shadow(fa, dx, dy, sigma, shadow_argb); apply_filter_asset(slot, fa, backend); }
+
+    void glow_surface(uint32_t slot, float sigma, uint32_t glow_argb, neui_render_backend_t* backend)
+    { FilterAsset fa; filter_build_glow(fa, sigma, glow_argb); apply_filter_asset(slot, fa, backend); }
+
+    void tint_surface(uint32_t slot, uint32_t argb, neui_render_backend_t* backend)
+    { FilterAsset fa; filter_build_tint(fa, argb); apply_filter_asset(slot, fa, backend); }
+
+    void desaturate_surface(uint32_t slot, float amount, neui_render_backend_t* backend)
+    { FilterAsset fa; filter_build_desaturate(fa, amount); apply_filter_asset(slot, fa, backend); }
+
+    void elevation_surface(uint32_t slot, float level, neui_render_backend_t* backend)
+    { FilterAsset fa; filter_build_elevation(fa, level); apply_filter_asset(slot, fa, backend); }
+
+    void bevel_surface(uint32_t slot, float dx, float dy, float sigma,
+                       uint32_t light_argb, uint32_t dark_argb, neui_render_backend_t* backend)
+    { FilterAsset fa; filter_build_bevel(fa, dx, dy, sigma, light_argb, dark_argb); apply_filter_asset(slot, fa, backend); }
 
     // Release the slot. CPU pixels freed immediately; GPU caches dropped.
     void release_slot(uint32_t slot, neui_render_backend_t* backend)

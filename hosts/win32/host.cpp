@@ -31,6 +31,7 @@ namespace win32_host
   extern neui_asset_api_t     asset_api;
   extern neui_compound_api_t  compound_api;
   extern neui_behavior_api_t  behavior_api;
+  extern neui_filter_api_t    filter_api;
   extern neui_grid_api_t      grid_api;
   extern neui_dnd_api_t       dnd_api;
   extern neui_scroll_api_t    scroll_api;
@@ -76,6 +77,7 @@ namespace win32_host
     if (!strcmp(iface, NEUI_API_ASSETS))    return &win32_host::asset_api;
     if (!strcmp(iface, NEUI_API_COMPOUND))  return &win32_host::compound_api;
     if (!strcmp(iface, NEUI_API_BEHAVIOR))  return &win32_host::behavior_api;
+    if (!strcmp(iface, NEUI_API_FILTER))    return &win32_host::filter_api;
     if (!strcmp(iface, NEUI_API_GRID))      return &win32_host::grid_api;
     if (!strcmp(iface, NEUI_API_DND))       return &win32_host::dnd_api;
     if (!strcmp(iface, NEUI_API_SCROLL))    return &win32_host::scroll_api;

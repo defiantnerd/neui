@@ -362,6 +362,34 @@ if(APPLE)
   target_link_libraries(neui_surface_example PRIVATE neui-macoshost)
 endif()
 
+# Filter knob example. Bakes a knob's static art (bezel + linear-gradient face)
+# into a SURFACE, then bakes two drop shadows via assets->surface_drop_shadow
+# (SVG feDropShadow numbers: stdDeviation 9 / 18, black @ 25%). A 2-layer
+# compound draws the baked face + a rotating indicator surface; a rotational
+# drag behavior turns the knob. Demonstrates the "bake once, blit many"
+# architecture from plans/svg-adaption.md.
+if(MSVC)
+  add_executable(neui_filter_knob_example WIN32
+    examples/filter_knob_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_filter_knob_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_filter_knob_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_filter_knob_example WIN32 examples/filter_knob_example.cpp)
+elseif(APPLE)
+  add_executable(neui_filter_knob_example MACOSX_BUNDLE examples/filter_knob_example.cpp)
+else()
+  add_executable(neui_filter_knob_example examples/filter_knob_example.cpp)
+endif()
+target_link_libraries(neui_filter_knob_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_filter_knob_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_filter_knob_example PRIVATE neui-macoshost)
+endif()
+
 # Filmstrip / stitchmap knob example. Generates a vertical frame strip into a
 # SURFACE, tags it via assets->set_frame_layout, and drives it with a compound
 # asset layer whose "frame" prop is bound to NEUI_PARAM_VALUE + a rotational

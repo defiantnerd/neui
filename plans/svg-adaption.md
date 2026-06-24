@@ -148,9 +148,29 @@ knob it trades large memory for a benefit the GPU already gives for free.
 
 ## Open dependencies if this is pursued
 
-- Gradient fill primitive on rect/path layers (compound roadmap, deferred).
-- Cubic/quadratic bezier `set_path` commands (compound roadmap, deferred).
-- Gaussian-blur / shadow primitive in the painter API (not present), OR bake
-  shadows at rasterization time so no runtime blur is needed (preferred).
+- Gradient fill primitive on rect/path layers - DONE. `compound->set_gradient`
+  (linear / radial) plus the render/painter `fill_rect_gradient` /
+  `fill_path_gradient` primitives ship on all backends.
+- SVG `fe*` filter graph - DONE, via the "bake shadows at rasterization time"
+  route (preferred). A FILTER asset (`NEUI_ASSET_KIND_FILTER`) is a client-built
+  ordered graph of atomic primitives (`NEUI_API_FILTER`: feFlood, feColorMatrix,
+  feOffset, feGaussianBlur, feComposite, feBlend, feMerge + SourceGraphic /
+  SourceAlpha inputs), applied to a baked SURFACE via `assets->apply_filter`. The
+  engine is CPU, sRGB, premultiplied BGRA8 (`hosts/shared/filter_graph.h`); no
+  runtime per-frame blur. This reproduces the designer's two `<filter>` graphs
+  primitive-for-primitive (the full feColorMatrix-hardAlpha -> feOffset ->
+  feGaussianBlur -> feComposite-out -> feColorMatrix-tint -> feBlend chain), plus
+  the linear-gradient face. `surface_blur` / `surface_drop_shadow` remain as thin
+  convenience wrappers over the same engine. NEUI_API_FILTER is an optional host
+  extension (a host without off-screen surfaces returns nullptr). Verified by
+  `neui_filter_knob_example` + `tests/test_filter_graph.cpp`.
+- Cubic/quadratic bezier `set_path` commands (compound roadmap, still deferred;
+  not needed for the shadows or the gradient face).
+- Remaining SVG filter primitives as general ops (feColorMatrix, feComposite,
+  feBlend, feMerge, feFlood, feTurbulence) and `feComposite operator="out"`
+  semantics for *semi-transparent* shapes - deferred until a full `<filter>`
+  graph is needed.
 - An SVG rasterization path (vendored engine) OR a painter-API reimplementation
-  of the static art (preferred).
+  of the static art (preferred). The parsing location (fully in-core vs a helper
+  lib outside the core) is an open decision; it is independent of the filter
+  primitives above, which are parser-agnostic.

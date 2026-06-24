@@ -1059,9 +1059,9 @@ int main(int argc, char** argv) {
     app.widgets->set_asset(sess, cw_b, app.compound_shape);
     if (app.attrs) {
       app.attrs->set_string(sess, cw_a, "name",  "A");
-      app.attrs->set_float (sess, cw_a, NEUI_PARAM_VALUE, 0.5f);
-      app.attrs->set_string(sess, cw_b, "name",  "B");
-      app.attrs->set_float (sess, cw_b, NEUI_PARAM_VALUE, 0.5f);
+      app.attrs->set_float (sess, cw_a, NEUI_PARAM_VALUE, 0.3f);
+      app.attrs->set_string(sess, cw_b, "name",  "Bub");
+      app.attrs->set_float (sess, cw_b, NEUI_PARAM_VALUE, 0.7f);
     }
 
     // ----------------------------------------------------------------

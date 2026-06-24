@@ -20,6 +20,8 @@ add_executable(neui_tests
   test_clipboard_item.cpp
   test_asset_font.cpp
   test_asset_filmstrip.cpp
+  test_image_filter.cpp
+  test_filter_graph.cpp
   test_tabview.cpp
   test_mujson.cpp
   test_component_loader.cpp

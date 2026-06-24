@@ -75,6 +75,10 @@ extern "C" {
     // existing CUSTOMDRAW via widgets->set_asset). A *component* bundles a
     // *compound* plus a *behavior* - distinct kinds. See <neui/d/component.h>.
     NEUI_ASSET_KIND_COMPONENT = 8,
+    // Filter: a mutable, ordered graph of atomic SVG fe* primitives, built
+    // via NEUI_API_FILTER and applied to a SURFACE via apply_filter. See
+    // <neui/d/filter.h>.
+    NEUI_ASSET_KIND_FILTER    = 9,
   } neui_asset_kind_t;
 
   // --- Component loading types (NEUI_ASSET_KIND_COMPONENT) ----------------
@@ -360,6 +364,86 @@ extern "C" {
     // or the asset carries no frame layout (i.e. an ordinary bitmap).
     uint32_t (NEUI_ABI *get_frame_count)(neui_session_t session,
                                          neui_asset_t asset);
+
+    // --- SURFACE filters (NEUI_ASSET_KIND_SURFACE) -----------------------
+    // (Vtable-appended; check the api version / pointer before calling.)
+    //
+    // CPU image filters applied in place to a SURFACE's pixel buffer - the
+    // rendering half of the SVG filter primitives feGaussianBlur and
+    // feDropShadow. They run on the pixels paint_surface read back, so the
+    // result is identical on every backend and needs no backend support.
+    // Surfaces are baked once (startup / theme / DPI change), not filtered
+    // per frame; a re-paint via paint_surface overwrites the pixels, so
+    // re-apply any filter after each paint_surface. All distances are in
+    // LOGICAL (96-DPI) px and scale with the surface's backing scale. No-op
+    // on non-SURFACE handles, invalid handles, or a not-yet-painted surface.
+
+    // Gaussian-blur the surface (feGaussianBlur). sigma_x / sigma_y are the
+    // per-axis std-deviations; an axis with sigma <= 0 is left unblurred
+    // (pass the same value for an isotropic blur).
+    void (NEUI_ABI *surface_blur)(neui_session_t session, neui_asset_t surface,
+                                  float sigma_x, float sigma_y);
+
+    // Composite a drop shadow under the surface content (feDropShadow): a
+    // copy of the source's alpha coverage, tinted by shadow_argb (straight
+    // ARGB), blurred by `sigma`, offset by (dx, dy) (positive = right / down),
+    // drawn behind the crisp source. The surface must carry enough
+    // transparent margin to hold the offset + blurred halo.
+    void (NEUI_ABI *surface_drop_shadow)(neui_session_t session,
+                                         neui_asset_t surface,
+                                         float dx, float dy, float sigma,
+                                         uint32_t shadow_argb);
+
+    // --- SVG filter graph (NEUI_ASSET_KIND_FILTER) -----------------------
+    // (Vtable-appended; check the api version / pointer before calling.)
+
+    // Create an empty filter graph asset. Populate via NEUI_API_FILTER.
+    // Returns asset_none on allocation failure or a backend without
+    // off-screen support (null backend - same graceful path as surfaces).
+    neui_asset_t (NEUI_ABI *create_filter)(neui_session_t session);
+
+    // Evaluate `filter`'s primitive graph in place over `surface`'s pixels,
+    // replacing them with the final result, then drop cached GPU uploads so
+    // the next draw_asset re-uploads. Call after paint_surface populated the
+    // surface (re-apply after each re-paint). No-op on a non-SURFACE target,
+    // a non-FILTER filter, an empty graph, or a not-yet-painted surface.
+    void (NEUI_ABI *apply_filter)(neui_session_t session,
+                                  neui_asset_t surface, neui_asset_t filter);
+
+    // --- Convenience surface filters -------------------------------------
+    // (Vtable-appended; check the api version / pointer before calling.)
+    //
+    // Each is a named recipe over the same fe* engine as apply_filter (one
+    // call instead of hand-wiring the graph). All distances are LOGICAL px;
+    // call after paint_surface (re-apply after each re-paint); no-op on a
+    // non-SURFACE handle or a backend without off-screen support.
+
+    // Inset shadow band over the source (feDropShadow's inverse). dx/dy/sigma
+    // shape it; shadow_argb is the straight-alpha shadow colour.
+    void (NEUI_ABI *surface_inner_shadow)(neui_session_t session, neui_asset_t surface,
+                                          float dx, float dy, float sigma,
+                                          uint32_t shadow_argb);
+    // Symmetric coloured glow (a zero-offset drop shadow) - focus rings, lit
+    // states. sigma = softness, glow_argb = colour.
+    void (NEUI_ABI *surface_glow)(neui_session_t session, neui_asset_t surface,
+                                  float sigma, uint32_t glow_argb);
+    // Colourise: replace RGB with argb, keep coverage (argb's alpha scales
+    // opacity). Recolour a white master to the theme accent.
+    void (NEUI_ABI *surface_tint)(neui_session_t session, neui_asset_t surface,
+                                  uint32_t argb);
+    // Desaturate: amount 1 = fully grey, 0 = unchanged. Disabled-state look.
+    void (NEUI_ABI *surface_desaturate)(neui_session_t session, neui_asset_t surface,
+                                        float amount);
+    // Material-style elevation: a soft ambient + tighter key black shadow
+    // under the source, sized by `level` (logical px of depth).
+    void (NEUI_ABI *surface_elevation)(neui_session_t session, neui_asset_t surface,
+                                       float level);
+    // Bevel / emboss: a light inner band from one corner + a dark inner band
+    // from the opposite corner (3D raised / inset look). dx/dy/sigma shape the
+    // bands; light_argb / dark_argb are the highlight / shadow colours.
+    void (NEUI_ABI *surface_bevel)(neui_session_t session, neui_asset_t surface,
+                                   float dx, float dy, float sigma,
+                                   uint32_t light_argb, uint32_t dark_argb);
   } neui_asset_api_t;
 
 #ifdef __cplusplus
