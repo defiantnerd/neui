@@ -211,9 +211,13 @@ TEST_CASE("evaluate_filter: drop-shadow graph casts an offset halo under the sou
   // Source still crisp red on top.
   CHECK_EQ(buf[idx(3, 3, w) + 2], static_cast<uint8_t>(255));  // R
   CHECK_EQ(buf[idx(3, 3, w) + 3], static_cast<uint8_t>(255));  // A
-  // Offset region (was transparent) now carries a dark shadow.
-  CHECK(buf[idx(7, 7, w) + 3] > 0);
-  CHECK(buf[idx(7, 7, w) + 2] < 64);   // dark (black shadow)
+  // Offset region (was transparent) now carries a substantial, neutral-dark
+  // shadow: real coverage (alpha well above 0, not a faint sliver), genuinely
+  // black (premultiplied R far below its own alpha), and untinted (B == R).
+  const uint8_t sa = buf[idx(7, 7, w) + 3];
+  CHECK(sa > 64);                                          // not a sliver
+  CHECK(buf[idx(7, 7, w) + 2] <= sa / 4);                  // near-black vs its own alpha
+  CHECK_EQ(buf[idx(7, 7, w) + 0], buf[idx(7, 7, w) + 2]);  // neutral grey (B == R)
 }
 
 // ---- Convenience recipe builders -------------------------------------------
@@ -288,6 +292,11 @@ TEST_CASE("filter_build_bevel: opposite interior edges differ (light vs dark)")
   FilterAsset fa; filter_build_bevel(fa, 3.0f, 3.0f, 2.0f, 0xFFFFFFFFu, 0xFF000000u);
   evaluate_filter(fa, buf.data(), w, h, 1.0f);
   CHECK_EQ(A_at(buf, 8, 8, w), static_cast<uint8_t>(255));     // coverage kept
-  // One interior corner is lightened, the opposite darkened.
-  CHECK(R_at(buf, 5, 5, w) != R_at(buf, 10, 10, w));
+  // A genuine bevel SPLITS the two opposite interior edges relative to the
+  // mid-grey (128) fill: one lightens (R above 128), the other darkens (R
+  // below). Asserting the split DIRECTION - not just "differ" - catches a
+  // light/dark swap (or both bands the same colour). dark=black at +dx/+dy
+  // lands top-left; light=white at -dx/-dy lands bottom-right.
+  CHECK(R_at(buf, 5, 5, w)   < 128);   // top-left interior: dark band
+  CHECK(R_at(buf, 10, 10, w) > 128);   // bottom-right interior: light band
 }

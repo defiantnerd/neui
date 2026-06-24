@@ -2,22 +2,24 @@
 // feDropShadow) on a baked SURFACE, the "bake once, blit many" architecture
 // from plans/svg-adaption.md.
 //
-// A designer's SVG knob (134x134) defines its drop shadows as two filter
-// graphs that resolve to feDropShadow, plus a vertical linear-gradient face:
+// A designer's SVG knob defines its drop shadow as a filter graph that
+// resolves to feDropShadow, plus a vertical linear-gradient face:
 //
-//   filter1_d:  feOffset dy=18 + feGaussianBlur stdDeviation=18, black @ 25%
-//   filter0_d:  feOffset dy=9  + feGaussianBlur stdDeviation=9,  black @ 25%
-//   paint0:     linearGradient (67,20)->(67,78), #4E4E4E -> #363636
+//   feOffset dy=9 + feGaussianBlur stdDeviation=9, black drop shadow
+//   linearGradient down the face, #4E4E4E -> #363636
 //
-// We reproduce those numbers exactly: the static art (bezel + gradient face)
-// is painted once into an off-screen SURFACE via paint_surface, then the two
-// shadows are baked in with assets->surface_drop_shadow (sigma = the SVG
-// stdDeviation, colour = black at 0.25 alpha). A second small SURFACE holds
-// the rotating indicator. A two-layer COMPOUND draws the baked face (below)
-// and the indicator (above, rotation bound to neui.param.value); a
-// DRAG_ROTATIONAL BEHAVIOR turns the knob. The compound + behavior + both
-// surfaces are shared across all three knob instances (shape baked once,
-// AttrBag per widget) - the whole point of the bake-once approach.
+// We reproduce that shadow primitive-for-primitive: the static art (bezel +
+// gradient face) is painted once into an off-screen SURFACE via paint_surface,
+// then build_drop_shadow_filter() hand-wires the designer's fe* chain into a
+// NEUI_API_FILTER graph and assets->apply_filter bakes it into the surface
+// pixels (sigma = the SVG stdDeviation, colour = black at 0.35 alpha). The
+// canvas carries transparent margin so the offset + blurred halo fits (see the
+// geometry constants below). A second small SURFACE holds the rotating
+// indicator. A two-layer COMPOUND draws the baked face (below) and the
+// indicator (above, rotation bound to neui.param.value); a DRAG_ROTATIONAL
+// BEHAVIOR turns the knob. The compound + behavior + both surfaces are shared
+// across all three knob instances (shape baked once, AttrBag per widget) - the
+// whole point of the bake-once approach.
 
 #include "neui/neui.h"
 #include <math.h>
@@ -40,10 +42,13 @@
 
 static const float kTwoPi = 6.28318530718f;
 
-// Knob geometry, in the surface's logical pixels (134x134 canvas).
-static const float kCanvas  = 134.0f;
-static const float kCx      = 67.0f;
-static const float kCy      = 67.0f;
+// Knob geometry, in the surface's logical pixels. The canvas carries generous
+// transparent margin around the bezel so the drop shadow (offset dy + ~3*sigma
+// of blur halo) stays inside the surface instead of clipping at the edge: the
+// bezel bottom (kCy+kRBezel=113) plus dy 9 + 3*sigma 27 = 149 < kCanvas 160.
+static const float kCanvas  = 160.0f;
+static const float kCx      = 80.0f;
+static const float kCy      = 80.0f;
 static const float kRBezel  = 33.0f;
 static const float kRFace   = 29.0f;
 
@@ -294,9 +299,11 @@ int main(int /*argc*/, char* /*argv*/[])
 
   const char* names[3] = { "Gain", "Tone", "Mix" };
   float       vals [3] = { 0.25f, 0.55f, 0.80f };
-  const int   knob_sz  = 120;
+  // The baked surface now includes shadow margin around the disc, so upsize the
+  // widget (and spacing) to keep the disc's apparent size ~constant.
+  const int   knob_sz  = 144;
   for (int i = 0; i < 3 && app.comp.id != asset_none.id; ++i) {
-    int x = 20 + i * 150;
+    int x = 20 + i * 165;
     neui_widget_t k = app.widgets->create(app.session, win, NEUI_W_CUSTOMDRAW,
                                           x, 40, knob_sz, knob_sz, nullptr);
     app.widgets->set_asset(app.session, k, app.comp);    // visual

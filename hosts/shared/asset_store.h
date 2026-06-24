@@ -508,15 +508,11 @@ namespace neui_detail
       if (backend->read_pixels_bgra)
         backend->read_pixels_bgra(ctx, entry->pixels.data());
 
-      // Drop every cached per-window GPU upload of this surface so the
-      // next draw_asset re-uploads from the new pixel buffer. The cache
-      // key is (window-ctx), not surface_ctx - destroy_bitmap runs
-      // against the window ctx that owns each cached bitmap.
-      if (backend->destroy_bitmap) {
-        for (auto& [other_ctx, cached] : entry->bitmaps)
-          if (cached.bmp) backend->destroy_bitmap(other_ctx, cached.bmp);
-      }
-      entry->bitmaps.clear();
+      // Drop every cached per-window GPU upload of this surface so the next
+      // draw_asset re-uploads from the new pixel buffer (the cache key is the
+      // window ctx, not surface_ctx - destroy_bitmap runs against the window
+      // ctx that owns each cached bitmap). Shared with the filter ops below.
+      drop_surface_gpu_cache(*entry, backend);
     }
 
     // Drop every cached per-window GPU upload of a SURFACE slot so the next
