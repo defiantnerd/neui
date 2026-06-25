@@ -102,6 +102,18 @@ extern "C" {
     NEUI_COMPOUND_LAYER_RECT  = 3,
     NEUI_COMPOUND_LAYER_PATH  = 4,
     NEUI_COMPOUND_LAYER_QR    = 5,
+    // A container layer: a transform+clip scope holding a sub-list of layers
+    // added via add_child_layer. The group's own rect (anchor / offset / size,
+    // bindable like any layer) defines a local coordinate frame - children
+    // anchor and size against the GROUP rect, not the widget - and children are
+    // clipped to it. A group counts as ONE layer at the widget level: its `z`
+    // alone decides whether the whole group paints below (z<0) or above (z>=0)
+    // the widget's real children; child `z` only orders layers WITHIN the group
+    // and never interleaves with the widget's children. Child layers read the
+    // same widget AttrBag (templates + bindings) at the same priority as
+    // top-level layers - there is no separate data plane. `alpha` and
+    // `show_when` on the group apply to the whole subtree. Groups may nest.
+    NEUI_COMPOUND_LAYER_GROUP = 6,
   } neui_compound_layer_kind_t;
 
   // QR error-correction levels for NEUI_COMPOUND_LAYER_QR's "ecc" prop.
@@ -353,6 +365,24 @@ extern "C" {
     void (NEUI_ABI *set_gradient)(neui_session_t session, neui_asset_t asset,
                                   neui_compound_layer_t layer,
                                   const neui_gradient_t* grad);
+
+    // -------- Group children (vtable-appended) -----------------------------
+
+    // Append a layer as a child of an existing NEUI_COMPOUND_LAYER_GROUP
+    // layer. Identical to add_layer except the new layer lives inside
+    // `parent`'s coordinate frame (anchored / sized against the group rect,
+    // clipped to it) and its `z` orders it only among `parent`'s other
+    // children - it never interleaves with the widget's real children (the
+    // enclosing group's own z decides below/above as a whole). `parent` may
+    // itself be a child group (groups nest). Returns compound_layer_none if
+    // `parent` is not a GROUP layer of this asset, or on a non-compound asset.
+    // The returned handle works with every set_* / bind / remove_layer call
+    // exactly like a top-level layer handle.
+    neui_compound_layer_t (NEUI_ABI *add_child_layer)(neui_session_t session,
+                                                       neui_asset_t asset,
+                                                       neui_compound_layer_t parent,
+                                                       neui_compound_layer_kind_t kind,
+                                                       int z);
   } neui_compound_api_t;
 
 #ifdef __cplusplus

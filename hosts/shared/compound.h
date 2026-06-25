@@ -59,6 +59,11 @@ namespace neui_detail
   {
     neui_compound_layer_kind_t kind = NEUI_COMPOUND_LAYER_NONE;
     int                        z              = 0;
+    // Owning GROUP layer's slot, or 0 (the unused sentinel slot) for a
+    // top-level layer. A NEUI_COMPOUND_LAYER_GROUP layer collects every layer
+    // whose `parent` equals its own slot; those children anchor / size against
+    // the group rect and clip to it. See compound_add_child_layer.
+    uint32_t                   parent         = 0;
     neui_anchor_t              parent_anchor  = NEUI_ANCHOR_TOP_LEFT;
     neui_anchor_t              self_anchor    = NEUI_ANCHOR_TOP_LEFT;
 
@@ -229,13 +234,22 @@ namespace neui_detail
   // compound_add_layer can stamp the QR layer's default "{value}" template.
   inline std::vector<TextSegment> parse_template(const char* src);
 
-  inline uint32_t compound_add_layer(CompoundAsset& ca,
-                                      neui_compound_layer_kind_t kind,
-                                      int z)
+  // Defined further down; forward-declared so compound_add_child_layer can
+  // validate the parent layer's kind before the accessor's definition.
+  inline CompoundLayer* compound_get_layer(CompoundAsset& ca, uint32_t slot);
+  inline const CompoundLayer* compound_get_layer(const CompoundAsset& ca, uint32_t slot);
+
+  // parent_slot == 0 -> top-level layer; otherwise the new layer is a child of
+  // the GROUP layer at parent_slot (caller is responsible for validating that
+  // parent_slot names a GROUP - see compound_add_child_layer).
+  inline uint32_t compound_add_layer_parented(CompoundAsset& ca,
+                                              neui_compound_layer_kind_t kind,
+                                              int z, uint32_t parent_slot)
   {
     auto layer = std::make_unique<CompoundLayer>();
-    layer->kind = kind;
-    layer->z    = z;
+    layer->kind   = kind;
+    layer->z      = z;
+    layer->parent = parent_slot;
     // QR layers default to encoding the "{value}" attr; a client can override
     // the template via set_string(..., "text", ...) or supply NEUI_ATTR_QRCODE.
     if (kind == NEUI_COMPOUND_LAYER_QR) {
@@ -255,10 +269,35 @@ namespace neui_detail
     return slot;
   }
 
+  inline uint32_t compound_add_layer(CompoundAsset& ca,
+                                      neui_compound_layer_kind_t kind,
+                                      int z)
+  {
+    return compound_add_layer_parented(ca, kind, z, /*parent_slot*/0);
+  }
+
+  // Add a layer inside the GROUP at parent_slot. Returns UINT32_MAX (the host
+  // maps this to compound_layer_none) when parent_slot does not name an
+  // existing NEUI_COMPOUND_LAYER_GROUP layer of this asset.
+  inline uint32_t compound_add_child_layer(CompoundAsset& ca, uint32_t parent_slot,
+                                           neui_compound_layer_kind_t kind, int z)
+  {
+    const CompoundLayer* parent = compound_get_layer(ca, parent_slot);
+    if (!parent || parent->kind != NEUI_COMPOUND_LAYER_GROUP) return UINT32_MAX;
+    return compound_add_layer_parented(ca, kind, z, parent_slot);
+  }
+
+  // Remove a layer. A GROUP layer removes its whole subtree (every descendant)
+  // so no child is left pointing at a freed parent slot.
   inline void compound_remove_layer(CompoundAsset& ca, uint32_t slot)
   {
     if (slot == 0 || slot >= ca.layers.size()) return;
     if (!ca.layers[slot]) return;
+    // Recurse into children first so nested groups are torn down depth-first.
+    for (uint32_t i = 1; i < ca.layers.size(); ++i) {
+      if (ca.layers[i] && ca.layers[i]->parent == slot)
+        compound_remove_layer(ca, i);
+    }
     ca.layers[slot].reset();
     ca.free_slots.push_back(slot);
   }
@@ -718,5 +757,27 @@ namespace neui_detail
       });
     return slots;
   }
+
+  // Like compound_sorted_slots, but restricted to the direct children of
+  // `parent_slot` (parent_slot == 0 -> top-level layers). The paint walk
+  // iterates the top level with this, and each GROUP layer iterates its own
+  // children with it, so group membership is honoured without flattening.
+  inline std::vector<uint32_t> compound_sorted_children(const CompoundAsset& ca,
+                                                        uint32_t parent_slot)
+  {
+    std::vector<uint32_t> slots;
+    for (uint32_t i = 1; i < ca.layers.size(); ++i) {
+      if (ca.layers[i] && ca.layers[i]->parent == parent_slot) slots.push_back(i);
+    }
+    std::stable_sort(slots.begin(), slots.end(),
+      [&](uint32_t a, uint32_t b) {
+        return ca.layers[a]->z < ca.layers[b]->z;
+      });
+    return slots;
+  }
+
+  // Recursion cap on nested GROUP layers (paint-time guard against a malformed
+  // / cyclic parent chain). Generous: real layer trees are a handful deep.
+  inline constexpr int k_compound_max_group_depth = 16;
 
 } // namespace neui_detail

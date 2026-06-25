@@ -1784,6 +1784,21 @@ namespace ios_host
     s->invalidate_widgets_with_compound(asset.id);
     return neui_detail::pack_compound_layer(asset.id & 0xffff, slot);
   }
+  static neui_compound_layer_t NEUI_ABI co_add_child_layer(neui_session_t session, neui_asset_t asset,
+                                                           neui_compound_layer_t parent,
+                                                           neui_compound_layer_kind_t kind, int z)
+  {
+    Session* s = nullptr;
+    auto* ca = resolve_compound_ios(session, asset, s);
+    if (!ca) return compound_layer_none;
+    if (neui_detail::compound_layer_asset_slot(parent) != (asset.id & 0xffff))
+      return compound_layer_none;
+    uint32_t slot = neui_detail::compound_add_child_layer(
+      *ca, neui_detail::compound_layer_slot(parent), kind, z);
+    if (slot == UINT32_MAX) return compound_layer_none;
+    s->invalidate_widgets_with_compound(asset.id);
+    return neui_detail::pack_compound_layer(asset.id & 0xffff, slot);
+  }
   static void NEUI_ABI co_remove_layer(neui_session_t session, neui_asset_t asset, neui_compound_layer_t layer)
   {
     Session* s = nullptr;
@@ -1894,6 +1909,7 @@ namespace ios_host
     co_add_layer, co_remove_layer, co_clear, co_set_z, co_set_anchor,
     co_set_int, co_set_float, co_set_string, co_set_asset,
     co_bind, co_bind_asset, co_unbind, co_set_path, co_set_gradient,
+    co_add_child_layer,
   };
 
   // -------------------------------------------------------------------------

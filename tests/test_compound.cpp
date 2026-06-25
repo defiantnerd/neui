@@ -345,3 +345,68 @@ TEST_CASE("eval_binding_asset: missing or zero id -> asset_none, else handle")
   bag.set_int("img", 1234);
   CHECK_EQ((unsigned)eval_binding_asset(b, &bag).id, 1234u);
 }
+
+// ---------------------------------------------------------------------------
+// Group layers (NEUI_COMPOUND_LAYER_GROUP)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("compound_add_child_layer: nests only under a GROUP; sets parent")
+{
+  CompoundAsset ca;
+  uint32_t g = compound_add_layer(ca, NEUI_COMPOUND_LAYER_GROUP, 0);
+  REQUIRE(g != 0u);
+  CHECK_EQ((int)compound_get_layer(ca, g)->parent, 0);   // top-level group
+
+  uint32_t child = compound_add_child_layer(ca, g, NEUI_COMPOUND_LAYER_RECT, 5);
+  REQUIRE(child != UINT32_MAX);
+  CHECK_EQ((int)compound_get_layer(ca, child)->parent, (int)g);
+  CHECK_EQ(compound_get_layer(ca, child)->z, 5);
+
+  // A non-group parent is rejected.
+  uint32_t rect = compound_add_layer(ca, NEUI_COMPOUND_LAYER_RECT, 0);
+  CHECK(compound_add_child_layer(ca, rect, NEUI_COMPOUND_LAYER_TEXT, 0) == UINT32_MAX);
+  // A bogus parent slot is rejected.
+  CHECK(compound_add_child_layer(ca, 9999u, NEUI_COMPOUND_LAYER_TEXT, 0) == UINT32_MAX);
+}
+
+TEST_CASE("compound_sorted_children: scopes to a parent and sorts by z")
+{
+  CompoundAsset ca;
+  uint32_t g    = compound_add_layer(ca, NEUI_COMPOUND_LAYER_GROUP, 0);
+  uint32_t top  = compound_add_layer(ca, NEUI_COMPOUND_LAYER_RECT, 0);
+  uint32_t c_hi = compound_add_child_layer(ca, g, NEUI_COMPOUND_LAYER_RECT, 10);
+  uint32_t c_lo = compound_add_child_layer(ca, g, NEUI_COMPOUND_LAYER_TEXT, -10);
+  (void)top;
+
+  // Top level holds the group + the standalone rect; the children are NOT
+  // visible at the top level (they belong to the group).
+  CHECK_EQ((int)compound_sorted_children(ca, 0).size(), 2);
+
+  auto kids = compound_sorted_children(ca, g);
+  REQUIRE(kids.size() == 2);
+  CHECK_EQ((int)kids[0], (int)c_lo);   // z -10 sorts first
+  CHECK_EQ((int)kids[1], (int)c_hi);   // z 10 second
+}
+
+TEST_CASE("compound_remove_layer: removing a GROUP removes its whole subtree")
+{
+  CompoundAsset ca;
+  uint32_t g  = compound_add_layer(ca, NEUI_COMPOUND_LAYER_GROUP, 0);
+  uint32_t c1 = compound_add_child_layer(ca, g, NEUI_COMPOUND_LAYER_RECT, 0);
+  uint32_t ng = compound_add_child_layer(ca, g, NEUI_COMPOUND_LAYER_GROUP, 1);  // nested
+  uint32_t c2 = compound_add_child_layer(ca, ng, NEUI_COMPOUND_LAYER_TEXT, 0);
+
+  compound_remove_layer(ca, g);
+  CHECK(compound_get_layer(ca, g)  == nullptr);
+  CHECK(compound_get_layer(ca, c1) == nullptr);
+  CHECK(compound_get_layer(ca, ng) == nullptr);
+  CHECK(compound_get_layer(ca, c2) == nullptr);   // nested grandchild gone too
+  CHECK(compound_sorted_children(ca, 0).empty());
+}
+
+TEST_CASE("compound_add_layer: a top-level layer's parent defaults to 0")
+{
+  CompoundAsset ca;
+  uint32_t s = compound_add_layer(ca, NEUI_COMPOUND_LAYER_RECT, 0);
+  CHECK_EQ((int)compound_get_layer(ca, s)->parent, 0);
+}

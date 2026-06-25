@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <string>
 #include <utility>
 #include <variant>
@@ -160,6 +161,7 @@ namespace neui_detail
       if (s == "asset") return NEUI_COMPOUND_LAYER_ASSET;
       if (s == "rect")  return NEUI_COMPOUND_LAYER_RECT;
       if (s == "path")  return NEUI_COMPOUND_LAYER_PATH;
+      if (s == "group") return NEUI_COMPOUND_LAYER_GROUP;
       return NEUI_COMPOUND_LAYER_NONE;
     }
     inline neui_behavior_kind_t parse_behavior_kind(const std::string& s)
@@ -273,6 +275,7 @@ namespace neui_detail
         case NEUI_COMPOUND_LAYER_ASSET: return "asset";
         case NEUI_COMPOUND_LAYER_RECT:  return "rect";
         case NEUI_COMPOUND_LAYER_PATH:  return "path";
+        case NEUI_COMPOUND_LAYER_GROUP: return "group";
         default:                        return "";
       }
     }
@@ -406,20 +409,31 @@ namespace neui_detail
     if (cs.id == asset_none.id) return out; // host without compound support
     out.compound = cs;
 
-    if (const mj::array_t* layers = as_arr(obj_get(root, "layers"))) {
-      for (const auto& ln : *layers) {
-        const mj::object_t* lo = as_obj(&ln);
-        if (!lo) continue;
+    // Build one layer (and, for a GROUP, recurse into its nested "layers").
+    // parent_layer == compound_layer_none -> top-level (add_layer); otherwise
+    // the layer is a child of that GROUP (add_child_layer). Recursive, so the
+    // tree can nest arbitrarily.
+    std::function<void(const mj::object_t&, neui_compound_layer_t)> build_layer;
+    build_layer = [&](const mj::object_t& lo_ref, neui_compound_layer_t parent_layer) {
+        const mj::object_t* lo = &lo_ref;
         const std::string* kstr = as_str(obj_get(*lo, "kind"));
-        if (!kstr) continue;
+        if (!kstr) return;
         neui_compound_layer_kind_t kind = parse_layer_kind(*kstr);
-        if (kind == NEUI_COMPOUND_LAYER_NONE) continue;
+        if (kind == NEUI_COMPOUND_LAYER_NONE) return;
 
         int z = 0;
         double zd;
         if (as_num(obj_get(*lo, "z"), zd)) z = static_cast<int>(std::lround(zd));
 
-        neui_compound_layer_t layer = apis.compound->add_layer(session, cs, kind, z);
+        // A host without group support leaves add_child_layer null; the child
+        // is then skipped while the rest of the document still loads.
+        neui_compound_layer_t layer =
+          (parent_layer.id == compound_layer_none.id)
+            ? apis.compound->add_layer(session, cs, kind, z)
+            : (apis.compound->add_child_layer
+                 ? apis.compound->add_child_layer(session, cs, parent_layer, kind, z)
+                 : compound_layer_none);
+        if (layer.id == compound_layer_none.id) return;
 
         // anchor (default center/center)
         neui_anchor_t pa = NEUI_ANCHOR_CENTER, sa = NEUI_ANCHOR_CENTER;
@@ -596,7 +610,20 @@ namespace neui_detail
             }
           }
         }
-      }
+
+        // A GROUP layer's nested "layers" array becomes its children, added
+        // via add_child_layer so they live in the group's coordinate frame.
+        if (kind == NEUI_COMPOUND_LAYER_GROUP) {
+          if (const mj::array_t* kids = as_arr(obj_get(*lo, "layers")))
+            for (const auto& kn : *kids)
+              if (const mj::object_t* ko = as_obj(&kn)) build_layer(*ko, layer);
+        }
+      };
+
+    if (const mj::array_t* layers = as_arr(obj_get(root, "layers"))) {
+      for (const auto& ln : *layers)
+        if (const mj::object_t* lo = as_obj(&ln))
+          build_layer(*lo, compound_layer_none);
     }
 
     // behavior
@@ -704,13 +731,18 @@ namespace neui_detail
     };
 
     if (in.compound) {
-      mj::array_t larr;
       // A frame-strip layout lives on the asset, not the layer, so it is only
       // re-emitted on the FIRST asset layer (in serialization order) that
       // references each tagged asset. Emitting it on every layer sharing the
       // asset would bloat the round-trip document (minimal-diff violation).
       std::vector<uint32_t> emitted_frame_layout_assets;
-      for (uint32_t slot : compound_sorted_slots(*in.compound)) {
+      // Emit the direct children of parent_slot (0 == top level) as a layers
+      // array; a GROUP layer recurses to nest its own children, so a
+      // load -> serialize round-trip preserves the layer tree.
+      std::function<mj::array_t(uint32_t)> emit_children;
+      emit_children = [&](uint32_t parent_slot) -> mj::array_t {
+      mj::array_t larr;
+      for (uint32_t slot : compound_sorted_children(*in.compound, parent_slot)) {
         const CompoundLayer* L = compound_get_layer(*in.compound, slot);
         if (!L) continue;
         // Compare against a default-constructed layer rather than hard-coded
@@ -837,6 +869,9 @@ namespace neui_detail
             }
             lo.emplace_back("path", njson_arr(std::move(parr)));
           }
+        } else if (L->kind == NEUI_COMPOUND_LAYER_GROUP) {
+          // Recurse: the group's children become its own nested layers array.
+          lo.emplace_back("layers", njson_arr(emit_children(slot)));
         }
 
         if (!L->bindings.empty()) {
@@ -860,7 +895,9 @@ namespace neui_detail
 
         larr.push_back(njson_obj(std::move(lo)));
       }
-      root.emplace_back("layers", njson_arr(std::move(larr)));
+      return larr;
+      };
+      root.emplace_back("layers", njson_arr(emit_children(/*parent_slot*/0)));
     }
 
     if (in.behavior) {

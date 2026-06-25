@@ -244,12 +244,16 @@ namespace neui_detail
     return it->second.bmp;
   }
 
-  // Paint a single layer.
+  // Paint a single layer. `ca` + `self_slot` let a GROUP layer find and paint
+  // its children; `depth` guards against a malformed / cyclic parent chain.
   inline void paint_compound_layer(neui_painter_t* p,
+                                     const CompoundAsset& ca,
+                                     uint32_t self_slot,
                                      const CompoundLayer& L,
                                      float parent_w, float parent_h,
                                      const AttrBag* bag,
-                                     uint32_t state_mask)
+                                     uint32_t state_mask,
+                                     int depth)
   {
     // AND-filter: every bit set in show_when must be present in state_mask.
     // show_when == 0 (default) always passes.
@@ -501,6 +505,29 @@ namespace neui_detail
         }
         break;
       }
+      case NEUI_COMPOUND_LAYER_GROUP: {
+        // Container: establish a local coordinate frame at the group rect and
+        // clip children to it, then paint every direct child sorted by its own
+        // z. The group is one layer at the widget level (its z already decided
+        // below/above in paint_compound_pass), so children paint together here
+        // regardless of their z sign - no interleaving with the widget's real
+        // children. Children read the same widget AttrBag, anchored / sized
+        // against the group rect (r.w x r.h). The alpha scope opened above
+        // wraps the whole subtree, so a group alpha fades all children at once.
+        if (depth >= k_compound_max_group_depth) break;
+        k_painter_api.push_transform(p);
+        k_painter_api.translate(p, r.x, r.y);
+        k_painter_api.push_clip(p, 0.0f, 0.0f, r.w, r.h);
+        for (uint32_t cslot : compound_sorted_children(ca, self_slot)) {
+          const CompoundLayer* child = compound_get_layer(ca, cslot);
+          if (child)
+            paint_compound_layer(p, ca, cslot, *child, r.w, r.h,
+                                  bag, state_mask, depth + 1);
+        }
+        k_painter_api.pop_clip(p);
+        k_painter_api.pop_transform(p);
+        break;
+      }
       case NEUI_COMPOUND_LAYER_NONE:
       default:
         break;
@@ -521,13 +548,17 @@ namespace neui_detail
                                     bool paint_above_children,
                                     uint32_t state_mask)
   {
-    auto slots = compound_sorted_slots(ca);
+    // Only top-level layers (parent == 0) interleave with the widget's real
+    // children via the z<0 / z>=0 split; a GROUP's own children are painted
+    // recursively from the GROUP case, scoped to the group's single z slot.
+    auto slots = compound_sorted_children(ca, /*parent_slot*/0);
     for (uint32_t slot : slots) {
       const CompoundLayer* L = compound_get_layer(ca, slot);
       if (!L) continue;
       bool is_above = (L->z >= 0);
       if (is_above != paint_above_children) continue;
-      paint_compound_layer(p, *L, widget_w, widget_h, bag, state_mask);
+      paint_compound_layer(p, ca, slot, *L, widget_w, widget_h,
+                            bag, state_mask, /*depth*/0);
     }
   }
 

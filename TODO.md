@@ -54,11 +54,12 @@ is a real initiative, not trivial; together they form one programme.
   worth designing the slot system without them, not worth shipping
   them without it. Build the abstraction alongside the first one.
 - **Compound layer kinds beyond v1.** `text` / `asset` / `rect` /
-  `path` shipped. Remaining: `group` (nested transform scopes for a
-  tree of layers), cubic/quad bezier on `path` (needs painter API
-  extension first), template format specs (`{key:.2f}` reserved but
-  parser not implemented - `include/neui/d/compound.h:36`), SVG-mini
-  string form for `set_path`.
+  `path` / `qr` / `group` shipped (`group` = a nested transform+clip
+  scope holding a tree of child layers added via `add_child_layer`; the
+  group is one layer at the widget level, child `z` orders only within
+  it, children read the same widget AttrBag). Remaining: template format
+  specs (`{key:.2f}` reserved but parser not implemented -
+  `include/neui/d/compound.h:36`), SVG-mini string form for `set_path`.
 - **Behavior follow-ups.** Declarative interactivity v1 shipped as
   `NEUI_ASSET_KIND_BEHAVIOR` (drag V/H/rotational/biaxial, wheel,
   key step, click toggle/cycle, context reset, drag-source) - one

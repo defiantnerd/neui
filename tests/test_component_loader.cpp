@@ -21,6 +21,7 @@ namespace
   {
     neui_compound_layer_kind_t kind = NEUI_COMPOUND_LAYER_NONE;
     int                        z    = 0;
+    int                        parent = -1;   // -1 == top-level; else parent layer id
     neui_anchor_t              pa = NEUI_ANCHOR_TOP_LEFT, sa = NEUI_ANCHOR_TOP_LEFT;
     std::map<std::string, int>          ints;
     std::map<std::string, float>        flts;
@@ -82,7 +83,16 @@ namespace
   neui_compound_layer_t NEUI_ABI fake_add_layer(neui_session_t, neui_asset_t,
                                                 neui_compound_layer_kind_t kind, int z)
   {
-    LayerRec r; r.kind = kind; r.z = z;
+    LayerRec r; r.kind = kind; r.z = z; r.parent = -1;
+    g_layers.push_back(r);
+    neui_compound_layer_t l; l.id = static_cast<uint32_t>(g_layers.size() - 1);
+    return l;
+  }
+  neui_compound_layer_t NEUI_ABI fake_add_child_layer(neui_session_t, neui_asset_t,
+                                                      neui_compound_layer_t parent,
+                                                      neui_compound_layer_kind_t kind, int z)
+  {
+    LayerRec r; r.kind = kind; r.z = z; r.parent = static_cast<int>(parent.id);
     g_layers.push_back(r);
     neui_compound_layer_t l; l.id = static_cast<uint32_t>(g_layers.size() - 1);
     return l;
@@ -141,7 +151,8 @@ namespace
     a.set_frame_layout  = fake_set_frame_layout;
 
     c = neui_compound_api_t{};
-    c.add_layer   = fake_add_layer;
+    c.add_layer       = fake_add_layer;
+    c.add_child_layer = fake_add_child_layer;
     c.set_anchor  = fake_set_anchor;
     c.set_int     = fake_c_set_int;
     c.set_float   = fake_c_set_float;
@@ -431,6 +442,31 @@ TEST_CASE("component_loader: malformed json fails gracefully")
   CHECK(c.compound.id == asset_none.id);
 }
 
+TEST_CASE("component_loader: a group layer nests children via add_child_layer")
+{
+  const char* json = R"json({
+    "size": [60, 60],
+    "layers": [
+      { "kind": "group", "z": 0, "anchor": ["center","center"], "size": [40,40],
+        "layers": [
+          { "kind": "rect", "z": 0, "fill_color": "#FF101010" },
+          { "kind": "text", "z": 1, "text": "{value}" }
+        ] }
+    ]
+  })json";
+  run_loader(json);
+
+  REQUIRE(g_layers.size() == 3);
+  // layer 0 is the group (top-level); 1 & 2 are its children (parent == 0).
+  CHECK(g_layers[0].kind == NEUI_COMPOUND_LAYER_GROUP);
+  CHECK(g_layers[0].parent == -1);
+  CHECK(g_layers[0].ints.at("width") == 40 && g_layers[0].ints.at("height") == 40);
+  CHECK(g_layers[1].kind == NEUI_COMPOUND_LAYER_RECT);
+  CHECK(g_layers[1].parent == 0);
+  CHECK(g_layers[2].kind == NEUI_COMPOUND_LAYER_TEXT);
+  CHECK(g_layers[2].parent == 0);
+}
+
 // --- serialization (designer round-trip) -----------------------------------
 
 namespace
@@ -624,6 +660,52 @@ TEST_CASE("serialize_component: frame_layout is emitted once when layers share a
     if (cl_detail::obj_get(std::get<neui::mujson::object_t>(ln.value), "frame_layout"))
       ++frame_layout_count;
   CHECK_EQ(frame_layout_count, 1);
+}
+
+TEST_CASE("serialize_component: nests a group's children under a layers array")
+{
+  // Build a real group compound (group + 2 children), serialize, and confirm
+  // the children land in a nested "layers" array; then round-trip it back
+  // through the loader and confirm 3 layers with the right parentage.
+  CompoundAsset ca;
+  uint32_t g = compound_add_layer(ca, NEUI_COMPOUND_LAYER_GROUP, 0);
+  compound_get_layer(ca, g)->width  = 40;
+  compound_get_layer(ca, g)->height = 40;
+  uint32_t c0 = compound_add_child_layer(ca, g, NEUI_COMPOUND_LAYER_RECT, 0);
+  apply_set_int(*compound_get_layer(ca, c0), "fill_color",
+                static_cast<int>(static_cast<uint32_t>(0xFF101010u)));
+  uint32_t c1 = compound_add_child_layer(ca, g, NEUI_COMPOUND_LAYER_TEXT, 1);
+  apply_set_string(*compound_get_layer(ca, c1), "text", "{value}");
+
+  BehaviorAsset ba;
+  std::string nm = "grp";
+  std::vector<std::pair<std::string, std::string>> an;
+  std::vector<std::pair<uint32_t, std::string>>    hn;
+  ComponentSerializeInput in;
+  in.name = &nm; in.width = 60.0f; in.height = 60.0f;
+  in.asset_names = &an; in.asset_handle_names = &hn;
+  in.compound = &ca; in.behavior = &ba;
+
+  std::string json = serialize_component(in, 0);
+  auto root = neui::mujson::parse(json);
+  REQUIRE(!root.empty());
+  const auto* layers = cl_detail::obj_get(root, "layers");
+  REQUIRE(layers && std::holds_alternative<neui::mujson::array_t>(layers->value));
+  const auto& la = std::get<neui::mujson::array_t>(layers->value);
+  REQUIRE(la.size() == 1);   // only the group at the top level
+  const auto& go = std::get<neui::mujson::object_t>(la[0].value);
+  const auto* kind = cl_detail::obj_get(go, "kind");
+  REQUIRE(kind); CHECK(std::get<std::string>(kind->value) == "group");
+  const auto* kids = cl_detail::obj_get(go, "layers");
+  REQUIRE(kids && std::holds_alternative<neui::mujson::array_t>(kids->value));
+  CHECK_EQ((int)std::get<neui::mujson::array_t>(kids->value).size(), 2);
+
+  // Full round-trip through the loader: 3 layers, both children under the group.
+  run_loader(json);
+  REQUIRE(g_layers.size() == 3);
+  CHECK(g_layers[0].kind == NEUI_COMPOUND_LAYER_GROUP);
+  CHECK(g_layers[1].parent == 0);
+  CHECK(g_layers[2].parent == 0);
 }
 
 // Regression: a drag_biaxial handler's per-axis Y target must survive JSON
