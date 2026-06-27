@@ -1376,6 +1376,34 @@ namespace xpl_host
     // the window is created. The actual per-monitor DPI is read back afterwards.
     UINT sys_dpi = GetDpiForSystem();
 
+    // neui's create() width/height specify the CLIENT (content) area - the same
+    // contract as the win32 native host (hosts/win32/widgets.cpp) and macOS
+    // (initWithContentRect:), and what get_client_rect reports back.
+    // CreateWindowExW takes the OUTER window size, so grow the requested client
+    // rect by the non-client frame (title bar, resize borders, and the menu-bar
+    // row when this frame carries a menubar) via AdjustWindowRectExForDpi.
+    // Without this the usable client is ~30-50 px shorter and a few px narrower
+    // than asked for, clipping any widget laid out flush to the right / bottom
+    // edge. The menubar is SetMenu'd onto the frame right after creation (see
+    // widget show in widgets.cpp), so reserve its row here too.
+    bool has_menu = false;
+    for (uint32_t ci = session->_widgets.child(widget_index); ci != 0;
+         ci = session->_widgets.next(ci)) {
+      if (!session->_widgets.exists(ci)) continue;
+      if (!session->_widgets[ci].is_menubar()) continue;
+      auto* mb = dynamic_cast<MenubarWidget*>(&session->_widgets[ci]);
+      if (mb && mb->hmenu) { has_menu = true; break; }
+    }
+
+    auto outer_for_dpi = [&](UINT dpi) -> SIZE {
+      RECT wr = { 0, 0,
+                  MulDiv(wd.width,  static_cast<int>(dpi), 96),
+                  MulDiv(wd.height, static_cast<int>(dpi), 96) };
+      AdjustWindowRectExForDpi(&wr, style, has_menu ? TRUE : FALSE, ex_style, dpi);
+      return SIZE{ wr.right - wr.left, wr.bottom - wr.top };
+    };
+    SIZE outer = outer_for_dpi(sys_dpi);
+
     auto* wud = new WindowUserData{ session, widget_index };
 
     HWND hwnd = CreateWindowExW(
@@ -1385,8 +1413,8 @@ namespace xpl_host
       style,
       MulDiv(wd.x,      sys_dpi, 96),
       MulDiv(wd.y,      sys_dpi, 96),
-      MulDiv(wd.width,  sys_dpi, 96),
-      MulDiv(wd.height, sys_dpi, 96),
+      outer.cx,
+      outer.cy,
       owner_hwnd,
       nullptr,
       g_hinstance,
@@ -1407,9 +1435,9 @@ namespace xpl_host
     // coordinate space at another - visible as margins that don't match
     // left/top. Resize using the actual window DPI to keep both in sync.
     if (wd.dpi != sys_dpi && wd.dpi != 0) {
+      SIZE outer2 = outer_for_dpi(wd.dpi);
       SetWindowPos(hwnd, nullptr, 0, 0,
-                   MulDiv(wd.width,  static_cast<int>(wd.dpi), 96),
-                   MulDiv(wd.height, static_cast<int>(wd.dpi), 96),
+                   outer2.cx, outer2.cy,
                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
@@ -1556,12 +1584,28 @@ namespace xpl_host
   void platform_set_window_pos(void* native_handle,
                                 int x, int y, int w, int h, uint32_t dpi)
   {
-    // Client coordinates are logical (96 DPI base); convert to physical pixels.
-    SetWindowPos(static_cast<HWND>(native_handle), nullptr,
-      MulDiv(x, dpi, 96),
-      MulDiv(y, dpi, 96),
-      MulDiv(w, dpi, 96),
-      MulDiv(h, dpi, 96),
+    HWND hwnd = static_cast<HWND>(native_handle);
+    if (!hwnd) return;
+    if (dpi == 0) dpi = 96;
+    // w/h are the logical (96 DPI base) CLIENT size - this seam is frame-only
+    // in the xpl host (child widgets are painted, not HWNDs), so grow the
+    // requested client rect to the OUTER window size the same way
+    // create_native_window does, otherwise a programmatic set_size shrinks the
+    // usable client by the title bar / border / menu chrome. Style, ex-style
+    // and menu presence are read back from the live HWND. Position (x, y) is
+    // kept as the outer top-left, matching the create path.
+    RECT wr = { 0, 0,
+                MulDiv(w, static_cast<int>(dpi), 96),
+                MulDiv(h, static_cast<int>(dpi), 96) };
+    DWORD style    = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+    DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+    BOOL  has_menu = GetMenu(hwnd) != nullptr;
+    AdjustWindowRectExForDpi(&wr, style, has_menu, ex_style, dpi);
+    SetWindowPos(hwnd, nullptr,
+      MulDiv(x, static_cast<int>(dpi), 96),
+      MulDiv(y, static_cast<int>(dpi), 96),
+      wr.right - wr.left,
+      wr.bottom - wr.top,
       SWP_NOZORDER | SWP_NOACTIVATE);
   }
 
@@ -1653,8 +1697,35 @@ namespace xpl_host
   void platform_menubar_attach(void* frame_hwnd, void* hmenu)
   {
     if (!frame_hwnd || !hmenu) return;
-    SetMenu(static_cast<HWND>(frame_hwnd), static_cast<HMENU>(hmenu));
-    DrawMenuBar(static_cast<HWND>(frame_hwnd));
+    HWND hwnd = static_cast<HWND>(frame_hwnd);
+    SetMenu(hwnd, static_cast<HMENU>(hmenu));
+    DrawMenuBar(hwnd);
+
+    // Adding a menu bar consumes a row from the client area, but the frame's
+    // create() size is the CLIENT area - so restore it: recompute the outer
+    // window size for the stored logical client dims *with* the menu row and
+    // resize to it. This is idempotent by design:
+    //   - menubar present at create time: create_native_window already sized
+    //     the window with the menu allowance, so the target equals the current
+    //     outer size and this is a no-op.
+    //   - menubar created after the frame is shown (dynamic): the window was
+    //     sized without a menu row, so SetMenu above stole a client row; this
+    //     grows the window back so the client stays the requested size.
+    WindowUserData* wud = get_wud(hwnd);
+    if (!wud || !wud->session) return;
+    if (!wud->session->_widgets.exists(wud->widget_index)) return;
+    auto& wd = wud->session->_widgets[wud->widget_index];
+    UINT dpi = wd.dpi ? wd.dpi : GetDpiForWindow(hwnd);
+    if (dpi == 0) dpi = 96;
+    RECT wr = { 0, 0,
+                MulDiv(wd.width,  static_cast<int>(dpi), 96),
+                MulDiv(wd.height, static_cast<int>(dpi), 96) };
+    DWORD style    = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+    DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+    AdjustWindowRectExForDpi(&wr, style, TRUE, ex_style, dpi);
+    SetWindowPos(hwnd, nullptr, 0, 0,
+                 wr.right - wr.left, wr.bottom - wr.top,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
   }
 
   void platform_menubar_refresh(void* frame_hwnd)

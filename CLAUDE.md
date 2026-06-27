@@ -357,6 +357,33 @@ widgets->show(sess, win);
 neui->run(sess);
 ```
 
+## Writing client code: window sizing + event routing (recurring pitfalls)
+
+Two mistakes recur in generated neui client code. Apply both explicitly when authoring examples or client layouts.
+
+**1. Size a top-level frame from its content; account for the menubar band, don't undersize.** `widgets->create(sess, widget_none, NEUI_W_APPWINDOW, x, y, w, h, ...)` takes `w`/`h` as the **logical client area** at 96 DPI (1:1 - the host grows the outer window for title bar / borders and scales for DPI; never add chrome or DPI math to the create size yourself). The symptom to avoid is content clipped by a small fixed margin (~10-30 px), which is **not** a DPI ratio - it is the non-client chrome / in-frame menubar band eating into where you assumed `(0,0)..(w,h)` was usable:
+   - Compute `w`/`h` from the laid-out children: `w >= max(child.x + child.width) + margin`, `h >= max(child.y + child.height) + margin`, leaving an 8-12 px margin at the right and bottom edges (a widget flush to `w`/`h` reads as cramped and can clip).
+   - When the frame carries a `NEUI_W_MENUBAR`, the **usable content height is less than `h`** by the menubar band on the in-frame-menubar host (Linux ~24 px). Lay children out against `widgets->get_client_rect(sess, frame, &x,&y,&w,&h)` (origin `(0, inset)`, size `(w, h-inset)`), not the raw create height - this is exactly the ~10-20 px shortfall. See the `get_client_rect` note under the Coordinates design pattern.
+   - Don't fall back to a habitual small default (e.g. 400x300 / 100,100,...). Pick a size that actually holds the content plus margins.
+
+**2. Every event payload carries a `.widget` - gate every handler on it.** `onevent(token, event)` is called for *all* widgets with `emit_events` set, so a handler that branches on `event->type` alone fires for the wrong widget. Always test `event->data.<category>.widget.id == my_expected_id` before acting (the established pattern throughout `examples/main.cpp`):
+
+```cpp
+case NEUI_EVENT_MOUSE_BUTTON_CLICK:
+  if (event->data.mouse.widget.id == app->save_button_id)   { /* ... */ return true; }
+  if (event->data.mouse.widget.id == app->cancel_button_id) { /* ... */ return true; }
+  break;
+case NEUI_EVENT_RESIZE:
+  // resize.widget is the FRAME being resized. With more than one frame
+  // (APPWINDOW + DIALOG, multiple windows) you MUST check it or you
+  // relayout the wrong window:
+  if (event->data.resize.widget.id == app->main_win_id) {
+    int w = event->data.resize.width, h = event->data.resize.height; /* ... */
+  }
+  break;
+```
+   The category field name matches the payload union in `include/neui/d/events.h`: `mouse` / `wheel` / `key` / `focus` / `checkbox` / `item` / `tree` / `resize` / `value` / `attr` / `grid_row` / `grid_cell` / `grid_column_resize` / `grid_sort` / `dnd` / `scroll` / `tab` / `metrics`. (Examples deliberately do **not** add a `NEUI_EVENT_RESIZE` handler to re-fit children - live layout-on-resize is a deferred feature - but any RESIZE handler you do write must check the frame id.)
+
 ## Platform Implementation Gotchas
 
 Win32:
