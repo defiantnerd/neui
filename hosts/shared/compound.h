@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -124,6 +125,17 @@ namespace neui_detail
     uint32_t                 stroke_color  = 0x00000000;
     float                    stroke_width  = 0.0f;
     float                    corner_radius = 0.0f;
+
+    // SVG fill-rule + stroke style for RECT / PATH layers (cap/join/dash only
+    // affect PATH strokes). Defaults match the bare fill_path / stroke_path:
+    // nonzero fill, butt cap, miter join, solid line. Stored as plain ints
+    // (cast to the neui_*_t enums at paint) so the model needs no extra header.
+    int                      fill_rule          = 0;     // 0 nonzero, 1 evenodd
+    int                      stroke_cap         = 0;     // 0 butt, 1 round, 2 square
+    int                      stroke_join        = 0;     // 0 miter, 1 round, 2 bevel
+    float                    stroke_miter       = 4.0f;  // SVG default
+    std::vector<float>       stroke_dash;                // on/off lengths (empty = solid)
+    float                    stroke_dash_offset = 0.0f;
 
     // Optional gradient fill for RECT / PATH layers (set via the compound
     // API's set_gradient). When `enabled` with >= 2 stops the layer's FILL
@@ -563,6 +575,9 @@ namespace neui_detail
     if (L.kind == NEUI_COMPOUND_LAYER_RECT || L.kind == NEUI_COMPOUND_LAYER_PATH) {
       if (prop == "fill_color")   { L.fill_color   = static_cast<uint32_t>(v); return true; }
       if (prop == "stroke_color") { L.stroke_color = static_cast<uint32_t>(v); return true; }
+      if (prop == "fill_rule")    { L.fill_rule    = (v != 0) ? 1 : 0; return true; }
+      if (prop == "stroke_cap")   { L.stroke_cap   = (v < 0) ? 0 : (v > 2 ? 2 : v); return true; }
+      if (prop == "stroke_join")  { L.stroke_join  = (v < 0) ? 0 : (v > 2 ? 2 : v); return true; }
     }
     if (L.kind == NEUI_COMPOUND_LAYER_ASSET) {
       if (prop == "tint")  { L.tint  = static_cast<uint32_t>(v); return true; }
@@ -599,6 +614,8 @@ namespace neui_detail
     }
     if (L.kind == NEUI_COMPOUND_LAYER_RECT || L.kind == NEUI_COMPOUND_LAYER_PATH) {
       if (prop == "stroke_width")  { L.stroke_width  = (v < 0.0f) ? 0.0f : v; return true; }
+      if (prop == "stroke_miter")  { L.stroke_miter  = (v < 1.0f) ? 4.0f : v; return true; }
+      if (prop == "stroke_dash_offset") { L.stroke_dash_offset = v; return true; }
     }
     if (L.kind == NEUI_COMPOUND_LAYER_RECT) {
       if (prop == "corner_radius") { L.corner_radius = (v < 0.0f) ? 0.0f : v; return true; }
@@ -624,6 +641,23 @@ namespace neui_detail
     if (L.kind == NEUI_COMPOUND_LAYER_QR && prop == "text") {
       L.text_template = v ? v : "";
       L.text_segments = parse_template(v);
+      return true;
+    }
+    // stroke-dasharray transported as a comma/space-separated string (the
+    // compound API has no float-array setter; this avoids a vtable change).
+    // Parsed once here into the on/off run-length vector; negatives/zeros drop.
+    if ((L.kind == NEUI_COMPOUND_LAYER_PATH || L.kind == NEUI_COMPOUND_LAYER_RECT)
+        && prop == "stroke_dasharray") {
+      L.stroke_dash.clear();
+      for (const char* p = v ? v : ""; *p;) {
+        while (*p == ' ' || *p == ',' || *p == '\t') ++p;
+        if (!*p) break;
+        char* e = nullptr;
+        double d = std::strtod(p, &e);
+        if (e == p) break;
+        p = e;
+        if (d > 0.0) L.stroke_dash.push_back(static_cast<float>(d));
+      }
       return true;
     }
     return false;
