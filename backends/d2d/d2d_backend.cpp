@@ -1303,17 +1303,14 @@ namespace neui_d2d_backend
       ctx->sink->SetFillMode(ctx->fill_mode);
   }
 
-  static void d2d_stroke_path_styled(neui_render_ctx_t raw, float stroke_width,
-                                     uint32_t argb, const neui_stroke_style_t* style)
+  // Resolve a neui_stroke_style_t into a cached ID2D1StrokeStyle on the ctx,
+  // returning it (or nullptr for a plain/solid stroke). Shared by
+  // d2d_stroke_path_styled + d2d_stroke_path_gradient.
+  static ID2D1StrokeStyle* d2d_resolve_stroke_style(D2DContext* ctx,
+                                                     float stroke_width,
+                                                     const neui_stroke_style_t* style)
   {
-    auto* ctx = static_cast<D2DContext*>(raw);
-    if (!ctx || !ctx->target || !ctx->brush || !ctx->path) return;
-    finalise_path(ctx);
-    ctx->brush->SetColor(argb_to_color(argb, current_alpha(ctx)));
-    if (!style) {
-      ctx->target->DrawGeometry(ctx->path, ctx->brush, stroke_width);
-      return;
-    }
+    if (!style) return nullptr;
 
     auto map_cap = [](neui_line_cap_t c) -> D2D1_CAP_STYLE {
       switch (c) {
@@ -1368,8 +1365,18 @@ namespace neui_d2d_backend
       ctx->cached_stroke_props  = props;
       ctx->cached_stroke_dashes = dashes;
     }
-    ctx->target->DrawGeometry(ctx->path, ctx->brush, stroke_width,
-                              ctx->cached_stroke_style);
+    return ctx->cached_stroke_style;
+  }
+
+  static void d2d_stroke_path_styled(neui_render_ctx_t raw, float stroke_width,
+                                     uint32_t argb, const neui_stroke_style_t* style)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx || !ctx->target || !ctx->brush || !ctx->path) return;
+    finalise_path(ctx);
+    ctx->brush->SetColor(argb_to_color(argb, current_alpha(ctx)));
+    ID2D1StrokeStyle* ss = d2d_resolve_stroke_style(ctx, stroke_width, style);
+    ctx->target->DrawGeometry(ctx->path, ctx->brush, stroke_width, ss);
   }
 
   // ---------------------------------------------------------------------------
@@ -1549,6 +1556,20 @@ namespace neui_d2d_backend
     br->Release();
   }
 
+  static void d2d_stroke_path_gradient(neui_render_ctx_t raw, float stroke_width,
+                                       const neui_gradient_t* g,
+                                       const neui_stroke_style_t* style)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx || !ctx->target || !ctx->path) return;
+    ID2D1Brush* br = d2d_make_gradient_brush(ctx, g);
+    if (!br) return;
+    finalise_path(ctx);
+    ID2D1StrokeStyle* ss = d2d_resolve_stroke_style(ctx, stroke_width, style);
+    ctx->target->DrawGeometry(ctx->path, br, stroke_width, ss);
+    br->Release();
+  }
+
   // ---------------------------------------------------------------------------
   // Off-screen contexts (NEUI_ASSET_KIND_SURFACE).
 
@@ -1701,6 +1722,7 @@ namespace neui_d2d_backend
     d2d_quad_to,
     d2d_set_fill_rule,
     d2d_stroke_path_styled,
+    d2d_stroke_path_gradient,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

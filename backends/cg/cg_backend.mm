@@ -838,6 +838,39 @@ namespace neui_cg_backend
     CGContextRestoreGState(st->cg_ctx);
   }
 
+  static void cg_stroke_path_gradient(neui_render_ctx_t raw, float stroke_width,
+                                      const neui_gradient_t* g,
+                                      const neui_stroke_style_t* style)
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    if (!st || !st->cg_ctx || !st->path || !g || !g->stops || g->stop_count < 2)
+      return;
+    CGContextSaveGState(st->cg_ctx);
+    // CG can't set a gradient as a stroke colour. Replace the path with its
+    // stroked outline (honouring the line width/cap/join/dash set just below),
+    // clip to it, then paint the gradient through the clip.
+    CGContextSetLineWidth(st->cg_ctx, stroke_width);
+    if (style) {
+      CGContextSetLineCap(st->cg_ctx,
+        style->cap == NEUI_LINE_CAP_ROUND  ? kCGLineCapRound  :
+        style->cap == NEUI_LINE_CAP_SQUARE ? kCGLineCapSquare : kCGLineCapButt);
+      CGContextSetLineJoin(st->cg_ctx,
+        style->join == NEUI_LINE_JOIN_ROUND ? kCGLineJoinRound :
+        style->join == NEUI_LINE_JOIN_BEVEL ? kCGLineJoinBevel : kCGLineJoinMiter);
+      CGContextSetMiterLimit(st->cg_ctx, style->miter_limit > 0.0f ? style->miter_limit : 4.0f);
+      if (style->dash_array && style->dash_count > 0) {
+        std::vector<CGFloat> dashes(style->dash_count);
+        for (uint32_t i = 0; i < style->dash_count; ++i) dashes[i] = style->dash_array[i];
+        CGContextSetLineDash(st->cg_ctx, style->dash_offset, dashes.data(), dashes.size());
+      }
+    }
+    CGContextAddPath(st->cg_ctx, st->path);
+    CGContextReplacePathWithStrokedPath(st->cg_ctx);  // current path -> stroke outline
+    CGContextClip(st->cg_ctx);                         // clip to the stroke region
+    cg_draw_gradient(st, g);
+    CGContextRestoreGState(st->cg_ctx);
+  }
+
   // ---------------------------------------------------------------------------
   // Transform stack - CGContextSaveGState/RestoreGState saves+restores both
   // the CTM and the clip stack atomically. Widget code never interleaves
@@ -1226,6 +1259,7 @@ namespace neui_cg_backend
     cg_quad_to,
     cg_set_fill_rule,
     cg_stroke_path_styled,
+    cg_stroke_path_gradient,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

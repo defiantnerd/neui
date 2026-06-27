@@ -331,6 +331,12 @@ typedef struct neui_render_backend {
                                       uint32_t argb,
                                       const neui_stroke_style_t* style);
 
+  // Stroke the current path with a gradient brush (the stroke analogue of
+  // fill_path_gradient). NULL style == plain stroke; NULL/<2-stop grad == no-op.
+  void (NEUI_ABI *stroke_path_gradient)(neui_render_ctx_t ctx, float stroke_width,
+                                        const neui_gradient_t* grad,
+                                        const neui_stroke_style_t* style);
+
 } neui_render_backend_t;
 
 #ifdef __cplusplus

@@ -894,6 +894,36 @@ namespace neui_cairo_backend
     cairo_pattern_destroy(pat);
   }
 
+  static void cairo_stroke_path_gradient(neui_render_ctx_t raw, float stroke_width,
+                                         const neui_gradient_t* g,
+                                         const neui_stroke_style_t* style)
+  {
+    auto* st = static_cast<CairoCtx*>(raw);
+    if (!st || !st->cr) return;
+    cairo_pattern_t* pat = cairo_make_gradient(st, g);
+    if (!pat) return;
+    cairo_save(st->cr);   // source + line cap/join/miter/dash are cr state
+    cairo_set_source(st->cr, pat);
+    cairo_set_line_width(st->cr, stroke_width);
+    if (style) {
+      cairo_set_line_cap(st->cr,
+        style->cap == NEUI_LINE_CAP_ROUND  ? CAIRO_LINE_CAP_ROUND  :
+        style->cap == NEUI_LINE_CAP_SQUARE ? CAIRO_LINE_CAP_SQUARE : CAIRO_LINE_CAP_BUTT);
+      cairo_set_line_join(st->cr,
+        style->join == NEUI_LINE_JOIN_ROUND ? CAIRO_LINE_JOIN_ROUND :
+        style->join == NEUI_LINE_JOIN_BEVEL ? CAIRO_LINE_JOIN_BEVEL : CAIRO_LINE_JOIN_MITER);
+      cairo_set_miter_limit(st->cr, style->miter_limit > 0.0f ? style->miter_limit : 4.0);
+      if (style->dash_array && style->dash_count > 0) {
+        std::vector<double> dashes(style->dash_count);
+        for (uint32_t i = 0; i < style->dash_count; ++i) dashes[i] = style->dash_array[i];
+        cairo_set_dash(st->cr, dashes.data(), static_cast<int>(dashes.size()), style->dash_offset);
+      }
+    }
+    cairo_stroke_preserve(st->cr);  // keep path so a later op still works
+    cairo_restore(st->cr);
+    cairo_pattern_destroy(pat);
+  }
+
   // --------------------------------------------------------------------------
   // Transform stack - cairo_save/restore covers both CTM and clip.
 
@@ -1177,6 +1207,7 @@ namespace neui_cairo_backend
     cairo_quad_to,
     cairo_set_fill_rule_fn,
     cairo_stroke_path_styled,
+    cairo_stroke_path_gradient,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

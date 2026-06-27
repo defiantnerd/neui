@@ -376,6 +376,11 @@ namespace neui_detail {
                                          const neui_stroke_style_t* style)
   { if (p && p->backend && p->backend->stroke_path_styled)
       p->backend->stroke_path_styled(p->ctx, stroke_w, argb, style); }
+  inline void painter_stroke_path_gradient(neui_painter_t* p, float stroke_w,
+                                           const neui_gradient_t* grad,
+                                           const neui_stroke_style_t* style)
+  { if (p && p->backend && p->backend->stroke_path_gradient)
+      p->backend->stroke_path_gradient(p->ctx, stroke_w, grad, style); }
 
   // The static api table. Each host extern-references this from its
   // paint dispatch and stamps it into neui_event_paint_t::painter_api.
@@ -414,6 +419,7 @@ namespace neui_detail {
     painter_quad_to,
     painter_set_fill_rule,
     painter_stroke_path_styled,
+    painter_stroke_path_gradient,
   };
 
 } // namespace neui_detail
