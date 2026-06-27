@@ -557,6 +557,30 @@ namespace neui_detail
           double swd;
           if (as_num(obj_get(*lo, "stroke_width"), swd))
             apis.compound->set_float(session, cs, layer, "stroke_width", static_cast<float>(swd));
+          // SVG fill-rule + stroke style (cap / join / miter / dash).
+          if (const std::string* fr = as_str(obj_get(*lo, "fill_rule")))
+            apis.compound->set_int(session, cs, layer, "fill_rule", (*fr == "evenodd") ? 1 : 0);
+          if (const std::string* lc = as_str(obj_get(*lo, "stroke_linecap")))
+            apis.compound->set_int(session, cs, layer, "stroke_cap",
+                                   (*lc == "round") ? 1 : (*lc == "square") ? 2 : 0);
+          if (const std::string* lj = as_str(obj_get(*lo, "stroke_linejoin")))
+            apis.compound->set_int(session, cs, layer, "stroke_join",
+                                   (*lj == "round") ? 1 : (*lj == "bevel") ? 2 : 0);
+          double mld;
+          if (as_num(obj_get(*lo, "stroke_miterlimit"), mld))
+            apis.compound->set_float(session, cs, layer, "stroke_miter", static_cast<float>(mld));
+          double dod;
+          if (as_num(obj_get(*lo, "stroke_dashoffset"), dod))
+            apis.compound->set_float(session, cs, layer, "stroke_dash_offset", static_cast<float>(dod));
+          if (const mj::array_t* da = as_arr(obj_get(*lo, "stroke_dasharray"))) {
+            std::string spec;  // transported as a string (no float-array setter)
+            for (const auto& dn : *da) {
+              double d;
+              if (as_num(&dn, d)) { if (!spec.empty()) spec += ','; spec += std::to_string(d); }
+            }
+            if (!spec.empty())
+              apis.compound->set_string(session, cs, layer, "stroke_dasharray", spec.c_str());
+          }
           if (kind == NEUI_COMPOUND_LAYER_RECT) {
             double cr;
             if (as_num(obj_get(*lo, "corner_radius"), cr))
@@ -838,6 +862,22 @@ namespace neui_detail
           if (L->fill_color)   lo.emplace_back("fill_color",   njson_str(hexcolor(L->fill_color)));
           if (L->stroke_color) lo.emplace_back("stroke_color", njson_str(hexcolor(L->stroke_color)));
           if (L->stroke_width != 0.0f) lo.emplace_back("stroke_width", njson_num(L->stroke_width));
+          if (L->fill_rule != 0) lo.emplace_back("fill_rule", njson_str("evenodd"));
+          if (L->kind == NEUI_COMPOUND_LAYER_PATH) {
+            if (L->stroke_cap != 0)
+              lo.emplace_back("stroke_linecap", njson_str(L->stroke_cap == 1 ? "round" : "square"));
+            if (L->stroke_join != 0)
+              lo.emplace_back("stroke_linejoin", njson_str(L->stroke_join == 1 ? "round" : "bevel"));
+            if (L->stroke_miter != 4.0f)
+              lo.emplace_back("stroke_miterlimit", njson_num(L->stroke_miter));
+            if (!L->stroke_dash.empty()) {
+              mj::array_t da;
+              for (float d : L->stroke_dash) da.push_back(njson_num(d));
+              lo.emplace_back("stroke_dasharray", njson_arr(std::move(da)));
+              if (L->stroke_dash_offset != 0.0f)
+                lo.emplace_back("stroke_dashoffset", njson_num(L->stroke_dash_offset));
+            }
+          }
           if (L->kind == NEUI_COMPOUND_LAYER_RECT && L->corner_radius != 0.0f)
             lo.emplace_back("corner_radius", njson_num(L->corner_radius));
           if (L->kind == NEUI_COMPOUND_LAYER_PATH && !L->path_cmds.empty()) {

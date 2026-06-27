@@ -396,6 +396,30 @@ TEST_CASE("component_loader: path geometry")
   CHECK(p->path[4].kind == NEUI_PATH_CMD_CLOSE);
 }
 
+TEST_CASE("component_loader: path fill-rule + stroke style")
+{
+  const char* json = R"({
+    "component": "t", "size": [10, 10],
+    "layers": [
+      { "kind": "path", "size": [10, 10],
+        "fill_color": "#FF000000", "fill_rule": "evenodd",
+        "stroke_color": "#FF112233", "stroke_width": 2,
+        "stroke_linecap": "round", "stroke_linejoin": "bevel",
+        "stroke_miterlimit": 8, "stroke_dasharray": [4, 2], "stroke_dashoffset": 1,
+        "path": [ {"m":[0,0]}, {"l":[5,5]} ] }
+    ]
+  })";
+  run_loader(json);
+  const LayerRec* p = layer_of_kind(NEUI_COMPOUND_LAYER_PATH, 0);
+  REQUIRE(p);
+  CHECK(p->ints.at("fill_rule")  == 1);   // evenodd
+  CHECK(p->ints.at("stroke_cap") == 1);   // round
+  CHECK(p->ints.at("stroke_join") == 2);  // bevel
+  CHECK(p->flts.at("stroke_miter") == 8.0f);
+  CHECK(p->flts.at("stroke_dash_offset") == 1.0f);
+  CHECK(p->strs.count("stroke_dasharray") == 1);  // array -> string transport
+}
+
 TEST_CASE("component_loader: behavior handlers + typed props")
 {
   run_loader(kKnobJson);

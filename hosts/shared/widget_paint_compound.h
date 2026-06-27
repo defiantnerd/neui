@@ -377,6 +377,9 @@ namespace neui_detail
         k_painter_api.push_transform(p);
         k_painter_api.translate(p, r.x, r.y);
         k_painter_api.begin_path(p);
+        // fill-rule resets to NONZERO on begin_path, so set it before any verb.
+        if (L.fill_rule != 0 && k_painter_api.set_fill_rule)
+          k_painter_api.set_fill_rule(p, NEUI_FILL_RULE_EVENODD);
         for (const auto& cmd : L.path_cmds) {
           switch (cmd.kind) {
             case NEUI_PATH_CMD_MOVE_TO:
@@ -410,7 +413,22 @@ namespace neui_detail
         } else if (solid_fill) {
           k_painter_api.fill_path(p, fill);
         }
-        if (has_stroke) k_painter_api.stroke_path(p, sw, stroke);
+        if (has_stroke) {
+          bool styled = L.stroke_cap != 0 || L.stroke_join != 0 ||
+                        !L.stroke_dash.empty() || L.stroke_miter != 4.0f;
+          if (styled && k_painter_api.stroke_path_styled) {
+            neui_stroke_style_t style{};
+            style.cap         = static_cast<neui_line_cap_t>(L.stroke_cap);
+            style.join        = static_cast<neui_line_join_t>(L.stroke_join);
+            style.miter_limit = L.stroke_miter;
+            style.dash_array  = L.stroke_dash.empty() ? nullptr : L.stroke_dash.data();
+            style.dash_count  = static_cast<uint32_t>(L.stroke_dash.size());
+            style.dash_offset = L.stroke_dash_offset;
+            k_painter_api.stroke_path_styled(p, sw, stroke, &style);
+          } else {
+            k_painter_api.stroke_path(p, sw, stroke);
+          }
+        }
         k_painter_api.pop_transform(p);
         break;
       }

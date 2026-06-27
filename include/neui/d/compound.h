@@ -273,14 +273,24 @@ extern "C" {
     //     "fill_color"    int   ARGB; 0 = no fill (alpha 0)
     //     "stroke_color"  int   ARGB; 0 = no stroke (alpha 0)
     //     "stroke_width"  float px; 0 (default) = no stroke
+    //     "fill_rule"     int   0 = NONZERO (default), 1 = EVENODD
     //     "corner_radius" float px; 0 (default) = sharp corners. Clamped to
     //                              min(width, height) / 2 at paint time.
     //     A gradient fill (overriding fill_color) is set via set_gradient
     //     (below); the stroke stays solid. Honours corner_radius.
-    //   path layer props:
+    //   path layer props (same fill/stroke/fill_rule as rect, plus SVG-style
+    //   stroke styling, which uses the painter's stroke_path_styled):
     //     "fill_color"    int   ARGB; 0 = no fill. Same semantics as rect.
     //     "stroke_color"  int   ARGB; 0 = no stroke. Same semantics as rect.
     //     "stroke_width"  float px; 0 (default) = no stroke. Same as rect.
+    //     "fill_rule"     int   0 = NONZERO (default), 1 = EVENODD.
+    //     "stroke_cap"    int   neui_line_cap_t: 0 BUTT, 1 ROUND, 2 SQUARE.
+    //     "stroke_join"   int   neui_line_join_t: 0 MITER, 1 ROUND, 2 BEVEL.
+    //     "stroke_miter"  float miter limit; < 1 (or unset) = SVG default 4.
+    //     "stroke_dasharray"   string of comma/space-separated on/off run
+    //                          lengths in px (the compound API has no float-
+    //                          array setter); empty / unset = solid line.
+    //     "stroke_dash_offset" float px; shifts the dash pattern start.
     //     The path geometry itself is assigned via set_path (below); it
     //     replaces any previous geometry on the layer. A gradient fill is
     //     available via set_gradient, same as rect.
