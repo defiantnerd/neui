@@ -6,6 +6,7 @@
 #include <d2d1effects_2.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <dcomp.h>
 #include <dwrite.h>
 #include <dwrite_3.h>
 #include <cassert>
@@ -22,6 +23,7 @@
 #pragma comment(lib, "d2d1")
 #pragma comment(lib, "d3d11")
 #pragma comment(lib, "dxgi")
+#pragma comment(lib, "dcomp")
 #pragma comment(lib, "dwrite")
 #pragma comment(lib, "dxguid")  // provides CLSID_D2D1Tint and other effect CLSIDs
 
@@ -70,6 +72,20 @@ namespace neui_d2d_backend
     uint32_t               width       = 0;
     uint32_t               height      = 0;
     uint32_t               generation  = 1;
+
+    // Composition (overlay) HWND path. Set when the target window carries
+    // WS_EX_NOREDIRECTIONBITMAP (a transparent overlay CUSTOMDRAW): instead
+    // of a flip swap chain bound to the window's opaque redirection surface
+    // (which a redirection-less window lacks, so CreateSwapChainForHwnd
+    // can't be used), the back buffer is a CreateSwapChainForComposition
+    // chain with premultiplied alpha, hung on a DirectComposition visual so
+    // DWM composites it - per-pixel-alpha - over the sibling widgets beneath.
+    // `swap_chain` / `back_buffer` are reused; the discriminator is
+    // `composition`. The DComp device is process-wide (g_dcomp_device); the
+    // target + visual are per-ctx.
+    bool                   composition  = false;
+    IDCompositionTarget*   dcomp_target = nullptr;
+    IDCompositionVisual*   dcomp_visual = nullptr;
 
     // Off-screen-specific. With D2D 1.1, a target bitmap created via
     // CreateBitmap[FromWicBitmap] with D2D1_BITMAP_OPTIONS_TARGET is a
@@ -148,6 +164,11 @@ namespace neui_d2d_backend
   static IDXGIDevice*        g_dxgi_device    = nullptr;
   static ID2D1Device*        g_d2d_device     = nullptr;
 
+  // Process-wide DirectComposition device, lazily created the first time an
+  // overlay (composition) context is built. Device-bound, so torn down with
+  // the rest of the device chain on device-loss and rebuilt on demand.
+  static IDCompositionDevice* g_dcomp_device  = nullptr;
+
   // Text format cache, keyed by (family, weight, size). Size is quantised
   // to 0.1 logical pixels so floating-point chatter (12.0 vs 12.00001)
   // doesn't churn cache entries. Entries are never evicted; a typical
@@ -185,6 +206,7 @@ namespace neui_d2d_backend
   // and stays alive across rebuilds.
   static void release_device_chain()
   {
+    if (g_dcomp_device) { g_dcomp_device->Release(); g_dcomp_device = nullptr; }
     if (g_d2d_device)  { g_d2d_device->Release();  g_d2d_device  = nullptr; }
     if (g_dxgi_device) { g_dxgi_device->Release(); g_dxgi_device = nullptr; }
     if (g_d3d_device)  { g_d3d_device->Release();  g_d3d_device  = nullptr; }
@@ -223,6 +245,20 @@ namespace neui_d2d_backend
 
     hr = g_factory->CreateDevice(g_dxgi_device, &g_d2d_device);
     if (FAILED(hr)) { release_device_chain(); return false; }
+    return true;
+  }
+
+  // Lazily create the process-wide DirectComposition device over the shared
+  // DXGI device. Returns false (so the caller fails the overlay ctx) if DComp
+  // is unavailable - it is present on every Win8+ target, so this only fails
+  // on a broken device chain.
+  static bool ensure_dcomp_device()
+  {
+    if (g_dcomp_device) return true;
+    if (!ensure_device_chain()) return false;
+    HRESULT hr = DCompositionCreateDevice(g_dxgi_device,
+                                           IID_PPV_ARGS(&g_dcomp_device));
+    if (FAILED(hr) || !g_dcomp_device) { g_dcomp_device = nullptr; return false; }
     return true;
   }
 
@@ -570,6 +606,10 @@ namespace neui_d2d_backend
     if (ctx->brush)       { ctx->brush->Release();       ctx->brush       = nullptr; }
     if (ctx->back_buffer) { ctx->back_buffer->Release(); ctx->back_buffer = nullptr; }
     if (ctx->target)      { ctx->target->Release();      ctx->target      = nullptr; }
+    // DComp visual/target reference the swap-chain content; release them
+    // before the swap chain. The DComp device is process-wide, not per-ctx.
+    if (ctx->dcomp_visual) { ctx->dcomp_visual->Release(); ctx->dcomp_visual = nullptr; }
+    if (ctx->dcomp_target) { ctx->dcomp_target->Release(); ctx->dcomp_target = nullptr; }
     if (ctx->swap_chain)  { ctx->swap_chain->Release();  ctx->swap_chain  = nullptr; }
   }
 
@@ -649,6 +689,96 @@ namespace neui_d2d_backend
     return true;
   }
 
+  // Build target + composition swap chain + DComp visual tree for an overlay
+  // (WS_EX_NOREDIRECTIONBITMAP) HWND ctx. Mirrors d2d_build_hwnd_target but:
+  //   - the swap chain comes from CreateSwapChainForComposition (a redirection-
+  //     less window has no surface for CreateSwapChainForHwnd to present to),
+  //   - it carries premultiplied alpha so unpainted pixels are transparent,
+  //   - it's hung on an IDCompositionVisual whose target is bound to the HWND
+  //     with topmost = TRUE, so DWM composites it over the sibling widgets.
+  // Populates ctx->target / swap_chain / back_buffer / brush / dcomp_* on
+  // success; leaves them null and returns false on failure.
+  static bool d2d_build_composition_target(D2DContext* ctx)
+  {
+    if (!ctx || !ctx->hwnd || ctx->width == 0 || ctx->height == 0) return false;
+    if (!ensure_factory()) return false;
+    if (!ensure_device_chain()) return false;
+    if (!ensure_dcomp_device()) return false;
+
+    ID2D1DeviceContext* dc = nullptr;
+    HRESULT hr = g_d2d_device->CreateDeviceContext(
+      D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc);
+    if (FAILED(hr) || !dc) return false;
+    dc->SetDpi(static_cast<float>(ctx->dpi), static_cast<float>(ctx->dpi));
+
+    // Composition swap chain: explicit size (no window to track), flip model,
+    // premultiplied alpha, STRETCH scaling (required for composition chains).
+    DXGI_SWAP_CHAIN_DESC1 sc = {};
+    sc.Width            = ctx->width;
+    sc.Height           = ctx->height;
+    sc.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+    sc.BufferUsage      = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sc.BufferCount      = 2;
+    sc.SwapEffect       = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    sc.SampleDesc.Count = 1;
+    sc.Scaling          = DXGI_SCALING_STRETCH;
+    sc.AlphaMode        = DXGI_ALPHA_MODE_PREMULTIPLIED;
+    IDXGISwapChain1* swap = nullptr;
+    hr = g_dxgi_factory->CreateSwapChainForComposition(g_d3d_device, &sc,
+                                                        nullptr, &swap);
+    if (FAILED(hr) || !swap) { dc->Release(); return false; }
+
+    IDXGISurface* back = nullptr;
+    hr = swap->GetBuffer(0, IID_PPV_ARGS(&back));
+    if (FAILED(hr) || !back) { swap->Release(); dc->Release(); return false; }
+
+    D2D1_BITMAP_PROPERTIES1 bp = {};
+    bp.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    bp.pixelFormat   = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                          D2D1_ALPHA_MODE_PREMULTIPLIED);
+    bp.dpiX = static_cast<float>(ctx->dpi);
+    bp.dpiY = static_cast<float>(ctx->dpi);
+    ID2D1Bitmap1* bb = nullptr;
+    hr = dc->CreateBitmapFromDxgiSurface(back, &bp, &bb);
+    back->Release();
+    if (FAILED(hr) || !bb) { swap->Release(); dc->Release(); return false; }
+    dc->SetTarget(bb);
+
+    // DComp visual tree: visual content = the swap chain; target bound to the
+    // HWND, topmost so the visual sits in front of the window's own children.
+    IDCompositionTarget* dtarget = nullptr;
+    hr = g_dcomp_device->CreateTargetForHwnd(ctx->hwnd, TRUE, &dtarget);
+    if (FAILED(hr) || !dtarget) {
+      bb->Release(); swap->Release(); dc->Release(); return false;
+    }
+    IDCompositionVisual* dvisual = nullptr;
+    hr = g_dcomp_device->CreateVisual(&dvisual);
+    if (FAILED(hr) || !dvisual) {
+      dtarget->Release(); bb->Release(); swap->Release(); dc->Release(); return false;
+    }
+    dvisual->SetContent(swap);
+    dtarget->SetRoot(dvisual);
+    // Commit publishes the visual tree once; subsequent frames update content
+    // via Present alone (no per-frame Commit needed).
+    g_dcomp_device->Commit();
+
+    ID2D1SolidColorBrush* brush = nullptr;
+    hr = dc->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &brush);
+    if (FAILED(hr)) {
+      dvisual->Release(); dtarget->Release();
+      bb->Release(); swap->Release(); dc->Release();
+      return false;
+    }
+
+    ctx->target       = dc;
+    ctx->swap_chain   = swap;
+    ctx->back_buffer  = bb;
+    ctx->brush        = brush;
+    ctx->dcomp_target = dtarget;
+    ctx->dcomp_visual = dvisual;
+    return true;
+  }
+
   static neui_render_ctx_t d2d_create_context(void* native_handle,
                                                uint32_t width, uint32_t height)
   {
@@ -662,7 +792,14 @@ namespace neui_d2d_backend
     ctx->width  = width;
     ctx->height = height;
     ctx->dpi    = dpi;
-    if (!d2d_build_hwnd_target(ctx)) { delete ctx; return nullptr; }
+    // A window created WS_EX_NOREDIRECTIONBITMAP (overlay CUSTOMDRAW) has no
+    // redirection surface, so it takes the DirectComposition path; every
+    // other HWND uses the flip swap chain bound to its redirection surface.
+    ctx->composition = (GetWindowLongW(hwnd, GWL_EXSTYLE)
+                          & WS_EX_NOREDIRECTIONBITMAP) != 0;
+    bool ok = ctx->composition ? d2d_build_composition_target(ctx)
+                               : d2d_build_hwnd_target(ctx);
+    if (!ok) { delete ctx; return nullptr; }
     return ctx;
   }
 
@@ -713,8 +850,12 @@ namespace neui_d2d_backend
 
     D2D1_BITMAP_PROPERTIES1 bp = {};
     bp.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    // Composition (overlay) chains carry premultiplied alpha so transparency
+    // survives a resize; the opaque flip path keeps ignoring alpha.
     bp.pixelFormat   = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                                          D2D1_ALPHA_MODE_IGNORE);
+                                          ctx->composition
+                                            ? D2D1_ALPHA_MODE_PREMULTIPLIED
+                                            : D2D1_ALPHA_MODE_IGNORE);
     bp.dpiX = static_cast<float>(ctx->dpi);
     bp.dpiY = static_cast<float>(ctx->dpi);
     ID2D1Bitmap1* bb = nullptr;
@@ -738,7 +879,9 @@ namespace neui_d2d_backend
       // skip this frame; the next begin_frame retries. Off-screen surface
       // ctxs do not take this path - their target stays alive for life.
       release_device_chain();
-      if (!d2d_build_hwnd_target(ctx)) return;
+      bool rebuilt = ctx->composition ? d2d_build_composition_target(ctx)
+                                       : d2d_build_hwnd_target(ctx);
+      if (!rebuilt) return;
       ctx->generation++;
     }
     if (!ctx->target) return;

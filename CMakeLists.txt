@@ -416,6 +416,32 @@ if(APPLE)
   target_link_libraries(neui_path_example PRIVATE neui-macoshost)
 endif()
 
+# Overlay example. A transparent CUSTOMDRAW (NEUI_ATTR_OVERLAY +
+# NEUI_ATTR_INPUT_TRANSPARENT) composited over a backdrop CUSTOMDRAW - exercises
+# widget-local mouse coords, input-transparent hit-testing, and per-pixel-alpha
+# overlay compositing (DirectComposition on the native win32 host) together.
+if(MSVC)
+  add_executable(neui_overlay_example WIN32
+    examples/overlay_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_overlay_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_overlay_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_overlay_example WIN32 examples/overlay_example.cpp)
+elseif(APPLE)
+  add_executable(neui_overlay_example MACOSX_BUNDLE examples/overlay_example.cpp)
+else()
+  add_executable(neui_overlay_example examples/overlay_example.cpp)
+endif()
+target_link_libraries(neui_overlay_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_overlay_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_overlay_example PRIVATE neui-macoshost)
+endif()
+
 # Filmstrip / stitchmap knob example. Generates a vertical frame strip into a
 # SURFACE, tags it via assets->set_frame_layout, and drives it with a compound
 # asset layer whose "frame" prop is bound to NEUI_PARAM_VALUE + a rotational

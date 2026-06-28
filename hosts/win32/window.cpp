@@ -314,10 +314,14 @@ namespace win32_host
         float lh = static_cast<float>(rc.bottom) * 96.0f / static_cast<float>(dpi);
         bool focused = (GetFocus() == hwnd);
 
-        // Background colour: client override -> theme palette (when the
-        // owning frame opts in) -> system COLOR_WINDOW (today's default).
+        // Background colour: transparent for an OVERLAY CUSTOMDRAW (its
+        // composition target composites over the siblings beneath, so
+        // unpainted pixels must stay clear) -> client override -> theme
+        // palette (when the owning frame opts in) -> system COLOR_WINDOW.
         uint32_t clear_argb;
-        if (wd->attrs && wd->attrs->has(NEUI_ATTR_BACKGROUND)) {
+        if (wd->attrs && wd->attrs->get_int(NEUI_ATTR_OVERLAY, 0) != 0) {
+          clear_argb = 0x00000000u;  // fully transparent (premultiplied)
+        } else if (wd->attrs && wd->attrs->has(NEUI_ATTR_BACKGROUND)) {
           clear_argb = static_cast<uint32_t>(
             wd->attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
         } else if (wd->session && wd->session->frame_follows_theme(wd)) {
@@ -494,6 +498,17 @@ namespace win32_host
       }
       return 0;
     }
+    case WM_NCHITTEST:
+      // NEUI_ATTR_INPUT_TRANSPARENT: returning HTTRANSPARENT makes the OS
+      // re-send the hit to the window beneath this one in z-order (the
+      // sibling backdrop), so mouse messages fall through. WS_EX_TRANSPARENT
+      // alone does NOT do this for a non-layered child window - it only
+      // affects paint order - so the explicit HTTRANSPARENT is required for
+      // a transparent overlay to be click-through.
+      if (wd && wd->attrs &&
+          wd->attrs->get_int(NEUI_ATTR_INPUT_TRANSPARENT, 0) != 0)
+        return HTTRANSPARENT;
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
     default:
       return DefWindowProcW(hwnd, msg, wParam, lParam);
     }

@@ -71,6 +71,46 @@ extern "C" {
 // Supersedes neui_widget_api_t::set_tab_stop.
 #define NEUI_ATTR_TAB_STOP  "neui.attr.tab_stop"
 
+// int (bool): "decorative / input-transparent" marker. A widget with this
+// set is painted normally (full opacity - unlike a disabled widget, which
+// dims to 50%) but is NEVER claimed by hit-testing, so mouse input falls
+// through to whatever sits beneath it (siblings / parent). This is distinct
+// from both:
+//   - enabled = false  : click-transparent BUT force-dimmed to 50% alpha;
+//   - emit_events       : governs whether the widget emits events at all
+//                         (auto-set by interactive widget types).
+// Use it for overlays, rulers, guides, selection marquees and measurement
+// HUDs drawn on top of live content that must not intercept the pointer.
+//   0 / unset (default) - normal hit-testing.
+//   1                   - paint normally, never hit-test.
+// Honoured by the crossplatform host (skipped in the hit-test walk while
+// kept at full opacity); on the native win32 host a CUSTOMDRAW with this set
+// gets WS_EX_TRANSPARENT so clicks pass through to the window beneath.
+// Live - re-read each hit-test on the crossplatform host.
+#define NEUI_ATTR_INPUT_TRANSPARENT "neui.attr.input_transparent"
+
+// int (bool): transparent OVERLAY mode for a CUSTOMDRAW widget. The widget
+// composites over the sibling widgets beneath it with per-pixel alpha -
+// whatever the client's WIDGET_PAINT does not paint stays transparent and
+// the content below shows through. Use it for rulers, guides, selection
+// marquees, measurement HUDs, or fast meters / spectrum / convolution
+// displays drawn on top of live content.
+//   0 / unset (default) - opaque: the widget clears to its background first.
+//   1                   - transparent overlay (no background clear).
+// Host support:
+//   - crossplatform host: CUSTOMDRAW already composites in the single-surface
+//     paint walk, so the attribute is a no-op there (the behaviour is the
+//     default); set it anyway for portability.
+//   - native win32 host: the widget's child window is created
+//     WS_EX_NOREDIRECTIONBITMAP and rendered through a DirectComposition
+//     visual + composition swap chain (premultiplied alpha) so DWM composites
+//     it - GPU-resident, no per-frame readback - over the siblings beneath.
+//     This makes it suitable for high-frame-rate overlays. Read at
+//     widget_show (the window style + render path are fixed at creation); pair
+//     with NEUI_ATTR_INPUT_TRANSPARENT for a click-through overlay.
+//   - other native hosts: best-effort; treated as opaque if not supported.
+#define NEUI_ATTR_OVERLAY "neui.attr.overlay"
+
 // string: "none", "left", "center", "right" (LABEL, BUTTON, SECTION).
 // On SECTION this selects the horizontal position of the optional header
 // label drawn in the band at the top of the section rectangle. "none"

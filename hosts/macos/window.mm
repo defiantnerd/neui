@@ -1235,6 +1235,18 @@ static float neui_snap_to_steps(float v, int steps)
 - (BOOL)isOpaque  { return NO; }
 - (BOOL)acceptsFirstMouse:(NSEvent*)event { (void)event; return YES; }
 
+// NEUI_ATTR_INPUT_TRANSPARENT: returning nil makes the view click-through -
+// the hit-test descends to the view beneath it - while the view keeps
+// painting normally (full opacity). Mirrors the crossplatform host's
+// "decorative, never hit-tested" contract and the win32 WS_EX_TRANSPARENT path.
+- (NSView*)hitTest:(NSPoint)point
+{
+  auto* wd = macos_host::widget_for_id(widget_id);
+  if (wd && wd->attrs && wd->attrs->get_int(NEUI_ATTR_INPUT_TRANSPARENT, 0) != 0)
+    return nil;
+  return [super hitTest:point];
+}
+
 // CUSTOMDRAW (forwards keys to the client) and GRID (handles arrow / page /
 // home / end / return nav itself) take keyboard focus. KNOB / IMAGE / SECTION
 // don't need key input.

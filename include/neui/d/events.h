@@ -122,6 +122,12 @@ extern "C" {
   };
 
   // event_mouse for all events like move/click/button etc.
+  // x / y are WIDGET-local logical pixels at 96 DPI: (0, 0) is the top-left
+  // of the widget that .widget identifies, matching the NEUI_EVENT_WIDGET_PAINT
+  // origin and the DnD payload. This contract is identical on every host -
+  // the native win32 / macOS hosts get widget-local coords directly from the
+  // per-widget HWND/NSView; the single-surface crossplatform host translates
+  // frame-local input to the target widget's origin before dispatch.
   typedef struct neui_event_mouse
   {
     neui_widget_t widget;
@@ -138,6 +144,10 @@ extern "C" {
   //                          (Win32 WM_MOUSEHWHEEL; NSEvent scrollingDeltaX)
   //                          OR Shift+wheel converted by the platform layer
   //                          as the conventional mouse fallback.
+  // x / y are WIDGET-local logical pixels (same convention as
+  // neui_event_mouse_t): relative to the widget named by .widget, which on a
+  // bubbling wheel is the actual recipient (an inner widget or the scrolling
+  // ancestor that consumed it).
   typedef struct neui_event_wheel
   {
     neui_widget_t widget;

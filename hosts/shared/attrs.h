@@ -54,6 +54,8 @@ namespace neui_detail
     { NEUI_ATTR_READONLY,             AttrKind::INT    },
     { NEUI_ATTR_PASSWORD,             AttrKind::INT    },
     { NEUI_ATTR_TAB_STOP,             AttrKind::INT    },
+    { NEUI_ATTR_INPUT_TRANSPARENT,    AttrKind::INT    },
+    { NEUI_ATTR_OVERLAY,              AttrKind::INT    },
     { NEUI_ATTR_ALIGN_TEXT,           AttrKind::STRING },
     { NEUI_ATTR_SCROLL_MODE,          AttrKind::STRING },
     { NEUI_ATTR_CONTENT_WIDTH,        AttrKind::INT    },

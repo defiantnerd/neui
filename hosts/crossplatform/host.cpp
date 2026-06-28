@@ -494,7 +494,13 @@ namespace xpl_host
             // the hit, but children remain hit-testable. This matches
             // Win32 EnableWindow semantics, where a disabled control
             // passes clicks through to its parent / siblings.
-            if (wd.emit_events && wd.enabled)
+            // NEUI_ATTR_INPUT_TRANSPARENT requests the same click-through
+            // WITHOUT the 50% dim a disabled widget gets - so a decorative
+            // overlay (ruler / crosshair / HUD) paints at full opacity yet
+            // never intercepts the pointer. Read live; cheap at pointer speed.
+            bool input_transparent =
+              wd.attrs && wd.attrs->get_int(NEUI_ATTR_INPUT_TRANSPARENT, 0) != 0;
+            if (wd.emit_events && wd.enabled && !input_transparent)
               result = idx;
             // SECTION: only descend into children when the cursor is
             // inside the body rect. The body is clipped on paint, so
@@ -2326,7 +2332,21 @@ namespace xpl_host
     auto& w = _widgets[widget_idx];
     if (!w.emit_events) return;
     if (!w.enabled) return;  // disabled widgets don't receive mouse events
-    if (!dispatch_event(ev))
+    // The platform layers fill ev->data.mouse.x/y in FRAME-local logical px
+    // (one shared HWND/NSView per frame). The client-facing contract is
+    // WIDGET-local - matching the native win32 / macOS hosts (per-widget
+    // HWND/NSView) and the DnD payload (see neui_event_dnd_t). So translate
+    // by the target's frame-local origin (abs_x/abs_y) just for the client
+    // callback, then restore frame-local before the internal on_mouse_event
+    // handler, which subtracts abs_x/abs_y itself.
+    const int frame_x = ev->data.mouse.x;
+    const int frame_y = ev->data.mouse.y;
+    ev->data.mouse.x = frame_x - w.abs_x;
+    ev->data.mouse.y = frame_y - w.abs_y;
+    const bool handled = dispatch_event(ev);
+    ev->data.mouse.x = frame_x;
+    ev->data.mouse.y = frame_y;
+    if (!handled)
       w.on_mouse_event(ev);
   }
 
@@ -2343,7 +2363,17 @@ namespace xpl_host
       // Stamp the bubbling target onto the event so the client (and any
       // widget code reading ev->data.wheel.widget) sees the actual recipient.
       ev->data.wheel.widget = { w.widget_id };
-      if (dispatch_event(ev)) return true;
+      // Frame-local -> widget-local for the client callback (each bubble
+      // recipient sees coords local to itself), restored to frame-local
+      // before the internal handler. See dispatch_mouse_event for rationale.
+      const int frame_x = ev->data.wheel.x;
+      const int frame_y = ev->data.wheel.y;
+      ev->data.wheel.x = frame_x - w.abs_x;
+      ev->data.wheel.y = frame_y - w.abs_y;
+      const bool handled = dispatch_event(ev);
+      ev->data.wheel.x = frame_x;
+      ev->data.wheel.y = frame_y;
+      if (handled) return true;
       return w.on_mouse_event(ev);
     };
     if (widget_idx == stop_before) return false;

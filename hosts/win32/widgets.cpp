@@ -2080,9 +2080,24 @@ namespace win32_host
     if (!strcmp(wd.type, NEUI_W_CUSTOMDRAW)) {
       DWORD style = WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS;
       if (wd.visible) style |= WS_VISIBLE;
+      // NEUI_ATTR_INPUT_TRANSPARENT: WS_EX_TRANSPARENT makes the child pass
+      // mouse hits through to the window beneath it in z-order, mirroring the
+      // crossplatform host's "decorative, never hit-tested" contract. The
+      // widget still paints normally (full opacity).
+      // NEUI_ATTR_OVERLAY: WS_EX_NOREDIRECTIONBITMAP drops the opaque
+      // redirection surface so the backend renders the widget through a
+      // DirectComposition visual (premultiplied alpha) - DWM then composites
+      // it over the sibling widgets beneath. (See d2d_build_composition_target.)
+      bool input_transparent = wd.attrs &&
+        wd.attrs->get_int(NEUI_ATTR_INPUT_TRANSPARENT, 0) != 0;
+      bool overlay = wd.attrs &&
+        wd.attrs->get_int(NEUI_ATTR_OVERLAY, 0) != 0;
+      DWORD ex_style = 0;
+      if (input_transparent) ex_style |= WS_EX_TRANSPARENT;
+      if (overlay)           ex_style |= WS_EX_NOREDIRECTIONBITMAP;
       wd.paint_fn       = &paint_customdraw_w32;
       wd.painted_msg_fn = &painted_msg_customdraw_w32;
-      HWND hwnd = CreateWindowExW(0, L"neui.painted", L"", style,
+      HWND hwnd = CreateWindowExW(ex_style, L"neui.painted", L"", style,
         LogicalToPhysical(wd.x, parent_dpi),
         LogicalToPhysical(wd.y, parent_dpi),
         LogicalToPhysical(wd.width, parent_dpi),
@@ -2094,6 +2109,12 @@ namespace win32_host
       if (hwnd) {
         SetWindowSubclass(hwnd, ChildSubclassProc, 1, reinterpret_cast<DWORD_PTR>(&wd));
         wd.has_subclass = true;
+        // An overlay must sit above the siblings it composites over. Child
+        // z-order is creation order, so a client that adds the overlay last
+        // already gets this; force it to the top so order-independence holds.
+        if (overlay)
+          SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
+                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
       }
       return hwnd;
     }
