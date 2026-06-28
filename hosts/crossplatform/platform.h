@@ -318,6 +318,13 @@ namespace xpl_host
   // Enable or disable a top-level popup entry (identified by the submenu pointer).
   void  platform_menubar_enable_popup(void* parent_hmenu, void* submenu, bool enabled);
 
+  // Show or hide a checkmark on a leaf command item.
+  // Win32: CheckMenuItem(MF_CHECKED / MF_UNCHECKED).
+  // macOS: NSMenuItem.state = NSControlStateValueOn / Off.
+  // Linux: no-op (the in-frame menu reads MenuItemData::checked when painting).
+  // iOS / null: no-op.
+  void  platform_menubar_check_item(void* parent_hmenu, uint32_t cmd_id, bool checked);
+
   // Replace the display text of an existing command item (text already includes
   // any tab+shortcut suffix).
   void  platform_menubar_set_item_text(void* parent_hmenu, uint32_t cmd_id,

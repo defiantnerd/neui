@@ -3993,6 +3993,7 @@ namespace xpl_host
   static constexpr int MENUBAR_FONT_PX    = 13;
   static constexpr int MENU_SHORTCUT_GAP  = 24;   // min gap text -> shortcut in a dropdown
   static constexpr int MENU_ARROW_W       = 16;   // submenu arrow column width
+  static constexpr int MENU_CHECK_W       = 16;   // checkmark gutter width (left of text)
 
   namespace {
 
@@ -4004,12 +4005,14 @@ namespace xpl_host
       bool        separator = false;
       bool        submenu   = false;
       bool        enabled   = true;
+      bool        checked   = false;
       int         y         = 0;
       int         h         = 0;
     };
     struct MenuColL {
       uint32_t              parent_item = 0;  // the item whose children this column shows
       int                   x = 0, y = 0, w = 0, h = 0;
+      bool                  check_gutter = false;  // reserve a left checkmark column
       std::vector<MenuRowL> rows;
     };
     struct MenuBandItem {
@@ -4127,7 +4130,7 @@ namespace xpl_host
       menu_children(mb, parent_id, kids);
 
       int max_text = 0, max_short = 0;
-      bool any_sub = false;
+      bool any_sub = false, any_check = false;
       for (uint32_t kid : kids) {
         auto it = mb.menu_items.find(kid);
         if (it == mb.menu_items.end()) continue;
@@ -4138,6 +4141,7 @@ namespace xpl_host
         r.shortcut  = mi.shortcut;
         r.separator = mi.is_separator;
         r.submenu   = menu_item_has_children(mb, kid);
+        r.checked   = !r.separator && !r.submenu && mi.checked;
         r.enabled   = r.separator ? false
                     : (r.submenu ? mi.enabled : s->menu_item_enabled(mb, kid));
         if (!r.separator) {
@@ -4145,11 +4149,13 @@ namespace xpl_host
           if (!r.shortcut.empty())
             max_short = std::max(max_short, menu_measure(s->_backend, ctx, r.shortcut));
           if (r.submenu) any_sub = true;
+          if (r.checked) any_check = true;
         }
         col.rows.push_back(std::move(r));
       }
 
       int w = POPUP_PAD_X * 2 + max_text;
+      if (any_check)     w += MENU_CHECK_W;
       if (max_short > 0) w += MENU_SHORTCUT_GAP + max_short;
       if (any_sub)       w += MENU_ARROW_W;
       if (w < POPUP_MIN_W) w = POPUP_MIN_W;
@@ -4162,6 +4168,7 @@ namespace xpl_host
       }
       col.w = w;
       col.h = run + POPUP_PAD_Y;
+      col.check_gutter = any_check;
 
       if (level == 0) {
         int bx = 0;
@@ -4325,8 +4332,17 @@ namespace xpl_host
         uint32_t tcol = !r.enabled ? C(ColorRole::text_disabled)
                       : hl          ? C(ColorRole::accent_text)
                                     : C(ColorRole::text_primary);
-        _backend->draw_text(ctx, (float)(col.x + POPUP_PAD_X), ry,
-                            (float)(col.w - POPUP_PAD_X * 2), (float)r.h,
+        // When the column reserves a checkmark gutter, text is indented past it
+        // and a check glyph is drawn in the gutter for checked rows.
+        int gutter = col.check_gutter ? MENU_CHECK_W : 0;
+        if (r.checked) {
+          _backend->draw_text(ctx, (float)(col.x + POPUP_PAD_X), ry,
+                              (float)MENU_CHECK_W, (float)r.h,
+                              "\xE2\x9C\x93" /* U+2713 check mark */,
+                              (float)MENUBAR_FONT_PX, tcol);
+        }
+        _backend->draw_text(ctx, (float)(col.x + POPUP_PAD_X + gutter), ry,
+                            (float)(col.w - POPUP_PAD_X * 2 - gutter), (float)r.h,
                             r.text.c_str(), (float)MENUBAR_FONT_PX, tcol);
         if (!r.shortcut.empty()) {
           int sw = menu_measure(_backend, ctx, r.shortcut);

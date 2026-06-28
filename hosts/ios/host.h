@@ -113,6 +113,8 @@ namespace ios_host
       // the model so it survives a UITableView reloadData. Mirror of the xpl
       // host's TreeNode::expanded.
       bool        expanded  = false;
+      // MENUBAR items only: UIMenu element checkmark (UIMenuElementStateOn).
+      bool        checked   = false;
       uint32_t    menu_cmd  = 0;
       uint32_t    shortcut_mods = 0;
       uint32_t    shortcut_key  = NEUI_KEY_NONE;

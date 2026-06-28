@@ -116,6 +116,8 @@ namespace macos_host
       std::string text;
       void*       userdata  = nullptr;
       bool        enabled   = true;
+      // Menubar items only: NSMenuItem checkmark state (NSControlStateValueOn).
+      bool        checked   = false;
       // Menubar items only: a built-in command (NEUI_CMD_*) bound via
       // tree->set_menu_cmd. On activation, the menu pick routes this to the
       // focused widget first; 0 = no binding (client gets TREE_ITEM_ACTIVATED).

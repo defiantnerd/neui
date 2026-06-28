@@ -2180,6 +2180,8 @@ namespace
   void  platform_menubar_remove_item(void* /*hmenu*/, uint32_t /*cmd*/)                 {}
   void  platform_menubar_enable_item(void* /*hmenu*/, uint32_t /*cmd*/, bool /*en*/)    {}
   void  platform_menubar_enable_popup(void* /*hmenu*/, void* /*sub*/, bool /*en*/)      {}
+  // The in-frame menu reads MenuItemData::checked when it paints; nothing native.
+  void  platform_menubar_check_item(void* /*hmenu*/, uint32_t /*cmd*/, bool /*chk*/)    {}
   void  platform_menubar_set_item_text(void* /*hmenu*/, uint32_t /*cmd*/, const char* /*t*/) {}
   void  platform_menubar_set_item_shortcut(void* /*hmenu*/, uint32_t /*cmd*/,
                                             uint32_t /*mods*/, uint32_t /*key*/)        {}

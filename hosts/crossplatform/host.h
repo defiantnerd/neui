@@ -723,6 +723,7 @@ namespace xpl_host
       uint32_t    cmd_id         = 0;
       uint32_t    parent_item_id = 0;
       bool        enabled        = true;
+      bool        checked        = false;   // checkmark (leaf menu items only)
       bool        is_separator   = false;
       void*       userdata       = nullptr;
       std::string text;

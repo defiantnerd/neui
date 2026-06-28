@@ -1217,8 +1217,18 @@ namespace macos_host
     if (!s) return;
     uint32_t i = WidgetToIndex(widget);
     if (!s->_widgets.exists(i)) return;
-    auto it = s->_widgets[i].tree_items.find(item.id);
-    if (it != s->_widgets[i].tree_items.end()) it->second.enabled = enabled;
+    auto& wd = s->_widgets[i];
+    auto it = wd.tree_items.find(item.id);
+    if (it == wd.tree_items.end()) return;
+    it->second.enabled = enabled;
+    // Apply to the live NSMenuItem (menubar only). The menus are built with
+    // setAutoenablesItems:NO, so AppKit never re-enables them - the flag set
+    // here is what actually grays/ungrays the item. find_menu_item_by_tag
+    // resolves both leaf items and submenu parents by tag.
+    if (!widget_is_menubar(wd) || !wd.native_control) return;
+    NSMenu* root = (__bridge NSMenu*)wd.native_control;
+    NSMenuItem* mi = find_menu_item_by_tag(root, item.id);
+    if (mi) mi.enabled = enabled ? YES : NO;
   }
 
   static bool NEUI_ABI t_get_enabled(neui_session_t session, neui_widget_t widget,
@@ -1230,6 +1240,37 @@ namespace macos_host
     if (!s->_widgets.exists(i)) return true;
     auto it = s->_widgets[i].tree_items.find(item.id);
     return (it != s->_widgets[i].tree_items.end()) ? it->second.enabled : true;
+  }
+
+  static void NEUI_ABI t_set_checked(neui_session_t session, neui_widget_t widget,
+                                      neui_item_t item, bool checked)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t i = WidgetToIndex(widget);
+    if (!s->_widgets.exists(i)) return;
+    auto& wd = s->_widgets[i];
+    auto it = wd.tree_items.find(item.id);
+    if (it == wd.tree_items.end()) return;
+    it->second.checked = checked;
+    // Apply to the live NSMenuItem (menubar only). A submenu parent shows a
+    // disclosure, not a checkmark, so only mark leaves.
+    if (!widget_is_menubar(wd) || !wd.native_control) return;
+    NSMenu* root = (__bridge NSMenu*)wd.native_control;
+    NSMenuItem* mi = find_menu_item_by_tag(root, item.id);
+    if (mi && !mi.submenu)
+      mi.state = checked ? NSControlStateValueOn : NSControlStateValueOff;
+  }
+
+  static bool NEUI_ABI t_get_checked(neui_session_t session, neui_widget_t widget,
+                                      neui_item_t item)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return false;
+    uint32_t i = WidgetToIndex(widget);
+    if (!s->_widgets.exists(i)) return false;
+    auto it = s->_widgets[i].tree_items.find(item.id);
+    return (it != s->_widgets[i].tree_items.end()) ? it->second.checked : false;
   }
 
   static void NEUI_ABI t_set_shortcut(neui_session_t session, neui_widget_t widget,
@@ -1345,6 +1386,7 @@ namespace macos_host
     t_get_first_child, t_get_next_sibling,
     t_get_selected, t_set_selected,
     t_set_menu_cmd,
+    t_set_checked, t_get_checked,
   };
 
   // Attribute API: minimal real impl so frame attrs (icon path, min/max,

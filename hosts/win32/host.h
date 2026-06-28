@@ -164,6 +164,7 @@ namespace win32_host {
       UINT        cmd_id        = 0;        // 0 for popup items
       uint32_t    parent_item_id = 0;       // parent neui_item_t id; 0 = direct child of menu bar
       bool        enabled       = true;
+      bool        checked       = false;     // MF_CHECKED checkmark (leaf items only)
       bool        is_separator  = false;
       void*       userdata      = nullptr;
       std::string text;
@@ -326,6 +327,8 @@ namespace win32_host {
     void*       tree_get_userdata(neui_widget_t widget, neui_item_t item);
     void        tree_set_enabled (neui_widget_t widget, neui_item_t item, bool enabled);
     bool        tree_get_enabled (neui_widget_t widget, neui_item_t item);
+    void        tree_set_checked (neui_widget_t widget, neui_item_t item, bool checked);
+    bool        tree_get_checked (neui_widget_t widget, neui_item_t item);
     void        tree_set_shortcut(neui_widget_t widget, neui_item_t item, uint32_t modifiers, uint32_t key);
     neui_item_t tree_get_first_child (neui_widget_t widget, neui_item_t parent);
     neui_item_t tree_get_next_sibling(neui_widget_t widget, neui_item_t item);

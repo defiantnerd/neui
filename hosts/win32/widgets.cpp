@@ -3200,6 +3200,11 @@ namespace win32_host
         auto& mi = kv.second;
         if (mi.is_separator) continue;
         if (mi.parent_hmenu != popup) continue;
+        // Re-assert the checkmark on every popup open: cheap and keeps the
+        // state correct across any menu rebuild that recreated the HMENU item.
+        if (!mi.submenu)
+          CheckMenuItem(popup, mi.cmd_id,
+                        MF_BYCOMMAND | (mi.checked ? MF_CHECKED : MF_UNCHECKED));
         if (!has_validate &&
             (mi.menu_cmd == 0 || mi.menu_cmd >= NEUI_CMD_USER_BASE))
           continue;  // nothing to compute for this item
@@ -4067,6 +4072,32 @@ namespace win32_host
     return true;
   }
 
+  void Session::tree_set_checked(neui_widget_t widget, neui_item_t item, bool checked)
+  {
+    uint32_t wi = WidgetToIndex(widget);
+    if (!_widgets.exists(wi)) return;
+    auto& w = _widgets[wi];
+    if (!is_menubar(w.type)) return;   // treeview ignores
+    auto it = w.menu_items.find(item.id);
+    // Leaf items only: a popup parent / separator can't carry a checkmark.
+    if (it == w.menu_items.end() || it->second.is_separator || it->second.submenu) return;
+    it->second.checked = checked;
+    CheckMenuItem(it->second.parent_hmenu, it->second.cmd_id,
+                  MF_BYCOMMAND | (checked ? MF_CHECKED : MF_UNCHECKED));
+    HWND frame = find_parent_hwnd(wi);
+    if (frame) DrawMenuBar(frame);
+  }
+
+  bool Session::tree_get_checked(neui_widget_t widget, neui_item_t item)
+  {
+    uint32_t wi = WidgetToIndex(widget);
+    if (!_widgets.exists(wi)) return false;
+    auto& w = _widgets[wi];
+    if (!is_menubar(w.type)) return false;
+    auto it = w.menu_items.find(item.id);
+    return (it != w.menu_items.end()) ? it->second.checked : false;
+  }
+
   bool Session::try_translate_accel(MSG* msg)
   {
     if (!msg) return false;
@@ -4280,6 +4311,14 @@ namespace win32_host
     auto it = w->menu_items.find(item.id);
     if (it != w->menu_items.end()) it->second.menu_cmd = command;
   }
+  static void tree_set_checked_fn(neui_session_t session, neui_widget_t widget, neui_item_t item, bool checked)
+  {
+    auto s = get_session_for_widget(session, widget); if (s) s->tree_set_checked(widget, item, checked);
+  }
+  static bool tree_get_checked_fn(neui_session_t session, neui_widget_t widget, neui_item_t item)
+  {
+    auto s = get_session_for_widget(session, widget); return s ? s->tree_get_checked(widget, item) : false;
+  }
 
   neui_tree_api_t tree_api = {
     tree_add_fn,
@@ -4296,6 +4335,8 @@ namespace win32_host
     tree_get_selected_fn,
     tree_set_selected_fn,
     tree_set_menu_cmd_fn,
+    tree_set_checked_fn,
+    tree_get_checked_fn,
   };
 
   static void set_focus(neui_session_t session, neui_widget_t widget)

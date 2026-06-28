@@ -868,6 +868,32 @@ namespace ios_host
     auto it = wd.tree_items.find(item.id);
     return it != wd.tree_items.end() ? it->second.enabled : false;
   }
+  static void NEUI_ABI t_set_checked(neui_session_t session, neui_widget_t widget,
+                                     neui_item_t item, bool checked)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t i = WidgetToIndex(widget);
+    if (!s->_widgets.exists(i)) return;
+    auto& wd = s->_widgets[i];
+    auto it = wd.tree_items.find(item.id);
+    if (it != wd.tree_items.end()) {
+      it->second.checked = checked;
+      // The UIMenu is rebuilt from the model; refreshing re-emits the element
+      // with its checkmark state.
+      if (widget_is_menubar(wd)) frame_refresh_hamburger_ios(wd);
+    }
+  }
+  static bool NEUI_ABI t_get_checked(neui_session_t session, neui_widget_t widget, neui_item_t item)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return false;
+    uint32_t i = WidgetToIndex(widget);
+    if (!s->_widgets.exists(i)) return false;
+    auto& wd = s->_widgets[i];
+    auto it = wd.tree_items.find(item.id);
+    return it != wd.tree_items.end() ? it->second.checked : false;
+  }
   static void NEUI_ABI t_set_shortcut(neui_session_t session, neui_widget_t widget,
                                       neui_item_t item, uint32_t mods, uint32_t key)
   {
@@ -966,6 +992,7 @@ namespace ios_host
     t_get_first_child, t_get_next_sibling,
     t_get_selected, t_set_selected,
     t_set_menu_cmd,
+    t_set_checked, t_get_checked,
   };
 
   // -------------------------------------------------------------------------

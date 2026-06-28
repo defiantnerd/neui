@@ -1680,6 +1680,14 @@ namespace xpl_host
     if (it) it.enabled = enabled ? YES : NO;
   }
 
+  void platform_menubar_check_item(void* parent_hmenu, uint32_t cmd_id, bool checked)
+  {
+    if (!parent_hmenu) return;
+    NSMenu* parent = (__bridge NSMenu*)parent_hmenu;
+    NSMenuItem* it = macos_find_item_with_tag(parent, cmd_id);
+    if (it) it.state = checked ? NSControlStateValueOn : NSControlStateValueOff;
+  }
+
   void platform_menubar_set_item_text(void* parent_hmenu, uint32_t cmd_id,
                                        const char* display_text)
   {

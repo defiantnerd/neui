@@ -63,6 +63,8 @@ struct AppState {
   uint32_t           check_id  = 0;
   uint32_t           check3_id = 0;
   uint32_t           menubar_id = 0;
+  neui_item_t        wrap_item    = tree_item_none;  // checkable Edit > Word Wrap
+  bool               wrap_checked = false;
   uint32_t           treev_id  = 0;
   uint32_t           slider_id  = 0;
   uint32_t           slider2_id = 0;   // 16-step variant
@@ -520,6 +522,10 @@ static neui_widget_client_t widget_client = {
       dbglog("tree item activated: \"%s\" -> %p\n", buf, ud);
       if (ud == (void*)4 && app->neui)  // Exit
         app->neui->endsession(sess);
+      if (ud == (void*)12) {            // Edit > Word Wrap -> toggle checkmark
+        app->wrap_checked = !app->wrap_checked;
+        app->tree->set_checked(sess, widget, item, app->wrap_checked);
+      }
       if (ud == (void*)20)              // Help > About -> open modal dialog
         open_about_dialog(app);
       return true;
@@ -621,6 +627,10 @@ int main(int argc, char** argv) {
   app.tree->set_menu_cmd (sess, menubar, undo_item, NEUI_CMD_UNDO);
   app.tree->set_menu_cmd (sess, menubar, redo_item, NEUI_CMD_REDO);
   // app.tree->set_enabled (sess, menubar, redo_item, false);  // Redo is grayed
+                   app.tree->add(sess, menubar, edit_menu,      "-",    nullptr);
+  app.wrap_item  = app.tree->add(sess, menubar, edit_menu,      "Word Wrap", (void*)12);
+  // Checkable item: the client owns the state, toggled in TREE_ITEM_ACTIVATED.
+  app.tree->set_checked(sess, menubar, app.wrap_item, app.wrap_checked);
 
   auto help_menu  = app.tree->add(sess, menubar, tree_item_root, "Help",  nullptr);
                     app.tree->add(sess, menubar, help_menu,      "About", (void*)20);

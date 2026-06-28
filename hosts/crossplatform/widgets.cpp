@@ -1360,6 +1360,44 @@ namespace xpl_host
     return it != tv.tree_items.end() && it->second.enabled;
   }
 
+  static void NEUI_ABI t_set_checked(neui_session_t session,
+                                      neui_widget_t widget,
+                                      neui_item_t item, bool checked)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    if (!wd.is_menubar()) return;   // treeview ignores
+
+    auto& mb = dynamic_cast<MenubarWidget&>(wd);
+    auto it = mb.menu_items.find(item.id);
+    // Leaf items only: a popup parent / separator can't carry a checkmark.
+    if (it == mb.menu_items.end() || it->second.is_separator || it->second.submenu) return;
+    it->second.checked = checked;
+    // Native menubars (win32 / macOS) apply the mark through the seam; the
+    // Linux in-frame menu reads MenuItemData::checked straight from the model
+    // when it paints, so the refresh below is enough there.
+    platform_menubar_check_item(it->second.parent_hmenu, it->second.cmd_id, checked);
+    void* frame = s->find_parent_native_handle(idx);
+    if (frame) platform_menubar_refresh(frame);
+  }
+
+  static bool NEUI_ABI t_get_checked(neui_session_t session,
+                                      neui_widget_t widget, neui_item_t item)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return false;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return false;
+    auto& wd = s->_widgets[idx];
+    if (!wd.is_menubar()) return false;
+    auto& mb = dynamic_cast<MenubarWidget&>(wd);
+    auto it = mb.menu_items.find(item.id);
+    return it != mb.menu_items.end() && it->second.checked;
+  }
+
   bool Session::try_translate_accel(void* msg_ptr)
   {
 #ifdef _WIN32
@@ -1550,6 +1588,8 @@ namespace xpl_host
     t_get_selected,
     t_set_selected,
     t_set_menu_cmd,
+    t_set_checked,
+    t_get_checked,
   };
 
   // -------------------------------------------------------------------------

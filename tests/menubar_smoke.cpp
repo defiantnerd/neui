@@ -139,6 +139,12 @@ int main()
   T->set_shortcut(SESS, MB, IT_UNDO, NEUI_KMOD_CTRL, NEUI_KEY_Z);
   T->set_menu_cmd(SESS, MB, IT_UNDO, NEUI_CMD_UNDO);  // no focused widget -> falls through to ACTIVATED
 
+  // Checkable item round-trip (model-level; needs no X display).
+  T->set_checked(SESS, MB, IT_UNDO, true);
+  check_int("set/get_checked true",  T->get_checked(SESS, MB, IT_UNDO) ? 1 : 0, 1);
+  T->set_checked(SESS, MB, IT_UNDO, false);
+  check_int("set/get_checked false", T->get_checked(SESS, MB, IT_UNDO) ? 1 : 0, 0);
+
   W->show(SESS, WIN);
   pump(40);
 

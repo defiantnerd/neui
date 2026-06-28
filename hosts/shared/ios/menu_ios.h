@@ -332,6 +332,7 @@ namespace neui_detail
                                             modifierFlags:flags
                                              propertyList:nil];
         if (!data.enabled) kc.attributes = UIMenuElementAttributesDisabled;
+        if (data.checked)  kc.state      = UIMenuElementStateOn;
         [run addObject:kc];
         continue;
       }
@@ -352,6 +353,7 @@ namespace neui_detail
         cb(cmd_id);
       }];
       if (!data.enabled) action.attributes = UIMenuElementAttributesDisabled;
+      if (data.checked)  action.state      = UIMenuElementStateOn;
       // Surface the shortcut text in the item subtitle where one is bound (the
       // cached display label, e.g. "Cmd+S"). discoverabilityTitle shows under
       // the title in the popover.

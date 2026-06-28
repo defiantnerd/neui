@@ -1790,6 +1790,13 @@ namespace xpl_host
                    MF_BYCOMMAND | (enabled ? MF_ENABLED : MF_GRAYED));
   }
 
+  void platform_menubar_check_item(void* parent_hmenu, uint32_t cmd_id, bool checked)
+  {
+    if (!parent_hmenu) return;
+    CheckMenuItem(static_cast<HMENU>(parent_hmenu), cmd_id,
+                  MF_BYCOMMAND | (checked ? MF_CHECKED : MF_UNCHECKED));
+  }
+
   void platform_menubar_enable_popup(void* parent_hmenu, void* submenu, bool enabled)
   {
     if (!parent_hmenu || !submenu) return;

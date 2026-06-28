@@ -187,6 +187,7 @@ namespace ios_host {
     bool        is_separator   = false;
     uint32_t    cmd_id         = 0;
     bool        enabled        = true;
+    bool        checked        = false;
     std::string shortcut;
     uint32_t    shortcut_mods  = 0;
     uint32_t    shortcut_key   = NEUI_KEY_NONE;
@@ -1859,6 +1860,7 @@ namespace ios_host
       mi.is_separator   = (it->second.text == "-");
       mi.cmd_id         = id;     // route by tree id (dispatch maps it)
       mi.enabled        = it->second.enabled;
+      mi.checked        = it->second.checked;
       mi.shortcut_mods  = it->second.shortcut_mods;
       mi.shortcut_key   = it->second.shortcut_key;
       // shortcut text left empty: on iPad the UIKeyCommand element shows the

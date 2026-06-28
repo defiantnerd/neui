@@ -72,6 +72,19 @@ typedef struct neui_tree_api {
   // Treeview: ignored.
   void        (NEUI_ABI *set_menu_cmd)(neui_session_t session, neui_widget_t widget,
                                         neui_item_t item, uint32_t command);
+
+  // Show or hide a checkmark next to a menu item (a checkable / toggle entry).
+  // The client owns the logical on/off state: flip it from the item's
+  // NEUI_EVENT_TREE_ITEM_ACTIVATED handler. The host renders the mark natively -
+  // Win32 MF_CHECKED, macOS NSMenuItem state, iOS UIMenu element state - and the
+  // Linux in-frame menubar draws a check glyph in a left gutter. A checkmark and
+  // a submenu arrow are mutually exclusive, so a top-level popup or a submenu
+  // parent ignores this; separators ignore it too.
+  // Treeview: ignored (no checkmark semantics for tree items).
+  void        (NEUI_ABI *set_checked) (neui_session_t session, neui_widget_t widget,
+                                        neui_item_t item, bool checked);
+  bool        (NEUI_ABI *get_checked) (neui_session_t session, neui_widget_t widget,
+                                        neui_item_t item);
 } neui_tree_api_t;
 
 #ifdef __cplusplus
