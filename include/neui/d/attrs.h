@@ -108,6 +108,9 @@ extern "C" {
 //     This makes it suitable for high-frame-rate overlays. Read at
 //     widget_show (the window style + render path are fixed at creation); pair
 //     with NEUI_ATTR_INPUT_TRANSPARENT for a click-through overlay.
+//   - native macOS host: the CUSTOMDRAW's painted NSView is already non-opaque,
+//     so the overlay clears transparent (instead of panel_bg) and AppKit
+//     composites it over the backdrop sibling. Read live each drawRect:.
 //   - other native hosts: best-effort; treated as opaque if not supported.
 #define NEUI_ATTR_OVERLAY "neui.attr.overlay"
 

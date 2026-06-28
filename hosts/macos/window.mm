@@ -1420,14 +1420,23 @@ static float neui_snap_to_steps(float v, int steps)
   // clear so the un-painted header band shows the parent's pixels.
   bool is_section = macos_host::is_section_like(wd->type);
   bool is_tabview = wd->type && !strcmp(wd->type, NEUI_W_TABVIEW);
+  // NEUI_ATTR_OVERLAY on a CUSTOMDRAW: clear transparent so whatever the
+  // client's WIDGET_PAINT leaves unpainted stays see-through and the sibling
+  // widget beneath shows through with per-pixel alpha. The painted view is
+  // already non-opaque (isOpaque == NO), so AppKit composites the overlay over
+  // the backdrop sibling - the macOS counterpart of the win32 host's
+  // DirectComposition path (no DWM-side compositor needed for a single
+  // shared-surface window).
+  bool is_overlay = wd->type && !strcmp(wd->type, NEUI_W_CUSTOMDRAW)
+                 && wd->attrs && wd->attrs->get_int(NEUI_ATTR_OVERLAY, 0) != 0;
   // SECTION / TABPAGE / TABVIEW clear transparent so the shared paint helper
   // (which leaves the chip-band / strip-gutter area unpainted) shows the
   // parent's pixels through; other painted widgets clear to panel_bg / an
   // explicit NEUI_ATTR_BACKGROUND.
-  uint32_t clear = (is_section || is_tabview)
+  uint32_t clear = (is_section || is_tabview || is_overlay)
     ? 0x00000000
     : neui_detail::color(neui_detail::ColorRole::panel_bg);
-  if (!is_section && !is_tabview && wd->attrs && wd->attrs->has(NEUI_ATTR_BACKGROUND))
+  if (!is_section && !is_tabview && !is_overlay && wd->attrs && wd->attrs->has(NEUI_ATTR_BACKGROUND))
     clear = (uint32_t)wd->attrs->get_int(NEUI_ATTR_BACKGROUND, 0);
   backend->begin_frame(render_ctx, clear);
 
