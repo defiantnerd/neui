@@ -71,6 +71,42 @@ namespace neui_detail
     k_painter_api.close_path(p);
   }
 
+  // Append an elliptical-arc approximation (cubic Bezier segments) to the
+  // painter's current open path, from angle a0 to a1 (renderer radians: 0 =
+  // +x / 3 o'clock, +y down so increasing angle sweeps clockwise on screen)
+  // on the ellipse centred (cx, cy) with radii (rx, ry). The caller must have
+  // already placed the current point at the arc start (move_to for a ring;
+  // move_to(centre) + line_to(start) for a pie). The range is split into
+  // <= 90 deg segments, each using the standard handle length
+  // k = 4/3 * tan(dtheta / 4) - exact for a circle and affine-correct for an
+  // ellipse (the cubic is an affine image of the circular-arc cubic). Works on
+  // any backend with cubic_to; nothing is emitted for a zero sweep.
+  inline void append_elliptical_arc(neui_painter_t* p,
+                                     float cx, float cy, float rx, float ry,
+                                     float a0, float a1)
+  {
+    const float PI = 3.14159265358979323846f;
+    float total = a1 - a0;
+    if (total == 0.0f) return;
+    int segs = static_cast<int>(std::ceil(std::fabs(total) / (PI * 0.5f)));
+    if (segs < 1) segs = 1;
+    const float seg = total / static_cast<float>(segs);
+    const float k   = (4.0f / 3.0f) * std::tan(seg * 0.25f);
+    float t0 = a0;
+    for (int i = 0; i < segs; ++i) {
+      const float t1 = t0 + seg;
+      const float c0 = std::cos(t0), s0 = std::sin(t0);
+      const float c1 = std::cos(t1), s1 = std::sin(t1);
+      // tangent of (rx cos t, ry sin t) is (-rx sin t, ry cos t).
+      const float p1x = cx + rx * c0,         p1y = cy + ry * s0;
+      const float h1x = p1x + k * (-rx * s0), h1y = p1y + k * (ry * c0);
+      const float p2x = cx + rx * c1,         p2y = cy + ry * s1;
+      const float h2x = p2x - k * (-rx * s1), h2y = p2y - k * (ry * c1);
+      k_painter_api.cubic_to(p, h1x, h1y, h2x, h2y, p2x, p2y);
+      t0 = t1;
+    }
+  }
+
   // Resolution helper: parse a layer's geometry against the widget rect.
   // Picks the FILL sentinels up (-1 -> parent dim) and applies bound
   // overrides for offset_x/y/width/height/alpha read against the
@@ -467,6 +503,89 @@ namespace neui_detail
             k_painter_api.fill_path(p, fill);
           }
           if (has_stroke) k_painter_api.stroke_path(p, sw, stroke);
+        }
+        break;
+      }
+      case NEUI_COMPOUND_LAYER_ARC: {
+        uint32_t fill   = static_cast<uint32_t>(
+          effective_int  (L, "fill_color",   static_cast<int>(L.fill_color),   bag));
+        uint32_t stroke = static_cast<uint32_t>(
+          effective_int  (L, "stroke_color", static_cast<int>(L.stroke_color), bag));
+        float    sw     = effective_float(L, "stroke_width", L.stroke_width, bag);
+        if (sw < 0.0f) sw = 0.0f;
+        bool has_fill   = ((fill   >> 24) & 0xffu) != 0u;
+        bool has_stroke = sw > 0.0f && ((stroke >> 24) & 0xffu) != 0u;
+        if (!has_fill && !has_stroke) break;
+
+        // Sweep parameters. `value` is the painted fraction of [begin, end];
+        // begin/end are in degrees (0 = 12 o'clock, +cw); polarity anchors the
+        // fill; direction selects which way the begin->end range travels.
+        float value = effective_float(L, "value", L.arc_value, bag);
+        if (value < 0.0f) value = 0.0f;
+        if (value > 1.0f) value = 1.0f;
+        float begin_deg = effective_float(L, "begin_angle", L.arc_begin_deg, bag);
+        float end_deg   = effective_float(L, "end_angle",   L.arc_end_deg,   bag);
+        int   polarity  = effective_int  (L, "polarity",    L.arc_polarity,  bag);
+        int   direction = effective_int  (L, "direction",   L.arc_direction, bag);
+
+        const float PI  = 3.14159265358979323846f;
+        const float D2R = PI / 180.0f;
+        // 0 deg = 12 o'clock, cw-positive -> renderer radians (0 = 3 o'clock,
+        // +y down): subtract 90 deg.
+        float a0 = (begin_deg - 90.0f) * D2R;
+        float a1 = (end_deg   - 90.0f) * D2R;
+        // Resolve the begin->end sweep into the chosen direction so the range
+        // is unambiguous however the angles were authored: cw increases the
+        // angle, ccw decreases it.
+        if (direction == 0) { while (a1 < a0) a1 += 2.0f * PI; }
+        else                { while (a1 > a0) a1 -= 2.0f * PI; }
+        const float total = a1 - a0;
+        const float theta = a0 + total * value;
+        float anchor;
+        switch (polarity) {
+          case 1:  anchor = (a0 + a1) * 0.5f; break;  // center (bipolar)
+          case 2:  anchor = a1;               break;  // max (end)
+          default: anchor = a0;               break;  // min (begin)
+        }
+        if (std::fabs(theta - anchor) < 1e-4f) break;  // nothing swept
+
+        const float cx = r.x + r.w * 0.5f;
+        const float cy = r.y + r.h * 0.5f;
+        // Pie fills the inscribed ellipse; the ring insets by half its width
+        // so the stroke stays within the layer rect.
+        const float rx_fill = r.w * 0.5f;
+        const float ry_fill = r.h * 0.5f;
+        float rx_ring = rx_fill - sw * 0.5f;
+        float ry_ring = ry_fill - sw * 0.5f;
+        if (rx_ring < 0.0f) rx_ring = 0.0f;
+        if (ry_ring < 0.0f) ry_ring = 0.0f;
+
+        if (has_fill && rx_fill > 0.0f && ry_fill > 0.0f) {
+          k_painter_api.begin_path(p);
+          k_painter_api.move_to(p, cx, cy);
+          k_painter_api.line_to(p, cx + rx_fill * std::cos(anchor),
+                                    cy + ry_fill * std::sin(anchor));
+          append_elliptical_arc(p, cx, cy, rx_fill, ry_fill, anchor, theta);
+          k_painter_api.close_path(p);
+          k_painter_api.fill_path(p, fill);
+        }
+        if (has_stroke && rx_ring > 0.0f && ry_ring > 0.0f) {
+          k_painter_api.begin_path(p);
+          k_painter_api.move_to(p, cx + rx_ring * std::cos(anchor),
+                                    cy + ry_ring * std::sin(anchor));
+          append_elliptical_arc(p, cx, cy, rx_ring, ry_ring, anchor, theta);
+          if (L.stroke_cap != 0 && k_painter_api.stroke_path_styled) {
+            neui_stroke_style_t style{};
+            style.cap         = static_cast<neui_line_cap_t>(L.stroke_cap);
+            style.join        = NEUI_LINE_JOIN_ROUND;
+            style.miter_limit = 4.0f;
+            style.dash_array  = nullptr;
+            style.dash_count  = 0;
+            style.dash_offset = 0.0f;
+            k_painter_api.stroke_path_styled(p, sw, stroke, &style);
+          } else {
+            k_painter_api.stroke_path(p, sw, stroke);
+          }
         }
         break;
       }

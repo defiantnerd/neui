@@ -137,6 +137,18 @@ namespace neui_detail
     std::vector<float>       stroke_dash;                // on/off lengths (empty = solid)
     float                    stroke_dash_offset = 0.0f;
 
+    // ARC-layer (NEUI_COMPOUND_LAYER_ARC) config. The arc is inscribed in the
+    // layer rect (ellipse when width != height); `arc_value` (bindable, the
+    // "value" prop) is the painted FRACTION of the begin..end range, anchored
+    // by `arc_polarity` (KnobPolarity values). Angles are in degrees, 0 = 12
+    // o'clock, positive = clockwise on screen. Reuses fill_color (pie) +
+    // stroke_color / stroke_width / stroke_cap (ring) above.
+    float                    arc_value     = 0.0f;     // [0..1] swept fraction
+    float                    arc_begin_deg = -135.0f;  // range start (deg)
+    float                    arc_end_deg   = 135.0f;   // range end   (deg)
+    int                      arc_polarity  = 0;        // 0 min, 1 center, 2 max
+    int                      arc_direction = 0;        // 0 cw, 1 ccw
+
     // Optional gradient fill for RECT / PATH layers (set via the compound
     // API's set_gradient). When `enabled` with >= 2 stops the layer's FILL
     // uses this gradient instead of the solid fill_color; the stroke is
@@ -579,6 +591,15 @@ namespace neui_detail
       if (prop == "stroke_cap")   { L.stroke_cap   = (v < 0) ? 0 : (v > 2 ? 2 : v); return true; }
       if (prop == "stroke_join")  { L.stroke_join  = (v < 0) ? 0 : (v > 2 ? 2 : v); return true; }
     }
+    // ARC reuses fill_color (pie) + stroke_color / stroke_cap (ring) and adds
+    // its own polarity / direction enums.
+    if (L.kind == NEUI_COMPOUND_LAYER_ARC) {
+      if (prop == "fill_color")   { L.fill_color   = static_cast<uint32_t>(v); return true; }
+      if (prop == "stroke_color") { L.stroke_color = static_cast<uint32_t>(v); return true; }
+      if (prop == "stroke_cap")   { L.stroke_cap   = (v < 0) ? 0 : (v > 2 ? 2 : v); return true; }
+      if (prop == "polarity")     { L.arc_polarity = (v < 0) ? 0 : (v > 2 ? 2 : v); return true; }
+      if (prop == "direction")    { L.arc_direction = (v != 0) ? 1 : 0; return true; }
+    }
     if (L.kind == NEUI_COMPOUND_LAYER_ASSET) {
       if (prop == "tint")  { L.tint  = static_cast<uint32_t>(v); return true; }
       if (prop == "frame") { L.frame = v; return true; }
@@ -619,6 +640,12 @@ namespace neui_detail
     }
     if (L.kind == NEUI_COMPOUND_LAYER_RECT) {
       if (prop == "corner_radius") { L.corner_radius = (v < 0.0f) ? 0.0f : v; return true; }
+    }
+    if (L.kind == NEUI_COMPOUND_LAYER_ARC) {
+      if (prop == "stroke_width") { L.stroke_width  = (v < 0.0f) ? 0.0f : v; return true; }
+      if (prop == "value")       { L.arc_value     = v; return true; }
+      if (prop == "begin_angle") { L.arc_begin_deg = v; return true; }
+      if (prop == "end_angle")   { L.arc_end_deg   = v; return true; }
     }
     return false;
   }

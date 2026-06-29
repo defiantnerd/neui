@@ -442,6 +442,31 @@ if(APPLE)
   target_link_libraries(neui_overlay_example PRIVATE neui-macoshost)
 endif()
 
+# Arc example. Value-driven arc / ring / pie compound layers
+# (NEUI_COMPOUND_LAYER_ARC) - ring, elliptical ring, filled wedge, and a
+# center-polarity bipolar arc, each bound to NEUI_PARAM_VALUE.
+if(MSVC)
+  add_executable(neui_arc_example WIN32
+    examples/arc_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_arc_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_arc_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_arc_example WIN32 examples/arc_example.cpp)
+elseif(APPLE)
+  add_executable(neui_arc_example MACOSX_BUNDLE examples/arc_example.cpp)
+else()
+  add_executable(neui_arc_example examples/arc_example.cpp)
+endif()
+target_link_libraries(neui_arc_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_arc_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_arc_example PRIVATE neui-macoshost)
+endif()
+
 # Filmstrip / stitchmap knob example. Generates a vertical frame strip into a
 # SURFACE, tags it via assets->set_frame_layout, and drives it with a compound
 # asset layer whose "frame" prop is bound to NEUI_PARAM_VALUE + a rotational

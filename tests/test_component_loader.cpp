@@ -491,6 +491,33 @@ TEST_CASE("component_loader: a group layer nests children via add_child_layer")
   CHECK(g_layers[2].parent == 0);
 }
 
+TEST_CASE("build_component: arc layer props + value binding")
+{
+  const char* json = R"json({
+    "size": [80, 80],
+    "layers": [
+      { "kind": "arc", "z": 1, "anchor": ["center","center"], "size": "fill",
+        "stroke_color": "#FFE0E0E0", "stroke_width": 6, "stroke_linecap": "round",
+        "begin_angle": -135, "end_angle": 135, "polarity": "center", "direction": "ccw",
+        "bind": { "value": { "attr": "neui.param.value", "scale": 1, "offset": 0 } } }
+    ]
+  })json";
+  run_loader(json);
+
+  REQUIRE(g_layers.size() == 1);
+  const LayerRec& a = g_layers[0];
+  CHECK(a.kind == NEUI_COMPOUND_LAYER_ARC);
+  CHECK(a.ints.at("stroke_color") == static_cast<int>(0xFFE0E0E0u));
+  CHECK(a.flts.at("stroke_width") == 6.0f);
+  CHECK(a.ints.at("stroke_cap") == 1);     // round
+  CHECK(a.flts.at("begin_angle") == -135.0f);
+  CHECK(a.flts.at("end_angle") == 135.0f);
+  CHECK(a.ints.at("polarity") == 1);       // center
+  CHECK(a.ints.at("direction") == 1);      // ccw
+  REQUIRE(a.binds.count("value") == 1);
+  CHECK(a.binds.at("value").attr == "neui.param.value");
+}
+
 // --- serialization (designer round-trip) -----------------------------------
 
 namespace
@@ -629,6 +656,45 @@ TEST_CASE("serialize_component: round-trips through the loader")
   const auto& fl = g_frame_layouts.begin()->second;
   CHECK_EQ((int)fl.cols, 1);
   CHECK_EQ((int)fl.rows, 100);
+}
+
+TEST_CASE("serialize_component: round-trips an arc layer")
+{
+  // Hand-build a value-driven ring (stroked arc, value bound to the param).
+  HandBuilt hb;
+  hb.name = "ring";
+  uint32_t s = compound_add_layer(hb.ca, NEUI_COMPOUND_LAYER_ARC, 1);
+  CompoundLayer* L = compound_get_layer(hb.ca, s);
+  L->parent_anchor = NEUI_ANCHOR_CENTER; L->self_anchor = NEUI_ANCHOR_CENTER;
+  apply_set_int  (*L, "stroke_color", static_cast<int>(0xFFE0E0E0u));
+  apply_set_float(*L, "stroke_width", 6.0f);
+  apply_set_int  (*L, "stroke_cap",   1);          // round
+  apply_set_float(*L, "begin_angle",  -120.0f);
+  apply_set_float(*L, "end_angle",     120.0f);
+  apply_set_int  (*L, "polarity",      1);          // center
+  apply_set_int  (*L, "direction",     1);          // ccw
+  apply_bind     (*L, "value", "neui.param.value", 1.0f, 0.0f);
+
+  ComponentSerializeInput in;
+  in.name = &hb.name; in.width = 80.0f; in.height = 80.0f;
+  in.compound = &hb.ca; in.behavior = &hb.ba;
+  std::string json = serialize_component(in, 0);
+
+  BuiltComponent rebuilt = run_loader(json);
+  CHECK(rebuilt.ok);
+  REQUIRE(g_layers.size() == 1);
+  const LayerRec& a = g_layers[0];
+  CHECK(a.kind == NEUI_COMPOUND_LAYER_ARC);
+  CHECK(a.ints.at("stroke_color") == static_cast<int>(0xFFE0E0E0u));
+  CHECK(a.flts.at("stroke_width") == 6.0f);
+  CHECK(a.ints.at("stroke_cap") == 1);
+  CHECK(a.flts.at("begin_angle") == -120.0f);
+  CHECK(a.flts.at("end_angle") == 120.0f);
+  CHECK(a.ints.at("polarity") == 1);
+  CHECK(a.ints.at("direction") == 1);
+  // `value` is bound (not a static prop), so it round-trips as a binding.
+  REQUIRE(a.binds.count("value") == 1);
+  CHECK(a.binds.at("value").attr == "neui.param.value");
 }
 
 TEST_CASE("serialize_component: re-emits frame_layout for a tagged asset")

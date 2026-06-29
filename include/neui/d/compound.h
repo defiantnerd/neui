@@ -114,6 +114,14 @@ extern "C" {
     // top-level layers - there is no separate data plane. `alpha` and
     // `show_when` on the group apply to the whole subtree. Groups may nest.
     NEUI_COMPOUND_LAYER_GROUP = 6,
+    // A value-driven arc / ring / pie. The arc is inscribed in the layer rect
+    // (an ellipse when width != height) and its swept extent is driven by the
+    // bindable "value" prop (0..1) between a "begin_angle" and "end_angle",
+    // anchored by "polarity" - the knob's active-fill-arc look, generalised to
+    // a designer-authorable, value-bound compound layer. Stroke props paint a
+    // ring; fill_color paints a filled wedge (pie); both may be set. Cheap
+    // per-frame vector paint (never baked), so it animates with the value.
+    NEUI_COMPOUND_LAYER_ARC   = 7,
   } neui_compound_layer_kind_t;
 
   // QR error-correction levels for NEUI_COMPOUND_LAYER_QR's "ecc" prop.
@@ -294,6 +302,34 @@ extern "C" {
     //     The path geometry itself is assigned via set_path (below); it
     //     replaces any previous geometry on the layer. A gradient fill is
     //     available via set_gradient, same as rect.
+    //   arc layer props (a value-driven arc inscribed in the layer rect -
+    //   an ellipse when width != height; rx = width/2, ry = height/2):
+    //     "value"        float [0..1] the swept FRACTION of the begin..end
+    //                          range that is painted. Default 0. Almost always
+    //                          BOUND - bind("value", "neui.param.value", 1, 0) -
+    //                          so a knob/meter value drives the sweep live.
+    //                          Clamped to [0,1] at paint.
+    //     "begin_angle"  float degrees of the full arc range start. Default
+    //                          -135. 0 deg = 12 o'clock (up); positive = clockwise
+    //                          on screen. Bindable.
+    //     "end_angle"    float degrees of the full arc range end. Default +135
+    //                          (so the default range is the knob's 270 deg sweep).
+    //                          Bindable.
+    //     "direction"    int   0 = clockwise from begin to end (default),
+    //                          1 = counter-clockwise. Selects which way around
+    //                          the ellipse the begin->end sweep travels.
+    //     "polarity"     int   anchor end of the painted fill, reusing the KNOB
+    //                          NEUI_ATTR_POLARITY values: 0 = min (fill from
+    //                          begin, default), 1 = center (fill from the range
+    //                          midpoint - bipolar), 2 = max (fill from end).
+    //     "fill_color"   int   ARGB of the filled wedge / pie (centre -> arc).
+    //                          0 (default) = no fill.
+    //     "stroke_color" int   ARGB of the stroked ring along the arc. 0 = none.
+    //     "stroke_width" float ring thickness in px. 0 (default) = no ring.
+    //     "stroke_cap"   int   neui_line_cap_t for the ring ends: 0 BUTT, 1
+    //                          ROUND, 2 SQUARE.
+    //     Set stroke_* for a ring, fill_color for a pie, or both. Falls back to
+    //     nothing on a backend without the path API (graceful degradation).
     //   any layer:
     //     "offset_x"  int     px, relative to anchor
     //     "offset_y"  int     px, relative to anchor

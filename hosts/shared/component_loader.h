@@ -162,6 +162,7 @@ namespace neui_detail
       if (s == "rect")  return NEUI_COMPOUND_LAYER_RECT;
       if (s == "path")  return NEUI_COMPOUND_LAYER_PATH;
       if (s == "group") return NEUI_COMPOUND_LAYER_GROUP;
+      if (s == "arc")   return NEUI_COMPOUND_LAYER_ARC;
       return NEUI_COMPOUND_LAYER_NONE;
     }
     inline neui_behavior_kind_t parse_behavior_kind(const std::string& s)
@@ -276,6 +277,7 @@ namespace neui_detail
         case NEUI_COMPOUND_LAYER_RECT:  return "rect";
         case NEUI_COMPOUND_LAYER_PATH:  return "path";
         case NEUI_COMPOUND_LAYER_GROUP: return "group";
+        case NEUI_COMPOUND_LAYER_ARC:   return "arc";
         default:                        return "";
       }
     }
@@ -614,6 +616,37 @@ namespace neui_detail
                                         static_cast<uint32_t>(cmds.size()));
             }
           }
+        } else if (kind == NEUI_COMPOUND_LAYER_ARC) {
+          int col;
+          if (as_color(obj_get(*lo, "fill_color"), col))
+            apis.compound->set_int(session, cs, layer, "fill_color", col);
+          if (as_color(obj_get(*lo, "stroke_color"), col))
+            apis.compound->set_int(session, cs, layer, "stroke_color", col);
+          double swd;
+          if (as_num(obj_get(*lo, "stroke_width"), swd))
+            apis.compound->set_float(session, cs, layer, "stroke_width", static_cast<float>(swd));
+          if (const std::string* lc = as_str(obj_get(*lo, "stroke_linecap")))
+            apis.compound->set_int(session, cs, layer, "stroke_cap",
+                                   (*lc == "round") ? 1 : (*lc == "square") ? 2 : 0);
+          double ang;
+          if (as_num(obj_get(*lo, "begin_angle"), ang))
+            apis.compound->set_float(session, cs, layer, "begin_angle", static_cast<float>(ang));
+          if (as_num(obj_get(*lo, "end_angle"), ang))
+            apis.compound->set_float(session, cs, layer, "end_angle", static_cast<float>(ang));
+          double val;
+          if (as_num(obj_get(*lo, "value"), val))
+            apis.compound->set_float(session, cs, layer, "value", static_cast<float>(val));
+          // polarity: "min" / "center" / "max" (or 0 / 1 / 2).
+          if (const std::string* ps = as_str(obj_get(*lo, "polarity")))
+            apis.compound->set_int(session, cs, layer, "polarity",
+                                   (*ps == "center" || *ps == "centre") ? 1 : (*ps == "max") ? 2 : 0);
+          else { double pd; if (as_num(obj_get(*lo, "polarity"), pd))
+            apis.compound->set_int(session, cs, layer, "polarity", static_cast<int>(std::lround(pd))); }
+          // direction: "cw" / "ccw" (or 0 / 1).
+          if (const std::string* ds = as_str(obj_get(*lo, "direction")))
+            apis.compound->set_int(session, cs, layer, "direction", (*ds == "ccw") ? 1 : 0);
+          else { double dd; if (as_num(obj_get(*lo, "direction"), dd))
+            apis.compound->set_int(session, cs, layer, "direction", (dd != 0.0) ? 1 : 0); }
         }
 
         // bindings (numeric props + asset prop)
@@ -909,6 +942,21 @@ namespace neui_detail
             }
             lo.emplace_back("path", njson_arr(std::move(parr)));
           }
+        } else if (L->kind == NEUI_COMPOUND_LAYER_ARC) {
+          if (L->fill_color)   lo.emplace_back("fill_color",   njson_str(hexcolor(L->fill_color)));
+          if (L->stroke_color) lo.emplace_back("stroke_color", njson_str(hexcolor(L->stroke_color)));
+          if (L->stroke_width != 0.0f) lo.emplace_back("stroke_width", njson_num(L->stroke_width));
+          if (L->stroke_cap != 0)
+            lo.emplace_back("stroke_linecap", njson_str(L->stroke_cap == 1 ? "round" : "square"));
+          if (L->arc_begin_deg != defL.arc_begin_deg) lo.emplace_back("begin_angle", njson_num(L->arc_begin_deg));
+          if (L->arc_end_deg   != defL.arc_end_deg)   lo.emplace_back("end_angle",   njson_num(L->arc_end_deg));
+          // `value` is normally bound (emitted in the bind block); a static
+          // override round-trips here.
+          if (L->arc_value     != defL.arc_value)     lo.emplace_back("value",       njson_num(L->arc_value));
+          if (L->arc_polarity  != defL.arc_polarity)
+            lo.emplace_back("polarity", njson_str(L->arc_polarity == 1 ? "center" : L->arc_polarity == 2 ? "max" : "min"));
+          if (L->arc_direction != defL.arc_direction)
+            lo.emplace_back("direction", njson_str(L->arc_direction == 1 ? "ccw" : "cw"));
         } else if (L->kind == NEUI_COMPOUND_LAYER_GROUP) {
           // Recurse: the group's children become its own nested layers array.
           lo.emplace_back("layers", njson_arr(emit_children(slot)));
