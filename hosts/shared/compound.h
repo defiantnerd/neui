@@ -126,6 +126,18 @@ namespace neui_detail
     float                    stroke_width  = 0.0f;
     float                    corner_radius = 0.0f;
 
+    // RECT value-driven fill (the linear bar / level meter - request §B). The
+    // "value" prop is the painted FRACTION of the rect along the fill axis;
+    // default 1 ⇒ full fill ⇒ an unbound RECT is unchanged. orientation picks
+    // the axis (0 horizontal / 1 vertical); polarity (KnobPolarity values)
+    // anchors the fill: 0 min/origin edge, 1 center/bipolar, 2 max/far edge.
+    // The stroke (if any) always outlines the FULL rect as a track; the
+    // gradient fill stays mapped to the full rect so it reads as a fixed scale
+    // the fill reveals. Normally bound: bind("value","neui.param.value",1,0).
+    float                    rect_value       = 1.0f;
+    int                      rect_orientation = 0;
+    int                      rect_polarity    = 0;
+
     // SVG fill-rule + stroke style for RECT / PATH layers (cap/join/dash only
     // affect PATH strokes). Defaults match the bare fill_path / stroke_path:
     // nonzero fill, butt cap, miter join, solid line. Stored as plain ints
@@ -178,6 +190,17 @@ namespace neui_detail
       float    args[6];   // six: a cubic Bézier needs two control points + end
     };
     std::vector<PathCommand> path_cmds;
+
+    // PATH value-driven stroke trim (request §A). The "value" prop is the
+    // trimmed FRACTION of the path's total arc length to stroke; default 1 ⇒
+    // whole path ⇒ an unbound PATH is unchanged (byte-for-byte). trim_polarity
+    // (KnobPolarity values) anchors the trimmed span: 0 min (from the start),
+    // 1 center (grows out from the middle, bipolar), 2 max (from the end). The
+    // trim is a geometry op on the STROKE only - fills always use the whole
+    // path (a partial fill of an arbitrary path has no canonical meaning).
+    // Normally bound: bind("value","neui.param.value",1,0).
+    float                    trim_value    = 1.0f;
+    int                      trim_polarity = 0;
 
     // QR-layer (NEUI_COMPOUND_LAYER_QR) config. The string to encode reuses
     // text_template / text_segments above (default "{value}"), unless the
@@ -591,6 +614,15 @@ namespace neui_detail
       if (prop == "stroke_cap")   { L.stroke_cap   = (v < 0) ? 0 : (v > 2 ? 2 : v); return true; }
       if (prop == "stroke_join")  { L.stroke_join  = (v < 0) ? 0 : (v > 2 ? 2 : v); return true; }
     }
+    // PATH stroke-trim anchor (§A) - reuses the arc/KNOB polarity enum.
+    if (L.kind == NEUI_COMPOUND_LAYER_PATH) {
+      if (prop == "polarity")     { L.trim_polarity = (v < 0) ? 0 : (v > 2 ? 2 : v); return true; }
+    }
+    // RECT value-driven fill (§B) - same polarity enum, plus a fill axis.
+    if (L.kind == NEUI_COMPOUND_LAYER_RECT) {
+      if (prop == "polarity")     { L.rect_polarity    = (v < 0) ? 0 : (v > 2 ? 2 : v); return true; }
+      if (prop == "orientation")  { L.rect_orientation = (v != 0) ? 1 : 0; return true; }
+    }
     // ARC reuses fill_color (pie) + stroke_color / stroke_cap (ring) and adds
     // its own polarity / direction enums.
     if (L.kind == NEUI_COMPOUND_LAYER_ARC) {
@@ -638,8 +670,12 @@ namespace neui_detail
       if (prop == "stroke_miter")  { L.stroke_miter  = (v < 1.0f) ? 4.0f : v; return true; }
       if (prop == "stroke_dash_offset") { L.stroke_dash_offset = v; return true; }
     }
+    if (L.kind == NEUI_COMPOUND_LAYER_PATH) {
+      if (prop == "value")         { L.trim_value   = v; return true; }   // §A stroke trim
+    }
     if (L.kind == NEUI_COMPOUND_LAYER_RECT) {
       if (prop == "corner_radius") { L.corner_radius = (v < 0.0f) ? 0.0f : v; return true; }
+      if (prop == "value")         { L.rect_value    = v; return true; }  // §B linear bar
     }
     if (L.kind == NEUI_COMPOUND_LAYER_ARC) {
       if (prop == "stroke_width") { L.stroke_width  = (v < 0.0f) ? 0.0f : v; return true; }

@@ -108,6 +108,147 @@ namespace neui_detail
     }
   }
 
+  // Arc-length stroke trim for the PATH layer (§A). Flattens the layer's
+  // command list into polyline vertices (each carrying a `move` flag = start
+  // of a new subpath, no segment leads into it; CLOSE re-adds the closing
+  // segment back to the subpath start), measures cumulative arc length, then
+  // returns the sub-path covering the fractional span [a, b] of total length as
+  // a fresh MOVE_TO / LINE_TO list. Lines are exact; curves + arcs are sampled
+  // (dense enough that a stroked trim reads smooth at typical sizes). Boundary
+  // segments are split by linear interpolation along the flattened polyline.
+  // 0 <= a <= b <= 1 expected; an empty result means nothing to draw. All
+  // backend-agnostic math - no D2D / CG / Cairo work.
+  inline std::vector<CompoundLayer::PathCommand>
+  trim_path_commands(const std::vector<CompoundLayer::PathCommand>& cmds,
+                     float a, float b)
+  {
+    struct FP { float x, y; bool move; };
+    std::vector<FP> pts;
+    pts.reserve(cmds.size() * 4 + 4);
+
+    const float PI = 3.14159265358979323846f;
+    float cx = 0.0f, cy = 0.0f;   // current point
+    float sx = 0.0f, sy = 0.0f;   // subpath start
+    bool  have_cur = false;
+    auto emit = [&](float x, float y, bool mv) { pts.push_back({ x, y, mv }); };
+
+    for (const auto& c : cmds) {
+      switch (c.kind) {
+        case NEUI_PATH_CMD_MOVE_TO:
+          cx = c.args[0]; cy = c.args[1]; sx = cx; sy = cy; have_cur = true;
+          emit(cx, cy, true);
+          break;
+        case NEUI_PATH_CMD_LINE_TO:
+          if (!have_cur) {
+            cx = c.args[0]; cy = c.args[1]; sx = cx; sy = cy; have_cur = true;
+            emit(cx, cy, true);
+          } else {
+            cx = c.args[0]; cy = c.args[1];
+            emit(cx, cy, false);
+          }
+          break;
+        case NEUI_PATH_CMD_CUBIC_TO: {
+          if (!have_cur) break;
+          const int N = 24;
+          const float x0 = cx, y0 = cy;
+          const float x1 = c.args[0], y1 = c.args[1];
+          const float x2 = c.args[2], y2 = c.args[3];
+          const float x3 = c.args[4], y3 = c.args[5];
+          for (int i = 1; i <= N; ++i) {
+            const float t = static_cast<float>(i) / N, u = 1.0f - t;
+            emit(u*u*u*x0 + 3*u*u*t*x1 + 3*u*t*t*x2 + t*t*t*x3,
+                 u*u*u*y0 + 3*u*u*t*y1 + 3*u*t*t*y2 + t*t*t*y3, false);
+          }
+          cx = x3; cy = y3;
+          break;
+        }
+        case NEUI_PATH_CMD_QUAD_TO: {
+          if (!have_cur) break;
+          const int N = 18;
+          const float x0 = cx, y0 = cy;
+          const float x1 = c.args[0], y1 = c.args[1];
+          const float x2 = c.args[2], y2 = c.args[3];
+          for (int i = 1; i <= N; ++i) {
+            const float t = static_cast<float>(i) / N, u = 1.0f - t;
+            emit(u*u*x0 + 2*u*t*x1 + t*t*x2,
+                 u*u*y0 + 2*u*t*y1 + t*t*y2, false);
+          }
+          cx = x2; cy = y2;
+          break;
+        }
+        case NEUI_PATH_CMD_ARC: {
+          const float acx = c.args[0], acy = c.args[1], rr = c.args[2];
+          const float a0 = c.args[3], a1 = c.args[4];
+          // Canvas arc() convention: connect the current point to the arc start
+          // with a line, then sweep. With no current point the start opens a
+          // new subpath instead.
+          const float startx = acx + rr * std::cos(a0);
+          const float starty = acy + rr * std::sin(a0);
+          if (have_cur) emit(startx, starty, false);
+          else { emit(startx, starty, true); sx = startx; sy = starty; }
+          int N = static_cast<int>(std::ceil(std::fabs(a1 - a0) / (PI / 24.0f)));
+          if (N < 1) N = 1;
+          for (int i = 1; i <= N; ++i) {
+            const float t = a0 + (a1 - a0) * (static_cast<float>(i) / N);
+            emit(acx + rr * std::cos(t), acy + rr * std::sin(t), false);
+          }
+          cx = acx + rr * std::cos(a1);
+          cy = acy + rr * std::sin(a1);
+          have_cur = true;
+          break;
+        }
+        case NEUI_PATH_CMD_CLOSE:
+          if (have_cur) { emit(sx, sy, false); cx = sx; cy = sy; }
+          break;
+        default:
+          break;
+      }
+    }
+
+    std::vector<CompoundLayer::PathCommand> out;
+    if (pts.size() < 2) return out;
+
+    // Cumulative arc length per vertex (a `move` vertex adds no segment).
+    std::vector<float> cum(pts.size(), 0.0f);
+    for (size_t i = 1; i < pts.size(); ++i) {
+      if (pts[i].move) { cum[i] = cum[i - 1]; continue; }
+      const float dx = pts[i].x - pts[i - 1].x;
+      const float dy = pts[i].y - pts[i - 1].y;
+      cum[i] = cum[i - 1] + std::sqrt(dx * dx + dy * dy);
+    }
+    const float total = cum.back();
+    if (total <= 0.0f) return out;
+
+    const float la = a * total, lb = b * total;
+    if (lb <= la) return out;
+
+    auto push = [&](uint32_t kind, float x, float y) {
+      CompoundLayer::PathCommand pc{};
+      pc.kind = kind; pc.args[0] = x; pc.args[1] = y;
+      out.push_back(pc);
+    };
+
+    bool pen_down = false;
+    for (size_t i = 1; i < pts.size(); ++i) {
+      if (pts[i].move) { pen_down = false; continue; }  // subpath break
+      const float c0 = cum[i - 1], c1 = cum[i];
+      if (c1 <= c0) continue;                            // zero-length segment
+      float ts = (la - c0) / (c1 - c0);
+      float te = (lb - c0) / (c1 - c0);
+      if (ts < 0.0f) ts = 0.0f; else if (ts > 1.0f) ts = 1.0f;
+      if (te < 0.0f) te = 0.0f; else if (te > 1.0f) te = 1.0f;
+      if (te <= ts) continue;                            // segment outside span
+      const float ax = pts[i - 1].x, ay = pts[i - 1].y;
+      const float bx = pts[i].x,     by = pts[i].y;
+      if (!pen_down) {
+        push(NEUI_PATH_CMD_MOVE_TO, ax + (bx - ax) * ts, ay + (by - ay) * ts);
+        pen_down = true;
+      }
+      push(NEUI_PATH_CMD_LINE_TO, ax + (bx - ax) * te, ay + (by - ay) * te);
+    }
+    return out;
+  }
+
   // Resolution helper: parse a layer's geometry against the widget rect.
   // Picks the FILL sentinels up (-1 -> parent dim) and applies bound
   // overrides for offset_x/y/width/height/alpha read against the
@@ -408,49 +549,74 @@ namespace neui_detail
         bool has_stroke  = sw > 0.0f && ((stroke >> 24) & 0xffu) != 0u;
         if (!has_fill && !has_stroke) break;
 
+        // Value-driven stroke trim (§A). Default 1 ⇒ whole path (no trim, the
+        // existing behaviour byte-for-byte); ≤ 0 ⇒ nothing stroked. Fills are
+        // never trimmed - a partial fill of an arbitrary path has no canonical
+        // meaning, so the fill always uses the whole path.
+        float trim_v = behavior_clamp(
+          effective_float(L, "value", L.trim_value, bag), 0.0f, 1.0f);
+        int   trim_pol = effective_int(L, "polarity", L.trim_polarity, bag);
+        bool  do_trim  = has_stroke && trim_v < 1.0f;
+
+        std::vector<CompoundLayer::PathCommand> trimmed;
+        if (do_trim && trim_v > 0.0f) {
+          float ta, tb;
+          switch (trim_pol) {
+            case 1:  ta = 0.5f - trim_v * 0.5f; tb = 0.5f + trim_v * 0.5f; break;  // center
+            case 2:  ta = 1.0f - trim_v;        tb = 1.0f;                 break;  // max (end)
+            default: ta = 0.0f;                 tb = trim_v;               break;  // min (start)
+          }
+          trimmed = trim_path_commands(L.path_cmds, ta, tb);
+        }
+
         // Replay path commands in layer-local space - push a transform so
         // the path's (0, 0) lands at the layer rect's top-left. The
         // outer widget-bounds clip set up by the caller still applies.
         k_painter_api.push_transform(p);
         k_painter_api.translate(p, r.x, r.y);
-        k_painter_api.begin_path(p);
-        // fill-rule resets to NONZERO on begin_path, so set it before any verb.
-        if (L.fill_rule != 0 && k_painter_api.set_fill_rule)
-          k_painter_api.set_fill_rule(p, NEUI_FILL_RULE_EVENODD);
-        for (const auto& cmd : L.path_cmds) {
-          switch (cmd.kind) {
-            case NEUI_PATH_CMD_MOVE_TO:
-              k_painter_api.move_to(p, cmd.args[0], cmd.args[1]);
-              break;
-            case NEUI_PATH_CMD_LINE_TO:
-              k_painter_api.line_to(p, cmd.args[0], cmd.args[1]);
-              break;
-            case NEUI_PATH_CMD_ARC:
-              k_painter_api.arc(p, cmd.args[0], cmd.args[1], cmd.args[2],
-                                  cmd.args[3], cmd.args[4]);
-              break;
-            case NEUI_PATH_CMD_CUBIC_TO:
-              k_painter_api.cubic_to(p, cmd.args[0], cmd.args[1], cmd.args[2],
-                                        cmd.args[3], cmd.args[4], cmd.args[5]);
-              break;
-            case NEUI_PATH_CMD_QUAD_TO:
-              k_painter_api.quad_to(p, cmd.args[0], cmd.args[1], cmd.args[2], cmd.args[3]);
-              break;
-            case NEUI_PATH_CMD_CLOSE:
-              k_painter_api.close_path(p);
-              break;
-            default:
-              break;  // unknown kind, skip
+
+        auto replay = [&](const std::vector<CompoundLayer::PathCommand>& list) {
+          k_painter_api.begin_path(p);
+          // fill-rule resets to NONZERO on begin_path, so set it before any verb.
+          if (L.fill_rule != 0 && k_painter_api.set_fill_rule)
+            k_painter_api.set_fill_rule(p, NEUI_FILL_RULE_EVENODD);
+          for (const auto& cmd : list) {
+            switch (cmd.kind) {
+              case NEUI_PATH_CMD_MOVE_TO:
+                k_painter_api.move_to(p, cmd.args[0], cmd.args[1]);
+                break;
+              case NEUI_PATH_CMD_LINE_TO:
+                k_painter_api.line_to(p, cmd.args[0], cmd.args[1]);
+                break;
+              case NEUI_PATH_CMD_ARC:
+                k_painter_api.arc(p, cmd.args[0], cmd.args[1], cmd.args[2],
+                                    cmd.args[3], cmd.args[4]);
+                break;
+              case NEUI_PATH_CMD_CUBIC_TO:
+                k_painter_api.cubic_to(p, cmd.args[0], cmd.args[1], cmd.args[2],
+                                          cmd.args[3], cmd.args[4], cmd.args[5]);
+                break;
+              case NEUI_PATH_CMD_QUAD_TO:
+                k_painter_api.quad_to(p, cmd.args[0], cmd.args[1], cmd.args[2], cmd.args[3]);
+                break;
+              case NEUI_PATH_CMD_CLOSE:
+                k_painter_api.close_path(p);
+                break;
+              default:
+                break;  // unknown kind, skip
+            }
           }
-        }
-        // Path is in the translated frame, so the gradient is too: origin (0,0).
-        if (grad_fill) {
-          neui_gradient_t g = resolve_layer_gradient(L.fill_gradient, 0.0f, 0.0f, r.w, r.h);
-          k_painter_api.fill_path_gradient(p, &g);
-        } else if (solid_fill) {
-          k_painter_api.fill_path(p, fill);
-        }
-        if (has_stroke) {
+        };
+        auto do_fill = [&]() {
+          // Path is in the translated frame, so the gradient is too: origin (0,0).
+          if (grad_fill) {
+            neui_gradient_t g = resolve_layer_gradient(L.fill_gradient, 0.0f, 0.0f, r.w, r.h);
+            k_painter_api.fill_path_gradient(p, &g);
+          } else if (solid_fill) {
+            k_painter_api.fill_path(p, fill);
+          }
+        };
+        auto do_stroke = [&]() {
           bool styled = L.stroke_cap != 0 || L.stroke_join != 0 ||
                         !L.stroke_dash.empty() || L.stroke_miter != 4.0f;
           if (styled && k_painter_api.stroke_path_styled) {
@@ -465,6 +631,20 @@ namespace neui_detail
           } else {
             k_painter_api.stroke_path(p, sw, stroke);
           }
+        };
+
+        if (!do_trim) {
+          // No trim: one replay carries both the fill and the stroke (the
+          // path persists across both on D2D + CG), exactly as before.
+          replay(L.path_cmds);
+          if (has_fill)   do_fill();
+          if (has_stroke) do_stroke();
+        } else {
+          // Trimming: the fill (if any) still uses the whole path; the stroke
+          // replays the trimmed sub-path. trim_v == 0 leaves `trimmed` empty,
+          // so the fill (track) still shows while nothing is stroked.
+          if (has_fill) { replay(L.path_cmds); do_fill(); }
+          if (!trimmed.empty()) { replay(trimmed); do_stroke(); }
         }
         k_painter_api.pop_transform(p);
         break;
@@ -485,25 +665,62 @@ namespace neui_detail
         bool has_stroke  = sw > 0.0f && ((stroke >> 24) & 0xffu) != 0u;
         if (!has_fill && !has_stroke) break;
 
+        // Value-driven fill (§B - the linear bar). `value` is the painted
+        // fraction of the rect along the fill axis; default 1 ⇒ the sub-rect
+        // equals the full rect, so an unbound RECT paints exactly as before.
+        // The stroke always outlines the FULL rect as a track; the gradient
+        // stays mapped to the full rect so it reads as a fixed scale revealed
+        // by the fill.
+        float rv  = behavior_clamp(effective_float(L, "value", L.rect_value, bag),
+                                   0.0f, 1.0f);
+        int   ori = effective_int(L, "orientation", L.rect_orientation, bag);
+        int   pol = effective_int(L, "polarity",    L.rect_polarity,    bag);
+        float fx = r.x, fy = r.y, fw = r.w, fh = r.h;
+        if (rv < 1.0f) {
+          if (ori == 1) {            // vertical: fill along y
+            fh = r.h * rv;
+            switch (pol) {
+              case 1:  fy = r.y + (r.h - fh) * 0.5f; break;  // center
+              case 2:  fy = r.y + (r.h - fh);        break;  // max (far / bottom edge)
+              default: fy = r.y;                     break;  // min (origin / top edge)
+            }
+          } else {                   // horizontal: fill along x
+            fw = r.w * rv;
+            switch (pol) {
+              case 1:  fx = r.x + (r.w - fw) * 0.5f; break;  // center
+              case 2:  fx = r.x + (r.w - fw);        break;  // max (far / right edge)
+              default: fx = r.x;                     break;  // min (origin / left edge)
+            }
+          }
+        }
+        bool draw_fill = has_fill && rv > 0.0f && fw > 0.0f && fh > 0.0f;
+
         if (radius <= 0.0f) {
           // RECT fills draw with no transform pushed, so the gradient is in
           // absolute widget-local space: origin = the layer rect's top-left.
-          if (grad_fill) {
-            neui_gradient_t g = resolve_layer_gradient(L.fill_gradient, r.x, r.y, r.w, r.h);
-            k_painter_api.fill_rect_gradient(p, r.x, r.y, r.w, r.h, &g);
-          } else if (solid_fill) {
-            k_painter_api.fill_rect(p, r.x, r.y, r.w, r.h, fill);
+          if (draw_fill) {
+            if (grad_fill) {
+              neui_gradient_t g = resolve_layer_gradient(L.fill_gradient, r.x, r.y, r.w, r.h);
+              k_painter_api.fill_rect_gradient(p, fx, fy, fw, fh, &g);
+            } else if (solid_fill) {
+              k_painter_api.fill_rect(p, fx, fy, fw, fh, fill);
+            }
           }
           if (has_stroke) k_painter_api.draw_rect(p, r.x, r.y, r.w, r.h, sw, stroke);
         } else {
-          build_rounded_rect_path(p, r.x, r.y, r.w, r.h, radius);
-          if (grad_fill) {
-            neui_gradient_t g = resolve_layer_gradient(L.fill_gradient, r.x, r.y, r.w, r.h);
-            k_painter_api.fill_path_gradient(p, &g);
-          } else if (solid_fill) {
-            k_painter_api.fill_path(p, fill);
+          if (draw_fill) {
+            build_rounded_rect_path(p, fx, fy, fw, fh, radius);
+            if (grad_fill) {
+              neui_gradient_t g = resolve_layer_gradient(L.fill_gradient, r.x, r.y, r.w, r.h);
+              k_painter_api.fill_path_gradient(p, &g);
+            } else if (solid_fill) {
+              k_painter_api.fill_path(p, fill);
+            }
           }
-          if (has_stroke) k_painter_api.stroke_path(p, sw, stroke);
+          if (has_stroke) {
+            build_rounded_rect_path(p, r.x, r.y, r.w, r.h, radius);
+            k_painter_api.stroke_path(p, sw, stroke);
+          }
         }
         break;
       }

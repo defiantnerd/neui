@@ -583,6 +583,25 @@ namespace neui_detail
             if (!spec.empty())
               apis.compound->set_string(session, cs, layer, "stroke_dasharray", spec.c_str());
           }
+          // Value-driven trim (PATH §A) / fill (RECT §B). `value` is the
+          // painted/stroked fraction; `polarity` (same min/center/max enum as
+          // the arc) anchors it; RECT adds a fill-axis `orientation`. Defaults
+          // (value 1, polarity min, horizontal) are the no-op ones, so a doc
+          // that omits them keeps the old static behaviour.
+          double valnum;
+          if (as_num(obj_get(*lo, "value"), valnum))
+            apis.compound->set_float(session, cs, layer, "value", static_cast<float>(valnum));
+          if (const std::string* ps = as_str(obj_get(*lo, "polarity")))
+            apis.compound->set_int(session, cs, layer, "polarity",
+                                   (*ps == "center" || *ps == "centre") ? 1 : (*ps == "max") ? 2 : 0);
+          else { double pd; if (as_num(obj_get(*lo, "polarity"), pd))
+            apis.compound->set_int(session, cs, layer, "polarity", static_cast<int>(std::lround(pd))); }
+          if (kind == NEUI_COMPOUND_LAYER_RECT) {
+            if (const std::string* os = as_str(obj_get(*lo, "orientation")))
+              apis.compound->set_int(session, cs, layer, "orientation", (*os == "vertical") ? 1 : 0);
+            else { double od; if (as_num(obj_get(*lo, "orientation"), od))
+              apis.compound->set_int(session, cs, layer, "orientation", (od != 0.0) ? 1 : 0); }
+          }
           if (kind == NEUI_COMPOUND_LAYER_RECT) {
             double cr;
             if (as_num(obj_get(*lo, "corner_radius"), cr))
@@ -910,9 +929,24 @@ namespace neui_detail
               if (L->stroke_dash_offset != 0.0f)
                 lo.emplace_back("stroke_dashoffset", njson_num(L->stroke_dash_offset));
             }
+            // §A stroke trim. `value` is normally bound (emitted in the bind
+            // block); a static override + the anchor round-trip here.
+            if (L->trim_value != defL.trim_value) lo.emplace_back("value", njson_num(L->trim_value));
+            if (L->trim_polarity != defL.trim_polarity)
+              lo.emplace_back("polarity", njson_str(L->trim_polarity == 1 ? "center"
+                                                   : L->trim_polarity == 2 ? "max" : "min"));
           }
-          if (L->kind == NEUI_COMPOUND_LAYER_RECT && L->corner_radius != 0.0f)
-            lo.emplace_back("corner_radius", njson_num(L->corner_radius));
+          if (L->kind == NEUI_COMPOUND_LAYER_RECT) {
+            if (L->corner_radius != 0.0f)
+              lo.emplace_back("corner_radius", njson_num(L->corner_radius));
+            // §B value-driven fill (the linear bar). Same round-trip rule.
+            if (L->rect_value != defL.rect_value) lo.emplace_back("value", njson_num(L->rect_value));
+            if (L->rect_orientation != defL.rect_orientation)
+              lo.emplace_back("orientation", njson_str(L->rect_orientation == 1 ? "vertical" : "horizontal"));
+            if (L->rect_polarity != defL.rect_polarity)
+              lo.emplace_back("polarity", njson_str(L->rect_polarity == 1 ? "center"
+                                                  : L->rect_polarity == 2 ? "max" : "min"));
+          }
           if (L->kind == NEUI_COMPOUND_LAYER_PATH && !L->path_cmds.empty()) {
             mj::array_t parr;
             for (const auto& c : L->path_cmds) {

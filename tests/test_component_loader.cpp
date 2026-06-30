@@ -518,6 +518,55 @@ TEST_CASE("build_component: arc layer props + value binding")
   CHECK(a.binds.at("value").attr == "neui.param.value");
 }
 
+TEST_CASE("build_component: path stroke-trim props + value binding (§A)")
+{
+  const char* json = R"json({
+    "size": [100, 20],
+    "layers": [
+      { "kind": "path", "z": 0, "anchor": ["top_left","top_left"], "size": "fill",
+        "stroke_color": "#FF3366CC", "stroke_width": 4, "stroke_linecap": "round",
+        "polarity": "center",
+        "path": [ {"m":[0,10]}, {"l":[100,10]} ],
+        "bind": { "value": { "attr": "neui.param.value", "scale": 1, "offset": 0 } } }
+    ]
+  })json";
+  run_loader(json);
+
+  REQUIRE(g_layers.size() == 1);
+  const LayerRec& a = g_layers[0];
+  CHECK(a.kind == NEUI_COMPOUND_LAYER_PATH);
+  CHECK(a.ints.at("stroke_color") == static_cast<int>(0xFF3366CCu));
+  CHECK(a.flts.at("stroke_width") == 4.0f);
+  CHECK(a.ints.at("stroke_cap") == 1);       // round
+  CHECK(a.ints.at("polarity") == 1);         // center (trim anchor)
+  REQUIRE(a.binds.count("value") == 1);
+  CHECK(a.binds.at("value").attr == "neui.param.value");
+}
+
+TEST_CASE("build_component: rect value-driven fill props + value binding (§B)")
+{
+  const char* json = R"json({
+    "size": [120, 16],
+    "layers": [
+      { "kind": "rect", "z": 0, "anchor": ["top_left","top_left"], "size": "fill",
+        "fill_color": "#FF40C040", "stroke_color": "#FF202020", "stroke_width": 1,
+        "corner_radius": 3, "orientation": "vertical", "polarity": "max",
+        "bind": { "value": { "attr": "neui.param.value", "scale": 1, "offset": 0 } } }
+    ]
+  })json";
+  run_loader(json);
+
+  REQUIRE(g_layers.size() == 1);
+  const LayerRec& a = g_layers[0];
+  CHECK(a.kind == NEUI_COMPOUND_LAYER_RECT);
+  CHECK(a.ints.at("fill_color") == static_cast<int>(0xFF40C040u));
+  CHECK(a.flts.at("corner_radius") == 3.0f);
+  CHECK(a.ints.at("orientation") == 1);      // vertical
+  CHECK(a.ints.at("polarity") == 2);         // max (far edge)
+  REQUIRE(a.binds.count("value") == 1);
+  CHECK(a.binds.at("value").attr == "neui.param.value");
+}
+
 // --- serialization (designer round-trip) -----------------------------------
 
 namespace
@@ -693,6 +742,74 @@ TEST_CASE("serialize_component: round-trips an arc layer")
   CHECK(a.ints.at("polarity") == 1);
   CHECK(a.ints.at("direction") == 1);
   // `value` is bound (not a static prop), so it round-trips as a binding.
+  REQUIRE(a.binds.count("value") == 1);
+  CHECK(a.binds.at("value").attr == "neui.param.value");
+}
+
+TEST_CASE("serialize_component: round-trips a path stroke-trim layer (§A)")
+{
+  // Hand-build a value-driven trimmed line (stroke trimmed from the centre).
+  HandBuilt hb;
+  hb.name = "trim";
+  uint32_t s = compound_add_layer(hb.ca, NEUI_COMPOUND_LAYER_PATH, 0);
+  CompoundLayer* L = compound_get_layer(hb.ca, s);
+  L->parent_anchor = NEUI_ANCHOR_TOP_LEFT; L->self_anchor = NEUI_ANCHOR_TOP_LEFT;
+  apply_set_int  (*L, "stroke_color", static_cast<int>(0xFF3366CCu));
+  apply_set_float(*L, "stroke_width", 4.0f);
+  apply_set_int  (*L, "polarity",     1);            // center
+  {
+    neui_path_cmd_t cmds[2]{};
+    cmds[0].kind = NEUI_PATH_CMD_MOVE_TO; cmds[0].args[0] = 0;   cmds[0].args[1] = 10;
+    cmds[1].kind = NEUI_PATH_CMD_LINE_TO; cmds[1].args[0] = 100; cmds[1].args[1] = 10;
+    apply_set_path(*L, cmds, 2);
+  }
+  apply_bind     (*L, "value", "neui.param.value", 1.0f, 0.0f);
+
+  ComponentSerializeInput in;
+  in.name = &hb.name; in.width = 100.0f; in.height = 20.0f;
+  in.compound = &hb.ca; in.behavior = &hb.ba;
+  std::string json = serialize_component(in, 0);
+
+  BuiltComponent rebuilt = run_loader(json);
+  CHECK(rebuilt.ok);
+  REQUIRE(g_layers.size() == 1);
+  const LayerRec& a = g_layers[0];
+  CHECK(a.kind == NEUI_COMPOUND_LAYER_PATH);
+  CHECK(a.ints.at("stroke_color") == static_cast<int>(0xFF3366CCu));
+  CHECK(a.flts.at("stroke_width") == 4.0f);
+  CHECK(a.ints.at("polarity") == 1);                 // center
+  REQUIRE(a.path.size() == 2);
+  REQUIRE(a.binds.count("value") == 1);
+  CHECK(a.binds.at("value").attr == "neui.param.value");
+}
+
+TEST_CASE("serialize_component: round-trips a rect value-fill layer (§B)")
+{
+  HandBuilt hb;
+  hb.name = "bar";
+  uint32_t s = compound_add_layer(hb.ca, NEUI_COMPOUND_LAYER_RECT, 0);
+  CompoundLayer* L = compound_get_layer(hb.ca, s);
+  L->parent_anchor = NEUI_ANCHOR_TOP_LEFT; L->self_anchor = NEUI_ANCHOR_TOP_LEFT;
+  apply_set_int  (*L, "fill_color",    static_cast<int>(0xFF40C040u));
+  apply_set_float(*L, "corner_radius", 3.0f);
+  apply_set_int  (*L, "orientation",   1);            // vertical
+  apply_set_int  (*L, "polarity",      2);            // max (far edge)
+  apply_bind     (*L, "value", "neui.param.value", 1.0f, 0.0f);
+
+  ComponentSerializeInput in;
+  in.name = &hb.name; in.width = 120.0f; in.height = 16.0f;
+  in.compound = &hb.ca; in.behavior = &hb.ba;
+  std::string json = serialize_component(in, 0);
+
+  BuiltComponent rebuilt = run_loader(json);
+  CHECK(rebuilt.ok);
+  REQUIRE(g_layers.size() == 1);
+  const LayerRec& a = g_layers[0];
+  CHECK(a.kind == NEUI_COMPOUND_LAYER_RECT);
+  CHECK(a.ints.at("fill_color") == static_cast<int>(0xFF40C040u));
+  CHECK(a.flts.at("corner_radius") == 3.0f);
+  CHECK(a.ints.at("orientation") == 1);               // vertical
+  CHECK(a.ints.at("polarity") == 2);                  // max
   REQUIRE(a.binds.count("value") == 1);
   CHECK(a.binds.at("value").attr == "neui.param.value");
 }
