@@ -562,7 +562,7 @@ namespace neui_detail
         if (do_trim && trim_v > 0.0f) {
           float ta, tb;
           switch (trim_pol) {
-            case 1:  ta = 0.5f - trim_v * 0.5f; tb = 0.5f + trim_v * 0.5f; break;  // center
+            case 1:  ta = std::fmin(0.5f, trim_v); tb = std::fmax(0.5f, trim_v); break;  // center: middle -> value
             case 2:  ta = 1.0f - trim_v;        tb = 1.0f;                 break;  // max (end)
             default: ta = 0.0f;                 tb = trim_v;               break;  // min (start)
           }
@@ -678,18 +678,20 @@ namespace neui_detail
         float fx = r.x, fy = r.y, fw = r.w, fh = r.h;
         if (rv < 1.0f) {
           if (ori == 1) {            // vertical: fill along y
-            fh = r.h * rv;
-            switch (pol) {
-              case 1:  fy = r.y + (r.h - fh) * 0.5f; break;  // center
-              case 2:  fy = r.y + (r.h - fh);        break;  // max (far / bottom edge)
-              default: fy = r.y;                     break;  // min (origin / top edge)
+            if (pol == 1) {          // center: from the middle to the value position
+              float lo = std::fmin(0.5f, rv), hi = std::fmax(0.5f, rv);
+              fy = r.y + lo * r.h;  fh = (hi - lo) * r.h;
+            } else {
+              fh = r.h * rv;
+              fy = (pol == 2) ? r.y + (r.h - fh) : r.y;  // max: bottom edge / min: top edge
             }
           } else {                   // horizontal: fill along x
-            fw = r.w * rv;
-            switch (pol) {
-              case 1:  fx = r.x + (r.w - fw) * 0.5f; break;  // center
-              case 2:  fx = r.x + (r.w - fw);        break;  // max (far / right edge)
-              default: fx = r.x;                     break;  // min (origin / left edge)
+            if (pol == 1) {          // center: from the middle to the value position
+              float lo = std::fmin(0.5f, rv), hi = std::fmax(0.5f, rv);
+              fx = r.x + lo * r.w;  fw = (hi - lo) * r.w;
+            } else {
+              fw = r.w * rv;
+              fx = (pol == 2) ? r.x + (r.w - fw) : r.x;  // max: right edge / min: left edge
             }
           }
         }
