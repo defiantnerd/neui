@@ -61,6 +61,15 @@ namespace win32_host
   // layer state filters (NEUI_LAYER_STATE_*).
   void w32_invalidate_if_state_filtered_compound(WidgetData& wd);
 
+  // Shared native-control parent-notification routing (defined below). Any
+  // wndproc that can be a native control's parent calls these so the control
+  // reports its events regardless of which HWND owns it: the frame
+  // (AppWindowProc), a scrolling SECTION's body (SectionBodyWndProc), or a
+  // non-scrolling SECTION / TABPAGE painted HWND (PaintedWndProc).
+  bool    route_native_command_notification(Session* sess, WPARAM wParam, LPARAM lParam);
+  bool    route_native_scroll_notification(Session* sess, UINT msg, WPARAM wParam, LPARAM lParam);
+  LRESULT route_native_notify(Session* sess, LPARAM lParam, bool& handled);
+
   // Re-apply system-theme state to a frame. Called from
   // Session::on_theme_changed for every frame in the session;
   // gated internally on NEUI_ATTR_FOLLOW_SYSTEM_THEME so frames that
@@ -509,9 +518,257 @@ namespace win32_host
           wd->attrs->get_int(NEUI_ATTR_INPUT_TRANSPARENT, 0) != 0)
         return HTTRANSPARENT;
       return DefWindowProcW(hwnd, msg, wParam, lParam);
+    // A SECTION / TABPAGE is itself a painted widget, and its native-control
+    // children (when the section isn't scrolling, so there's no body HWND)
+    // parent directly to THIS painted HWND. Route their parent notifications
+    // exactly as the frame / section-body procs do, otherwise a slider /
+    // button / list inside a plain section or a tab page is silent. Shared
+    // helpers keyed on the owning Session.
+    case WM_HSCROLL:
+    case WM_VSCROLL:
+      if (wd && wd->session &&
+          route_native_scroll_notification(wd->session, msg, wParam, lParam))
+        return 0;
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+    case WM_COMMAND:
+      if (wd && wd->session &&
+          route_native_command_notification(wd->session, wParam, lParam))
+        return 0;
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+    case WM_NOTIFY: {
+      bool handled = false;
+      LRESULT r = route_native_notify(wd ? wd->session : nullptr, lParam, handled);
+      if (handled) return r;
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
     default:
       return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // Native-control notification routing, shared by every wndproc that can
+  // parent a Win32 common control. A control reports user changes to its
+  // PARENT HWND (trackbar -> WM_HSCROLL/WM_VSCROLL, button/list/combo ->
+  // WM_COMMAND, treeview -> WM_NOTIFY). The parent of a control inside a
+  // scrolling SECTION is the body HWND (SectionBodyWndProc), not the frame,
+  // so the body proc must run the same routing as AppWindowProc - otherwise
+  // those controls are mute (no VALUE_CHANGED / CLICK / selection event).
+  // Keyed on the owning Session (recovered from whichever WidgetData the
+  // parent HWND carries) rather than a specific frame.
+  // ---------------------------------------------------------------------
+
+  // WM_COMMAND child-control notification (lParam = control HWND, non-zero).
+  // Returns true when consumed; false for menu picks / accelerators
+  // (lParam == 0), which only the frame proc handles.
+  bool route_native_command_notification(Session* sess, WPARAM wParam, LPARAM lParam)
+  {
+    if (!sess || lParam == 0) return false;
+    uint32_t   child_index  = static_cast<uint32_t>(LOWORD(wParam));
+    WORD       notification = HIWORD(wParam);
+    WidgetData* child       = sess->get_widget(child_index);
+    if (child && child->emit_events) {
+      if (notification == BN_CLICKED) {
+        neui_widget_t wid = { child->widget_id };
+        bool is_cb = child->type &&
+                     (!strcmp(child->type, NEUI_W_CHECKBOX) || !strcmp(child->type, NEUI_W_CHECKBOX3));
+        if (is_cb) {
+          LRESULT bst = SendMessageW(reinterpret_cast<HWND>(lParam), BM_GETCHECK, 0, 0);
+          neui_check_state_t state = (bst == BST_CHECKED)       ? NEUI_CHECK_CHECKED
+                                   : (bst == BST_INDETERMINATE) ? NEUI_CHECK_INDETERMINATE
+                                                                 : NEUI_CHECK_UNCHECKED;
+          neui_event_t event = { NEUI_EVENT_CHECKBOX_CHANGED };
+          event.data.checkbox = { wid, state };
+          sess->dispatch_event(&event);
+        } else {
+          neui_event_t event = { NEUI_EVENT_MOUSE_BUTTON_CLICK };
+          event.data.mouse = { wid, 0, 0, 0 };
+          sess->dispatch_event(&event);
+        }
+      } else if (notification == LBN_SELCHANGE) {  // LBN_SELCHANGE == CBN_SELCHANGE == 1
+        bool is_list  = child->type && !strcmp(child->type, NEUI_W_LISTBOX);
+        bool is_combo = child->type && !strcmp(child->type, NEUI_W_COMBOBOX);
+        if (is_list || is_combo) {
+          UINT getsel = is_list ? LB_GETCURSEL : CB_GETCURSEL;
+          LRESULT sel = SendMessageW(reinterpret_cast<HWND>(lParam), getsel, 0, 0);
+          uint32_t sel_idx = (sel < 0) ? NEUI_ITEM_NONE : static_cast<uint32_t>(sel);
+          neui_widget_t wid = { child->widget_id };
+          neui_event_t event = { NEUI_EVENT_ITEM_SELECTED };
+          event.data.item = { wid, sel_idx };
+          sess->dispatch_event(&event);
+        }
+      }
+    }
+    return true;
+  }
+
+  // Trackbar (SLIDER) WM_HSCROLL/WM_VSCROLL -> VALUE_CHANGED. lParam is the
+  // trackbar HWND (null for native scrollbars - ignored). Returns true when
+  // the message belonged to a SLIDER child and was consumed.
+  bool route_native_scroll_notification(Session* sess, UINT msg, WPARAM wParam, LPARAM lParam)
+  {
+    HWND ctrl = reinterpret_cast<HWND>(lParam);
+    if (!ctrl || !sess) return false;
+
+    // GetDlgCtrlID(ctrl) recovers wd.index (we pass it as the HMENU param
+    // to CreateWindowExW).
+    UINT        child_index = GetDlgCtrlID(ctrl);
+    WidgetData* child       = sess->get_widget(child_index);
+    if (!child || !child->type || strcmp(child->type, NEUI_W_SLIDER) != 0)
+      return false;
+
+    // Read the (possibly already-updated) thumb position. For most
+    // notification codes Windows has updated TBM_GETPOS for us before
+    // sending; the codes that don't update first are TB_THUMBPOSITION
+    // and TB_THUMBTRACK, where HIWORD(wParam) carries the new value.
+    WORD code = LOWORD(wParam);
+    LRESULT pos;
+    if (code == TB_THUMBPOSITION || code == TB_THUMBTRACK)
+      pos = HIWORD(wParam);
+    else
+      pos = SendMessageW(ctrl, TBM_GETPOS, 0, 0);
+
+    if (pos < 0)    pos = 0;
+    if (pos > 1000) pos = 1000;
+    float v = static_cast<float>(pos) / 1000.0f;
+
+    // Vertical trackbars in Win32 send 0 at the top by default, but the
+    // logical "fader" convention is 1.0 at the top - match that here so
+    // the same NEUI_PARAM_VALUE means the same thing on both axes.
+    if (msg == WM_VSCROLL) v = 1.0f - v;
+
+    // Snap to discrete steps if NEUI_ATTR_STEPS is set, then push the
+    // snapped position back to the trackbar so the thumb visually lands
+    // on the tick (TBM_SETTICFREQ doesn't enforce snap by itself).
+    int steps = child->attrs ? child->attrs->get_int(NEUI_ATTR_STEPS, 0) : 0;
+    if (steps >= 2) {
+      int sidx = static_cast<int>(v * static_cast<float>(steps - 1) + 0.5f);
+      if (sidx < 0) sidx = 0;
+      if (sidx >= steps) sidx = steps - 1;
+      v = static_cast<float>(sidx) / static_cast<float>(steps - 1);
+      int snap_pos = static_cast<int>((msg == WM_VSCROLL ? (1.0f - v) : v) * 1000.0f + 0.5f);
+      if (snap_pos != pos)
+        SendMessageW(ctrl, TBM_SETPOS, TRUE, snap_pos);
+    }
+
+    // Update the attribute (silent) so reads from PREUPDATE / paint
+    // don't lag the native control.
+    neui_detail::ensure_attrs(child->attrs).set_float(NEUI_PARAM_VALUE, v);
+
+    // Fire VALUE_CHANGED on every notification. TB_ENDTRACK fires once at
+    // the end with the final position; the THUMBTRACK / LINE / PAGE codes
+    // fire continuously; clients see all of them and can debounce as needed.
+    if (child->emit_events) {
+      neui_widget_t wid = { child->widget_id };
+      neui_event_t ev{};
+      ev.type = NEUI_EVENT_VALUE_CHANGED;
+      ev.data.value.widget = wid;
+      ev.data.value.value  = v;
+      sess->dispatch_event(&ev);
+    }
+    return true;
+  }
+
+  // WM_NOTIFY routing (currently TREEVIEW custom-draw + selection). Sets
+  // `handled` and returns the wndproc result when consumed; leaves
+  // `handled = false` (caller should DefWindowProcW) otherwise.
+  LRESULT route_native_notify(Session* sess, LPARAM lParam, bool& handled)
+  {
+    handled = false;
+    if (!sess) return 0;
+    NMHDR* hdr = reinterpret_cast<NMHDR*>(lParam);
+    uint32_t child_index = static_cast<uint32_t>(hdr->idFrom);
+    WidgetData* child = sess->get_widget(child_index);
+    if (!child) return 0;
+
+    // Treeview disabled-item handling. Both NM_CUSTOMDRAW (visual
+    // graying) and TVN_SELCHANGINGW (selection veto) are behaviour
+    // attached to the disabled state; they don't depend on whether
+    // the client wants selection events.
+    if (child->type && !strcmp(child->type, NEUI_W_TREEVIEW)) {
+      if (hdr->code == NM_CUSTOMDRAW) {
+        NMTVCUSTOMDRAW* cd = reinterpret_cast<NMTVCUSTOMDRAW*>(lParam);
+        bool follow = sess->frame_follows_theme(child);
+        handled = true;
+        switch (cd->nmcd.dwDrawStage) {
+        case CDDS_PREPAINT:
+          return CDRF_NOTIFYITEMDRAW;
+        case CDDS_ITEMPREPAINT: {
+          using neui_detail::ColorRole;
+          HTREEITEM hitem = reinterpret_cast<HTREEITEM>(cd->nmcd.dwItemSpec);
+          auto rit = child->tree_items_reverse.find(
+            reinterpret_cast<uintptr_t>(hitem));
+          bool disabled = false;
+          if (rit != child->tree_items_reverse.end()) {
+            auto it = child->tree_items.find(rit->second);
+            disabled = (it != child->tree_items.end() && !it->second.enabled);
+          }
+          if (follow) {
+            bool selected = (cd->nmcd.uItemState & CDIS_SELECTED) != 0;
+            if (disabled) {
+              cd->clrText   = neui_detail::colorref_from_argb(neui_detail::color(ColorRole::text_disabled));
+              cd->clrTextBk = neui_detail::colorref_from_argb(neui_detail::color(ColorRole::control_bg));
+            } else if (selected) {
+              cd->clrText   = neui_detail::colorref_from_argb(neui_detail::color(ColorRole::accent_text));
+              cd->clrTextBk = neui_detail::colorref_from_argb(neui_detail::color(ColorRole::accent));
+            } else {
+              cd->clrText   = neui_detail::colorref_from_argb(neui_detail::color(ColorRole::text_primary));
+              cd->clrTextBk = neui_detail::colorref_from_argb(neui_detail::color(ColorRole::control_bg));
+            }
+            return CDRF_NEWFONT;
+          }
+          if (disabled) {
+            cd->clrText = GetSysColor(COLOR_GRAYTEXT);
+            return CDRF_NEWFONT;
+          }
+          return CDRF_DODEFAULT;
+        }
+        }
+        return CDRF_DODEFAULT;
+      }
+      if (hdr->code == TVN_SELCHANGINGW) {
+        // Veto selection changes onto disabled items. Runs even when
+        // the treeview has emit_events = false; the veto is a state
+        // policy, not an event delivery.
+        NMTREEVIEWW* ntv = reinterpret_cast<NMTREEVIEWW*>(lParam);
+        uint32_t neui_id = static_cast<uint32_t>(ntv->itemNew.lParam);
+        auto it = child->tree_items.find(neui_id);
+        handled = true;
+        if (it != child->tree_items.end() && !it->second.enabled)
+          return TRUE;
+        return 0;
+      }
+    }
+
+    if (!child->emit_events) return 0;
+
+    switch (hdr->code)
+    {
+    case TVN_SELCHANGEDW:
+      {
+        NMTREEVIEWW* ntv = reinterpret_cast<NMTREEVIEWW*>(lParam);
+        uint32_t neui_id = static_cast<uint32_t>(ntv->itemNew.lParam);
+        neui_widget_t wid = { child->widget_id };
+        neui_event_t ev = { NEUI_EVENT_TREE_ITEM_SELECTED };
+        ev.data.tree = { wid, { neui_id } };
+        sess->dispatch_event(&ev);
+        handled = true;
+        return 0;
+      }
+    case NM_DBLCLK:
+      {
+        // Activated item is the current selection
+        neui_widget_t wid = { child->widget_id };
+        neui_item_t   sel = sess->tree_get_selected(wid);
+        if (sel.id == tree_item_none.id) { handled = true; return 0; }
+        neui_event_t ev = { NEUI_EVENT_TREE_ITEM_ACTIVATED };
+        ev.data.tree = { wid, sel };
+        sess->dispatch_event(&ev);
+        handled = true;
+        return 0;
+      }
+    }
+    return 0;
   }
 
   // Inner body container for a scrolling SECTION. Children of the
@@ -589,6 +846,33 @@ namespace win32_host
       }
       return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
+    // Native-control children re-parented here (slider / button / checkbox /
+    // list / combo / treeview) report to THIS body HWND, not the frame. Run
+    // the same routing the frame proc does so their events still reach the
+    // client - without these cases the controls paint but are silent.
+    case WM_HSCROLL:
+    case WM_VSCROLL: {
+      auto* sec = reinterpret_cast<WidgetData*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+      Session* sess = sec ? sec->session : nullptr;
+      if (route_native_scroll_notification(sess, msg, wParam, lParam))
+        return 0;
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+    case WM_COMMAND: {
+      auto* sec = reinterpret_cast<WidgetData*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+      Session* sess = sec ? sec->session : nullptr;
+      if (route_native_command_notification(sess, wParam, lParam))
+        return 0;
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+    case WM_NOTIFY: {
+      auto* sec = reinterpret_cast<WidgetData*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+      Session* sess = sec ? sec->session : nullptr;
+      bool handled = false;
+      LRESULT r = route_native_notify(sess, lParam, handled);
+      if (handled) return r;
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
     default:
       return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
@@ -658,207 +942,28 @@ namespace win32_host
           wd->session->dispatch_menu_event(LOWORD(wParam));
           return 0;
         }
-        // Child control notifications: lParam is the control HWND (non-zero)
-        if (wd && wd->session && lParam != 0) {
-          uint32_t child_index = static_cast<uint32_t>(LOWORD(wParam));
-          WORD notification = HIWORD(wParam);
-          WidgetData* child = wd->session->get_widget(child_index);
-          if (child && child->emit_events) {
-            if (notification == BN_CLICKED) {
-              neui_widget_t wid = { child->widget_id };
-              bool is_cb = child->type &&
-                           (!strcmp(child->type, NEUI_W_CHECKBOX) || !strcmp(child->type, NEUI_W_CHECKBOX3));
-              if (is_cb) {
-                LRESULT bst = SendMessageW(reinterpret_cast<HWND>(lParam), BM_GETCHECK, 0, 0);
-                neui_check_state_t state = (bst == BST_CHECKED)       ? NEUI_CHECK_CHECKED
-                                         : (bst == BST_INDETERMINATE) ? NEUI_CHECK_INDETERMINATE
-                                                                       : NEUI_CHECK_UNCHECKED;
-                neui_event_t event = { NEUI_EVENT_CHECKBOX_CHANGED };
-                event.data.checkbox = { wid, state };
-                wd->session->dispatch_event(&event);
-              } else {
-                neui_event_t event = { NEUI_EVENT_MOUSE_BUTTON_CLICK };
-                event.data.mouse = { wid, 0, 0, 0 };
-                wd->session->dispatch_event(&event);
-              }
-            } else if (notification == LBN_SELCHANGE) {  // LBN_SELCHANGE == CBN_SELCHANGE == 1
-              bool is_list  = child->type && !strcmp(child->type, NEUI_W_LISTBOX);
-              bool is_combo = child->type && !strcmp(child->type, NEUI_W_COMBOBOX);
-              if (is_list || is_combo) {
-                UINT getsel = is_list ? LB_GETCURSEL : CB_GETCURSEL;
-                LRESULT sel = SendMessageW(reinterpret_cast<HWND>(lParam), getsel, 0, 0);
-                uint32_t sel_idx = (sel < 0) ? NEUI_ITEM_NONE : static_cast<uint32_t>(sel);
-                neui_widget_t wid = { child->widget_id };
-                neui_event_t event = { NEUI_EVENT_ITEM_SELECTED };
-                event.data.item = { wid, sel_idx };
-                wd->session->dispatch_event(&event);
-              }
-            }
-          }
-        }
+        // Child control notifications: lParam is the control HWND (non-zero).
+        // Shared with SectionBodyWndProc - see route_native_command_notification.
+        if (wd && wd->session)
+          route_native_command_notification(wd->session, wParam, lParam);
         return 0;
       }
     case WM_HSCROLL:
     case WM_VSCROLL:
       {
-        // Trackbar (msctls_trackbar32) sends HSCROLL (horizontal) or VSCROLL
-        // (vertical) to its parent. lParam is the trackbar HWND.
-        // For native scrollbars (no control HWND) lParam is null - ignore.
-        HWND ctrl = reinterpret_cast<HWND>(lParam);
-        if (!ctrl || !wd || !wd->session) return DefWindowProcW(hwnd, msg, wParam, lParam);
-
-        // Look up the WidgetData from the control's GWLP_USERDATA - set by
-        // SetWindowSubclass dwRefData... actually we only have the dlg-id
-        // route. Use GetDlgCtrlID(ctrl) to recover wd.index (we set the
-        // HMENU param to wd.index in CreateWindowExW).
-        UINT child_index = GetDlgCtrlID(ctrl);
-        WidgetData* child = wd->session->get_widget(child_index);
-        if (!child || !child->type ||
-            strcmp(child->type, NEUI_W_SLIDER) != 0)
-          return DefWindowProcW(hwnd, msg, wParam, lParam);
-
-        // Read the (possibly already-updated) thumb position. For most
-        // notification codes Windows has updated TBM_GETPOS for us before
-        // sending; the codes that don't update first are TB_THUMBPOSITION
-        // and TB_THUMBTRACK, where HIWORD(wParam) carries the new value.
-        WORD code = LOWORD(wParam);
-        LRESULT pos;
-        if (code == TB_THUMBPOSITION || code == TB_THUMBTRACK)
-          pos = HIWORD(wParam);
-        else
-          pos = SendMessageW(ctrl, TBM_GETPOS, 0, 0);
-
-        if (pos < 0)    pos = 0;
-        if (pos > 1000) pos = 1000;
-        float v = static_cast<float>(pos) / 1000.0f;
-
-        // Vertical trackbars in Win32 send 0 at the top by default, but the
-        // logical "fader" convention is 1.0 at the top - match that here so
-        // the same NEUI_PARAM_VALUE means the same thing on both axes.
-        if (msg == WM_VSCROLL) v = 1.0f - v;
-
-        // Snap to discrete steps if NEUI_ATTR_STEPS is set, then push the
-        // snapped position back to the trackbar so the thumb visually lands
-        // on the tick (TBM_SETTICFREQ doesn't enforce snap by itself).
-        int steps = child->attrs ? child->attrs->get_int(NEUI_ATTR_STEPS, 0) : 0;
-        if (steps >= 2) {
-          int sidx = static_cast<int>(v * static_cast<float>(steps - 1) + 0.5f);
-          if (sidx < 0) sidx = 0;
-          if (sidx >= steps) sidx = steps - 1;
-          v = static_cast<float>(sidx) / static_cast<float>(steps - 1);
-          int snap_pos = static_cast<int>((msg == WM_VSCROLL ? (1.0f - v) : v) * 1000.0f + 0.5f);
-          if (snap_pos != pos)
-            SendMessageW(ctrl, TBM_SETPOS, TRUE, snap_pos);
-        }
-
-        // Update the attribute (silent) so reads from PREUPDATE / paint
-        // don't lag the native control.
-        neui_detail::ensure_attrs(child->attrs).set_float(NEUI_PARAM_VALUE, v);
-
-        // Fire VALUE_CHANGED on every notification. TB_ENDTRACK fires once at
-        // the end with the final position; the THUMBTRACK / LINE / PAGE codes
-        // fire continuously; clients see all of them and can debounce as needed.
-        if (child->emit_events) {
-          neui_widget_t wid = { child->widget_id };
-          neui_event_t ev{};
-          ev.type = NEUI_EVENT_VALUE_CHANGED;
-          ev.data.value.widget = wid;
-          ev.data.value.value  = v;
-          wd->session->dispatch_event(&ev);
-        }
-        return 0;
+        // Trackbar (msctls_trackbar32) reports via WM_HSCROLL/WM_VSCROLL to
+        // its parent. Shared with SectionBodyWndProc - see
+        // route_native_scroll_notification.
+        if (wd && wd->session &&
+            route_native_scroll_notification(wd->session, msg, wParam, lParam))
+          return 0;
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
       }
     case WM_NOTIFY:
       {
-        if (!wd || !wd->session) return DefWindowProcW(hwnd, msg, wParam, lParam);
-        NMHDR* hdr = reinterpret_cast<NMHDR*>(lParam);
-        uint32_t child_index = static_cast<uint32_t>(hdr->idFrom);
-        WidgetData* child = wd->session->get_widget(child_index);
-        if (!child) return DefWindowProcW(hwnd, msg, wParam, lParam);
-
-        // Treeview disabled-item handling. Both NM_CUSTOMDRAW (visual
-        // graying) and TVN_SELCHANGINGW (selection veto) are behaviour
-        // attached to the disabled state; they don't depend on whether
-        // the client wants selection events.
-        if (child->type && !strcmp(child->type, NEUI_W_TREEVIEW)) {
-          if (hdr->code == NM_CUSTOMDRAW) {
-            NMTVCUSTOMDRAW* cd = reinterpret_cast<NMTVCUSTOMDRAW*>(lParam);
-            bool follow = wd->session->frame_follows_theme(child);
-            switch (cd->nmcd.dwDrawStage) {
-            case CDDS_PREPAINT:
-              return CDRF_NOTIFYITEMDRAW;
-            case CDDS_ITEMPREPAINT: {
-              using neui_detail::ColorRole;
-              HTREEITEM hitem = reinterpret_cast<HTREEITEM>(cd->nmcd.dwItemSpec);
-              auto rit = child->tree_items_reverse.find(
-                reinterpret_cast<uintptr_t>(hitem));
-              bool disabled = false;
-              if (rit != child->tree_items_reverse.end()) {
-                auto it = child->tree_items.find(rit->second);
-                disabled = (it != child->tree_items.end() && !it->second.enabled);
-              }
-              if (follow) {
-                bool selected = (cd->nmcd.uItemState & CDIS_SELECTED) != 0;
-                if (disabled) {
-                  cd->clrText   = neui_detail::colorref_from_argb(neui_detail::color(ColorRole::text_disabled));
-                  cd->clrTextBk = neui_detail::colorref_from_argb(neui_detail::color(ColorRole::control_bg));
-                } else if (selected) {
-                  cd->clrText   = neui_detail::colorref_from_argb(neui_detail::color(ColorRole::accent_text));
-                  cd->clrTextBk = neui_detail::colorref_from_argb(neui_detail::color(ColorRole::accent));
-                } else {
-                  cd->clrText   = neui_detail::colorref_from_argb(neui_detail::color(ColorRole::text_primary));
-                  cd->clrTextBk = neui_detail::colorref_from_argb(neui_detail::color(ColorRole::control_bg));
-                }
-                return CDRF_NEWFONT;
-              }
-              if (disabled) {
-                cd->clrText = GetSysColor(COLOR_GRAYTEXT);
-                return CDRF_NEWFONT;
-              }
-              return CDRF_DODEFAULT;
-            }
-            }
-            return CDRF_DODEFAULT;
-          }
-          if (hdr->code == TVN_SELCHANGINGW) {
-            // Veto selection changes onto disabled items. Runs even when
-            // the treeview has emit_events = false; the veto is a state
-            // policy, not an event delivery.
-            NMTREEVIEWW* ntv = reinterpret_cast<NMTREEVIEWW*>(lParam);
-            uint32_t neui_id = static_cast<uint32_t>(ntv->itemNew.lParam);
-            auto it = child->tree_items.find(neui_id);
-            if (it != child->tree_items.end() && !it->second.enabled)
-              return TRUE;
-            return 0;
-          }
-        }
-
-        if (!child->emit_events) return DefWindowProcW(hwnd, msg, wParam, lParam);
-
-        switch (hdr->code)
-        {
-        case TVN_SELCHANGEDW:
-          {
-            NMTREEVIEWW* ntv = reinterpret_cast<NMTREEVIEWW*>(lParam);
-            uint32_t neui_id = static_cast<uint32_t>(ntv->itemNew.lParam);
-            neui_widget_t wid = { child->widget_id };
-            neui_event_t ev = { NEUI_EVENT_TREE_ITEM_SELECTED };
-            ev.data.tree = { wid, { neui_id } };
-            wd->session->dispatch_event(&ev);
-            return 0;
-          }
-        case NM_DBLCLK:
-          {
-            // Activated item is the current selection
-            neui_widget_t wid = { child->widget_id };
-            neui_item_t   sel = wd->session->tree_get_selected(wid);
-            if (sel.id == tree_item_none.id) return 0;
-            neui_event_t ev = { NEUI_EVENT_TREE_ITEM_ACTIVATED };
-            ev.data.tree = { wid, sel };
-            wd->session->dispatch_event(&ev);
-            return 0;
-          }
-        }
+        bool handled = false;
+        LRESULT r = route_native_notify(wd ? wd->session : nullptr, lParam, handled);
+        if (handled) return r;
         return DefWindowProcW(hwnd, msg, wParam, lParam);
       }
     case WM_GETMINMAXINFO:

@@ -1548,7 +1548,19 @@ namespace macos_host
     if (!s || !key) return 0;
     uint32_t i = WidgetToIndex(widget);
     if (!s->_widgets.exists(i) || !s->_widgets[i].attrs) return 0;
-    return s->_widgets[i].attrs->remove(key) ? 1 : 0;
+    auto& wd = s->_widgets[i];
+    bool removed = wd.attrs->remove(key);
+    if (!removed) return 0;
+    // Mirror the a_set_* invalidation: removing a font key re-applies the
+    // native font + repaints; removing any key on a CUSTOMDRAW + compound
+    // widget can change a binding / template substitution, so repaint.
+    // Without this, clearing a bound {token} leaves stale pixels.
+    if (is_font_attr(key)) { apply_font_native_macos(wd); mark_widget_dirty_for_paint(wd); }
+    if (wd.type && !strcmp(wd.type, NEUI_W_CUSTOMDRAW) &&
+        wd.compound_asset.id != asset_none.id) {
+      mark_widget_dirty_for_paint(wd);
+    }
+    return 1;
   }
   static int     NEUI_ABI a_set_float(neui_session_t session, neui_widget_t widget,
                                        const char* key, float value)

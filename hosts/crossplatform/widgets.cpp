@@ -845,7 +845,16 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return 0;
     auto& wd = s->_widgets[idx];
     if (!wd.attrs) return 0;
-    return wd.attrs->remove(key) ? 1 : 0;
+    if (!wd.attrs->remove(key)) return 0;
+    // Removing a key can change what a self-painted widget draws (e.g.
+    // clearing a bound {token} or a value on a compound widget), so
+    // invalidate the owning frame - mirroring the a_set_* path above.
+    // Without this the widget shows stale pixels until an unrelated repaint.
+    if (!wd.is_frame()) {
+      if (void* frame = s->find_parent_native_handle(idx))
+        platform_invalidate(frame);
+    }
+    return 1;
   }
 
   static int NEUI_ABI a_set_float(neui_session_t session, neui_widget_t widget,

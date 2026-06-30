@@ -4935,6 +4935,14 @@ namespace win32_host
       ensure_custom_font_w32(*w);
       InvalidateRect(w->hwnd, nullptr, FALSE);
     }
+    // CUSTOMDRAW + compound: removing a key can change a layer binding or a
+    // template substitution (e.g. clearing a bound {token} or a value), so
+    // repaint - matching a_set_int / a_set_float / a_set_string. Without
+    // this the compound shows stale pixels until an unrelated repaint.
+    if (removed && w->hwnd && w->type && !strcmp(w->type, NEUI_W_CUSTOMDRAW) &&
+        w->compound_asset.id != asset_none.id) {
+      InvalidateRect(w->hwnd, nullptr, FALSE);
+    }
     return removed ? 1 : 0;
   }
 
