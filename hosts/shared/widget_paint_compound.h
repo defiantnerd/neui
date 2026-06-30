@@ -8,6 +8,7 @@
 #include "attrs.h"
 #include "painter.h"
 #include "theme_palette.h"
+#include "behavior_runtime.h"  // BEHAVIOR_PI / behavior_clamp (shared math)
 
 // Host-agnostic paint helper for compound drawables. Both the xpl host
 // (CustomDrawWidget::paint / paint_after_children) and the win32 native
@@ -520,16 +521,14 @@ namespace neui_detail
         // Sweep parameters. `value` is the painted fraction of [begin, end];
         // begin/end are in degrees (0 = 12 o'clock, +cw); polarity anchors the
         // fill; direction selects which way the begin->end range travels.
-        float value = effective_float(L, "value", L.arc_value, bag);
-        if (value < 0.0f) value = 0.0f;
-        if (value > 1.0f) value = 1.0f;
+        float value = behavior_clamp(
+          effective_float(L, "value", L.arc_value, bag), 0.0f, 1.0f);
         float begin_deg = effective_float(L, "begin_angle", L.arc_begin_deg, bag);
         float end_deg   = effective_float(L, "end_angle",   L.arc_end_deg,   bag);
         int   polarity  = effective_int  (L, "polarity",    L.arc_polarity,  bag);
         int   direction = effective_int  (L, "direction",   L.arc_direction, bag);
 
-        const float PI  = 3.14159265358979323846f;
-        const float D2R = PI / 180.0f;
+        const float D2R = BEHAVIOR_PI / 180.0f;
         // 0 deg = 12 o'clock, cw-positive -> renderer radians (0 = 3 o'clock,
         // +y down): subtract 90 deg.
         float a0 = (begin_deg - 90.0f) * D2R;
@@ -537,8 +536,8 @@ namespace neui_detail
         // Resolve the begin->end sweep into the chosen direction so the range
         // is unambiguous however the angles were authored: cw increases the
         // angle, ccw decreases it.
-        if (direction == 0) { while (a1 < a0) a1 += 2.0f * PI; }
-        else                { while (a1 > a0) a1 -= 2.0f * PI; }
+        if (direction == 0) { while (a1 < a0) a1 += 2.0f * BEHAVIOR_PI; }
+        else                { while (a1 > a0) a1 -= 2.0f * BEHAVIOR_PI; }
         const float total = a1 - a0;
         const float theta = a0 + total * value;
         float anchor;
@@ -560,19 +559,24 @@ namespace neui_detail
         if (rx_ring < 0.0f) rx_ring = 0.0f;
         if (ry_ring < 0.0f) ry_ring = 0.0f;
 
+        // Both the pie fill and the ring stroke start at `anchor`; evaluate the
+        // trig once and reuse it for either path.
+        const float ca = std::cos(anchor);
+        const float sa = std::sin(anchor);
+
         if (has_fill && rx_fill > 0.0f && ry_fill > 0.0f) {
           k_painter_api.begin_path(p);
           k_painter_api.move_to(p, cx, cy);
-          k_painter_api.line_to(p, cx + rx_fill * std::cos(anchor),
-                                    cy + ry_fill * std::sin(anchor));
+          k_painter_api.line_to(p, cx + rx_fill * ca,
+                                    cy + ry_fill * sa);
           append_elliptical_arc(p, cx, cy, rx_fill, ry_fill, anchor, theta);
           k_painter_api.close_path(p);
           k_painter_api.fill_path(p, fill);
         }
         if (has_stroke && rx_ring > 0.0f && ry_ring > 0.0f) {
           k_painter_api.begin_path(p);
-          k_painter_api.move_to(p, cx + rx_ring * std::cos(anchor),
-                                    cy + ry_ring * std::sin(anchor));
+          k_painter_api.move_to(p, cx + rx_ring * ca,
+                                    cy + ry_ring * sa);
           append_elliptical_arc(p, cx, cy, rx_ring, ry_ring, anchor, theta);
           if (L.stroke_cap != 0 && k_painter_api.stroke_path_styled) {
             neui_stroke_style_t style{};

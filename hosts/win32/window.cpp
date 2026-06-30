@@ -781,6 +781,12 @@ namespace win32_host
   // WidgetData* (set at create time).
   LRESULT CALLBACK SectionBodyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
   {
+    // The body HWND's USERDATA holds the owning section's WidgetData* (set at
+    // create time); the native-control routing cases below all need its Session.
+    auto body_session = [hwnd]() -> Session* {
+      auto* sec = reinterpret_cast<WidgetData*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+      return sec ? sec->session : nullptr;
+    };
     switch (msg) {
     case WM_NCCREATE: {
       CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
@@ -852,24 +858,18 @@ namespace win32_host
     // client - without these cases the controls paint but are silent.
     case WM_HSCROLL:
     case WM_VSCROLL: {
-      auto* sec = reinterpret_cast<WidgetData*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-      Session* sess = sec ? sec->session : nullptr;
-      if (route_native_scroll_notification(sess, msg, wParam, lParam))
+      if (route_native_scroll_notification(body_session(), msg, wParam, lParam))
         return 0;
       return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
     case WM_COMMAND: {
-      auto* sec = reinterpret_cast<WidgetData*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-      Session* sess = sec ? sec->session : nullptr;
-      if (route_native_command_notification(sess, wParam, lParam))
+      if (route_native_command_notification(body_session(), wParam, lParam))
         return 0;
       return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
     case WM_NOTIFY: {
-      auto* sec = reinterpret_cast<WidgetData*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-      Session* sess = sec ? sec->session : nullptr;
       bool handled = false;
-      LRESULT r = route_native_notify(sess, lParam, handled);
+      LRESULT r = route_native_notify(body_session(), lParam, handled);
       if (handled) return r;
       return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
