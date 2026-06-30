@@ -549,23 +549,23 @@ namespace neui_detail
         bool has_stroke  = sw > 0.0f && ((stroke >> 24) & 0xffu) != 0u;
         if (!has_fill && !has_stroke) break;
 
-        // Value-driven stroke trim (§A). Default 1 ⇒ whole path (no trim, the
-        // existing behaviour byte-for-byte); ≤ 0 ⇒ nothing stroked. Fills are
-        // never trimmed - a partial fill of an arbitrary path has no canonical
-        // meaning, so the fill always uses the whole path.
+        // Value-driven stroke trim (§A). `value` is a POSITION along the path;
+        // polarity picks the anchor (min = 0 / start, center = 0.5, max = 1 /
+        // end) and the stroked sub-path spans anchor -> value, matching the ARC
+        // and RECT layers. min: [0,v] (default v=1 ⇒ whole path, byte-for-byte);
+        // center: [min(.5,v), max(.5,v)]; max: [v,1]. An empty span (anchor==v)
+        // strokes nothing. Fills are never trimmed - a partial fill of an
+        // arbitrary path has no canonical meaning, so the fill uses the whole path.
         float trim_v = behavior_clamp(
           effective_float(L, "value", L.trim_value, bag), 0.0f, 1.0f);
         int   trim_pol = effective_int(L, "polarity", L.trim_polarity, bag);
-        bool  do_trim  = has_stroke && trim_v < 1.0f;
+        float t_anchor = (trim_pol == 1) ? 0.5f : (trim_pol == 2 ? 1.0f : 0.0f);
+        float ta = std::fmin(t_anchor, trim_v), tb = std::fmax(t_anchor, trim_v);
+        bool  full_path = ta <= 0.0f && tb >= 1.0f;   // whole path: skip trimming
+        bool  do_trim   = has_stroke && !full_path;
 
         std::vector<CompoundLayer::PathCommand> trimmed;
-        if (do_trim && trim_v > 0.0f) {
-          float ta, tb;
-          switch (trim_pol) {
-            case 1:  ta = std::fmin(0.5f, trim_v); tb = std::fmax(0.5f, trim_v); break;  // center: middle -> value
-            case 2:  ta = 1.0f - trim_v;        tb = 1.0f;                 break;  // max (end)
-            default: ta = 0.0f;                 tb = trim_v;               break;  // min (start)
-          }
+        if (do_trim && tb > ta) {
           trimmed = trim_path_commands(L.path_cmds, ta, tb);
         }
 
@@ -641,7 +641,7 @@ namespace neui_detail
           if (has_stroke) do_stroke();
         } else {
           // Trimming: the fill (if any) still uses the whole path; the stroke
-          // replays the trimmed sub-path. trim_v == 0 leaves `trimmed` empty,
+          // replays the trimmed sub-path. An empty span leaves `trimmed` empty,
           // so the fill (track) still shows while nothing is stroked.
           if (has_fill) { replay(L.path_cmds); do_fill(); }
           if (!trimmed.empty()) { replay(trimmed); do_stroke(); }
@@ -675,27 +675,20 @@ namespace neui_detail
                                    0.0f, 1.0f);
         int   ori = effective_int(L, "orientation", L.rect_orientation, bag);
         int   pol = effective_int(L, "polarity",    L.rect_polarity,    bag);
+        // `value` is a POSITION along the fill axis; polarity picks the anchor
+        // (min = 0 / origin, center = 0.5, max = 1 / far end) and the fill spans
+        // anchor -> value, matching the ARC layer exactly. min: [0,v] (grows
+        // from the origin); center: [min(.5,v), max(.5,v)] (pan/balance from the
+        // middle); max: [v,1] (anchored at the far end, empty at v=1).
+        float anchor = (pol == 1) ? 0.5f : (pol == 2 ? 1.0f : 0.0f);
+        float lo = std::fmin(anchor, rv), hi = std::fmax(anchor, rv);
         float fx = r.x, fy = r.y, fw = r.w, fh = r.h;
-        if (rv < 1.0f) {
-          if (ori == 1) {            // vertical: fill along y
-            if (pol == 1) {          // center: from the middle to the value position
-              float lo = std::fmin(0.5f, rv), hi = std::fmax(0.5f, rv);
-              fy = r.y + lo * r.h;  fh = (hi - lo) * r.h;
-            } else {
-              fh = r.h * rv;
-              fy = (pol == 2) ? r.y + (r.h - fh) : r.y;  // max: bottom edge / min: top edge
-            }
-          } else {                   // horizontal: fill along x
-            if (pol == 1) {          // center: from the middle to the value position
-              float lo = std::fmin(0.5f, rv), hi = std::fmax(0.5f, rv);
-              fx = r.x + lo * r.w;  fw = (hi - lo) * r.w;
-            } else {
-              fw = r.w * rv;
-              fx = (pol == 2) ? r.x + (r.w - fw) : r.x;  // max: right edge / min: left edge
-            }
-          }
+        if (ori == 1) {              // vertical: fill along y
+          fy = r.y + lo * r.h;  fh = (hi - lo) * r.h;
+        } else {                     // horizontal: fill along x
+          fx = r.x + lo * r.w;  fw = (hi - lo) * r.w;
         }
-        bool draw_fill = has_fill && rv > 0.0f && fw > 0.0f && fh > 0.0f;
+        bool draw_fill = has_fill && fw > 0.0f && fh > 0.0f;
 
         if (radius <= 0.0f) {
           // RECT fills draw with no transform pushed, so the gradient is in
