@@ -561,22 +561,22 @@ namespace neui_detail
 
         // Both the pie fill and the ring stroke start at `anchor`; evaluate the
         // trig once and reuse it for either path.
-        const float ca = std::cos(anchor);
-        const float sa = std::sin(anchor);
+        const float cos_a = std::cos(anchor);
+        const float sin_a = std::sin(anchor);
 
         if (has_fill && rx_fill > 0.0f && ry_fill > 0.0f) {
           k_painter_api.begin_path(p);
           k_painter_api.move_to(p, cx, cy);
-          k_painter_api.line_to(p, cx + rx_fill * ca,
-                                    cy + ry_fill * sa);
+          k_painter_api.line_to(p, cx + rx_fill * cos_a,
+                                    cy + ry_fill * sin_a);
           append_elliptical_arc(p, cx, cy, rx_fill, ry_fill, anchor, theta);
           k_painter_api.close_path(p);
           k_painter_api.fill_path(p, fill);
         }
         if (has_stroke && rx_ring > 0.0f && ry_ring > 0.0f) {
           k_painter_api.begin_path(p);
-          k_painter_api.move_to(p, cx + rx_ring * ca,
-                                    cy + ry_ring * sa);
+          k_painter_api.move_to(p, cx + rx_ring * cos_a,
+                                    cy + ry_ring * sin_a);
           append_elliptical_arc(p, cx, cy, rx_ring, ry_ring, anchor, theta);
           if (L.stroke_cap != 0 && k_painter_api.stroke_path_styled) {
             neui_stroke_style_t style{};
