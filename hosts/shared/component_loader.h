@@ -176,6 +176,7 @@ namespace neui_detail
       if (s == "key_step")        return NEUI_BEHAVIOR_KIND_KEY_STEP;
       if (s == "click_toggle")    return NEUI_BEHAVIOR_KIND_CLICK_TOGGLE;
       if (s == "click_cycle")     return NEUI_BEHAVIOR_KIND_CLICK_CYCLE;
+      if (s == "click_select")    return NEUI_BEHAVIOR_KIND_CLICK_SELECT;
       if (s == "context_reset")   return NEUI_BEHAVIOR_KIND_CONTEXT_RESET;
       if (s == "drag_source")     return NEUI_BEHAVIOR_KIND_DRAG_SOURCE;
       return NEUI_BEHAVIOR_KIND_NONE;
@@ -212,7 +213,8 @@ namespace neui_detail
       // strings
       if (p == "target" || p == "target_y" || p == "target_default" ||
           p == "snap_attr" || p == "fine_modifier" || p == "cursor" ||
-          p == "drag_data_key" || p == "drag_preview_key" || p == "result_attr")
+          p == "drag_data_key" || p == "drag_preview_key" || p == "result_attr" ||
+          p == "selected_attr")
         return P_STRING;
       // floats
       if (p == "min" || p == "max" || p == "step" || p == "coarse" ||
@@ -293,6 +295,7 @@ namespace neui_detail
         case NEUI_BEHAVIOR_KIND_KEY_STEP:        return "key_step";
         case NEUI_BEHAVIOR_KIND_CLICK_TOGGLE:    return "click_toggle";
         case NEUI_BEHAVIOR_KIND_CLICK_CYCLE:     return "click_cycle";
+        case NEUI_BEHAVIOR_KIND_CLICK_SELECT:    return "click_select";
         case NEUI_BEHAVIOR_KIND_CONTEXT_RESET:   return "context_reset";
         case NEUI_BEHAVIOR_KIND_DRAG_SOURCE:     return "drag_source";
         default:                                 return "";
@@ -1058,6 +1061,7 @@ namespace neui_detail
         if (H->drag_hot_x != def.drag_hot_x)          ho.emplace_back("drag_hot_x", njson_int(H->drag_hot_x));
         if (H->drag_hot_y != def.drag_hot_y)          ho.emplace_back("drag_hot_y", njson_int(H->drag_hot_y));
         if (H->result_attr != def.result_attr)        ho.emplace_back("result_attr", njson_str(H->result_attr));
+        if (H->selected_attr != def.selected_attr)    ho.emplace_back("selected_attr", njson_str(H->selected_attr));
         if (H->anchor_parent != def.anchor_parent)    ho.emplace_back("anchor_parent", njson_int(static_cast<int>(H->anchor_parent)));
         if (H->anchor_self != def.anchor_self)        ho.emplace_back("anchor_self", njson_int(static_cast<int>(H->anchor_self)));
         if (H->offset_x != def.offset_x)              ho.emplace_back("offset_x", njson_int(H->offset_x));

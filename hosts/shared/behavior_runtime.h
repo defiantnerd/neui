@@ -227,6 +227,7 @@ namespace neui_detail
         case NEUI_BEHAVIOR_KIND_DRAG_BIAXIAL:
         case NEUI_BEHAVIOR_KIND_CLICK_TOGGLE:
         case NEUI_BEHAVIOR_KIND_CLICK_CYCLE:
+        case NEUI_BEHAVIOR_KIND_CLICK_SELECT:
         case NEUI_BEHAVIOR_KIND_DRAG_SOURCE:
           break;
         default:
@@ -499,6 +500,29 @@ namespace neui_detail
         float mid = 0.5f * (H->min + H->max);
         float new_v = (current >= mid) ? H->min : H->max;
         behavior_write_value(*H, ctx, H->target, new_v);
+        return true;
+      }
+      if (H->kind == NEUI_BEHAVIOR_KIND_CLICK_SELECT) {
+        // Toggle: flip target between min (deselected) and max (selected),
+        // and mirror the on/off state into the selected int attr. The float
+        // write goes through behavior_write_value (snap / clamp / invalidate /
+        // emit); the int write mirrors the DRAG_SOURCE result_attr pattern
+        // (direct set_int + its own change-guard + emit + invalidate).
+        float current = behavior_read_value(*H, ctx.bag);
+        float mid = 0.5f * (H->min + H->max);
+        bool now_selected = !(current >= mid);
+        float new_v = now_selected ? H->max : H->min;
+        behavior_write_value(*H, ctx, H->target, new_v);
+        if (ctx.bag && !H->selected_attr.empty()) {
+          int sv = now_selected ? 1 : 0;
+          if (ctx.bag->get_int(H->selected_attr, -1) != sv) {
+            ctx.bag->set_int(H->selected_attr, sv);
+            if (ctx.emit_attr_changed)
+              ctx.emit_attr_changed(ctx.host_data, H->selected_attr.c_str(),
+                                    static_cast<float>(sv));
+            if (ctx.invalidate) ctx.invalidate(ctx.host_data);
+          }
+        }
         return true;
       }
       if (H->kind == NEUI_BEHAVIOR_KIND_CLICK_CYCLE) {

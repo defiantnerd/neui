@@ -83,6 +83,16 @@ extern "C" {
     // building the data item (clipboard_api->create_item / item_set_format)
     // and stashing its id in the widget's AttrBag before mouse-down.
     NEUI_BEHAVIOR_KIND_DRAG_SOURCE      = 10,
+    // Click select - LBUTTON click TOGGLES selection. Like CLICK_TOGGLE it
+    // flips `target` between `min` (deselected) and `max` (selected); it
+    // ADDITIONALLY mirrors the on/off state into an int attr `selected_attr`
+    // (default NEUI_ATTR_SELECTED = "neui.attr.selected", 1 = selected /
+    // 0 = not). The float `target` drives compound bindings (fill / opacity);
+    // the int `selected_attr` drives compound layer show_when visibility
+    // (NEUI_LAYER_STATE_SELECTED). Set `selected_attr` to "" to skip the
+    // boolean mirror (degenerates to a plain toggle). No group exclusivity -
+    // a widget can deselect itself; radio-group behaviour is the client's job.
+    NEUI_BEHAVIOR_KIND_CLICK_SELECT     = 11,
   } neui_behavior_kind_t;
 
   typedef struct neui_behavior_api {
@@ -125,6 +135,13 @@ extern "C" {
     //                             (default 0.2 - matches the existing KNOB).
     //     "cursor"        string  advisory cursor hint ("arrow"/"hand"/...) -
     //                             stored but not applied in v1.
+    //
+    //   click-select-specific (CLICK_SELECT):
+    //     "selected_attr" string  int attr key the click mirrors the on/off
+    //                             state into (1 = selected, 0 = not). Default
+    //                             "neui.attr.selected" (NEUI_ATTR_SELECTED,
+    //                             the key the compound show_when SELECTED axis
+    //                             reads). "" = skip the mirror (plain toggle).
     //
     //   drag-specific (DRAG_* kinds):
     //     "sweep"         float   pixels for a full 0..1 sweep on linear

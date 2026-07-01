@@ -615,3 +615,100 @@ TEST_CASE("DRAG_SOURCE result_attr: prop setter accepts the string key")
   apply_behavior_set_string(*H, "result_attr", "myapp.last_drop_action");
   CHECK_EQ(H->result_attr, std::string("myapp.last_drop_action"));
 }
+
+// ---------------------------------------------------------------------------
+// CLICK_SELECT dispatch: a click toggles the float target between min/max AND
+// mirrors the on/off state into the selected int attr, emitting ATTR_CHANGED
+// + invalidating for both writes.
+// ---------------------------------------------------------------------------
+
+namespace {
+  struct SelectProbe {
+    int value_emits = 0, selected_emits = 0, invalidate_calls = 0;
+  };
+  void select_on_attr_changed(void* hd, const char* key, float) {
+    auto* p = static_cast<SelectProbe*>(hd);
+    std::string k = key ? key : "";
+    if (k == "neui.param.value")         p->value_emits++;
+    else if (k == "neui.attr.selected")  p->selected_emits++;
+  }
+  void select_on_invalidate(void* hd) {
+    static_cast<SelectProbe*>(hd)->invalidate_calls++;
+  }
+}
+
+TEST_CASE("CLICK_SELECT: click toggles value min<->max and mirrors selected int")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_CLICK_SELECT);
+  (void)slot;  // defaults: target=neui.param.value, min/max 0/1, selected_attr=neui.attr.selected
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  SelectProbe probe;
+  BehaviorDispatchCtx ctx;
+  ctx.bag = &bag;
+  ctx.widget_w = 100; ctx.widget_h = 100;
+  ctx.host_data         = &probe;
+  ctx.emit_attr_changed = &select_on_attr_changed;
+  ctx.invalidate        = &select_on_invalidate;
+
+  neui_widget_t wid = { 1 };
+  auto click = [&]() {
+    neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+    down.data.mouse = { wid, 10, 10, NEUI_MK_LBUTTON };
+    return behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 10);
+  };
+
+  // Starts unselected (value defaults to 0). Click 1 -> selected.
+  CHECK(click());
+  CHECK_APPROX(bag.get_float("neui.param.value", -1.0f), 1.0);
+  CHECK_EQ(bag.get_int("neui.attr.selected", -1), 1);
+
+  // Click 2 -> deselected.
+  CHECK(click());
+  CHECK_APPROX(bag.get_float("neui.param.value", -1.0f), 0.0);
+  CHECK_EQ(bag.get_int("neui.attr.selected", -1), 0);
+
+  // Click 3 -> selected again.
+  CHECK(click());
+  CHECK_APPROX(bag.get_float("neui.param.value", -1.0f), 1.0);
+  CHECK_EQ(bag.get_int("neui.attr.selected", -1), 1);
+
+  // Each click writes both attrs -> 3 value emits + 3 selected emits, and one
+  // invalidate per write (6 total).
+  CHECK_EQ(probe.value_emits, 3);
+  CHECK_EQ(probe.selected_emits, 3);
+  CHECK_EQ(probe.invalidate_calls, 6);
+}
+
+TEST_CASE("CLICK_SELECT: empty selected_attr skips the mirror (plain toggle)")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_CLICK_SELECT);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  H->selected_attr = "";
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  BehaviorDispatchCtx ctx;
+  ctx.bag = &bag;
+  ctx.widget_w = 100; ctx.widget_h = 100;
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 10, 10, NEUI_MK_LBUTTON };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 10));
+  CHECK_APPROX(bag.get_float("neui.param.value", -1.0f), 1.0);
+  CHECK_FALSE(bag.has("neui.attr.selected"));
+}
+
+TEST_CASE("CLICK_SELECT: selected_attr default + prop setter")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_CLICK_SELECT);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  CHECK_EQ(H->selected_attr, std::string("neui.attr.selected"));
+  apply_behavior_set_string(*H, "selected_attr", "myapp.on");
+  CHECK_EQ(H->selected_attr, std::string("myapp.on"));
+}

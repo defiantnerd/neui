@@ -437,6 +437,47 @@ TEST_CASE("component_loader: behavior handlers + typed props")
   CHECK(g_handlers[3].strs.at("target_default") == "neui.param.default");
 }
 
+TEST_CASE("component_loader: click_select handler + selected_attr prop")
+{
+  const char* json = R"json({
+    "size": [40, 40],
+    "layers": [ { "kind": "rect", "z": 0, "fill_color": "#FF202020" } ],
+    "behavior": [
+      { "kind": "click_select", "target": "neui.param.value",
+        "selected_attr": "neui.attr.selected" }
+    ]
+  })json";
+  run_loader(json);
+
+  REQUIRE(g_handlers.size() == 1);
+  CHECK(g_handlers[0].kind == NEUI_BEHAVIOR_KIND_CLICK_SELECT);
+  CHECK(g_handlers[0].strs.at("target") == "neui.param.value");
+  CHECK(g_handlers[0].strs.at("selected_attr") == "neui.attr.selected");
+}
+
+TEST_CASE("serialize_component: click_select round-trips selected_attr")
+{
+  // Hand-build a minimal compound (one rect) + a click_select handler with a
+  // NON-default selected_attr (so it is emitted), serialize, and re-parse.
+  CompoundAsset ca;
+  compound_add_layer(ca, NEUI_COMPOUND_LAYER_RECT, 0);
+  BehaviorAsset ba;
+  uint32_t h = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_CLICK_SELECT);
+  behavior_get_handler(ba, h)->selected_attr = "myapp.on";
+
+  std::string name = "chip";
+  ComponentSerializeInput in;
+  in.name = &name; in.width = 40.0f; in.height = 40.0f;
+  in.compound = &ca; in.behavior = &ba;
+
+  std::string json = serialize_component(in, 0);
+  run_loader(json);
+
+  REQUIRE(g_handlers.size() == 1);
+  CHECK(g_handlers[0].kind == NEUI_BEHAVIOR_KIND_CLICK_SELECT);
+  CHECK(g_handlers[0].strs.at("selected_attr") == "myapp.on");
+}
+
 TEST_CASE("component_loader: asset resolution via env callback")
 {
   // resolve_asset returns a handle for "bg" (borrowed, NOT path-loaded) and

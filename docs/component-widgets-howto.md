@@ -277,6 +277,7 @@ the same 9-point anchor system (default: whole widget). Macros / enums in
 | **KEY_STEP** (`6`) | Arrow keys (`step`), Page (`coarse`), Home/End (`min`/`max`). Requires widget focus. |
 | **CLICK_TOGGLE** (`7`) | Left-click flips target between `min` and `max`. |
 | **CLICK_CYCLE** (`8`) | Left-click steps to next snap position (modulo the `steps` count). `wrap` (int: 0 = clamp at max, 1 = wrap to min). |
+| **CLICK_SELECT** (`11`) | Left-click TOGGLES selection: flips `target` between `min` (deselected) / `max` (selected) AND mirrors the on/off state into `selected_attr` as int (1/0). `selected_attr` (default `neui.attr.selected` - the key the compound `show_when` SELECTED axis reads; `""` = skip the mirror). Float drives bindings, bool drives layer visibility. No group exclusivity. |
 | **CONTEXT_RESET** (`9`) | Right-click "Reset to default" popup. `target_default` (attr key for the reset value, default `neui.param.default`). |
 | **DRAG_SOURCE** (`10`) | Arms on mouse-down in the hit region; past `threshold_px` (default 4) calls `begin_drag`. `allowed_actions` (int `NEUI_DND_ACTION_*` bitmask, default COPY\|MOVE), `drag_data_key` (attr holding the data-item id), `drag_preview_key` (attr holding the preview-image asset id), `drag_hot_x` / `drag_hot_y` (int hot-spot px, -1 = centre), `result_attr` (attr the runtime writes with the negotiated action; fires ATTR_CHANGED). |
 

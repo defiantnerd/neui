@@ -93,6 +93,12 @@ namespace neui_detail
     // since a drag end is itself the signal the client subscribes to.
     std::string result_attr;
 
+    // ---- Click-select-specific (CLICK_SELECT) ----------------------------
+    // Int attr key the click mirrors the on/off state into (1 = selected,
+    // 0 = not). Defaults to NEUI_ATTR_SELECTED - the key the compound
+    // show_when SELECTED axis reads. Empty = skip the mirror (plain toggle).
+    std::string selected_attr = "neui.attr.selected";
+
     // ---- Hit region (compound-style 9-pt anchor) --------------------------
     neui_anchor_t anchor_parent = NEUI_ANCHOR_TOP_LEFT;
     neui_anchor_t anchor_self   = NEUI_ANCHOR_TOP_LEFT;
@@ -210,6 +216,7 @@ namespace neui_detail
     if (prop == "drag_data_key")  { H.drag_data_key   = sv; return; }
     if (prop == "drag_preview_key") { H.drag_preview_key = sv; return; }
     if (prop == "result_attr")    { H.result_attr     = sv; return; }
+    if (prop == "selected_attr")  { H.selected_attr   = sv; return; }
   }
 
   // ---- Hit region resolution ----------------------------------------------
