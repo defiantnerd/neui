@@ -88,7 +88,8 @@
 //     string "fill" (both axes) or a 2-array of ("fill" | number) per axis.
 //   - colors: "#AARRGGBB" (string) or a bare int -> ARGB.
 //   - "show_when": array of state tokens, "!" negates: ["hovered","!pressed"]
-//     -> NEUI_LAYER_STATE_* bitmask.
+//     -> NEUI_LAYER_STATE_* bitmask. Tokens: enabled / hovered / pressed /
+//     selected (selected reads the NEUI_ATTR_SELECTED attribute).
 //   - "align": [x, y] with x in {left,center,right} and y in {top,center,bottom}.
 //   - "bind": map of numeric prop -> { attr, scale, offset } (compound->bind);
 //     a "bind" on the "asset" prop is treated as bind_asset (attr only).

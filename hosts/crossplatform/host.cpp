@@ -2832,7 +2832,9 @@ namespace xpl_host
     if (auto* ca = resolve_widget_compound(session, compound_asset)) {
       // Compound mode: paint z<0 layers here; z>=0 layers come from
       // paint_after_children below. WIDGET_PAINT is suppressed.
-      uint32_t state_mask = neui_detail::compose_widget_state(enabled, hovered, pressed);
+      bool selected = neui_detail::attr_as_float(
+                        neui_detail::attrs_readonly(attrs), NEUI_ATTR_SELECTED, 0.0f) != 0.0f;
+      uint32_t state_mask = neui_detail::compose_widget_state(enabled, hovered, pressed, selected);
       neui_detail::paint_compound_below(&painter, *ca, fw, fh,
                                           neui_detail::attrs_readonly(attrs),
                                           state_mask);
@@ -2875,7 +2877,9 @@ namespace xpl_host
     painter.host_token       = session;
     painter.draw_asset_thunk = &xpl_painter_draw_asset_thunk;
 
-    uint32_t state_mask = neui_detail::compose_widget_state(enabled, hovered, pressed);
+    bool selected = neui_detail::attr_as_float(
+                      neui_detail::attrs_readonly(attrs), NEUI_ATTR_SELECTED, 0.0f) != 0.0f;
+    uint32_t state_mask = neui_detail::compose_widget_state(enabled, hovered, pressed, selected);
     neui_detail::paint_compound_above(&painter, *ca, fw, fh,
                                         neui_detail::attrs_readonly(attrs),
                                         state_mask);

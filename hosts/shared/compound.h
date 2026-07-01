@@ -823,16 +823,20 @@ namespace neui_detail
     return false;
   }
 
-  // Compose a NEUI_LAYER_STATE_* bitmask from the three input booleans.
+  // Compose a NEUI_LAYER_STATE_* bitmask from the four input booleans.
   // Always carries exactly one bit per axis (positive or NOT_* form) so
   // the visibility check `(show_when & ~state_mask) == 0` lets a layer
-  // require either side of any axis via its show_when bits.
-  inline uint32_t compose_widget_state(bool enabled, bool hovered, bool pressed)
+  // require either side of any axis via its show_when bits. `selected` is
+  // the widget's logical selected state (from NEUI_ATTR_SELECTED); unlike
+  // hovered / pressed it is not host-tracked input but client-owned state.
+  inline uint32_t compose_widget_state(bool enabled, bool hovered,
+                                       bool pressed, bool selected)
   {
     uint32_t mask = 0;
-    mask |= enabled ? NEUI_LAYER_STATE_ENABLED : NEUI_LAYER_STATE_NOT_ENABLED;
-    mask |= hovered ? NEUI_LAYER_STATE_HOVERED : NEUI_LAYER_STATE_NOT_HOVERED;
-    mask |= pressed ? NEUI_LAYER_STATE_PRESSED : NEUI_LAYER_STATE_NOT_PRESSED;
+    mask |= enabled  ? NEUI_LAYER_STATE_ENABLED  : NEUI_LAYER_STATE_NOT_ENABLED;
+    mask |= hovered  ? NEUI_LAYER_STATE_HOVERED  : NEUI_LAYER_STATE_NOT_HOVERED;
+    mask |= pressed  ? NEUI_LAYER_STATE_PRESSED  : NEUI_LAYER_STATE_NOT_PRESSED;
+    mask |= selected ? NEUI_LAYER_STATE_SELECTED : NEUI_LAYER_STATE_NOT_SELECTED;
     return mask;
   }
 

@@ -186,7 +186,7 @@ int main(int, char*[])
   const int Y2 = 250;
   //         x    y         w    h   value polarity  color
   make_line( 20,  Y2,       400, 40, 0.70f, 0,       0xFF4E9CF5u); // trim from start
-  make_line( 20,  Y2 + 60,  400, 40, 0.50f, 1,       0xFFE05A8Au); // trim from centre
+  make_line( 20,  Y2 + 60,  400, 40, 0.75f, 1,       0xFFE05A8Au); // trim from centre -> right (0.5 = empty)
   //         x    y         w    h   value orient polarity  color
   make_bar ( 460, Y2,       380, 40, 0.70f, 0,     0,       0xFF50C878u); // horizontal, from left
   make_bar ( 600, Y2 + 60,  40,  90, 0.55f, 1,     2,       0xFFF59E4Eu); // vertical, from bottom

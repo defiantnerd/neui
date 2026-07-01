@@ -820,8 +820,9 @@ namespace win32_host
       // z=0 child slot is irreducibly fixed at "after the parent paint" -
       // both the below and above layers land before child HWNDs render.
       const neui_detail::AttrBag* bag = neui_detail::attrs_readonly(wd.attrs);
+      bool selected = neui_detail::attr_as_float(bag, NEUI_ATTR_SELECTED, 0.0f) != 0.0f;
       uint32_t state_mask = neui_detail::compose_widget_state(
-                              wd.enabled, wd.hovered, wd.pressed);
+                              wd.enabled, wd.hovered, wd.pressed, selected);
       neui_detail::paint_compound_below(&painter, *ca, w, h, bag, state_mask);
       neui_detail::paint_compound_above(&painter, *ca, w, h, bag, state_mask);
     } else {

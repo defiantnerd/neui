@@ -1532,8 +1532,9 @@ static float neui_snap_to_steps(float v, int steps)
 
     if (ca) {
       const neui_detail::AttrBag* bag = neui_detail::attrs_readonly(wd->attrs);
+      bool selected = neui_detail::attr_as_float(bag, NEUI_ATTR_SELECTED, 0.0f) != 0.0f;
       uint32_t state_mask = neui_detail::compose_widget_state(
-                              wd->enabled, wd->hovered, wd->pressed);
+                              wd->enabled, wd->hovered, wd->pressed, selected);
       neui_detail::paint_compound_below(&painter, *ca,
                                           (float)sz.width, (float)sz.height, bag,
                                           state_mask);

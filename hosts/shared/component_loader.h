@@ -150,9 +150,10 @@ namespace neui_detail
     {
       bool neg = !s.empty() && s[0] == '!';
       std::string t = neg ? s.substr(1) : s;
-      if (t == "enabled") return neg ? NEUI_LAYER_STATE_NOT_ENABLED : NEUI_LAYER_STATE_ENABLED;
-      if (t == "hovered") return neg ? NEUI_LAYER_STATE_NOT_HOVERED : NEUI_LAYER_STATE_HOVERED;
-      if (t == "pressed") return neg ? NEUI_LAYER_STATE_NOT_PRESSED : NEUI_LAYER_STATE_PRESSED;
+      if (t == "enabled")  return neg ? NEUI_LAYER_STATE_NOT_ENABLED  : NEUI_LAYER_STATE_ENABLED;
+      if (t == "hovered")  return neg ? NEUI_LAYER_STATE_NOT_HOVERED  : NEUI_LAYER_STATE_HOVERED;
+      if (t == "pressed")  return neg ? NEUI_LAYER_STATE_NOT_PRESSED  : NEUI_LAYER_STATE_PRESSED;
+      if (t == "selected") return neg ? NEUI_LAYER_STATE_NOT_SELECTED : NEUI_LAYER_STATE_SELECTED;
       return 0;
     }
     inline neui_compound_layer_kind_t parse_layer_kind(const std::string& s)
@@ -857,6 +858,8 @@ namespace neui_detail
           if (L->show_when & NEUI_LAYER_STATE_NOT_HOVERED) sw.push_back(njson_str("!hovered"));
           if (L->show_when & NEUI_LAYER_STATE_PRESSED)     sw.push_back(njson_str("pressed"));
           if (L->show_when & NEUI_LAYER_STATE_NOT_PRESSED) sw.push_back(njson_str("!pressed"));
+          if (L->show_when & NEUI_LAYER_STATE_SELECTED)     sw.push_back(njson_str("selected"));
+          if (L->show_when & NEUI_LAYER_STATE_NOT_SELECTED) sw.push_back(njson_str("!selected"));
           lo.emplace_back("show_when", njson_arr(std::move(sw)));
         }
 

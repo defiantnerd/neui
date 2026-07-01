@@ -36,6 +36,15 @@ extern "C" {
 // Implicit on CHECKBOX3.
 #define NEUI_ATTR_TRISTATE  "neui.attr.tristate"
 
+// int (bool): logical "selected" state of a widget. Unlike hovered / pressed
+// (transient input the host tracks from the mouse) this is semantic state the
+// client owns - so it lives in the AttrBag rather than as a host-tracked flag.
+// Read at paint time and folded into the compound layer state mask, so a
+// compound layer can gate visibility with show_when = NEUI_LAYER_STATE_SELECTED
+// / NOT_SELECTED (see <neui/d/compound.h>). Default 0 (not selected). Set via
+// attrs->set_int; a behavior asset can drive it the same way it drives value.
+#define NEUI_ATTR_SELECTED  "neui.attr.selected"
+
 // int (bool): read-only marker, set by the host when a NEUI_W_MULTILINE
 // widget is created. Multi-line vs single-line is determined by the widget
 // TYPE at creation (NEUI_W_MULTILINE vs NEUI_W_INPUTBOX), NOT by this

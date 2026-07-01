@@ -2360,7 +2360,8 @@ namespace ios_host
       }
       if (backend->push_clip) backend->push_clip(wd.render_ctx, 0, 0, w, h);
       if (ca) {
-        uint32_t state = neui_detail::compose_widget_state(wd.enabled, wd.hovered, wd.pressed);
+        bool selected = neui_detail::attr_as_float(wd.attrs.get(), NEUI_ATTR_SELECTED, 0.0f) != 0.0f;
+        uint32_t state = neui_detail::compose_widget_state(wd.enabled, wd.hovered, wd.pressed, selected);
         neui_detail::paint_compound_below(&painter, *ca, w, h, wd.attrs.get(), state);
         neui_detail::paint_compound_above(&painter, *ca, w, h, wd.attrs.get(), state);
       } else if (wd.emit_events) {

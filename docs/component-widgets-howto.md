@@ -231,7 +231,7 @@ order). Macros / enums in `<neui/d/compound.h>`.
 | `offset_x` / `offset_y` | int | px relative to the resolved anchor. |
 | `width` / `height` | int | px; `NEUI_COMPOUND_FILL` (-1) = match widget on that axis. |
 | `alpha` | float | 0..1 opacity; 0 short-circuits the layer. |
-| `show_when` | int | `NEUI_LAYER_STATE_*` bitmask. 0 = always visible. AND filter over enabled / hovered / pressed, each with a positive bit and a `_NOT_*` bit. Rule: visible iff `(show_when & ~current_state) == 0`. |
+| `show_when` | int | `NEUI_LAYER_STATE_*` bitmask. 0 = always visible. AND filter over enabled / hovered / pressed / selected, each with a positive bit and a `_NOT_*` bit. `selected` reads `NEUI_ATTR_SELECTED` (client/behavior-driven). Rule: visible iff `(show_when & ~current_state) == 0`. |
 
 ### Per-kind properties
 

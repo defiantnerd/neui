@@ -47,8 +47,8 @@ extern "C" {
 
 // Layer state filter bits. A layer with NEUI_PROP_SHOW_WHEN = 0 (default)
 // is painted in every state. Otherwise the mask is an AND filter across
-// three axes (enabled, hovered, pressed): each axis can require the
-// positive bit, the negated bit, or neither (don't care).
+// four axes (enabled, hovered, pressed, selected): each axis can require
+// the positive bit, the negated bit, or neither (don't care).
 //
 // The visibility rule is:
 //   layer visible iff (show_when & ~current_state) == 0
@@ -64,6 +64,9 @@ extern "C" {
 //   PRESSED  / NOT_PRESSED  - mouse button held since press on this
 //                             widget (capture-style: survives the cursor
 //                             leaving the rect, clears on release)
+//   SELECTED / NOT_SELECTED - the widget's logical selected state, read
+//                             from the NEUI_ATTR_SELECTED attribute (client-
+//                             or behavior-driven; see <neui/d/attrs.h>)
 //
 // Examples:
 //   show_when = HOVERED                       -> only when hovered
@@ -79,6 +82,8 @@ extern "C" {
 #define NEUI_LAYER_STATE_NOT_ENABLED  (1u << 3)
 #define NEUI_LAYER_STATE_NOT_HOVERED  (1u << 4)
 #define NEUI_LAYER_STATE_NOT_PRESSED  (1u << 5)
+#define NEUI_LAYER_STATE_SELECTED     (1u << 6)
+#define NEUI_LAYER_STATE_NOT_SELECTED (1u << 7)
 
 // Prop name for the state filter. Set via set_int. Default value 0
 // means "visible in every state".
