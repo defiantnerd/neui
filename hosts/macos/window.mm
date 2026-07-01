@@ -4214,9 +4214,19 @@ namespace macos_host
     // TABVIEW nests its TABPAGE children. For TABVIEW / a chip-less,
     // non-scrolling TABPAGE there is no inner body view, so
     // section_child_container_macos falls back to the painted view itself.
+    //
+    // CUSTOMDRAW also hosts child widgets: on win32 it is an HWND that parents
+    // child HWNDs, and neui's contract is that a child's (x, y) is relative to
+    // its immediate parent on every host. Without this, a child of a CUSTOMDRAW
+    // skipped over it to the frame content view but kept its parent-relative
+    // frame - so it rendered at the wrong offset (missing the CUSTOMDRAW's
+    // origin) and drifted on resize. section_child_container_macos returns the
+    // painted view itself (no body view), and the section-specific relayout in
+    // apply_geometry_native_macos is gated on is_section_like, so a CUSTOMDRAW
+    // just becomes a plain subview host.
     return is_section_like(w.type) ||
            (w.type && !strcmp(w.type, NEUI_W_TABVIEW)) ||
-	   (w.type && !strcmp(w.type, NEUI_W_CUSTOMDRAW));
+           (w.type && !strcmp(w.type, NEUI_W_CUSTOMDRAW));
   }
 
   // After a frame is created, walk every descendant and instantiate its
