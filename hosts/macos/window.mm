@@ -4215,7 +4215,8 @@ namespace macos_host
     // non-scrolling TABPAGE there is no inner body view, so
     // section_child_container_macos falls back to the painted view itself.
     return is_section_like(w.type) ||
-           (w.type && !strcmp(w.type, NEUI_W_TABVIEW));
+           (w.type && !strcmp(w.type, NEUI_W_TABVIEW)) ||
+	   (w.type && !strcmp(w.type, NEUI_W_CUSTOMDRAW));
   }
 
   // After a frame is created, walk every descendant and instantiate its
