@@ -72,7 +72,17 @@ namespace neui_detail
   {
     std::string text;
     for (NSURL* u in urls) {
-      NSString* abs = [u absoluteString];
+      // A file dragged from Finder often arrives as a *file-reference* URL
+      // (file:///.file/id=NNN.MMM), whose -absoluteString is that opaque id,
+      // not a usable path. -filePathURL resolves it to a path-based file URL
+      // (file:///Users/...); fall back to the original for non-file / already-
+      // path URLs where -filePathURL is nil.
+      NSURL* resolved = u;
+      if ([u isFileURL]) {
+        NSURL* pathURL = [u filePathURL];
+        if (pathURL) resolved = pathURL;
+      }
+      NSString* abs = [resolved absoluteString];
       if (!abs) continue;
       const char* c = [abs UTF8String];
       if (!c) continue;
