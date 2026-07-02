@@ -33,6 +33,7 @@
 
 # Typical Folders
 .vs
+.github
 out
 
 # MAC Shit
