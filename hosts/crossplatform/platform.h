@@ -378,4 +378,24 @@ namespace xpl_host
 
   void platform_set_cursor(int kind /* CursorKind */);
 
+#ifdef NEUI_PLATFORM_LVGL
+  // -------------------------------------------------------------------------
+  // Retained-mode seams (LVGL Option C prototype - plans/lvgl-host-approach-c.md).
+  // Only compiled on the LVGL platform; the shared host calls them from
+  // #ifdef NEUI_PLATFORM_LVGL blocks so every other platform stays
+  // byte-for-byte unchanged.
+
+  // A single widget's pixels changed (text, attr, value, hover/press/focus
+  // state). The platform invalidates that widget's mirror lv_obj only -
+  // falling back to a whole-frame invalidate when no mirror exists yet or
+  // retained mode is disabled at runtime (NEUI_LVGL_RETAINED=0).
+  void platform_retained_widget_invalidate(Session* session, uint32_t widget_index);
+
+  // Structure or geometry changed under this widget's frame (create /
+  // destroy / show / hide / set_pos / set_size / tab-page reflow / section
+  // scroll). The platform re-syncs the mirror tree (positions, sizes,
+  // visibility, abs coords) before the next LVGL refresh.
+  void platform_retained_tree_changed(Session* session, uint32_t widget_index);
+#endif
+
 } // namespace xpl_host

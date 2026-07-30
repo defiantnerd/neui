@@ -859,6 +859,26 @@ namespace xpl_host
     // Called by the platform layer when WM_PAINT / equivalent fires.
     void paint_frame(neui_render_ctx_t ctx, uint32_t parent_index);
 
+#ifdef NEUI_PLATFORM_LVGL
+    // Retained-mode paint entries (LVGL Option C prototype). The LVGL
+    // platform dispatches one widget at a time from per-object draw events;
+    // these wrap the widget paint in the same palette-override bracket /
+    // focus gating / PREUPDATE / disabled-dim mechanics paint_frame applies
+    // during its whole-tree walk, so widget paint code sees an identical
+    // environment on both paths.
+    //  - after_children=false: PREUPDATE + wd.paint (parent-local coords)
+    //  - after_children=true:  wd.paint_after_children (widget-local coords)
+    void paint_widget_retained(neui_render_ctx_t ctx, uint32_t widget_index,
+                               bool after_children);
+    // The begin_frame(clear) substitute: fill the frame rect with the
+    // frame's effective background colour.
+    void paint_frame_background_retained(neui_render_ctx_t ctx,
+                                         uint32_t frame_index);
+    // Overlay pass drawn above every widget mirror (combo drop, popup menu,
+    // toast), palette-bracketed like paint_frame's overlay tail.
+    void paint_overlays_retained(neui_render_ctx_t ctx, uint32_t frame_index);
+#endif
+
     // The 0xAARRGGBB colour paint_frame clears the frame to (per-frame
     // NEUI_ATTR_BACKGROUND override, else the theme frame_bg under the frame's
     // effective palette). Self-contained: applies and restores the palette

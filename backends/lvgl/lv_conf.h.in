@@ -1,0 +1,67 @@
+/* neui LVGL host prototype configuration (plans/lvgl-host-approach-c.md).
+ *
+ * TEMPLATE: backends/lvgl/CMakeLists.txt runs configure_file() over this to
+ * produce the lv_conf.h LVGL builds against (LV_BUILD_CONF_PATH). Minimal
+ * override-style config: every option not set here takes its
+ * lv_conf_internal.h default.
+ */
+#ifndef LV_CONF_H
+#define LV_CONF_H
+
+/* Framebuffer depth: 32 = XRGB8888 (desktop-like), 16 = RGB565 (MCU-like).
+ * Selected at configure time via -DNEUI_LVGL_COLOR_DEPTH=32|16. */
+#define LV_COLOR_DEPTH @NEUI_LVGL_COLOR_DEPTH@
+
+/* ~60 FPS refresh cap (default 33 ms caps animated measurement at 30). */
+#define LV_DEF_REFR_PERIOD 16
+
+/* Desktop prototype: use the C library directly instead of LVGL's built-in
+ * fixed-size pool (ThorVG scratch + TinyTTF glyph caches would exhaust the
+ * 64K default). */
+#define LV_USE_STDLIB_MALLOC  LV_STDLIB_CLIB
+#define LV_USE_STDLIB_STRING  LV_STDLIB_CLIB
+#define LV_USE_STDLIB_SPRINTF LV_STDLIB_CLIB
+
+/* The LVGL native Windows driver requires the OS abstraction: its HWND lives
+ * on a dedicated thread and every WndProc entry takes lv_lock(). */
+#define LV_USE_OS      LV_OS_WINDOWS
+#define LV_USE_WINDOWS 1
+
+/* With LV_USE_OS enabled the SW renderer runs draw tasks on a worker thread;
+ * ThorVG requires at least a 32K stack there (compile-time enforced). */
+#define LV_DRAW_THREAD_STACK_SIZE (64 * 1024)
+
+/* Scalable text for neui's family-name + arbitrary-px font model
+ * (open question resolved: Tiny TTF, not FreeType, for the prototype). */
+#define LV_USE_TINY_TTF               1
+#define LV_TINY_TTF_FILE_SUPPORT      1
+#define LV_TINY_TTF_CACHE_GLYPH_CNT   256
+#define LV_TINY_TTF_CACHE_KERNING_CNT 256
+
+/* Anti-aliased vector paths (KNOB arcs, compound PATH layers) via LVGL's
+ * bundled ThorVG (open question resolved: ThorVG, not a hand-rolled
+ * scanline rasteriser). */
+#define LV_USE_FLOAT          1  /* required by LV_USE_MATRIX */
+#define LV_USE_MATRIX         1
+#define LV_USE_VECTOR_GRAPHIC 1
+#define LV_USE_THORVG         1
+#define LV_USE_THORVG_INTERNAL 1
+
+/* FPS + CPU counters for the Milestone 3 measurements. LOG_MODE prints
+ * "sysmon: N FPS ..." lines to stdout instead of drawing an overlay label -
+ * capturable by scripts, and the overlay repaint can't pollute the
+ * Milestone 2 idle / dirty-rect verification. */
+#define LV_USE_SYSMON                 1
+#define LV_USE_PERF_MONITOR           1
+#define LV_USE_PERF_MONITOR_LOG_MODE  1
+
+/* Offscreen re-render of the object tree - used for pixel-level verification
+ * without touching the driver's private framebuffer. */
+#define LV_USE_SNAPSHOT 1
+
+/* Surface LVGL warnings on stdout during bring-up. */
+#define LV_USE_LOG    1
+#define LV_LOG_LEVEL  LV_LOG_LEVEL_WARN
+#define LV_LOG_PRINTF 1
+
+#endif /* LV_CONF_H */

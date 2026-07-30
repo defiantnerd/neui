@@ -19,6 +19,12 @@ option(NEUI_BUILD_TESTS    "Build the neui unit tests"       ${NEUI_IS_TOP_LEVEL
 # don't break the build - the project's documented default); CI turns it ON
 # (-DNEUI_WERROR=ON) so a new warning fails the build on every host.
 option(NEUI_WERROR         "Treat compiler warnings as errors" OFF)
+# LVGL host prototype (plans/lvgl-host-approach-c.md): a rendering backend +
+# xpl platform layer that draw through LVGL. OFF by default - existing builds
+# are unaffected. When ON, LVGL is fetched from git (see backends/lvgl/).
+# Currently Windows-only; configuration FAILS on other platforms (no silent
+# fallback).
+option(NEUI_WITH_LVGL      "Build the LVGL host + backend prototype" OFF)
 
 # iOS is an APPLE platform too, so it must be detected distinctly from macOS:
 # the CoreGraphics backend is shared (gated on APPLE), but the AppKit macOS
@@ -138,6 +144,17 @@ if(NEUI_IOS)
 endif()
 if(UNIX AND NOT APPLE)
   add_subdirectory("backends/cairo")
+endif()
+# LVGL backend + platform prototype - gated; FetchContent of LVGL lives in the
+# subdirectory. Must fail hard on platforms that can't run the LVGL host.
+if(NEUI_WITH_LVGL)
+  if(NOT WIN32)
+    message(FATAL_ERROR
+      "NEUI_WITH_LVGL is currently supported only on Windows (it uses LVGL's "
+      "native Windows display driver, LV_USE_WINDOWS). This platform cannot "
+      "run the LVGL host - configure with -DNEUI_WITH_LVGL=OFF.")
+  endif()
+  add_subdirectory("backends/lvgl")
 endif()
 add_subdirectory("backends/null")
 add_subdirectory("hosts/crossplatform")
@@ -630,6 +647,23 @@ if(WIN32)
 endif()
 if(APPLE)
   target_link_libraries(neui_tabview_example PRIVATE neui-macoshost)
+endif()
+
+# LVGL host prototype example (plans/lvgl-host-approach-c.md): the knob-heavy
+# measurement screen for the Milestone 3 FPS/CPU evaluation. Console app so
+# LVGL's perf monitor (LOG_MODE) prints sysmon lines to stdout. Pinned to the
+# crossplatform host, which this build pairs with the LVGL platform+backend.
+if(NEUI_WITH_LVGL)
+  add_executable(neui_lvgl_example examples/lvgl_example.cpp)
+  target_link_libraries(neui_lvgl_example PRIVATE neui neui-xplhost)
+  if(WIN32)
+    target_link_libraries(neui_lvgl_example PRIVATE neui-win32host)
+  endif()
+  # The IMAGE-widget check loads myimage.png from next to the executable.
+  add_custom_command(TARGET neui_lvgl_example POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage.png"
+            "$<TARGET_FILE_DIR:neui_lvgl_example>/myimage.png")
 endif()
 
 # Minimal README example - input + button + label echo. Pure C; mirrors the

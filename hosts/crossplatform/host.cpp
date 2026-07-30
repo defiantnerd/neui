@@ -782,6 +782,9 @@ namespace xpl_host
   void Session::set_focus(uint32_t new_idx)
   {
     if (new_idx == _focused_widget) return;
+#ifdef NEUI_PLATFORM_LVGL
+    const uint32_t prev_focus = _focused_widget;
+#endif
 
     // If the open combo is losing focus, close its overlay.
     if (_open_combo != 0 && _open_combo == _focused_widget && new_idx != _focused_widget)
@@ -816,9 +819,16 @@ namespace xpl_host
       ensure_widget_visible(new_idx);
     }
 
+#ifdef NEUI_PLATFORM_LVGL
+    // Focus decorations are per-widget: repaint the losing + gaining widgets
+    // only (whole-frame fallback happens inside the hook when needed).
+    platform_retained_widget_invalidate(this, new_idx);
+    platform_retained_widget_invalidate(this, prev_focus);
+#else
     uint32_t ref = (new_idx != 0) ? new_idx : _focused_widget;
     void* frame = find_parent_native_handle(ref);
     if (frame) platform_invalidate(frame);
+#endif
   }
 
   void Session::set_hovered(uint32_t new_idx)
@@ -852,11 +862,16 @@ namespace xpl_host
 
     // Repaint the frame so widgets whose paint reacts to .hovered (BUTTON, ...)
     // swap visuals. Hover transitions happen at human pointer speed - cheap.
+#ifdef NEUI_PLATFORM_LVGL
+    platform_retained_widget_invalidate(this, old_idx);
+    platform_retained_widget_invalidate(this, new_idx);
+#else
     uint32_t ref = (new_idx != 0) ? new_idx : old_idx;
     if (ref != 0) {
       if (void* frame = find_parent_native_handle(ref))
         platform_invalidate(frame);
     }
+#endif
   }
 
   void Session::set_pressed(uint32_t new_idx)
@@ -874,11 +889,16 @@ namespace xpl_host
 
     // Same rationale as set_hovered: frame repaint so .pressed-aware widgets
     // (BUTTON) flip to their pressed visual immediately.
+#ifdef NEUI_PLATFORM_LVGL
+    platform_retained_widget_invalidate(this, old_idx);
+    platform_retained_widget_invalidate(this, new_idx);
+#else
     uint32_t ref = (new_idx != 0) ? new_idx : old_idx;
     if (ref != 0) {
       if (void* frame = find_parent_native_handle(ref))
         platform_invalidate(frame);
     }
+#endif
   }
 
   void Session::on_dpi_changed(uint32_t widget_index, uint32_t new_dpi)
@@ -1055,6 +1075,10 @@ namespace xpl_host
         st.scroll_y == st.last_notified_y) return;
     st.last_notified_x = st.scroll_x;
     st.last_notified_y = st.scroll_y;
+#ifdef NEUI_PLATFORM_LVGL
+    // Children move with the scroll offset - re-sync the mirror tree.
+    platform_retained_tree_changed(session, index);
+#endif
     neui_event_t ev{};
     ev.type                  = NEUI_EVENT_SCROLL_CHANGED;
     ev.data.scroll.widget.id = widget_id;
@@ -1281,6 +1305,9 @@ namespace xpl_host
       pw.height = pw_h;
       pw.visible = (i == selected);
     }
+#ifdef NEUI_PLATFORM_LVGL
+    if (session) platform_retained_tree_changed(session, index);
+#endif
   }
 
   void TabViewWidget::select_tab(int ni)
@@ -1464,8 +1491,12 @@ namespace xpl_host
   void WidgetData::repaint()
   {
     if (session) {
+#ifdef NEUI_PLATFORM_LVGL
+      platform_retained_widget_invalidate(session, index);
+#else
       void* frame = session->find_parent_native_handle(index);
       if (frame) platform_invalidate(frame);
+#endif
     }
   }
 
@@ -2274,6 +2305,103 @@ namespace xpl_host
     // iteration) see the session's default tracking palette again.
     neui_detail::set_active_palette_override(prev_override);
   }
+
+#ifdef NEUI_PLATFORM_LVGL
+  // -------------------------------------------------------------------------
+  // Retained-mode paint entries (LVGL Option C prototype). One widget per
+  // call, dispatched from the widget mirror's LVGL draw events; the palette /
+  // focus / PREUPDATE / disabled-dim environment matches paint_frame's walk.
+
+  // The frame ancestor that owns widget_index's window (0 = none found).
+  static uint32_t owning_frame_index(Session* s, uint32_t widget_index)
+  {
+    uint32_t idx = widget_index;
+    while (idx != 0 && s->_widgets.exists(idx)) {
+      if (s->_widgets[idx].native_handle) return idx;
+      idx = s->_widgets.get_parent(idx);
+    }
+    return 0;
+  }
+
+  // RAII palette bracket matching paint_frame's selection for the frame.
+  struct RetainedPaletteBracket {
+    const neui_detail::Palette* prev;
+    RetainedPaletteBracket(Session* s, uint32_t frame_index)
+      : prev(neui_detail::active_palette_override_ptr())
+    {
+      bool follow = false;
+      if (frame_index != 0 && s->_widgets.exists(frame_index)) {
+        auto& fw = s->_widgets[frame_index];
+        if (fw.attrs && fw.attrs->get_int(NEUI_ATTR_FOLLOW_SYSTEM_THEME, 0) != 0)
+          follow = true;
+      }
+      neui_detail::set_active_palette_override(
+        follow ? &s->_effective_palette : &s->_frozen_palette);
+    }
+    ~RetainedPaletteBracket() { neui_detail::set_active_palette_override(prev); }
+  };
+
+  void Session::paint_widget_retained(neui_render_ctx_t ctx,
+                                      uint32_t widget_index,
+                                      bool after_children)
+  {
+    if (!_backend || !ctx) return;
+    if (widget_index == 0 || !_widgets.exists(widget_index)) return;
+    auto& wd = _widgets[widget_index];
+    if (wd.native_handle || wd.is_menubar() || !wd.visible ||
+        wd.width <= 0 || wd.height <= 0)
+      return;
+
+    RetainedPaletteBracket palette(this, owning_frame_index(this, widget_index));
+    const uint32_t focus_for_paint = _os_focused ? _focused_widget : 0;
+
+    if (!after_children) {
+      if (wd.emit_events) {
+        neui_event_t pre{};
+        pre.type = NEUI_EVENT_WIDGET_PREUPDATE;
+        pre.data.preupdate.widget.id = widget_index;
+        dispatch_event(&pre);
+      }
+      bool dim = !wd.enabled && _backend->push_alpha && _backend->pop_alpha;
+      if (dim) _backend->push_alpha(ctx, 0.5f);
+      wd.paint(_backend, ctx, widget_index == focus_for_paint);
+      if (dim) _backend->pop_alpha(ctx);
+    } else {
+      wd.paint_after_children(_backend, ctx, widget_index == focus_for_paint);
+    }
+  }
+
+  void Session::paint_frame_background_retained(neui_render_ctx_t ctx,
+                                                uint32_t frame_index)
+  {
+    if (!_backend || !ctx) return;
+    WidgetData* fw = get_widget(frame_index);
+    if (!fw) return;
+    const uint32_t clear = frame_clear_color(frame_index);
+    _backend->fill_rect(ctx, 0.0f, 0.0f,
+                        static_cast<float>(fw->width),
+                        static_cast<float>(fw->height),
+                        clear | 0xFF000000u);
+  }
+
+  void Session::paint_overlays_retained(neui_render_ctx_t ctx,
+                                        uint32_t frame_index)
+  {
+    if (!_backend || !ctx) return;
+    RetainedPaletteBracket palette(this, frame_index);
+    if (_open_combo != 0 && _widgets.exists(_open_combo)) {
+      auto parents = _widgets.get_all_parents(_open_combo);
+      bool in_frame = false;
+      for (uint32_t p : parents) if (p == frame_index) { in_frame = true; break; }
+      if (in_frame) {
+        auto* cb = dynamic_cast<ComboBoxWidget*>(&_widgets[_open_combo]);
+        if (cb) cb->paint_overlay(_backend, ctx);
+      }
+    }
+    paint_popup_menu(ctx);
+    paint_toast(ctx, frame_index);
+  }
+#endif // NEUI_PLATFORM_LVGL
 
   // -------------------------------------------------------------------------
   // Tab stop / focus cycling

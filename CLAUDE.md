@@ -26,6 +26,8 @@ Outputs - Windows: `out/build/Debug/{neui_example.exe, neui.lib, neui-win32host.
 
 **Tests**: `tests/` is a Tier-1 header-only unit suite (`neui_tests`) over the portable logic in `hosts/shared/*.h` - links no host and no backend, builds everywhere including the null platform. Toggle with `-DNEUI_BUILD_TESTS=OFF`. Run directly or via `ctest --test-dir out/build -C Debug`. Linux-only extra targets: `neui_cairo_smoke` (offscreen Cairo, ctest-registered) and `neui_embed_smoke` (fake-DAW embedding, needs a live X display).
 
+**LVGL host prototype** (`-DNEUI_WITH_LVGL=ON`, default OFF, Windows-only - configure FATAL_ERRORs elsewhere): pairs the xpl host with `backends/lvgl/` (`neui-backend-lvgl`) + `platform_lvgl.cpp` instead of D2D + `platform_win32.cpp` (LVGL fetched from git via FetchContent; config generated from `backends/lvgl/lv_conf.h.in`, framebuffer depth via `-DNEUI_LVGL_COLOR_DEPTH=32|16`). Adds `neui_lvgl_example` (console app; perf numbers on stdout). Runtime env `NEUI_LVGL_RETAINED=0` flips the retained per-widget mirror layer (Option C) back to the whole-frame baseline. Status + measurements (both depths): `plans/lvgl-host-approach-c.md`.
+
 ## Per-platform host + backend selection
 
 - **Windows**: `neui-win32host` + `neui-xplhost`; backend `neui-backend-d2d`; xpl platform `platform_win32.cpp`.
@@ -185,4 +187,5 @@ Active plans (`plans/`) are open or deferred work only - completed plans were re
 - `winui3-host.md` - third host backend feasibility analysis (deferred indefinitely).
 - `wasm-host.md` - WebAssembly / Canvas-2D host feasibility analysis (deferred; phased path documented).
 - `lvgl-port.md` - neui-on-LVGL feasibility investigation (no implementation proposed).
+- `lvgl-host-approach-c.md` - neui-on-LVGL Option C prototype - EXECUTED 2026-07-30; results + measurements appended in the file. Follow-ups (LVGL version pin, appearance cache, embedded driver) listed there.
 - `how-to-port.md` - reference playbook for new-platform ports.
