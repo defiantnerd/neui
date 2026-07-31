@@ -30,7 +30,8 @@
 //
 // HOW OFTEN provide() IS CALLED - it differs by kind:
 //   * IMAGE: the host caches resolution outcomes, misses included, so the client
-//     is asked ONCE per (name, scale band) per session and never re-probed. In
+//     is asked ONCE per (base_dir, name, scale band) per session and never
+//     re-probed - a name from a component document is scoped to that document. In
 //     particular `provide` is NEVER called per frame, even though the framework's
 //     IMAGE widget resolves its source on every paint, and a client that declines
 //     is not asked again. (Negative outcomes are sticky in v0; an explicit
@@ -49,14 +50,10 @@
 // this interface answers "here are the BYTES". Full order for an asset named
 // inside a component document:
 //   env.resolve_asset -> resource_client->provide -> filesystem.
-// v0 LIMITATION: the two hooks do NOT see the same string. resolve_asset gets the
-// raw entry from the document's "assets" map; provide() gets that entry joined
-// onto the document's base_dir, because the component loader holds only the
-// public asset API (which takes a path) and the join therefore happens before
-// this interface is reached. A client serving component-referenced assets should
-// match on the joined path's suffix. Tracked in
-// plans/client-resource-provider.md (follow-up 1: a byte hook through
-// ComponentApis closes it).
+// Both hooks see the SAME name string - the raw entry from the document's
+// "assets" map, never a base_dir-joined path - so one client-side lookup table
+// can serve both. The document's directory arrives separately in `base_dir`
+// below; only the host's own filesystem fallback joins the two.
 //
 // THREADING / REENTRANCY: provide() and release() are called on the UI thread,
 // synchronously, inside the neui call that triggered the load. That call is
@@ -108,13 +105,11 @@ extern "C" {
     neui_resource_kind_t kind;
 
     // The name exactly as the client originally passed it (to create_from_file,
-    // set_text on an IMAGE widget, create_font_from_file, ...). NOT a
-    // host-rewritten variant: no "@2x" suffix is ever appended - the @Nx
-    // convention stays a filesystem convention. The client looks its own
-    // container up by the name it already knows.
-    // ONE EXCEPTION (v0, see the file header): an asset referenced from inside a
-    // component document arrives as that document's base_dir joined onto the raw
-    // "assets"-map entry, not as the bare entry.
+    // set_text on an IMAGE widget, create_font_from_file, ...), or the raw entry
+    // from a component document's "assets" map. NOT a host-rewritten variant: no
+    // "@2x" suffix appended - the @Nx convention stays a filesystem convention -
+    // and no base_dir joined on. The client looks its own container up by the
+    // name it already knows.
     const char*          name;
 
     // IMAGE only (0.0 for every other kind): the display scale the host is
@@ -124,11 +119,11 @@ extern "C" {
     // name and scale band, never once per @Nx variant.
     float                scale_hint;
 
-    // RESERVED, always NULL in v0. Intended to carry the base_dir of the
-    // component document a resource is referenced from, so a client could
-    // disambiguate same-named assets of two different components. It stays NULL
-    // until the ComponentApis byte hook lands, because until then `name` above
-    // arrives base_dir-joined instead. Do not branch on it.
+    // When the resource is referenced from inside a component document, that
+    // document's base_dir - so a client can disambiguate same-named assets
+    // belonging to two different components, and so `name` above can stay the raw
+    // entry. NULL for every other load, and NULL for a document with no base_dir.
+    // A client that ignores it still works whenever its names are unique.
     const char*          base_dir;
   } neui_resource_request_t;
 

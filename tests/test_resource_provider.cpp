@@ -86,6 +86,7 @@ struct FakeClient {
   std::vector<std::string>          names;      // requested names, in order
   std::vector<neui_resource_kind_t> kinds;
   std::vector<float>                hints;
+  std::vector<std::string>          dirs;       // request base_dir ("" if NULL)
   std::vector<std::string>          serves;     // names it has bytes for
   float                             reply_scale = 0.0f;   // 0 -> "treat as 1.0"
   int                               provides    = 0;      // returned true count
@@ -93,7 +94,7 @@ struct FakeClient {
   uint8_t                           blob[4]     = { 1, 2, 3, 4 };
 
   void reset() {
-    names.clear(); kinds.clear(); hints.clear();
+    names.clear(); kinds.clear(); hints.clear(); dirs.clear();
     provides = releases = 0;
   }
 };
@@ -106,6 +107,7 @@ bool NEUI_ABI fc_provide(void* token, const neui_resource_request_t* req,
   fc->names.push_back(req->name ? req->name : "");
   fc->kinds.push_back(req->kind);
   fc->hints.push_back(req->scale_hint);
+  fc->dirs.push_back(req->base_dir ? req->base_dir : "");
   for (const auto& s : fc->serves) {
     if (s == fc->names.back()) {
       out->data          = fc->blob;
@@ -196,6 +198,44 @@ TEST_CASE("resource provider: client routes do not collapse across scale bands")
   // ... and neither may be mistakable for a filesystem path.
   CHECK(k1.find("logo.png") != std::string::npos);
   CHECK(k1[0] == '\x01');
+}
+
+TEST_CASE("resource provider: base_dir is passed alongside the name, not joined")
+{
+  // The component-document path (ComponentApis::bitmap_from_name -> here). The
+  // client must be asked for the raw "assets"-map entry with the document's
+  // directory as base_dir; only the filesystem fallback joins them.
+  CountingLoader::reset({ "res/b/knob.png" });   // the joined file exists
+  g_fc = FakeClient{};
+  g_fc.serves = { "knob.png" };                  // client knows the RAW name
+  g_fc.dirs.clear();
+
+  AssetStore<CountingLoader> store;
+  neui_resource_client_t iface{};
+  store.set_resource_provider(make_provider(iface, 0));
+
+  CHECK(store.allocate_from_file("knob.png", 1.0f, "res/a") != 0);
+  REQUIRE((int)g_fc.names.size() == 1);
+  CHECK(g_fc.names[0] == "knob.png");            // NOT "res/a/knob.png"
+  CHECK(g_fc.dirs[0]  == "res/a");
+  CHECK_EQ(CountingLoader::s_path_calls, 0);     // client won, no ladder
+
+  // A different document, same asset name: its own route, its own provider call
+  // (two components may use one name for different images).
+  CHECK(store.allocate_from_file("knob.png", 1.0f, "res/b") != 0);
+  REQUIRE((int)g_fc.names.size() == 2);
+  CHECK(g_fc.dirs[1] == "res/b");
+
+  // And with no provider answer, the ladder resolves base_dir + name.
+  g_fc.serves.clear();
+  AssetStore<CountingLoader> store2;
+  neui_resource_client_t iface2{};
+  store2.set_resource_provider(make_provider(iface2, 0));
+  CHECK(store2.allocate_from_file("knob.png", 1.0f, "res/b") != 0);
+  CHECK(store2.image_route("knob.png", 1.0f, false, "res/b").file_path
+        == std::string("res/b/knob.png"));
+  // A bare name with no base_dir is a different route and does not exist.
+  CHECK_EQ((int)store2.allocate_from_file("knob.png", 1.0f), 0);
 }
 
 TEST_CASE("resource provider: a client route still falls back to the file")

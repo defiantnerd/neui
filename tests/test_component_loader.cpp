@@ -7,6 +7,7 @@
 #include "neui_test.h"
 #include "component_loader.h"
 
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -498,6 +499,56 @@ TEST_CASE("component_loader: asset resolution via env callback")
   CHECK(g_loaded_files.size() == 1);
   CHECK(g_loaded_files[0] == std::string("res/knob_move.png"));
   CHECK(c.owned_assets.size() == 1);           // only the path-loaded one is owned
+}
+
+TEST_CASE("component_loader: the byte hook gets the raw name plus base_dir")
+{
+  // ComponentApis::bitmap_from_name is how a host reaches its client resource
+  // provider for a layer asset. The whole point is the name it receives: the raw
+  // "assets"-map entry with base_dir passed ALONGSIDE, never joined on - a client
+  // keying its container on "knob_bg.png" must not be asked for "res/knob_bg.png"
+  // (<neui/d/resource.h>). The hook fully replaces path mode, so create_from_file
+  // must not run at all.
+  static std::vector<std::pair<std::string, std::string>> asked;  // name, base_dir
+  asked.clear();
+
+  reset_recorders();
+  neui_asset_api_t a; neui_compound_api_t c; neui_behavior_api_t b;
+  ComponentApis apis = make_fake_apis(a, c, b);
+  apis.bitmap_from_name = [](void*, const char* name,
+                             const char* base_dir) -> neui_asset_t {
+    asked.emplace_back(name ? name : "", base_dir ? base_dir : "<null>");
+    if (std::string(name) == "knob_bg.png") { neui_asset_t r; r.id = 4242; return r; }
+    return asset_none;   // "indicator" declines -> stays unresolved
+  };
+
+  neui_component_env_t env{};
+  env.base_dir = "res";
+  neui_session_t sess; sess.session = 1;
+  BuiltComponent got = build_component(sess, kKnobJson,
+                                       (uint32_t)std::strlen(kKnobJson), &env, apis);
+
+  REQUIRE(asked.size() == 2);
+  CHECK(asked[0].first  == std::string("knob_bg.png"));    // raw, no "res/"
+  CHECK(asked[0].second == std::string("res"));            // passed separately
+  CHECK(asked[1].first  == std::string("knob_move.png"));
+  CHECK(g_loaded_files.empty());                 // path mode never ran
+  CHECK(got.owned_assets.size() == 1);           // the hook's handle is owned
+  CHECK(got.owned_assets[0].id == 4242u);
+
+  // env.resolve_asset still wins over the hook (order: resolve_asset -> provider
+  // -> filesystem), and a borrowed handle is not owned.
+  asked.clear();
+  reset_recorders();
+  env.resolve_asset = [](void*, const char* name, const char*) -> neui_asset_t {
+    if (std::string(name) == "bg") { neui_asset_t r; r.id = 7777; return r; }
+    return asset_none;
+  };
+  BuiltComponent got2 = build_component(sess, kKnobJson,
+                                        (uint32_t)std::strlen(kKnobJson), &env, apis);
+  REQUIRE(asked.size() == 1);                              // only "indicator"
+  CHECK(asked[0].first == std::string("knob_move.png"));
+  CHECK(got2.owned_assets.empty());                        // 7777 is borrowed
 }
 
 TEST_CASE("component_loader: malformed json fails gracefully")

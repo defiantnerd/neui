@@ -2416,6 +2416,22 @@ namespace macos_host
     for (auto a : built.owned_assets) a_destroy(session, a);
   }
 
+  // ComponentApis::bitmap_from_name - see component_loader.h. A layer asset named
+  // in a component document reaches the client resource provider as the raw
+  // "assets" entry plus that document's base_dir, which the public path-taking
+  // create_from_file cannot express; the store joins them for its own filesystem
+  // fallback.
+  static neui_asset_t component_bitmap_from_name(void* user, const char* name,
+                                                 const char* base_dir)
+  {
+    auto* s = static_cast<Session*>(user);
+    if (!s || !name) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_from_file(
+        name, best_asset_scale_macos(), base_dir);
+    if (slot == 0) return asset_none;
+    return pack_asset_macos(s->session_id(), slot);
+  }
+
   static neui_asset_t NEUI_ABI a_create_component_from_string(
       neui_session_t session, const char* json, uint32_t len,
       const neui_component_env_t* env)
@@ -2426,6 +2442,8 @@ namespace macos_host
     apis.asset    = &asset_api;
     apis.compound = &compound_api;
     apis.behavior = &behavior_api;
+    apis.bitmap_from_name = component_bitmap_from_name;
+    apis.user             = s;
     neui_detail::BuiltComponent built =
         neui_detail::build_component(session, json, len, env, apis);
     if (!built.ok) { release_built_component_macos(session, built); return asset_none; }

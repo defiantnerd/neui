@@ -204,6 +204,12 @@ namespace neui_detail
       // Resolved @Nx filesystem variant. Empty on a client route - those bytes
       // have no path, which is why `name` is kept separately.
       std::string file_path;
+      // The component document's base_dir when this name came from one, else
+      // empty. Passed to the provider as neui_resource_request_t::base_dir and
+      // joined onto `name` for the filesystem ladder - the whole point being that
+      // the client sees the raw name it wrote plus the directory separately,
+      // never a pre-joined path (<neui/d/resource.h>).
+      std::string base_dir;
       // Stable key for derived path-keyed caches: the resolved path for a file
       // route, a synthetic per-band key for a client route (see
       // client_cache_key - the band has to be in it).
@@ -222,22 +228,26 @@ namespace neui_detail
     }
 
     // `refresh_miss` re-probes an entry cached as a MISS (see the sticky-negative
-    // note above); a cached HIT is always reused.
+    // note above); a cached HIT is always reused. `base_dir` is the component
+    // document a name came from, if any - it scopes the cache entry, so the same
+    // asset name in two documents resolves independently.
     const ImageRoute& image_route(const std::string& name, float scale,
-                                  bool refresh_miss = false)
+                                  bool refresh_miss = false,
+                                  const char* base_dir = nullptr)
     {
       static const ImageRoute k_no_route;
       if (name.empty()) return k_no_route;
       if (scale <= 0.0f) scale = 1.0f;
 
-      std::string key = route_key(name, scale_bucket(scale));
+      const std::string dir = base_dir ? base_dir : "";
+      std::string key = route_key(name, scale_bucket(scale), dir);
       auto it = _routes.find(key);
       if (it != _routes.end()) {
         if (it->second.found || !refresh_miss) return it->second;
-        it->second = probe_image_route(name, scale);
+        it->second = probe_image_route(name, scale, dir);
         return it->second;
       }
-      return _routes.emplace(std::move(key), probe_image_route(name, scale))
+      return _routes.emplace(std::move(key), probe_image_route(name, scale, dir))
                     .first->second;
     }
 
@@ -284,7 +294,8 @@ namespace neui_detail
         _probe = ProbePixels{};
       } else if (route.from_client) {
         const bool ok = _provider.with_bytes(
-            NEUI_RESOURCE_KIND_IMAGE, route.name.c_str(), route.req_scale, nullptr,
+            NEUI_RESOURCE_KIND_IMAGE, route.name.c_str(), route.req_scale,
+            route.base_dir.empty() ? nullptr : route.base_dir.c_str(),
             [&](const uint8_t* data, uint32_t len, float s) {
               uint32_t dw = 0, dh = 0;
               uint8_t* raw = Loader::load_memory(data, len, &dw, &dh);
@@ -300,13 +311,14 @@ namespace neui_detail
           // just for the one probe that decided the route.
           out_px.clear();
           DecodedImage      file_px;
-          const std::string fallback = resolve_path(route.name, route.req_scale,
-                                                    &file_px);
+          const std::string fs_name  = fs_name_of(route.name, route.base_dir);
+          const std::string fallback = resolve_path(fs_name, route.req_scale,
+                                                   &file_px);
           if (fallback.empty() || file_px.pixels.empty()) return false;
           out_px = std::move(file_px.pixels);
           w  = file_px.w_px;
           h  = file_px.h_px;
-          sc = scale_of_resolved(route.name, fallback);
+          sc = scale_of_resolved(fs_name, fallback);
         }
       } else {
         uint32_t dw = 0, dh = 0;
@@ -323,7 +335,16 @@ namespace neui_detail
 
     // Allocate a slot from a file path (resolves @2x / @3x variants when
     // the requested scale > 1.0). Returns 0 on failure.
-    uint32_t allocate_from_file(const std::string& name, float scale)
+    //
+    // `base_dir` is for ONE caller: the component loader's byte hook
+    // (ComponentApis::bitmap_from_name). A name out of a component document's
+    // "assets" map must reach the client resource provider raw, with the
+    // document's directory alongside it rather than joined on - see
+    // <neui/d/resource.h>. The filesystem fallback below joins them itself, so
+    // this is equivalent to the old create_from_file(join_path(dir, name)) when
+    // no provider answers.
+    uint32_t allocate_from_file(const std::string& name, float scale,
+                                const char* base_dir = nullptr)
     {
       if (name.empty()) return 0;
       if (scale <= 0.0f) scale = 1.0f;
@@ -332,7 +353,8 @@ namespace neui_detail
       // that was missing earlier gets another chance (see the sticky-negative
       // note on ImageRoute). The per-frame tier in the xpl AssetManager does not
       // pass it.
-      const ImageRoute& route = image_route(name, scale, /*refresh_miss=*/true);
+      const ImageRoute& route = image_route(name, scale, /*refresh_miss=*/true,
+                                            base_dir);
       if (!route.found) return 0;
 
       auto     entry = std::make_unique<AssetEntry>();
@@ -1011,10 +1033,12 @@ namespace neui_detail
     // file. Those pixels are PARKED (park_probe) and handed to the first
     // decode_route for the same route, so a cold load costs one provide() and
     // one decode - and none per frame, which is the cost that actually mattered.
-    ImageRoute probe_image_route(const std::string& name, float scale)
+    ImageRoute probe_image_route(const std::string& name, float scale,
+                                 const std::string& base_dir)
     {
       ImageRoute r;
       r.name      = name;
+      r.base_dir  = base_dir;
       r.req_scale = scale;
       _probe = ProbePixels{};   // anything a previous probe parked is stale now
 
@@ -1022,7 +1046,8 @@ namespace neui_detail
         DecodedImage got;
         float        got_scale = 1.0f;
         const bool usable = _provider.with_bytes(
-            NEUI_RESOURCE_KIND_IMAGE, name.c_str(), scale, nullptr,
+            NEUI_RESOURCE_KIND_IMAGE, name.c_str(), scale,
+            base_dir.empty() ? nullptr : base_dir.c_str(),
             [&](const uint8_t* data, uint32_t len, float s) {
               uint32_t w = 0, h = 0;
               uint8_t* raw = Loader::load_memory(data, len, &w, &h);
@@ -1035,7 +1060,7 @@ namespace neui_detail
         if (usable) {
           r.found       = true;
           r.from_client = true;
-          r.cache_key   = client_cache_key(name, scale_bucket(scale));
+          r.cache_key   = client_cache_key(name, scale_bucket(scale), base_dir);
           r.scale       = got_scale;
           park_probe(r.cache_key, std::move(got), got_scale);
           return r;
@@ -1043,15 +1068,26 @@ namespace neui_detail
       }
 
       DecodedImage      file_px;
-      const std::string resolved = resolve_path(name, scale, &file_px);
+      const std::string fs_name  = fs_name_of(name, base_dir);
+      const std::string resolved = resolve_path(fs_name, scale, &file_px);
       if (!resolved.empty()) {
         r.found     = true;
         r.file_path = resolved;
         r.cache_key = resolved;
-        r.scale     = scale_of_resolved(name, resolved);
+        r.scale     = scale_of_resolved(fs_name, resolved);
         park_probe(r.cache_key, std::move(file_px), r.scale);
       }
       return r;
+    }
+
+    // The filesystem name a route resolves from: the resource name, joined onto
+    // its component document's base_dir when it has one. (join_path lives in
+    // component_loader.h, which this header already depends on for
+    // BuiltComponent.)
+    static std::string fs_name_of(const std::string& name,
+                                  const std::string& base_dir)
+    {
+      return base_dir.empty() ? name : cl_detail::join_path(base_dir, name);
     }
 
     // Cache key for a route whose bytes came from the client: those bytes have no
@@ -1059,19 +1095,24 @@ namespace neui_detail
     // legitimately answer one name with different pixels per band (that is what
     // scale_hint is for), and the derived path-keyed caches store one AssetEntry
     // per key - drop the band and every band after the first would be served the
-    // first one's bitmap at the wrong resolution.
-    static std::string client_cache_key(const std::string& name, int bucket)
+    // first one's bitmap at the wrong resolution. base_dir is in it for the same
+    // reason: two component documents may use one name for different images.
+    static std::string client_cache_key(const std::string& name, int bucket,
+                                       const std::string& base_dir)
     {
       return std::string("\x01") + "client\x01" + static_cast<char>('0' + bucket)
-           + '\x01' + name;   // '\x01' cannot occur in a path
+           + '\x01' + base_dir + '\x02' + name;  // neither byte occurs in a path
     }
 
-    // (name, scale bucket) -> resolution outcome key. Folded into one string so
-    // the map can hash rather than compare strings down a tree - this sits on the
-    // per-frame paint path.
-    static std::string route_key(const std::string& name, int bucket)
+    // (base_dir, name, scale bucket) -> resolution outcome key. Folded into one
+    // string so the map can hash rather than compare strings down a tree - this
+    // sits on the per-frame paint path.
+    static std::string route_key(const std::string& name, int bucket,
+                                 const std::string& base_dir)
     {
-      return name + '\x01' + static_cast<char>('0' + bucket);
+      std::string k = name + '\x01' + static_cast<char>('0' + bucket);
+      if (!base_dir.empty()) k = base_dir + '\x02' + k;
+      return k;
     }
 
     // Pixels a probe has already decoded, waiting for the first decode_route of
