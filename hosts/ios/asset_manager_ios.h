@@ -21,6 +21,9 @@ namespace ios_host
   {
     static uint8_t* load(const char* path, uint32_t* w_px, uint32_t* h_px)
     { return neui_detail::load_image_bgra8_ios(path, w_px, h_px); }
+    static uint8_t* load_memory(const uint8_t* data, size_t len,
+                                uint32_t* w_px, uint32_t* h_px)
+    { return neui_detail::load_image_bgra8_ios_memory(data, len, w_px, h_px); }
     static void free_pixels(uint8_t* p) { neui_detail::free_image_bgra8(p); }
   };
 

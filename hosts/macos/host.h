@@ -285,6 +285,11 @@ namespace macos_host
     // Fetched once at session create time; called when the user commits a
     // grid in-place cell edit.
     neui_grid_client_t* _grid_client = nullptr;
+
+    // Optional client resource provider (NEUI_API_RESOURCE_CLIENT). Asked for
+    // bytes before this host tries the bundle / disk. The live binding used by
+    // the load paths is _asset_manager.resource_provider().
+    neui_resource_client_t* _resource_client = nullptr;
   };
 
   // Process-wide session registry (defined in host.mm). Slot index + 1 is

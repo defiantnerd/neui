@@ -11,6 +11,8 @@ namespace xpl_host
   // loader policy below doesn't need the full platform.h.
   uint8_t* platform_load_image(const char* path,
                                 uint32_t* width_out, uint32_t* height_out);
+  uint8_t* platform_load_image_bytes(const uint8_t* data, size_t len,
+                                      uint32_t* width_out, uint32_t* height_out);
   void platform_free_image(uint8_t* pixels);
 }
 
@@ -22,6 +24,9 @@ namespace neui_detail
   {
     static uint8_t* load(const char* path, uint32_t* w_px, uint32_t* h_px)
     { return xpl_host::platform_load_image(path, w_px, h_px); }
+    static uint8_t* load_memory(const uint8_t* data, size_t len,
+                                uint32_t* w_px, uint32_t* h_px)
+    { return xpl_host::platform_load_image_bytes(data, len, w_px, h_px); }
     static void free_pixels(uint8_t* p) { xpl_host::platform_free_image(p); }
   };
 
@@ -54,13 +59,14 @@ namespace neui_detail
     void clear(neui_render_backend_t* backend);
 
   private:
-    // Cache keyed by resolved file path so different scale lookups that
-    // resolve to the same file share a single AssetEntry.
+    // Cache keyed by ImageRoute::cache_key - the resolved file path, or a
+    // synthetic key for client-provided bytes - so different scale lookups that
+    // resolve to the same source share a single AssetEntry.
     std::unordered_map<std::string, AssetEntry> _cache;
 
-    // Attempts to load pixels from path. Returns true and populates entry
-    // on success.
-    static bool load_pixels(const std::string& path, AssetEntry& entry);
+    // Decodes the source `route` designates into `entry`. Returns true on
+    // success.
+    bool load_pixels(const ImageRoute& route, AssetEntry& entry);
   };
 
 } // namespace neui_detail

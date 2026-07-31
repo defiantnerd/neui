@@ -43,6 +43,80 @@ namespace neui_detail
     return fac;
   }
 
+  // Shared tail: run an initialised WIC decoder's first frame through a format
+  // converter into a new[]-allocated buffer. Releases nothing the caller owns.
+  inline uint8_t* wic_decode_frame_w32(IWICImagingFactory* wic,
+                                       IWICBitmapDecoder* decoder,
+                                       const WICPixelFormatGUID& pixel_format,
+                                       uint32_t* width_out,
+                                       uint32_t* height_out)
+  {
+    IWICBitmapFrameDecode* frame     = nullptr;
+    IWICFormatConverter*   converter = nullptr;
+    uint8_t*               result    = nullptr;
+
+    HRESULT hr = decoder->GetFrame(0, &frame);
+    if (FAILED(hr)) goto cleanup;
+
+    hr = wic->CreateFormatConverter(&converter);
+    if (FAILED(hr)) goto cleanup;
+
+    hr = converter->Initialize(frame, pixel_format,
+                                WICBitmapDitherTypeNone, nullptr, 0.0,
+                                WICBitmapPaletteTypeMedianCut);
+    if (FAILED(hr)) goto cleanup;
+
+    {
+      UINT w = 0, h = 0;
+      converter->GetSize(&w, &h);
+      if (w == 0 || h == 0) goto cleanup;
+
+      uint32_t stride = w * 4;
+      uint32_t size   = stride * h;
+      result = new uint8_t[size];
+      hr = converter->CopyPixels(nullptr, stride, size, result);
+      if (FAILED(hr)) { delete[] result; result = nullptr; goto cleanup; }
+
+      if (width_out)  *width_out  = w;
+      if (height_out) *height_out = h;
+    }
+
+  cleanup:
+    if (converter) converter->Release();
+    if (frame)     frame->Release();
+    return result;
+  }
+
+  // Decode encoded image bytes already in memory - the client resource provider
+  // path (NEUI_API_RESOURCE_CLIENT) has no path to hand over. Also the engine
+  // behind the embedded-resource branch of load_image_bgra8_w32 below.
+  // Caller releases via `free_image_bgra8_w32`. Returns nullptr on failure.
+  inline uint8_t* load_image_bgra8_w32_memory(const uint8_t* data, size_t len,
+                                              uint32_t* width_out,
+                                              uint32_t* height_out,
+                                              const WICPixelFormatGUID& pixel_format
+                                                = GUID_WICPixelFormat32bppPBGRA)
+  {
+    if (!data || len == 0 || len > 0xFFFFFFFFull) return nullptr;
+    IWICImagingFactory* wic = wic_factory_w32();
+    if (!wic) return nullptr;
+
+    IStream* stream = SHCreateMemStream(static_cast<const BYTE*>(data),
+                                        static_cast<UINT>(len));
+    if (!stream) return nullptr;
+
+    IWICBitmapDecoder* decoder = nullptr;
+    uint8_t*           result  = nullptr;
+    if (SUCCEEDED(wic->CreateDecoderFromStream(
+            stream, nullptr, WICDecodeMetadataCacheOnLoad, &decoder))) {
+      result = wic_decode_frame_w32(wic, decoder, pixel_format,
+                                    width_out, height_out);
+      decoder->Release();
+    }
+    stream->Release();
+    return result;
+  }
+
   // Decode `path` into a heap-allocated BGRA8 buffer.
   // `pixel_format` selects the WIC output format:
   //   - GUID_WICPixelFormat32bppPBGRA (default) - premultiplied alpha,
@@ -67,17 +141,9 @@ namespace neui_detail
     std::wstring wpath(n - 1, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, path, -1, &wpath[0], n);
 
-    IWICBitmapDecoder*     decoder    = nullptr;
-    IWICBitmapFrameDecode* frame      = nullptr;
-    IWICFormatConverter*   converter  = nullptr;
-    IStream*               res_stream = nullptr;
-    uint8_t*               result     = nullptr;
-    HRESULT                hr         = S_OK;
-
     // Embedded "PNG" resource: name = the caller-supplied path wrapped
     // in literal quotes (the rc.exe quirk above). Resource memory has
-    // process lifetime, so the IStream-over-buffer stays valid until
-    // we release it after decode.
+    // process lifetime, so decoding straight out of it is safe.
     std::wstring res_name = L"\"" + wpath + L"\"";
     if (HMODULE hMod = GetModuleHandleW(nullptr)) {
       if (HRSRC hRes = FindResourceW(hMod, res_name.c_str(), L"PNG")) {
@@ -85,57 +151,25 @@ namespace neui_detail
         HGLOBAL hGlob = LoadResource(hMod, hRes);
         if (hGlob && rsize > 0) {
           if (void* rdata = LockResource(hGlob)) {
-            res_stream = SHCreateMemStream(
-              static_cast<const BYTE*>(rdata), rsize);
-            if (res_stream) {
-              hr = wic->CreateDecoderFromStream(
-                res_stream, nullptr,
-                WICDecodeMetadataCacheOnLoad, &decoder);
-              if (FAILED(hr)) { decoder = nullptr; }  // try file fallback
-            }
+            if (uint8_t* res = load_image_bgra8_w32_memory(
+                    static_cast<const uint8_t*>(rdata), rsize,
+                    width_out, height_out, pixel_format))
+              return res;
+            // Fall through to the file branch on a bad resource.
           }
         }
       }
     }
 
-    if (!decoder) {
-      hr = wic->CreateDecoderFromFilename(
-        wpath.c_str(), nullptr, GENERIC_READ,
-        WICDecodeMetadataCacheOnLoad, &decoder);
-    }
-    if (FAILED(hr)) goto cleanup;
+    IWICBitmapDecoder* decoder = nullptr;
+    if (FAILED(wic->CreateDecoderFromFilename(
+            wpath.c_str(), nullptr, GENERIC_READ,
+            WICDecodeMetadataCacheOnLoad, &decoder)))
+      return nullptr;
 
-    hr = decoder->GetFrame(0, &frame);
-    if (FAILED(hr)) goto cleanup;
-
-    hr = wic->CreateFormatConverter(&converter);
-    if (FAILED(hr)) goto cleanup;
-
-    hr = converter->Initialize(frame, pixel_format,
-                                WICBitmapDitherTypeNone, nullptr, 0.0,
-                                WICBitmapPaletteTypeMedianCut);
-    if (FAILED(hr)) goto cleanup;
-
-    {
-      UINT w = 0, h = 0;
-      converter->GetSize(&w, &h);
-      if (w == 0 || h == 0) goto cleanup;
-
-      uint32_t stride = w * 4;
-      uint32_t size   = stride * h;
-      result = new uint8_t[size];
-      hr = converter->CopyPixels(nullptr, stride, size, result);
-      if (FAILED(hr)) { delete[] result; result = nullptr; goto cleanup; }
-
-      *width_out  = w;
-      *height_out = h;
-    }
-
-  cleanup:
-    if (converter)  converter->Release();
-    if (frame)      frame->Release();
-    if (decoder)    decoder->Release();
-    if (res_stream) res_stream->Release();
+    uint8_t* result = wic_decode_frame_w32(wic, decoder, pixel_format,
+                                          width_out, height_out);
+    decoder->Release();
     return result;
   }
 

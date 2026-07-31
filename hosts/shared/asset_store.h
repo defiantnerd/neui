@@ -1,9 +1,11 @@
 #pragma once
 
 #include <cstring>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <neui/d/renderer.h>
@@ -17,6 +19,7 @@
 #include "filmstrip_recognize.h"  // FilmstripLayout + sidecar/filename discovery
 #include "image_filter.h"  // image_gaussian_blur_bgra
 #include "filter_graph.h"  // FilterAsset + evaluate_filter (SVG fe* engine)
+#include "resource_provider.h"  // ResourceProvider (NEUI_API_RESOURCE_CLIENT)
 
 // Session-scoped asset slot table shared by all three hosts. Each host
 // previously carried a near-identical manager (xpl AssetManager, win32
@@ -29,6 +32,10 @@
 //     // Decode `path` into a heap BGRA8-premultiplied buffer; null on
 //     // failure. Ownership returns to free_pixels.
 //     static uint8_t* load(const char* path, uint32_t* w_px, uint32_t* h_px);
+//     // Same, from encoded bytes already in memory - the client resource
+//     // provider path (NEUI_API_RESOURCE_CLIENT) has no path to hand over.
+//     static uint8_t* load_memory(const uint8_t* data, size_t len,
+//                                 uint32_t* w_px, uint32_t* h_px);
 //     static void     free_pixels(uint8_t* p);
 //   };
 //
@@ -164,6 +171,82 @@ namespace neui_detail
       return alloc_slot(std::move(entry));
     }
 
+    // --- Image source resolution (cached) ----------------------------------
+    //
+    // Where a (name, scale) pair's bytes actually come from. CACHED, including
+    // misses, because the callers sit on the paint path: the path-keyed tier
+    // backing NEUI_W_IMAGE resolves once per IMAGE widget per frame, and
+    // resolution probes the @Nx candidate ladder by *decoding* each candidate
+    // (resolve_path below). Before this cache existed an IMAGE widget paid a
+    // full image decode every single frame purely to answer "which variant?".
+    //
+    // Keyed on the scale BUCKET rather than the raw scale, because that is all
+    // resolve_path's candidate order depends on - so 1.25 / 1.5 / 1.75 all share
+    // one entry.
+    //
+    // Negative results are sticky for the session (v0 decision); a DPI change
+    // into a different bucket re-resolves naturally, and clear_image_routes()
+    // drops them outright so a resource published late can still appear.
+    struct ImageRoute {
+      bool        found       = false;
+      // Bytes come from the client resource provider rather than the
+      // filesystem (see provide_image_bytes).
+      bool        from_client = false;
+      std::string path;        // resolved @Nx filesystem variant, when !from_client
+      std::string cache_key;   // stable key for derived path-keyed caches
+      float       scale       = 1.0f;  // HiDPI factor of what decode_route yields
+    };
+
+    // resolve_path's candidate order depends only on which band `scale` is in.
+    static int scale_bucket(float scale)
+    {
+      return scale > 2.0f ? 2 : (scale > 1.0f ? 1 : 0);
+    }
+
+    const ImageRoute& image_route(const std::string& name, float scale)
+    {
+      static const ImageRoute k_no_route;
+      if (name.empty()) return k_no_route;
+      if (scale <= 0.0f) scale = 1.0f;
+
+      RouteKey key{ name, scale_bucket(scale) };
+      auto it = _routes.find(key);
+      if (it != _routes.end()) return it->second;
+      return _routes.emplace(std::move(key), probe_image_route(name, scale))
+                    .first->second;
+    }
+
+    void clear_image_routes() { _routes.clear(); }
+
+    // Installed by the host at session-create time from
+    // client->get_interface(NEUI_API_RESOURCE_CLIENT). Absent (the default),
+    // every resolution below behaves exactly as it did before the interface
+    // existed.
+    void set_resource_provider(const ResourceProvider& p)
+    {
+      _provider = p;
+      clear_image_routes();   // cached misses predate the provider
+    }
+    const ResourceProvider& resource_provider() const { return _provider; }
+
+    // Decode whatever `route` points at into a fresh BGRA8-premultiplied
+    // buffer (released with Loader::free_pixels, as everywhere else).
+    uint8_t* decode_route(const ImageRoute& route, uint32_t* w_px, uint32_t* h_px)
+    {
+      if (!route.found) return nullptr;
+      if (route.from_client) {
+        uint8_t* px = nullptr;
+        _provider.with_bytes(
+            NEUI_RESOURCE_KIND_IMAGE, route.path.c_str(), route.scale, nullptr,
+            [&](const uint8_t* data, uint32_t len, float) {
+              px = Loader::load_memory(data, len, w_px, h_px);
+              return px != nullptr;
+            });
+        return px;
+      }
+      return Loader::load(route.path.c_str(), w_px, h_px);
+    }
+
     // Allocate a slot from a file path (resolves @2x / @3x variants when
     // the requested scale > 1.0). Returns 0 on failure.
     uint32_t allocate_from_file(const std::string& name, float scale)
@@ -171,11 +254,11 @@ namespace neui_detail
       if (name.empty()) return 0;
       if (scale <= 0.0f) scale = 1.0f;
 
-      std::string resolved = resolve_path(name, scale);
-      if (resolved.empty()) return 0;
+      const ImageRoute& route = image_route(name, scale);
+      if (!route.found) return 0;
 
       uint32_t w_px = 0, h_px = 0;
-      uint8_t* raw = Loader::load(resolved.c_str(), &w_px, &h_px);
+      uint8_t* raw = decode_route(route, &w_px, &h_px);
       if (!raw || w_px == 0 || h_px == 0) {
         Loader::free_pixels(raw);
         return 0;
@@ -185,7 +268,7 @@ namespace neui_detail
       entry->kind      = NEUI_ASSET_KIND_BITMAP;
       entry->width_px  = w_px;
       entry->height_px = h_px;
-      entry->scale     = scale_of_resolved(name, resolved);
+      entry->scale     = route.scale;
       entry->pixels.assign(raw, raw + static_cast<size_t>(w_px) * h_px * 4);
       Loader::free_pixels(raw);
 
@@ -299,7 +382,8 @@ namespace neui_detail
     {
       if (frame_count == 0) {
         FilmstripLayout lay;
-        if (!filmstrip_discover_from_path(name, horizontal, lay)) return 0;
+        if (!filmstrip_discover_from_path(name, horizontal, lay, &_provider))
+          return 0;
         return allocate_filmstrip_grid_from_file(name, scale, lay.cols, lay.rows,
                                                  lay.gutter, backend);
       }
@@ -393,7 +477,24 @@ namespace neui_detail
     uint32_t allocate_font_from_file(const std::string& path,
                                       neui_render_backend_t* backend)
     {
-      if (path.empty() || !backend || !backend->register_font_file) return 0;
+      if (path.empty() || !backend) return 0;
+
+      // Client first: a client keeping its fonts in a container hands over
+      // bytes, which is the in-memory registration path rather than the
+      // backend's read-the-file-yourself one. A blob the backend rejects falls
+      // through to the file below (decision 9).
+      if (_provider.serves(NEUI_RESOURCE_KIND_FONT)) {
+        uint32_t slot = 0;
+        _provider.with_bytes(
+            NEUI_RESOURCE_KIND_FONT, path.c_str(), 0.0f, nullptr,
+            [&](const uint8_t* data, uint32_t len, float) {
+              slot = allocate_font(data, len, backend);
+              return slot != 0;
+            });
+        if (slot != 0) return slot;
+      }
+
+      if (!backend->register_font_file) return 0;
 
       auto entry = std::make_unique<AssetEntry>();
       entry->kind = NEUI_ASSET_KIND_FONT;
@@ -792,6 +893,61 @@ namespace neui_detail
     }
 
   protected:
+    // One resolution attempt for a (name, scale bucket) pair. Client first
+    // (decision 1 in plans/client-resource-provider.md): for a client whose
+    // assets live in a container the filesystem ladder below is a guaranteed
+    // miss - up to three failed decodes on paths that will never exist - and on
+    // an embedded target there may be no filesystem at all.
+    //
+    // The client probe DECODES what it gets back, which is what makes decision 9
+    // work: bytes that do not decode are treated as a miss and resolution
+    // continues to the filesystem, so a broken provider cannot shadow a good
+    // file. The probe throws those pixels away and decode_route asks once more
+    // when they are actually wanted - two provider calls on a cold load, none
+    // per frame, which is the cost that actually mattered.
+    ImageRoute probe_image_route(const std::string& name, float scale)
+    {
+      ImageRoute r;
+
+      if (_provider.serves(NEUI_RESOURCE_KIND_IMAGE)) {
+        float got_scale = 1.0f;
+        const bool usable = _provider.with_bytes(
+            NEUI_RESOURCE_KIND_IMAGE, name.c_str(), scale, nullptr,
+            [&](const uint8_t* data, uint32_t len, float s) {
+              uint32_t w = 0, h = 0;
+              uint8_t* px = Loader::load_memory(data, len, &w, &h);
+              const bool ok = px && w > 0 && h > 0;
+              Loader::free_pixels(px);
+              if (ok) got_scale = s;
+              return ok;
+            });
+        if (usable) {
+          r.found       = true;
+          r.from_client = true;
+          r.path        = name;                    // the name to re-ask with
+          r.cache_key   = "\x01client\x01" + name; // cannot collide with a path
+          r.scale       = got_scale;
+          return r;
+        }
+      }
+
+      std::string resolved = resolve_path(name, scale);
+      if (!resolved.empty()) {
+        r.found     = true;
+        r.path      = resolved;
+        r.cache_key = resolved;
+        r.scale     = scale_of_resolved(name, resolved);
+      }
+      return r;
+    }
+
+    // (name, scale bucket) -> resolution outcome, misses included.
+    using RouteKey = std::pair<std::string, int>;
+    std::map<RouteKey, ImageRoute> _routes;
+
+    // Optional client byte provider; empty unless the host installed one.
+    ResourceProvider _provider;
+
     // Slot table for handle-based assets (public neui_asset_api_t).
     // _handles[0] is intentionally unused so slot 0 maps to "invalid".
     std::vector<std::unique_ptr<AssetEntry>> _handles;

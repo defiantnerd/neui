@@ -8,11 +8,16 @@
 
 namespace neui_detail
 {
-  bool AssetManager::load_pixels(const std::string& path, AssetEntry& entry)
+  // Decode the source `route` designates (a resolved @Nx file, or bytes from the
+  // client resource provider) into `entry`.
+  bool AssetManager::load_pixels(const ImageRoute& route, AssetEntry& entry)
   {
     uint32_t w = 0, h = 0;
-    uint8_t* raw = XplImageLoader::load(path.c_str(), &w, &h);
-    if (!raw) return false;
+    uint8_t* raw = decode_route(route, &w, &h);
+    if (!raw || w == 0 || h == 0) {
+      XplImageLoader::free_pixels(raw);
+      return false;
+    }
 
     entry.width_px  = w;
     entry.height_px = h;
@@ -26,16 +31,19 @@ namespace neui_detail
   {
     if (name.empty() || !backend || !ctx || !backend->create_bitmap) return nullptr;
 
-    // Find or resolve and load the entry.
-    std::string resolved = resolve_path(name, scale);
-    if (resolved.empty()) return nullptr;
+    // Find or resolve and load the entry. image_route is CACHED (misses too),
+    // which matters here above all: this runs once per IMAGE widget per frame,
+    // and resolution used to probe the @Nx ladder by decoding each candidate -
+    // a full image decode every frame purely to answer "which variant?".
+    const ImageRoute& route = image_route(name, scale);
+    if (!route.found) return nullptr;
 
-    auto it = _cache.find(resolved);
+    auto it = _cache.find(route.cache_key);
     if (it == _cache.end()) {
       AssetEntry entry;
-      entry.scale = scale_of_resolved(name, resolved);
-      if (!load_pixels(resolved, entry)) return nullptr;
-      it = _cache.emplace(resolved, std::move(entry)).first;
+      entry.scale = route.scale;
+      if (!load_pixels(route, entry)) return nullptr;
+      it = _cache.emplace(route.cache_key, std::move(entry)).first;
     }
 
     AssetEntry& e = it->second;
@@ -68,15 +76,15 @@ namespace neui_detail
                                        float* width_out, float* height_out)
   {
     if (name.empty()) return false;
-    std::string resolved = resolve_path(name, scale);
-    if (resolved.empty()) return false;
+    const ImageRoute& route = image_route(name, scale);
+    if (!route.found) return false;
 
-    auto it = _cache.find(resolved);
+    auto it = _cache.find(route.cache_key);
     if (it == _cache.end()) {
       AssetEntry entry;
-      entry.scale = scale_of_resolved(name, resolved);
-      if (!load_pixels(resolved, entry)) return false;
-      it = _cache.emplace(resolved, std::move(entry)).first;
+      entry.scale = route.scale;
+      if (!load_pixels(route, entry)) return false;
+      it = _cache.emplace(route.cache_key, std::move(entry)).first;
     }
 
     const AssetEntry& e = it->second;

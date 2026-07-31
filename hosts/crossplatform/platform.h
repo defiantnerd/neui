@@ -136,6 +136,13 @@ namespace xpl_host
   // physical pixel dimensions of the decoded image.
   uint8_t* platform_load_image(const char* path,
                                 uint32_t* width_out, uint32_t* height_out);
+
+  // Same, for encoded image bytes already in memory. Used by the client
+  // resource provider path (NEUI_API_RESOURCE_CLIENT), which hands over bytes
+  // rather than a path - a client may keep its assets in a container, or on a
+  // target with no filesystem at all. Release with platform_free_image.
+  uint8_t* platform_load_image_bytes(const uint8_t* data, size_t len,
+                                      uint32_t* width_out, uint32_t* height_out);
   void platform_free_image(uint8_t* pixels);
 
   // Run the platform message loop.

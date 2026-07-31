@@ -459,6 +459,35 @@ if(APPLE)
   target_link_libraries(neui_overlay_example PRIVATE neui-macoshost)
 endif()
 
+# Client resource provider example (NEUI_API_RESOURCE_CLIENT). The client builds
+# a BMP in memory at startup and hands the bytes to the host on demand, so the
+# image resolves under a name that exists nowhere on disk. WIN32 subsystem like
+# the other GUI examples - the native Win32 host's window/pump lives behind
+# WinMain, so a console-subsystem build never gets a frame.
+if(MSVC)
+  add_executable(neui_resource_client_example WIN32
+    examples/resource_client_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_resource_client_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_resource_client_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_resource_client_example WIN32
+    examples/resource_client_example.cpp)
+elseif(APPLE)
+  add_executable(neui_resource_client_example MACOSX_BUNDLE
+    examples/resource_client_example.cpp)
+else()
+  add_executable(neui_resource_client_example examples/resource_client_example.cpp)
+endif()
+target_link_libraries(neui_resource_client_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_resource_client_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_resource_client_example PRIVATE neui-macoshost)
+endif()
+
 # Arc example. Value-driven arc / ring / pie compound layers
 # (NEUI_COMPOUND_LAYER_ARC) - ring, elliptical ring, filled wedge, and a
 # center-polarity bipolar arc, each bound to NEUI_PARAM_VALUE.

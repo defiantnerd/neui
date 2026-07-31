@@ -23,6 +23,7 @@
 #include "d/dnd.h"
 #include "d/commands.h"
 #include "d/menu.h"
+#include "d/resource.h"
 #include "d/theme.h"
 #include "d/grid.h"
 #include "d/scroll.h"

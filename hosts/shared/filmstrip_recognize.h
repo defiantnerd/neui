@@ -13,6 +13,7 @@
 // uses - hosts don't carry src/ on their include path.
 #include "../../src/mujson.h"
 #include "mujson_accessors.h"  // obj_get / as_num / as_str (shared with component_loader)
+#include "resource_provider.h" // ResourceProvider - sidecars are client-providable
 
 // Filmstrip recognition helpers. There is NO reliable in-band marker that a
 // PNG/JPG is a frame strip, so recognition is a layered, opt-in convention
@@ -151,16 +152,22 @@ namespace neui_detail
   // "<path>.json" then "<base>.json" sidecar, then the filename token (which
   // yields a count only, so default_horizontal picks the axis). Returns false
   // if nothing matches.
+  // `provider` (optional) is the client resource provider: each sidecar
+  // candidate is offered to it as NEUI_RESOURCE_KIND_SIDECAR before the
+  // filesystem, so a filmstrip whose image comes out of a client container can
+  // carry its layout document there too.
   inline bool filmstrip_discover_from_path(const std::string& path,
                                            bool default_horizontal,
-                                           FilmstripLayout& out)
+                                           FilmstripLayout& out,
+                                           const ResourceProvider* provider = nullptr)
   {
+    const ResourceProvider no_provider;
+    const ResourceProvider& rp = provider ? *provider : no_provider;
+
     auto try_sidecar = [&](const std::string& p) -> bool {
-      std::ifstream f(p, std::ios::binary);
-      if (!f) return false;
-      std::ostringstream ss;
-      ss << f.rdbuf();
-      return filmstrip_parse_sidecar(ss.str(), out, default_horizontal);
+      std::string text;
+      if (!rp.read_bytes(NEUI_RESOURCE_KIND_SIDECAR, p.c_str(), text)) return false;
+      return filmstrip_parse_sidecar(text, out, default_horizontal);
     };
     if (try_sidecar(path + ".json")) return true;
 

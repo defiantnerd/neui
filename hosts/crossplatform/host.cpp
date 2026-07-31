@@ -232,6 +232,20 @@ namespace xpl_host
     _grid_client = static_cast<neui_grid_client_t*>(
       _client->get_interface(token, NEUI_API_GRID_CLIENT));
 
+    // Opt-in client resource provider. Consulted BEFORE the host's own
+    // filesystem / embedded-resource lookup for images, fonts, component
+    // documents and filmstrip sidecars, so a client can keep its assets in its
+    // own container. The asset store owns the binding (it needs it on the image
+    // path); the font / component / sidecar sites read it back from there.
+    _resource_client = static_cast<neui_resource_client_t*>(
+      _client->get_interface(token, NEUI_API_RESOURCE_CLIENT));
+    if (_resource_client) {
+      neui_detail::ResourceProvider provider;
+      provider.client = _resource_client;
+      provider.token  = token;
+      _asset_manager.set_resource_provider(provider);
+    }
+
     // System-theme tracking. xpl host always follows the system theme;
     // the listener invalidates frames so paint pulls the current palette.
     // macOS provider is set up earlier in platform_init (which runs once at

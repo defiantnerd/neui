@@ -5493,10 +5493,11 @@ namespace win32_host
   {
     auto* s = get_session(session);
     if (!s || !path_utf8) return asset_none;
-    std::ifstream in(path_utf8, std::ios::binary);
-    if (!in) return asset_none;
-    std::string data((std::istreambuf_iterator<char>(in)),
-                     std::istreambuf_iterator<char>());
+    // Client resource provider first, then the file (shared read-or-ask helper).
+    std::string data;
+    if (!s->_asset_manager.resource_provider().read_bytes(
+            NEUI_RESOURCE_KIND_COMPONENT, path_utf8, data))
+      return asset_none;
     neui_component_env_t local{};
     const neui_component_env_t* use_env = env;
     static thread_local std::string base_keep;

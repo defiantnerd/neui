@@ -489,6 +489,11 @@ namespace win32_host {
     // commits an in-place cell edit (ENTER inside the editor).
     neui_grid_client_t*             _grid_client               = nullptr;
 
+    // Optional client resource provider (NEUI_API_RESOURCE_CLIENT). Asked for
+    // bytes before this host tries the embedded resources / disk. The live
+    // binding used by the load paths is _asset_manager.resource_provider().
+    neui_resource_client_t*         _resource_client           = nullptr;
+
     // System-theme listener handle (singleton listener in
     // theme_provider_win32.h). Registered in ctor, unregistered in dtor.
     uint32_t                        _theme_listener_handle     = 0;

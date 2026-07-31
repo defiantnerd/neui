@@ -1187,6 +1187,12 @@ namespace xpl_host
     // commits an in-place cell edit (ENTER inside the editor).
     neui_grid_client_t*             _grid_client               = nullptr;
 
+    // Optional client resource provider (NEUI_API_RESOURCE_CLIENT). Asked for
+    // bytes before the host tries the filesystem / embedded resources. Kept
+    // here for symmetry with the other opt-in client interfaces; the live
+    // binding used by the load paths is _asset_manager.resource_provider().
+    neui_resource_client_t*         _resource_client           = nullptr;
+
     // System-theme listener handle. The xpl host always tracks the system
     // theme; on_theme_changed invalidates every frame so paint pulls the
     // updated palette.

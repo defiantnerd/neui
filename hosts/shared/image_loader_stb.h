@@ -19,25 +19,24 @@
 
 #include <stb_image.h>
 
+#include <climits>
 #include <cstdint>
 
 namespace neui_detail
 {
-  // Decode `path` into a new[]-allocated BGRA8-premultiplied buffer. Caller
-  // releases via free_image_bgra8_stb. Returns nullptr on failure.
-  inline uint8_t* load_image_bgra8_stb(const char* path,
-                                       uint32_t* width_out,
-                                       uint32_t* height_out)
+  // Shared tail of both entry points: take stb's straight-RGBA8 output and
+  // convert to the new[]-allocated BGRA8-premultiplied buffer the backends want.
+  // Frees `rgba` either way.
+  inline uint8_t* stb_rgba_to_bgra8_premul(unsigned char* rgba, int w, int h,
+                                           uint32_t* width_out,
+                                           uint32_t* height_out)
   {
-    if (!path || !*path) return nullptr;
-    int w = 0, h = 0, n = 0;
-    unsigned char* rgba = stbi_load(path, &w, &h, &n, 4);  // force RGBA8
     if (!rgba) return nullptr;
     if (w <= 0 || h <= 0) { stbi_image_free(rgba); return nullptr; }
 
     // Guard the BGRA byte-count multiply against size_t overflow before we
-    // new[] it. (stbi_load would already have failed to allocate an absurd
-    // image, but make the bound explicit rather than rely on that.)
+    // new[] it. (stb would already have failed to allocate an absurd image,
+    // but make the bound explicit rather than rely on that.)
     size_t count = static_cast<size_t>(w) * static_cast<size_t>(h);
     if (count == 0 || count > (SIZE_MAX / 4)) { stbi_image_free(rgba); return nullptr; }
     uint8_t* out = new uint8_t[count * 4];
@@ -57,6 +56,33 @@ namespace neui_detail
     if (width_out)  *width_out  = static_cast<uint32_t>(w);
     if (height_out) *height_out = static_cast<uint32_t>(h);
     return out;
+  }
+
+  // Decode `path` into a new[]-allocated BGRA8-premultiplied buffer. Caller
+  // releases via free_image_bgra8_stb. Returns nullptr on failure.
+  inline uint8_t* load_image_bgra8_stb(const char* path,
+                                       uint32_t* width_out,
+                                       uint32_t* height_out)
+  {
+    if (!path || !*path) return nullptr;
+    int w = 0, h = 0, n = 0;
+    unsigned char* rgba = stbi_load(path, &w, &h, &n, 4);  // force RGBA8
+    return stb_rgba_to_bgra8_premul(rgba, w, h, width_out, height_out);
+  }
+
+  // Same, from encoded bytes already in memory - the client resource provider
+  // path (NEUI_API_RESOURCE_CLIENT) has no path to hand over. stb decodes the
+  // whole blob in one call; note stb is NOT incremental, so a true streaming
+  // form (stbi_load_from_callbacks) would buy nothing here.
+  inline uint8_t* load_image_bgra8_stb_memory(const uint8_t* data, size_t len,
+                                              uint32_t* width_out,
+                                              uint32_t* height_out)
+  {
+    if (!data || len == 0 || len > static_cast<size_t>(INT_MAX)) return nullptr;
+    int w = 0, h = 0, n = 0;
+    unsigned char* rgba = stbi_load_from_memory(
+        data, static_cast<int>(len), &w, &h, &n, 4);   // force RGBA8
+    return stb_rgba_to_bgra8_premul(rgba, w, h, width_out, height_out);
   }
 
   inline void free_image_bgra8_stb(uint8_t* pixels) { delete[] pixels; }

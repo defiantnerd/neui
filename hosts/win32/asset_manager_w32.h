@@ -16,6 +16,9 @@ namespace win32_host
   {
     static uint8_t* load(const char* path, uint32_t* w_px, uint32_t* h_px)
     { return neui_detail::load_image_bgra8_w32(path, w_px, h_px); }
+    static uint8_t* load_memory(const uint8_t* data, size_t len,
+                                uint32_t* w_px, uint32_t* h_px)
+    { return neui_detail::load_image_bgra8_w32_memory(data, len, w_px, h_px); }
     static void free_pixels(uint8_t* p) { delete[] p; }
   };
 

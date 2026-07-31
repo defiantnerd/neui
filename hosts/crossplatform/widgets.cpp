@@ -2264,11 +2264,11 @@ namespace xpl_host
     auto* s = get_session(session);
     if (!s || !path_utf8) return asset_none;
 
-    // Read the whole file (std::ifstream avoids the fopen /W4 deprecation).
-    std::ifstream in(path_utf8, std::ios::binary);
-    if (!in) return asset_none;
-    std::string data((std::istreambuf_iterator<char>(in)),
-                     std::istreambuf_iterator<char>());
+    // Client resource provider first, then the file (shared read-or-ask helper).
+    std::string data;
+    if (!s->_asset_manager.resource_provider().read_bytes(
+            NEUI_RESOURCE_KIND_COMPONENT, path_utf8, data))
+      return asset_none;
 
     // Default env.base_dir to the file's directory so relative asset paths
     // resolve next to the .json. A caller-supplied env wins.
