@@ -97,6 +97,12 @@ namespace xpl_host
     lv_obj_t*     screen       = nullptr;
     WNDPROC       prev_proc    = nullptr;
     lv_timer_t*   toast_timer  = nullptr;
+    // Spring-back heartbeat for smooth scroll, shared by the scrolling SECTION
+    // and the GRID (a "both" section can overscroll on both axes in one
+    // gesture, so one timer steps whatever is bouncing). 0 = not bouncing.
+    lv_timer_t*   bounce_timer     = nullptr;
+    uint32_t      bouncing_section = 0;
+    uint32_t      bouncing_grid    = 0;
     bool          closed       = false;
     // Set instead of calling lv_obj_invalidate when an invalidation arrives
     // from inside an LVGL draw dispatch (client PREUPDATE / PAINT handlers
@@ -425,11 +431,20 @@ namespace xpl_host
   // paint_widgets_recursive's geometry logic (abs-coord recompute, SECTION /
   // TABVIEW body offsets and scroll), creating / positioning / hiding the
   // mirror objects to match. LVGL invalidates whatever actually moved.
+  //
+  // `z_next` is the next child index to claim inside `parent_obj`. LVGL paints a
+  // container's children in child-list order, so that order has to track the
+  // widget tree's paint order - and lv_obj_create / lv_obj_set_parent both APPEND.
+  // Without this, a widget created or reparented into the MIDDLE of an existing
+  // sibling row would draw on top of the siblings that come after it (the
+  // mid-order-insert gap in plans/lvgl-host-approach-c.md). The walk visits
+  // objects in paint order, so claiming indices sequentially is exactly right.
   static void sync_children(WindowData* w, uint32_t parent_index,
                             lv_obj_t* parent_obj,
                             int parent_abs_x, int parent_abs_y,
                             int origin_x, int origin_y,
-                            std::unordered_set<uint32_t>& live)
+                            std::unordered_set<uint32_t>& live,
+                            int& z_next)
   {
     Session* s = w->session;
     for (uint32_t idx = s->_widgets.child(parent_index); idx != 0;
@@ -472,6 +487,15 @@ namespace xpl_host
         lv_obj_set_hidden(me.obj, !wd.visible);
       } else if (me.obj) {
         lv_obj_set_hidden(me.obj, true);
+      }
+
+      // Claim this widget's slot in the container's paint order. A hidden mirror
+      // still occupies a slot (it stays in the child list), so it is counted too -
+      // otherwise every later sibling would be off by one. Compared first so a
+      // steady-state sync, where the order already matches, costs nothing.
+      if (me.obj) {
+        if (lv_obj_get_index(me.obj) != z_next) lv_obj_move_to_index(me.obj, z_next);
+        ++z_next;
       }
 
       // Descent. Container + origins for the children. The children mirror under
@@ -518,8 +542,14 @@ namespace xpl_host
         abs_oy = wd.abs_y + slay->body_y - sy;
       }
 
+      // Children that went into a container of ours start a fresh index space;
+      // children handed UP to our own container keep claiming slots after us, so
+      // they paint after this widget and before the next sibling - matching the
+      // immediate-mode walk.
+      int child_z = 0;
       sync_children(w, idx, container, abs_ox, abs_oy,
-                    child_origin_x, child_origin_y, live);
+                    child_origin_x, child_origin_y, live,
+                    (container == parent_obj) ? z_next : child_z);
     }
   }
 
@@ -528,7 +558,8 @@ namespace xpl_host
     if (!w->session || !w->screen) return;
     LvLockGuard lock;
     std::unordered_set<uint32_t> live;
-    sync_children(w, w->widget_index, w->screen, 0, 0, 0, 0, live);
+    int z_next = 0;
+    sync_children(w, w->widget_index, w->screen, 0, 0, 0, 0, live, z_next);
 
     // Sweep mirrors whose widget vanished. Deleting an lv_obj deletes its
     // subtree, so delete only the roots of dead subtrees (entries whose
@@ -593,6 +624,176 @@ namespace xpl_host
     if (t_inside_lv > 0) { w->pending_invalidate = true; return; }
     LvLockGuard lock;
     lv_obj_invalidate(w->screen);
+  }
+
+  // Invalidate one widget's mirror from INSIDE an lv_timer callback: the LVGL
+  // lock is already held there, so this must not take LvLockGuard (it is not
+  // recursive) - the toast timer invalidates the same way. Falls back to the
+  // whole screen in baseline mode or before the mirror exists.
+  static void invalidate_widget_in_timer(WindowData* w, uint32_t widget_index)
+  {
+    if (!w || !w->screen) return;
+    if (g_retained) {
+      auto it = w->mirrors.find(widget_index);
+      if (it != w->mirrors.end() && it->second.obj) {
+        lv_obj_invalidate(it->second.obj);
+        return;
+      }
+    }
+    lv_obj_invalidate(w->screen);
+  }
+
+  // -------------------------------------------------------------------------
+  // Smooth-scroll kinetics (scrolling SECTION + GRID)
+  //
+  // The dynamics are the shared, Tier-1-tested integrators every other platform
+  // drives (hosts/shared/scroll_kinetics.h, reached through
+  // widget_section_scroll.h / grid_model.h) - only two things are per-platform:
+  // where a pixel-precise wheel delta comes from, and what runs the spring-back
+  // heartbeat. Here that is one 16 ms lv_timer per window, the same shape as the
+  // toast timer; platform_win32 uses SetTimer(16) and platform_linux a 16 ms tick.
+
+  // The scrolling SECTION that owns the wheel at `hit`: the hit widget itself, or
+  // its nearest ancestor carrying a SectionScrollState. 0 = none. (Twin of
+  // platform_win32 / platform_linux's find_scrolling_section.)
+  static uint32_t find_scrolling_section(Session* s, uint32_t hit)
+  {
+    auto* hw = s->get_widget(hit);
+    if (hw && hw->scroll_state_ptr()) return hit;
+    for (uint32_t pidx : s->_widgets.get_all_parents(hit)) {
+      auto* pw = s->get_widget(pidx);
+      if (pw && pw->scroll_state_ptr()) return pidx;
+    }
+    return 0;
+  }
+
+  // Spring-back tick. Steps whichever of the two is overscrolled, invalidates it,
+  // and deletes itself once nothing is moving - the lv_timer twin of
+  // platform_win32's XPL_SECTION_BOUNCE_TIMER_ID / XPL_GRID_BOUNCE_TIMER_ID
+  // WM_TIMER arms. Runs with the LVGL lock already held (see
+  // invalidate_widget_in_timer), and t_inside_lv is raised so a client
+  // SCROLL_CHANGED handler that writes attrs defers its invalidate instead of
+  // re-locking.
+  static void bounce_timer_cb(lv_timer_t* t)
+  {
+    auto* w = static_cast<WindowData*>(lv_timer_get_user_data(t));
+    if (!w || !w->session) { lv_timer_delete(t); return; }
+    using namespace neui_detail;
+
+    ++t_inside_lv;
+    bool more = false;
+
+    if (w->bouncing_section != 0) {
+      auto* sw = w->session->get_widget(w->bouncing_section);
+      SectionScrollState*  st = sw ? sw->scroll_state_ptr()    : nullptr;
+      const SectionLayout* L  = sw ? sw->section_layout_ptr() : nullptr;
+      if (st && L) {
+        const bool mv = section_scroll_bounce_step(*st, *L, false);
+        const bool mh = section_scroll_bounce_step(*st, *L, true);
+        invalidate_widget_in_timer(w, w->bouncing_section);
+        sw->notify_scroll_changed();
+        if (mv || mh) more = true;
+        else          w->bouncing_section = 0;
+      } else {
+        w->bouncing_section = 0;   // section died mid-bounce
+      }
+    }
+
+    if (w->bouncing_grid != 0) {
+      auto*      gw    = w->session->get_widget(w->bouncing_grid);
+      GridModel* model = gw ? gw->grid_model_ptr() : nullptr;
+      if (model) {
+        auto cfg = grid_read_config(gw->attrs.get());
+        GridViewport vp = grid_compute_viewport(*model, gw->width, gw->height,
+                                                cfg.row_h, cfg.header_h);
+        const bool mg = grid_scroll_bounce_step(*model, vp, cfg.row_h);
+        invalidate_widget_in_timer(w, w->bouncing_grid);
+        if (mg) more = true;
+        else    w->bouncing_grid = 0;
+      } else {
+        w->bouncing_grid = 0;
+      }
+    }
+
+    --t_inside_lv;
+
+    if (!more) {
+      w->bounce_timer = nullptr;
+      lv_timer_delete(t);   // deleting the running timer is supported by LVGL
+    }
+  }
+
+  // Arm (or re-arm) the heartbeat. Called from the input drain, which runs
+  // OUTSIDE lv_timer_handler, so it takes the lock itself.
+  static void start_bounce_timer(WindowData* w)
+  {
+    if (!w) return;
+    LvLockGuard lock;
+    if (w->bounce_timer) lv_timer_reset(w->bounce_timer);
+    else                 w->bounce_timer = lv_timer_create(bounce_timer_cb, 16, w);
+  }
+
+  // Feed a pixel-precise wheel delta into a scrolling SECTION's per-axis
+  // kinetics. dv / dh are logical px in the kinetics' sign convention (positive
+  // dv = scroll up, positive dh = scroll left), matching
+  // section_kinetic_wheel_w32 / _linux exactly - including the asymmetric
+  // single-axis fallback (a horizontal-only section absorbs a plain vertical
+  // wheel, because a classic wheel has no horizontal axis; a vertical-only
+  // section ignores explicit horizontal input rather than re-aiming it) and the
+  // NEUI_ATTR_SCROLL_KINETICS gate (STEPPED hard-clamps and never bounces).
+  static void section_kinetic_wheel_lvgl(WindowData* w, uint32_t sec_idx,
+                                         double dv, double dh)
+  {
+    using namespace neui_detail;
+    Session* s = w->session;
+    auto* sw = s->get_widget(sec_idx);
+    SectionScrollState*  st = sw ? sw->scroll_state_ptr()    : nullptr;
+    const SectionLayout* L  = sw ? sw->section_layout_ptr() : nullptr;
+    if (!st || !L) return;
+
+    const bool has_v = section_axis_has_v(st->axis);
+    const bool has_h = section_axis_has_h(st->axis);
+    if (!has_v && has_h && dh == 0.0 && dv != 0.0) { dh = dv; dv = 0.0; }
+
+    const int  kin_mode = section_read_kinetics_mode(sw->attrs.get());
+    const bool smooth   = scroll_kinetics_smooth_enabled(
+        kin_mode, /*platform_default_smooth=*/false);
+
+    bool changed = false, start_bounce = false;
+    if (smooth) {
+      ScrollWheelAction act_v{}, act_h{};
+      if (has_v && dv != 0.0) {
+        ScrollWheelInput in;
+        in.precise  = true;      // px-true input - enables the rubber band
+        in.delta_px = dv;
+        act_v = section_scroll_wheel_kinetic(*st, *L, in, false);
+      }
+      if (has_h && dh != 0.0) {
+        ScrollWheelInput in;
+        in.precise  = true;
+        in.delta_px = dh;
+        act_h = section_scroll_wheel_kinetic(*st, *L, in, true);
+      }
+      changed      = act_v.changed      || act_h.changed;
+      start_bounce = act_v.start_bounce || act_h.start_bounce;
+    } else {
+      if (has_v && dv != 0.0 && section_scroll_step_px(*st, *L, dv, false))
+        changed = true;
+      if (has_h && dh != 0.0 && section_scroll_step_px(*st, *L, dh, true))
+        changed = true;
+    }
+
+    if (changed) {
+      // The mirror's own draw pass notices synced_scroll_* moved and re-marks the
+      // tree dirty, which repositions the body's children on the next turn - the
+      // same route the stepped path already takes.
+      platform_retained_widget_invalidate(s, sec_idx);
+      sw->notify_scroll_changed();
+    }
+    if (start_bounce) {
+      w->bouncing_section = sec_idx;
+      start_bounce_timer(w);
+    }
   }
 
   static void flush_pending_invalidates()
@@ -838,18 +1039,57 @@ namespace xpl_host
 
         uint32_t hit = s->widget_at(lx, ly, w->widget_index);
         if (hit == 0) break;
-        if (auto* hw = s->get_widget(hit)) {
-          neui_event_t ev = {};
-          ev.type                     = NEUI_EVENT_MOUSE_WHEEL;
-          ev.data.wheel.widget        = { hw->widget_id };
-          ev.data.wheel.x             = static_cast<int>(lx);
-          ev.data.wheel.y             = static_cast<int>(ly);
-          ev.data.wheel.delta         = delta;
-          ev.data.wheel.is_horizontal = is_horiz ? 1 : 0;
-          // Stepped scrolling only in the prototype (no kinetics timers) -
-          // ancestors get the wheel via the normal bubble.
-          s->dispatch_wheel_event(hit, &ev);
+        auto* hw = s->get_widget(hit);
+        if (!hw) break;
+
+        // GRID in SMOOTH mode: the pixel-precise delta goes to the shared
+        // kinetics instead of the line-quantized `delta` above (the integrator
+        // owns its own pixel accumulator), same as platform_win32.
+        if (neui_detail::GridModel* model = hw->grid_model_ptr()) {
+          using namespace neui_detail;
+          auto cfg = grid_read_config(hw->attrs.get());
+          if (grid_smooth_enabled(cfg, /*platform_default_smooth=*/false)) {
+            GridViewport vp = grid_compute_viewport(*model, hw->width, hw->height,
+                                                    cfg.row_h, cfg.header_h);
+            GridWheelInput in;
+            in.precise  = true;
+            in.delta_px = ((double)raw / (double)WHEEL_DELTA)
+                        * (double)lines * (double)cfg.row_h;
+            GridWheelAction act = grid_scroll_wheel(*model, vp, cfg.row_h, in);
+            if (act.changed) platform_retained_widget_invalidate(s, hit);
+            if (act.start_bounce) {
+              w->bouncing_grid = hit;
+              start_bounce_timer(w);
+            }
+            break;
+          }
         }
+
+        neui_event_t ev = {};
+        ev.type                     = NEUI_EVENT_MOUSE_WHEEL;
+        ev.data.wheel.widget        = { hw->widget_id };
+        ev.data.wheel.x             = static_cast<int>(lx);
+        ev.data.wheel.y             = static_cast<int>(ly);
+        ev.data.wheel.delta         = delta;
+        ev.data.wheel.is_horizontal = is_horiz ? 1 : 0;
+
+        // Scrolling SECTION (the hit or its nearest such ancestor): widgets below
+        // it get first refusal through a bounded bubble; when nothing below
+        // consumes, the section eats the wheel through its kinetics.
+        const uint32_t sec_idx = find_scrolling_section(s, hit);
+        if (sec_idx != 0) {
+          if (hit != sec_idx && s->dispatch_wheel_event(hit, &ev, sec_idx)) break;
+          const double px = ((double)raw / (double)WHEEL_DELTA)
+                          * (double)lines * neui_detail::SECTION_WHEEL_LINE_PX;
+          // is_horiz covers both a real WM_MOUSEHWHEEL and shift+wheel; the sign
+          // flip matches the line path's "wheel-up = scroll-right" convention.
+          if (is_horiz) section_kinetic_wheel_lvgl(w, sec_idx, 0.0, -px);
+          else          section_kinetic_wheel_lvgl(w, sec_idx, px, 0.0);
+          break;
+        }
+
+        // Otherwise the wheel bubbles normally (stepped).
+        s->dispatch_wheel_event(hit, &ev);
         break;
       }
 
@@ -1169,6 +1409,14 @@ namespace xpl_host
         lv_timer_delete(w->toast_timer);
         w->toast_timer = nullptr;
       }
+      // Same for the spring-back heartbeat: it holds this WindowData and would
+      // tick against a dead session on the next lv_timer_handler.
+      if (w->bounce_timer) {
+        lv_timer_delete(w->bounce_timer);
+        w->bounce_timer = nullptr;
+      }
+      w->bouncing_section = 0;
+      w->bouncing_grid    = 0;
       if (w->screen) {
         lv_obj_clean(w->screen);
         lv_obj_remove_event_cb(w->screen, screen_draw_cb);

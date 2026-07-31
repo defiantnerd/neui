@@ -26,7 +26,7 @@ Outputs - Windows: `out/build/Debug/{neui_example.exe, neui.lib, neui-win32host.
 
 **Tests**: `tests/` is a Tier-1 header-only unit suite (`neui_tests`) over the portable logic in `hosts/shared/*.h` - links no host and no backend, builds everywhere including the null platform. Toggle with `-DNEUI_BUILD_TESTS=OFF`. Run directly or via `ctest --test-dir out/build -C Debug`. Linux-only extra targets: `neui_cairo_smoke` (offscreen Cairo, ctest-registered) and `neui_embed_smoke` (fake-DAW embedding, needs a live X display).
 
-**LVGL host prototype** (`-DNEUI_WITH_LVGL=ON`, default OFF, Windows-only - configure FATAL_ERRORs elsewhere): pairs the xpl host with `backends/lvgl/` (`neui-backend-lvgl`) + `platform_lvgl.cpp` instead of D2D + `platform_win32.cpp` (LVGL fetched from git via FetchContent; config generated from `backends/lvgl/lv_conf.h.in`, framebuffer depth via `-DNEUI_LVGL_COLOR_DEPTH=32|16`). Adds `neui_lvgl_example` (console app; perf numbers on stdout). Runtime env `NEUI_LVGL_RETAINED=0` flips the retained per-widget mirror layer (Option C) back to the whole-frame baseline. Status + measurements (both depths): `plans/lvgl-host-approach-c.md`.
+**LVGL host - EXPERIMENTAL, off by default, paused pending hardware.** `-DNEUI_WITH_LVGL=ON` (Windows only) swaps the xpl host's backend + platform layer for `neui-backend-lvgl` + `platform_lvgl.cpp` and adds `neui_lvgl_example`. It is a prototype: several host features are stubbed and it is not for product work. **Read `docs/host-lvgl.md` before touching it** (build flags, what works, what is stubbed); design record + measurements in `plans/lvgl-host-approach-c.md`.
 
 ## Per-platform host + backend selection
 
@@ -34,6 +34,7 @@ Outputs - Windows: `out/build/Debug/{neui_example.exe, neui.lib, neui-win32host.
 - **macOS**: `neui-macoshost` + `neui-xplhost`; backend `neui-backend-cg`; xpl platform `platform_macos.mm`.
 - **Linux** (X11): `neui-xplhost` only (no native host); backend `neui-backend-cairo` (software, blitted via XShm/XPutImage); xpl platform `platform_linux.cpp`. Clipboard (CLIPBOARD + PRIMARY + INCR), full XDND v5, neui-drawn message box, in-frame menubar, XI2 smooth scroll, D-Bus theme tracking, and DAW-embedding seams all live here - **see `docs/host-linux.md`**.
 - **Other**: `neui-xplhost`; backend `neui-backend-null`; xpl platform `platform_null.cpp`.
+- **LVGL** (opt-in, **experimental**, Windows only): `neui-xplhost`; backend `neui-backend-lvgl`; xpl platform `platform_lvgl.cpp`. Replaces the Windows pairing above when `-DNEUI_WITH_LVGL=ON` - **see `docs/host-lvgl.md`**.
 
 Top-level CMakeLists gates each platform-specific subdirectory; the example links the native host only when present.
 
@@ -176,6 +177,7 @@ Deep per-subsystem detail lives in `docs/`. **Read the relevant file before doin
 - **Theme palette; frame resize / icon / focus** -> `docs/theming.md`.
 - **Per-widget internals & enabled/disabled** -> `docs/widget-internals.md`. MULTILINE perf, hover/pressed visuals, DBLCLK->CLICK parity, disabled state per host.
 - **Linux (X11 + Cairo) host internals** -> `docs/host-linux.md`. Selections + INCR clipboard, XDND, in-frame menubar, XI2 smooth scroll, D-Bus theme, embedding seams.
+- **LVGL host (EXPERIMENTAL)** -> `docs/host-lvgl.md`. Opt-in embedded substrate for the xpl host: build flags, retained mirror layer, what works, what is stubbed, why it is paused pending hardware.
 - **Deferred / known-limitation list** -> `docs/deferred-issues.md`.
 - **Design rationale for shipped features** -> `docs/design-notes.md`. **Component-widget authoring how-to** -> `docs/component-widgets-howto.md`.
 
@@ -186,6 +188,6 @@ Active plans (`plans/`) are open or deferred work only - completed plans were re
 - `win32-pointer-and-directmanipulation.md` - WM_POINTER pen/touch + DirectManipulation smooth-scroll on scrolling SECTION + GRID (deferred; binding spec for when it lands).
 - `winui3-host.md` - third host backend feasibility analysis (deferred indefinitely).
 - `wasm-host.md` - WebAssembly / Canvas-2D host feasibility analysis (deferred; phased path documented).
-- `lvgl-port.md` - neui-on-LVGL feasibility investigation (no implementation proposed).
-- `lvgl-host-approach-c.md` - neui-on-LVGL Option C prototype - EXECUTED 2026-07-30; results + measurements appended in the file. Follow-ups (LVGL version pin, appearance cache, embedded driver) listed there.
+- `lvgl-port.md` - neui-on-LVGL feasibility investigation that picked the approach (superseded by the prototype below; kept for the impedance-mismatch analysis).
+- `lvgl-host-approach-c.md` - the **experimental** LVGL host: design record, per-milestone detail and all measurements. Prototype built + evaluated; **work paused until real target hardware is available** (the open items - appearance cache, embedded display driver / VGLite - need a panel and an MCU to evaluate). Reader-facing status: `docs/host-lvgl.md`.
 - `how-to-port.md` - reference playbook for new-platform ports.

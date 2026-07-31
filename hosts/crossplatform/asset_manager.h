@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>   // size_t for the platform_load_image_bytes redeclaration
 #include <string>
 #include <unordered_map>
 

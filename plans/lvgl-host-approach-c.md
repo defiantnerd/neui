@@ -1,8 +1,13 @@
 # Handoff: neui-on-LVGL host - Approach C prototype & evaluation
 
-Status: **EXECUTED 2026-07-30** - all milestones (M0-M3) done; results appended at the
-bottom of this file. This was a **prototype + evaluation**, not production.
-Audience: a fresh Claude instance that will implement it end-to-end.
+Status: **EXPERIMENTAL - built and evaluated 2026-07-30, work PAUSED pending real hardware.**
+All milestones (M0-M3) are done and the results are appended at the bottom of this file, but this
+was always a **prototype + evaluation, not production**: the host is opt-in
+(`-DNEUI_WITH_LVGL=ON`), several features are stubbed, and the two remaining items that matter (a
+per-widget appearance cache and an embedded display driver / VGLite path) cannot be judged on a
+desktop stand-in. They resume when target hardware is available.
+Reader-facing status + build instructions: `docs/host-lvgl.md`.
+Audience for the rest of this file: whoever picks that work up.
 
 ## Goal (what "done" means for this handoff)
 
@@ -305,7 +310,7 @@ Reading of the numbers:
 - Clipboard / DnD / IME / native menubar / message boxes stubbed; off-screen surfaces (SURFACE /
   filter graph) unavailable; font registration API returns false (family names resolve from the
   Windows fonts directory instead); no DPI scaling (logical px == LVGL px == physical px);
-  dialogs are resizable; smooth-scroll kinetics not wired (stepped wheel only).
+  dialogs are resizable. (Smooth-scroll kinetics ARE wired now - see the follow-up pass below.)
 - Overlay changes (combo/popup/toast) still invalidate the whole frame - transient, acceptable.
 - LVGL is pinned to commit `066d8db0` (the revision measured here). Move to a release tag when
   one carrying the `lv_draw_vector_dsc_*` API lands.
@@ -317,15 +322,53 @@ Reading of the numbers:
 
 ### Suggested next steps (if the direction is pursued)
 
-1. Move the retained layer from prototype to reviewed design (reparenting, mid-order sibling
-   inserts). Mirror teardown on window destroy and the LVGL commit pin are done - see the
-   code-review pass below.
+1. ~~Move the retained layer from prototype to reviewed design (reparenting, mid-order sibling
+   inserts)~~ **done** - mirror teardown, the LVGL commit pin, reparenting and child paint order
+   are all closed; see "Retained-layer + kinetics pass" below.
 2. Per-widget appearance cache (render-once-to-image for static-but-expensive chrome) - the
-   biggest remaining MCU win per lvgl.txt sec 7.
+   biggest remaining MCU win per lvgl.txt sec 7. **Still open, and now the top item**: it is a
+   design change (per-widget canvas + an invalidation contract for what counts as "appearance"),
+   not a wiring job, so it wants its own plan rather than an incremental patch.
 3. An embedded display driver (fbdev / vendor flush_cb) replacing the Windows driver, and a
-   VGLite draw-unit path for the vector half on RT1176-class silicon.
-4. Wire smooth-scroll kinetics (the shared `scroll_kinetics` on a 16 ms lv_timer) and the
-   remaining stubs as needed by the product.
+   VGLite draw-unit path for the vector half on RT1176-class silicon. **Still open**, and
+   unverifiable on a desktop - it needs the target hardware in the loop.
+4. ~~Wire smooth-scroll kinetics (the shared `scroll_kinetics` on a 16 ms lv_timer)~~ **done** for
+   the scrolling SECTION and the GRID; the remaining stubs (clipboard / DnD / IME / native
+   menubar / message boxes / off-screen surfaces) are untouched, per the product's needs.
+
+### Retained-layer + kinetics pass (2026-07-31, after the code-review pass)
+
+- **Child paint order is now maintained** (`sync_children`). LVGL paints a container's children in
+  child-list order and both `lv_obj_create` and `lv_obj_set_parent` APPEND, so any object that
+  arrives in the middle of an existing sibling row used to draw on top of the siblings after it.
+  The walk already visits objects in paint order, so each one claims the next index in its
+  container (`lv_obj_move_to_index`, compared against `lv_obj_get_index` first so a steady-state
+  sync costs nothing and triggers no invalidation). Hidden mirrors count too - they stay in the
+  child list, so skipping them would shift every later sibling. Note the widget API cannot insert
+  mid-order today (`Tree::add_child` appends and nothing calls `add_after`); what made this live is
+  the hand-up path, where a widget that stops painting gives its children to its own container
+  mid-list.
+- **Reparenting** now uses `lv_obj_set_parent` instead of delete + rebuild, which also removed a
+  latent use-after-free: `lv_obj_delete` takes the subtree with it, leaving every descendant's
+  `MirrorEntry::obj` dangling for the rest of that pass (and the sweep would delete it again).
+- **Smooth-scroll kinetics wired** through the same shared integrators the other platforms use:
+  `section_kinetic_wheel_lvgl` (twin of `section_kinetic_wheel_w32` / `_linux`, including the
+  asymmetric single-axis fallback and the `NEUI_ATTR_SCROLL_KINETICS` gate) plus the GRID
+  SMOOTH-mode branch, with one 16 ms `lv_timer` per window driving spring-back for whichever of the
+  two is overscrolled (the toast timer's shape; it self-deletes when nothing is moving and is torn
+  down with the window). Invalidation from inside the timer goes through
+  `invalidate_widget_in_timer` - the LVGL lock is already held there, so it must not take
+  `LvLockGuard`, and `t_inside_lv` is raised so a client SCROLL_CHANGED handler that writes attrs
+  defers its invalidate instead of re-locking.
+- **Verified by synthetic input** against `neui_section_scroll_example` temporarily pinned to the
+  xpl host (the LVGL-pinned example has no scrolling SECTION): stepped mode scrolls exactly
+  4 notches x 3 lines x `SECTION_WHEEL_LINE_PX` = 240 px; smooth mode rubber-bands to
+  `Scroll: (0, -33)` on an overscroll at the top and springs back to `(0, 0)`, with the client's
+  SCROLL_CHANGED label updating throughout. Note for future automation: WM_MOUSEWHEEL's lParam is
+  in SCREEN coords while the button messages carry CLIENT coords, and `PrintWindow` renders the
+  whole window (title bar included) into the target DC - so a client-sized bitmap is offset by the
+  non-client frame. Derive click targets from the example's `create()` coordinates, not from
+  measured screenshot pixels.
 
 ---
 

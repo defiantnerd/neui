@@ -19,12 +19,14 @@ option(NEUI_BUILD_TESTS    "Build the neui unit tests"       ${NEUI_IS_TOP_LEVEL
 # don't break the build - the project's documented default); CI turns it ON
 # (-DNEUI_WERROR=ON) so a new warning fails the build on every host.
 option(NEUI_WERROR         "Treat compiler warnings as errors" OFF)
-# LVGL host prototype (plans/lvgl-host-approach-c.md): a rendering backend +
-# xpl platform layer that draw through LVGL. OFF by default - existing builds
-# are unaffected. When ON, LVGL is fetched from git (see backends/lvgl/).
-# Currently Windows-only; configuration FAILS on other platforms (no silent
-# fallback).
-option(NEUI_WITH_LVGL      "Build the LVGL host + backend prototype" OFF)
+# EXPERIMENTAL LVGL host (docs/host-lvgl.md; design record + measurements in
+# plans/lvgl-host-approach-c.md): a rendering backend + xpl platform layer that
+# draw through LVGL. OFF by default - existing builds are unaffected, and this is
+# not for product work: several host features are stubbed and the remaining work
+# is paused until real target hardware is available. When ON, LVGL is fetched
+# from git (see backends/lvgl/). Windows-only; configuration FAILS on other
+# platforms (no silent fallback).
+option(NEUI_WITH_LVGL      "EXPERIMENTAL: build the LVGL host + backend (see docs/host-lvgl.md)" OFF)
 
 # iOS is an APPLE platform too, so it must be detected distinctly from macOS:
 # the CoreGraphics backend is shared (gated on APPLE), but the AppKit macOS
@@ -154,6 +156,9 @@ if(NEUI_WITH_LVGL)
       "native Windows display driver, LV_USE_WINDOWS). This platform cannot "
       "run the LVGL host - configure with -DNEUI_WITH_LVGL=OFF.")
   endif()
+  message(STATUS
+    "neui: EXPERIMENTAL LVGL host enabled - prototype only, several host "
+    "features are stubbed. See docs/host-lvgl.md.")
   add_subdirectory("backends/lvgl")
 endif()
 add_subdirectory("backends/null")

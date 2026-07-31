@@ -1,4 +1,7 @@
 #pragma once
+#include <cstddef>   // size_t - <cstdint> is NOT required to declare ::size_t
+                     // (libstdc++ does not; MSVC / libc++ happen to, which is why
+                     // platform_load_image_bytes below only broke on the GCC job)
 #include <cstdint>
 #include <neui/neui.h>
 

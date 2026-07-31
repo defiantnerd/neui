@@ -6,11 +6,19 @@
 // a file anywhere. The same seam serves a plugin bundle, an executable resource
 // section, an encrypted pack, or flash on an MCU.
 //
-// Two widgets reference the generated asset by name:
+// Three widgets reference the generated asset by name:
 //   * an IMAGE widget via set_text("generated.bmp") - the framework loads it
 //     lazily on first paint, through the provider;
 //   * an explicit assets->create_from_file("generated.bmp") handle, drawn by a
-//     CUSTOMDRAW widget, showing the same name resolving via the asset API.
+//     CUSTOMDRAW widget, showing the same name resolving via the asset API;
+//   * a COMPONENT built from a document that is ALSO served from memory, whose
+//     "assets" block references the same image. This is the interesting case for
+//     the name contract: the document lives at "widgets/meter.json", so its
+//     base_dir is "widgets", and the provider is asked for the raw entry
+//     ("generated.bmp") with base_dir passed ALONGSIDE - never joined into
+//     "widgets/generated.bmp", which this client would decline. The status lines
+//     print the exact name and base_dir the provider saw, so the contract is
+//     visible rather than implied.
 //
 // A BMP is generated rather than a PNG so the example stays self-contained with
 // no encoder: the header is 54 bytes and every platform decoder reads it.
@@ -91,19 +99,68 @@ void build_bmp(int w, int h)
   }
 }
 
+// --- The client's second "file": a component document, also in memory --------
+//
+// Referenced by the path below, which is what gives it a base_dir of "widgets".
+// Its "assets" entry is the RAW image name this client knows - the host must ask
+// for exactly that, with "widgets" in base_dir.
+
+const char* k_asset_name     = "generated.bmp";
+const char* k_component_name = "widgets/meter.json";
+
+const char* k_component_json = R"json({
+  "component": "meter",
+  "size": [104, 104],
+  "params": [
+    { "key": "neui.param.value", "default": 0.7, "min": 0, "max": 1, "label": "Level" }
+  ],
+  "assets": { "face": "generated.bmp" },
+  "layers": [
+    { "kind": "asset", "z": 0, "anchor": ["top", "top"], "size": [96, 80],
+      "offset": [0, 4], "asset": "face" },
+    { "kind": "rect", "z": 1, "anchor": ["center", "center"], "size": [104, 104],
+      "stroke_color": "#FF202024", "stroke_width": 2 },
+    { "kind": "text", "z": 2, "anchor": ["bottom", "bottom"], "size": ["fill", 18],
+      "text": "from client bytes", "font_size": 11, "color": "#FF202024",
+      "align": ["center", "center"] }
+  ]
+})json";
+
+// What the provider was asked for on behalf of the component's asset - printed
+// in the UI, because "was it joined onto base_dir?" is the whole point.
+std::string g_comp_asset_name;
+std::string g_comp_asset_dir;
+
 // --- The provider itself ---------------------------------------------------
 //
-// Serves exactly one name. Everything else is declined, which lets the host fall
-// back to its normal filesystem / embedded-resource resolution.
-
-const char* k_asset_name = "generated.bmp";
+// Serves exactly two names, one image and one component document. Everything
+// else is declined, which lets the host fall back to its normal filesystem /
+// embedded-resource resolution.
 
 bool NEUI_ABI res_provide(void* /*token*/, const neui_resource_request_t* req,
                           neui_resource_bytes_t* out)
 {
   ++g_provide_calls;
+  if (!req->name) return false;
+
+  if (req->kind == NEUI_RESOURCE_KIND_COMPONENT) {
+    if (strcmp(req->name, k_component_name) != 0) return false;
+    out->data          = (const uint8_t*)k_component_json;
+    out->len           = (uint32_t)strlen(k_component_json);
+    out->release_token = nullptr;
+    return true;
+  }
+
   if (req->kind != NEUI_RESOURCE_KIND_IMAGE) return false;
-  if (!req->name || strcmp(req->name, k_asset_name) != 0) return false;
+  if (strcmp(req->name, k_asset_name) != 0) return false;
+
+  // base_dir is set only for a name that came out of a component document. A
+  // client with per-document asset tables would key on it; here it is recorded
+  // so the UI can show that the name arrived raw and the directory separately.
+  if (req->base_dir) {
+    g_comp_asset_name = req->name;
+    g_comp_asset_dir  = req->base_dir;
+  }
 
   // scale_hint is what the host would resolve @2x / @3x for. We only have the
   // one resolution, so report it as 1.0 via `scale` and ignore the hint - a real
@@ -124,7 +181,9 @@ void NEUI_ABI res_release(void* /*token*/, const neui_resource_bytes_t* /*res*/)
 
 neui_resource_client_t resource_client = {
   NEUI_VERSION,
-  NEUI_RESOURCE_MASK_IMAGE,   // images only - never asked for fonts / components
+  // Images + component documents; the mask keeps this client off the font path
+  // and off the filmstrip-sidecar path entirely.
+  NEUI_RESOURCE_MASK_IMAGE | NEUI_RESOURCE_MASK_COMPONENT,
   res_provide,
   res_release,
 };
@@ -188,34 +247,49 @@ int main()
   app.assets  = (neui_asset_api_t*) app.neui->get_interface(app.sess, NEUI_API_ASSETS);
   if (!app.widgets) return 1;
 
-  // Content is 2 columns of 96px art + labels, so 460x260 holds it with margins.
+  // Content is 3 columns of ~104px art at y=40..144 (widest right edge 300+104),
+  // labels at y=148, and 3 status lines 616 wide ending at y=240; 640x272 holds
+  // that with a margin on all sides.
   auto win = app.widgets->create(app.sess, widget_none, NEUI_W_APPWINDOW,
-                                 120, 120, 460, 260, nullptr);
+                                 120, 120, 640, 272, nullptr);
   app.widgets->set_text(app.sess, win, "neui - client resource provider");
 
-  auto title = app.widgets->create(app.sess, win, NEUI_W_LABEL, 12, 10, 430, 20, nullptr);
+  auto title = app.widgets->create(app.sess, win, NEUI_W_LABEL, 12, 10, 616, 20, nullptr);
   app.widgets->set_text(app.sess, title,
-                        "Both images below come from client memory, not a file:");
+                        "Everything below comes from client memory, not a file:");
 
   // 1. IMAGE widget by name. The framework resolves this lazily on first paint,
   //    which is the path that goes through the provider.
   auto img = app.widgets->create(app.sess, win, NEUI_W_IMAGE, 12, 40, 96, 96, nullptr);
   app.widgets->set_text(app.sess, img, k_asset_name);
-  auto l1 = app.widgets->create(app.sess, win, NEUI_W_LABEL, 12, 142, 200, 18, nullptr);
-  app.widgets->set_text(app.sess, l1, "IMAGE widget (set_text)");
+  auto l1 = app.widgets->create(app.sess, win, NEUI_W_LABEL, 12, 148, 132, 18, nullptr);
+  app.widgets->set_text(app.sess, l1, "IMAGE (set_text)");
 
   // 2. Explicit asset handle by the same name, drawn by a CUSTOMDRAW.
   if (app.assets)
     app.handle = app.assets->create_from_file(app.sess, k_asset_name);
   auto canvas = app.widgets->create(app.sess, win, NEUI_W_CUSTOMDRAW,
-                                    140, 40, 104, 104, nullptr);
+                                    156, 40, 104, 104, nullptr);
   app.canvas_id = canvas.id;
-  auto l2 = app.widgets->create(app.sess, win, NEUI_W_LABEL, 140, 142, 220, 18, nullptr);
-  app.widgets->set_text(app.sess, l2, "CUSTOMDRAW (asset handle)");
+  auto l2 = app.widgets->create(app.sess, win, NEUI_W_LABEL, 156, 148, 132, 18, nullptr);
+  app.widgets->set_text(app.sess, l2, "CUSTOMDRAW handle");
 
-  // Counts as of the explicit create_from_file above. The IMAGE widget resolves
-  // lazily on its first paint, so its own provide() calls land after this.
-  auto status = app.widgets->create(app.sess, win, NEUI_W_LABEL, 12, 172, 430, 20, nullptr);
+  // 3. A COMPONENT whose document AND whose layer asset both come from the
+  //    provider. The document path gives it base_dir "widgets"; the asset inside
+  //    it is named "generated.bmp" and must arrive that way, or this client
+  //    declines and the face is blank.
+  if (app.assets) {
+    neui_asset_t comp = app.assets->create_component_from_file(app.sess,
+                                                              k_component_name, nullptr);
+    if (comp.id != asset_none.id)
+      app.widgets->create_from_component(app.sess, win, comp, 300, 40, 104, 104);
+  }
+  auto l3 = app.widgets->create(app.sess, win, NEUI_W_LABEL, 300, 148, 160, 18, nullptr);
+  app.widgets->set_text(app.sess, l3, "COMPONENT doc + asset");
+
+  // Counts as of the loads above. The IMAGE widget resolves lazily on its first
+  // paint, so its own provide() calls land after this.
+  auto status = app.widgets->create(app.sess, win, NEUI_W_LABEL, 12, 172, 616, 20, nullptr);
   app.status_id = status.id;
   char buf[192];
   std::snprintf(buf, sizeof(buf),
@@ -224,9 +298,19 @@ int main()
                 g_bmp.size(), g_provide_calls, g_release_calls, g_last_hint);
   app.widgets->set_text(app.sess, status, buf);
 
-  auto note = app.widgets->create(app.sess, win, NEUI_W_LABEL, 12, 196, 430, 20, nullptr);
+  // The name contract, printed rather than asserted: raw entry + separate dir.
+  auto prov = app.widgets->create(app.sess, win, NEUI_W_LABEL, 12, 196, 616, 20, nullptr);
+  char buf2[256];
+  std::snprintf(buf2, sizeof(buf2),
+                "component doc \"%s\" -> its asset asked as name=\"%s\" base_dir=\"%s\"",
+                k_component_name,
+                g_comp_asset_name.empty() ? "(never asked)" : g_comp_asset_name.c_str(),
+                g_comp_asset_dir.empty()  ? "(none)"        : g_comp_asset_dir.c_str());
+  app.widgets->set_text(app.sess, prov, buf2);
+
+  auto note = app.widgets->create(app.sess, win, NEUI_W_LABEL, 12, 220, 616, 20, nullptr);
   app.widgets->set_text(app.sess, note,
-                        "No file named generated.bmp exists anywhere.");
+                        "Neither generated.bmp nor widgets/meter.json exists on disk.");
 
   app.widgets->show(app.sess, win);
   app.neui->run(app.sess);
