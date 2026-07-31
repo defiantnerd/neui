@@ -66,11 +66,20 @@ namespace neui_detail
       neui_resource_bytes_t got{};
       if (!client->provide(token, &req, &got)) return false;
 
-      bool ok = false;
-      if (got.data && got.len > 0)
-        ok = fn(got.data, got.len, got.scale > 0.0f ? got.scale : 1.0f);
-      if (client->release) client->release(token, &got);
-      return ok;
+      // release() is promised exactly once for every provide() that returned
+      // true (<neui/d/resource.h>), so the pairing has to survive an exception
+      // unwinding out of `fn`: every consumer ends in an allocation that can
+      // throw (a decode into new[] / a std::string assign), and a client that
+      // allocated or mapped this blob per request would leak it.
+      struct ReleaseGuard {
+        neui_resource_client_t*      c;
+        void*                        t;
+        const neui_resource_bytes_t* b;
+        ~ReleaseGuard() { if (c->release) c->release(t, b); }
+      } guard{ client, token, &got };
+
+      if (!got.data || got.len == 0) return false;
+      return fn(got.data, got.len, got.scale > 0.0f ? got.scale : 1.0f);
     }
 
     // The byte-native kinds (FONT / COMPONENT / SIDECAR): ask the client, then

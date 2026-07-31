@@ -8,6 +8,7 @@
 #include <shlwapi.h>
 
 #include <cstdint>
+#include <new>
 #include <string>
 
 #pragma comment(lib, "Windowscodecs")
@@ -71,9 +72,22 @@ namespace neui_detail
       converter->GetSize(&w, &h);
       if (w == 0 || h == 0) goto cleanup;
 
-      uint32_t stride = w * 4;
-      uint32_t size   = stride * h;
-      result = new uint8_t[size];
+      // GetSize reports the dimensions the container's HEADER declares, without
+      // decoding a pixel - and these bytes reach us straight from a client
+      // resource provider via load_image_bgra8_w32_memory. So bound the buffer
+      // math in 64 bits: a blob declaring 65536x65536 would otherwise truncate
+      // stride * h to 0 in uint32_t and hand CopyPixels a zero-byte allocation
+      // with a 256 KB stride. (Same guard the stb loader carries.)
+      const uint64_t stride64 = static_cast<uint64_t>(w) * 4u;
+      const uint64_t size64   = stride64 * h;
+      if (size64 == 0 || size64 > 0xFFFFFFFFull) goto cleanup;
+
+      const uint32_t stride = static_cast<uint32_t>(stride64);
+      const uint32_t size   = static_cast<uint32_t>(size64);
+      // nothrow: a decoder fed untrusted bytes reports failure by returning
+      // nullptr (documented below), and this runs on the paint path.
+      result = new (std::nothrow) uint8_t[size];
+      if (!result) goto cleanup;
       hr = converter->CopyPixels(nullptr, stride, size, result);
       if (FAILED(hr)) { delete[] result; result = nullptr; goto cleanup; }
 

@@ -446,10 +446,14 @@ namespace xpl_host
 
       if (paintable) {
         if (me.obj && me.parent != parent_obj) {
-          // Tree slot reused under a different parent - rebuild the mirror.
-          lv_obj_delete(me.obj);
-          me.obj = nullptr;
-          me.body = nullptr;
+          // Our container changed: the tree slot was reused under a different
+          // parent, or an ancestor stopped painting and handed its children up
+          // (see the descent note below). REPARENT rather than delete + rebuild -
+          // lv_obj_delete takes the whole subtree with it, which would leave
+          // every descendant's MirrorEntry::obj pointing at a freed object for
+          // the rest of this pass (and it deletes it again when it gets there).
+          lv_obj_set_parent(me.obj, parent_obj);
+          me.parent = parent_obj;
         }
         if (!me.obj) {
           me.obj    = lv_obj_create(parent_obj);
@@ -470,16 +474,27 @@ namespace xpl_host
         lv_obj_set_hidden(me.obj, true);
       }
 
-      // Descent. Container + origins for the children:
-      lv_obj_t* container      = me.obj ? me.obj : parent_obj;
-      int       child_origin_x = me.obj ? 0 : origin_x + wd.x;
-      int       child_origin_y = me.obj ? 0 : origin_y + wd.y;
+      // Descent. Container + origins for the children. The children mirror under
+      // this widget's own object only while that object stands in for the widget:
+      // a mirror hidden because the widget stopped PAINTING (shrunk to zero size,
+      // gained a native handle) must not become their container, because
+      // LV_OBJ_FLAG_HIDDEN takes the whole subtree with it while
+      // paint_widgets_recursive skips only the widget itself and still paints its
+      // children - its one descent gate is wd.visible. Those children go to our
+      // own container with this widget's offset folded in, exactly like a widget
+      // that never had a mirror. A mirror hidden because the widget is INVISIBLE
+      // is the opposite case - there the subtree is meant to disappear too, so it
+      // stays the container.
+      const bool use_mirror    = me.obj && (paintable || !wd.visible);
+      lv_obj_t* container      = use_mirror ? me.obj : parent_obj;
+      int       child_origin_x = use_mirror ? 0 : origin_x + wd.x;
+      int       child_origin_y = use_mirror ? 0 : origin_y + wd.y;
       int       abs_ox         = wd.abs_x;
       int       abs_oy         = wd.abs_y;
 
       const auto* slay = wd.section_layout_ptr();
       auto*       sst  = wd.scroll_state_ptr();
-      if (slay && me.obj) {
+      if (slay && use_mirror) {
         const int sx = sst ? sst->scroll_x : 0;
         const int sy = sst ? sst->scroll_y : 0;
         if (!me.body) {

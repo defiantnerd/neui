@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstring>
-#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -184,17 +183,36 @@ namespace neui_detail
     // resolve_path's candidate order depends on - so 1.25 / 1.5 / 1.75 all share
     // one entry.
     //
-    // Negative results are sticky for the session (v0 decision); a DPI change
-    // into a different bucket re-resolves naturally, and clear_image_routes()
-    // drops them outright so a resource published late can still appear.
+    // Negative results are sticky (v0 decision), with three ways out:
+    //   * a scale that lands in a DIFFERENT band resolves independently. Note
+    //     this is genuinely narrower than "a DPI change re-resolves": 125% and
+    //     200% are both band 1, so moving between those two displays reuses the
+    //     cached outcome.
+    //   * an explicit allocate_from_file (create_from_file and friends - a
+    //     client-initiated load, not a per-frame resolve) RE-PROBES a cached
+    //     miss, so a resource published late still appears. The per-frame
+    //     path-keyed tier deliberately does not.
+    //   * clear_image_routes() / clear() drop them outright.
     struct ImageRoute {
       bool        found       = false;
       // Bytes come from the client resource provider rather than the
-      // filesystem (see provide_image_bytes).
+      // filesystem (see probe_image_route).
       bool        from_client = false;
-      std::string path;        // resolved @Nx filesystem variant, when !from_client
-      std::string cache_key;   // stable key for derived path-keyed caches
-      float       scale       = 1.0f;  // HiDPI factor of what decode_route yields
+      // The resource name exactly as it was asked for: the string to re-ask the
+      // provider with, and the base name the @Nx ladder resolves from.
+      std::string name;
+      // Resolved @Nx filesystem variant. Empty on a client route - those bytes
+      // have no path, which is why `name` is kept separately.
+      std::string file_path;
+      // Stable key for derived path-keyed caches: the resolved path for a file
+      // route, a synthetic per-band key for a client route (see
+      // client_cache_key - the band has to be in it).
+      std::string cache_key;
+      // HiDPI factor of what decode_route yields.
+      float       scale       = 1.0f;
+      // The display scale this route was resolved FOR - the scale_hint to re-ask
+      // the provider with, so the fetch sees the same request the probe did.
+      float       req_scale   = 1.0f;
     };
 
     // resolve_path's candidate order depends only on which band `scale` is in.
@@ -203,20 +221,31 @@ namespace neui_detail
       return scale > 2.0f ? 2 : (scale > 1.0f ? 1 : 0);
     }
 
-    const ImageRoute& image_route(const std::string& name, float scale)
+    // `refresh_miss` re-probes an entry cached as a MISS (see the sticky-negative
+    // note above); a cached HIT is always reused.
+    const ImageRoute& image_route(const std::string& name, float scale,
+                                  bool refresh_miss = false)
     {
       static const ImageRoute k_no_route;
       if (name.empty()) return k_no_route;
       if (scale <= 0.0f) scale = 1.0f;
 
-      RouteKey key{ name, scale_bucket(scale) };
+      std::string key = route_key(name, scale_bucket(scale));
       auto it = _routes.find(key);
-      if (it != _routes.end()) return it->second;
+      if (it != _routes.end()) {
+        if (it->second.found || !refresh_miss) return it->second;
+        it->second = probe_image_route(name, scale);
+        return it->second;
+      }
       return _routes.emplace(std::move(key), probe_image_route(name, scale))
                     .first->second;
     }
 
-    void clear_image_routes() { _routes.clear(); }
+    void clear_image_routes()
+    {
+      _routes.clear();
+      _probe = ProbePixels{};
+    }
 
     // Installed by the host at session-create time from
     // client->get_interface(NEUI_API_RESOURCE_CLIENT). Absent (the default),
@@ -229,22 +258,67 @@ namespace neui_detail
     }
     const ResourceProvider& resource_provider() const { return _provider; }
 
-    // Decode whatever `route` points at into a fresh BGRA8-premultiplied
-    // buffer (released with Loader::free_pixels, as everywhere else).
-    uint8_t* decode_route(const ImageRoute& route, uint32_t* w_px, uint32_t* h_px)
+    // Decode whatever `route` designates into `out_px` (BGRA8 premultiplied),
+    // reporting the pixel size and - in *scale_out - the HiDPI factor of what was
+    // ACTUALLY decoded. On a client route that is the scale the provider declares
+    // on THIS call, which need not be the one the probe saw: a provider is free
+    // to answer the same request with a different variant, and the entry must
+    // record the scale of the pixels it is holding or the bitmap draws at the
+    // wrong logical size. Returns false on failure (out_px left empty).
+    bool decode_route(const ImageRoute& route, std::vector<uint8_t>& out_px,
+                      uint32_t* w_px, uint32_t* h_px, float* scale_out)
     {
-      if (!route.found) return nullptr;
-      if (route.from_client) {
-        uint8_t* px = nullptr;
-        _provider.with_bytes(
-            NEUI_RESOURCE_KIND_IMAGE, route.path.c_str(), route.scale, nullptr,
-            [&](const uint8_t* data, uint32_t len, float) {
-              px = Loader::load_memory(data, len, w_px, h_px);
-              return px != nullptr;
+      out_px.clear();
+      if (!route.found) return false;
+
+      uint32_t w = 0, h = 0;
+      float    sc = route.scale;
+
+      if (_probe.valid && _probe.key == route.cache_key) {
+        // The probe already decoded exactly these pixels - take them rather
+        // than pay a second decode (and, on a client route, a second provide).
+        out_px = std::move(_probe.pixels);
+        w  = _probe.w_px;
+        h  = _probe.h_px;
+        sc = _probe.scale;
+        _probe = ProbePixels{};
+      } else if (route.from_client) {
+        const bool ok = _provider.with_bytes(
+            NEUI_RESOURCE_KIND_IMAGE, route.name.c_str(), route.req_scale, nullptr,
+            [&](const uint8_t* data, uint32_t len, float s) {
+              uint32_t dw = 0, dh = 0;
+              uint8_t* raw = Loader::load_memory(data, len, &dw, &dh);
+              if (!adopt_pixels(raw, dw, dh, out_px)) return false;
+              w = dw; h = dh; sc = s;
+              return true;
             });
-        return px;
+        if (!ok) {
+          // The provider validated once at probe time but has now declined, or
+          // handed over bytes that no longer decode. Fall back to the filesystem
+          // instead of failing the load for the rest of the session: "a buggy
+          // provider cannot shadow a good file" has to hold for every load, not
+          // just for the one probe that decided the route.
+          out_px.clear();
+          DecodedImage      file_px;
+          const std::string fallback = resolve_path(route.name, route.req_scale,
+                                                    &file_px);
+          if (fallback.empty() || file_px.pixels.empty()) return false;
+          out_px = std::move(file_px.pixels);
+          w  = file_px.w_px;
+          h  = file_px.h_px;
+          sc = scale_of_resolved(route.name, fallback);
+        }
+      } else {
+        uint32_t dw = 0, dh = 0;
+        uint8_t* raw = Loader::load(route.file_path.c_str(), &dw, &dh);
+        if (!adopt_pixels(raw, dw, dh, out_px)) return false;
+        w = dw; h = dh;
       }
-      return Loader::load(route.path.c_str(), w_px, h_px);
+
+      if (w_px)      *w_px      = w;
+      if (h_px)      *h_px      = h;
+      if (scale_out) *scale_out = sc;
+      return true;
     }
 
     // Allocate a slot from a file path (resolves @2x / @3x variants when
@@ -254,24 +328,22 @@ namespace neui_detail
       if (name.empty()) return 0;
       if (scale <= 0.0f) scale = 1.0f;
 
-      const ImageRoute& route = image_route(name, scale);
+      // refresh_miss: this is an explicit, client-initiated load, so a resource
+      // that was missing earlier gets another chance (see the sticky-negative
+      // note on ImageRoute). The per-frame tier in the xpl AssetManager does not
+      // pass it.
+      const ImageRoute& route = image_route(name, scale, /*refresh_miss=*/true);
       if (!route.found) return 0;
 
+      auto     entry = std::make_unique<AssetEntry>();
       uint32_t w_px = 0, h_px = 0;
-      uint8_t* raw = decode_route(route, &w_px, &h_px);
-      if (!raw || w_px == 0 || h_px == 0) {
-        Loader::free_pixels(raw);
-        return 0;
-      }
+      float    got_scale = route.scale;
+      if (!decode_route(route, entry->pixels, &w_px, &h_px, &got_scale)) return 0;
 
-      auto entry = std::make_unique<AssetEntry>();
       entry->kind      = NEUI_ASSET_KIND_BITMAP;
       entry->width_px  = w_px;
       entry->height_px = h_px;
-      entry->scale     = route.scale;
-      entry->pixels.assign(raw, raw + static_cast<size_t>(w_px) * h_px * 4);
-      Loader::free_pixels(raw);
-
+      entry->scale     = got_scale;
       return alloc_slot(std::move(entry));
     }
 
@@ -832,6 +904,10 @@ namespace neui_detail
       }
       _handles.clear();
       _free_slots.clear();
+      // Resolution outcomes describe the assets just torn down, so they go with
+      // them - otherwise a full asset reset could not recover a sticky MISS for
+      // a resource that has since appeared.
+      clear_image_routes();
     }
 
     // --- Path helpers (shared with derived path-keyed caches) --------------
@@ -845,6 +921,24 @@ namespace neui_detail
       else { base_out = name.substr(0, dot); ext_out = name.substr(dot); }
     }
 
+    // A decoded BGRA8-premultiplied image, owned by a vector so no raw
+    // Loader buffer is ever in flight across a return.
+    struct DecodedImage {
+      std::vector<uint8_t> pixels;
+      uint32_t             w_px = 0, h_px = 0;
+    };
+
+    // Move a Loader buffer into `out` and release it. Returns false for a failed
+    // or zero-size decode (still releasing whatever came back).
+    static bool adopt_pixels(uint8_t* raw, uint32_t w, uint32_t h,
+                             std::vector<uint8_t>& out)
+    {
+      if (!raw || w == 0 || h == 0) { Loader::free_pixels(raw); return false; }
+      out.assign(raw, raw + static_cast<size_t>(w) * h * 4);
+      Loader::free_pixels(raw);
+      return true;
+    }
+
     // Resolves the best available path for the requested scale, with a
     // higher-res fallback so a deployment that ships only @2x (or @3x)
     // still loads on a 96-DPI display - the bitmap is downscaled at draw
@@ -852,7 +946,12 @@ namespace neui_detail
     //   scale > 2.0 -> @3x -> @2x -> base
     //   scale > 1.0 -> @2x -> base -> @3x
     //   else        -> base -> @2x -> @3x
-    static std::string resolve_path(const std::string& name, float scale)
+    // Existence is tested by DECODING a candidate (there is no stat() in the
+    // Loader policy), so pass `keep` to be handed the winning candidate's pixels
+    // instead of throwing them away - that is what keeps a cold load down to one
+    // decode rather than one to probe plus one for real.
+    static std::string resolve_path(const std::string& name, float scale,
+                                    DecodedImage* keep = nullptr)
     {
       std::string base, ext;
       split_ext(name, base, ext);
@@ -874,7 +973,14 @@ namespace neui_detail
         uint32_t w = 0, h = 0;
         uint8_t* raw = Loader::load(p.c_str(), &w, &h);
         if (raw) {
-          Loader::free_pixels(raw);
+          if (keep) {
+            if (adopt_pixels(raw, w, h, keep->pixels)) {
+              keep->w_px = w;
+              keep->h_px = h;
+            }
+          } else {
+            Loader::free_pixels(raw);
+          }
           return p;
         }
       }
@@ -902,48 +1008,100 @@ namespace neui_detail
     // The client probe DECODES what it gets back, which is what makes decision 9
     // work: bytes that do not decode are treated as a miss and resolution
     // continues to the filesystem, so a broken provider cannot shadow a good
-    // file. The probe throws those pixels away and decode_route asks once more
-    // when they are actually wanted - two provider calls on a cold load, none
-    // per frame, which is the cost that actually mattered.
+    // file. Those pixels are PARKED (park_probe) and handed to the first
+    // decode_route for the same route, so a cold load costs one provide() and
+    // one decode - and none per frame, which is the cost that actually mattered.
     ImageRoute probe_image_route(const std::string& name, float scale)
     {
       ImageRoute r;
+      r.name      = name;
+      r.req_scale = scale;
+      _probe = ProbePixels{};   // anything a previous probe parked is stale now
 
       if (_provider.serves(NEUI_RESOURCE_KIND_IMAGE)) {
-        float got_scale = 1.0f;
+        DecodedImage got;
+        float        got_scale = 1.0f;
         const bool usable = _provider.with_bytes(
             NEUI_RESOURCE_KIND_IMAGE, name.c_str(), scale, nullptr,
             [&](const uint8_t* data, uint32_t len, float s) {
               uint32_t w = 0, h = 0;
-              uint8_t* px = Loader::load_memory(data, len, &w, &h);
-              const bool ok = px && w > 0 && h > 0;
-              Loader::free_pixels(px);
-              if (ok) got_scale = s;
-              return ok;
+              uint8_t* raw = Loader::load_memory(data, len, &w, &h);
+              if (!adopt_pixels(raw, w, h, got.pixels)) return false;
+              got.w_px  = w;
+              got.h_px  = h;
+              got_scale = s;
+              return true;
             });
         if (usable) {
           r.found       = true;
           r.from_client = true;
-          r.path        = name;                    // the name to re-ask with
-          r.cache_key   = "\x01client\x01" + name; // cannot collide with a path
+          r.cache_key   = client_cache_key(name, scale_bucket(scale));
           r.scale       = got_scale;
+          park_probe(r.cache_key, std::move(got), got_scale);
           return r;
         }
       }
 
-      std::string resolved = resolve_path(name, scale);
+      DecodedImage      file_px;
+      const std::string resolved = resolve_path(name, scale, &file_px);
       if (!resolved.empty()) {
         r.found     = true;
-        r.path      = resolved;
+        r.file_path = resolved;
         r.cache_key = resolved;
         r.scale     = scale_of_resolved(name, resolved);
+        park_probe(r.cache_key, std::move(file_px), r.scale);
       }
       return r;
     }
 
-    // (name, scale bucket) -> resolution outcome, misses included.
-    using RouteKey = std::pair<std::string, int>;
-    std::map<RouteKey, ImageRoute> _routes;
+    // Cache key for a route whose bytes came from the client: those bytes have no
+    // path, and the scale BAND has to be part of the key. A provider may
+    // legitimately answer one name with different pixels per band (that is what
+    // scale_hint is for), and the derived path-keyed caches store one AssetEntry
+    // per key - drop the band and every band after the first would be served the
+    // first one's bitmap at the wrong resolution.
+    static std::string client_cache_key(const std::string& name, int bucket)
+    {
+      return std::string("\x01") + "client\x01" + static_cast<char>('0' + bucket)
+           + '\x01' + name;   // '\x01' cannot occur in a path
+    }
+
+    // (name, scale bucket) -> resolution outcome key. Folded into one string so
+    // the map can hash rather than compare strings down a tree - this sits on the
+    // per-frame paint path.
+    static std::string route_key(const std::string& name, int bucket)
+    {
+      return name + '\x01' + static_cast<char>('0' + bucket);
+    }
+
+    // Pixels a probe has already decoded, waiting for the first decode_route of
+    // that same route. probe_image_route must decode to answer "are these bytes
+    // usable?" and resolve_path must decode to answer "does this candidate
+    // exist?"; parking the result is what stops the real load decoding a second
+    // time. At most ONE image is held, and it is dropped by the next probe, by
+    // the decode that consumes it, or by clear_image_routes().
+    struct ProbePixels {
+      bool                 valid = false;
+      std::string          key;                 // ImageRoute::cache_key it is for
+      std::vector<uint8_t> pixels;              // BGRA8 premultiplied
+      uint32_t             w_px = 0, h_px = 0;
+      float                scale = 1.0f;
+    };
+    ProbePixels _probe;
+
+    void park_probe(const std::string& key, DecodedImage&& img, float scale)
+    {
+      if (img.pixels.empty() || img.w_px == 0 || img.h_px == 0) return;
+      _probe.valid  = true;
+      _probe.key    = key;
+      _probe.pixels = std::move(img.pixels);
+      _probe.w_px   = img.w_px;
+      _probe.h_px   = img.h_px;
+      _probe.scale  = scale;
+    }
+
+    // route_key(name, bucket) -> resolution outcome, misses included.
+    std::unordered_map<std::string, ImageRoute> _routes;
 
     // Optional client byte provider; empty unless the host installed one.
     ResourceProvider _provider;

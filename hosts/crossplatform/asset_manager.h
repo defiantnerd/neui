@@ -59,9 +59,10 @@ namespace neui_detail
     void clear(neui_render_backend_t* backend);
 
   private:
-    // Cache keyed by ImageRoute::cache_key - the resolved file path, or a
-    // synthetic key for client-provided bytes - so different scale lookups that
-    // resolve to the same source share a single AssetEntry.
+    // Cache keyed by ImageRoute::cache_key - the resolved @Nx file path, or a
+    // per-scale-band synthetic key for client-provided bytes - so different
+    // scale lookups that resolve to the same source share a single AssetEntry,
+    // and ones that resolve to DIFFERENT pixels never collide.
     std::unordered_map<std::string, AssetEntry> _cache;
 
     // Decodes the source `route` designates into `entry`. Returns true on

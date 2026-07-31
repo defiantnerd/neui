@@ -8,7 +8,9 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
 
+#include <climits>
 #include <cstdint>
+#include <new>
 
 // iOS image-loading helpers for the xpl host (hosts/crossplatform/platform_ios.mm).
 // The CGImageSource + CGBitmapContextCreate BGRA8-premultiplied core is identical
@@ -73,9 +75,20 @@ namespace neui_detail
       return nullptr;
     }
 
+    // Bound the byte count before allocating: these dimensions can come from a
+    // container header in bytes a client resource provider handed over, and the
+    // sibling stb / WIC loaders carry the same guard.
+    if (w > (SIZE_MAX / 4) || h > (SIZE_MAX / (w * 4))) {
+      CGImageRelease(img);
+      return nullptr;
+    }
     size_t row_bytes = w * 4;
     size_t total     = row_bytes * h;
-    uint8_t* buf     = new uint8_t[total]();
+    uint8_t* buf     = new (std::nothrow) uint8_t[total]();
+    if (!buf) {
+      CGImageRelease(img);
+      return nullptr;
+    }
 
     CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     CGContextRef ctx = CGBitmapContextCreate(

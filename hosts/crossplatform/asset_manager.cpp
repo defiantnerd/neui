@@ -9,20 +9,18 @@
 namespace neui_detail
 {
   // Decode the source `route` designates (a resolved @Nx file, or bytes from the
-  // client resource provider) into `entry`.
+  // client resource provider) into `entry`. entry.scale comes from the decode,
+  // not from the route: on a client route the provider declares the HiDPI factor
+  // of the bytes it just handed over, and drawing depends on those matching.
   bool AssetManager::load_pixels(const ImageRoute& route, AssetEntry& entry)
   {
     uint32_t w = 0, h = 0;
-    uint8_t* raw = decode_route(route, &w, &h);
-    if (!raw || w == 0 || h == 0) {
-      XplImageLoader::free_pixels(raw);
-      return false;
-    }
+    float    scale = route.scale;
+    if (!decode_route(route, entry.pixels, &w, &h, &scale)) return false;
 
     entry.width_px  = w;
     entry.height_px = h;
-    entry.pixels.assign(raw, raw + static_cast<size_t>(w) * h * 4);
-    XplImageLoader::free_pixels(raw);
+    entry.scale     = scale;
     return true;
   }
 
@@ -41,7 +39,6 @@ namespace neui_detail
     auto it = _cache.find(route.cache_key);
     if (it == _cache.end()) {
       AssetEntry entry;
-      entry.scale = route.scale;
       if (!load_pixels(route, entry)) return nullptr;
       it = _cache.emplace(route.cache_key, std::move(entry)).first;
     }
@@ -82,7 +79,6 @@ namespace neui_detail
     auto it = _cache.find(route.cache_key);
     if (it == _cache.end()) {
       AssetEntry entry;
-      entry.scale = route.scale;
       if (!load_pixels(route, entry)) return false;
       it = _cache.emplace(route.cache_key, std::move(entry)).first;
     }

@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <string>
 #include <unordered_map>
-#include <fstream>
 #include "window.h"  // provides get_hinstance(), ChildSubclassProc
 #include "../../backends/d2d/d2d_backend.h"
 #include "../shared/win32/clipboard_win32.h"

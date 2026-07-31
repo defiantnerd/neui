@@ -25,7 +25,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <fstream>
 
 namespace ios_host
 {

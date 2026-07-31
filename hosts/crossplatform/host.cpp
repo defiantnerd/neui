@@ -796,9 +796,12 @@ namespace xpl_host
   void Session::set_focus(uint32_t new_idx)
   {
     if (new_idx == _focused_widget) return;
-#ifdef NEUI_PLATFORM_LVGL
+    // Captured BEFORE the assignment below - both invalidate paths need the
+    // widget that is LOSING focus (set_hovered / set_pressed keep old_idx for
+    // the same reason). Reading _focused_widget after the store makes clearing
+    // focus (new_idx == 0) invalidate nothing, leaving a stale caret / focus
+    // ring on screen until an unrelated repaint.
     const uint32_t prev_focus = _focused_widget;
-#endif
 
     // If the open combo is losing focus, close its overlay.
     if (_open_combo != 0 && _open_combo == _focused_widget && new_idx != _focused_widget)
@@ -839,7 +842,7 @@ namespace xpl_host
     platform_retained_widget_invalidate(this, new_idx);
     platform_retained_widget_invalidate(this, prev_focus);
 #else
-    uint32_t ref = (new_idx != 0) ? new_idx : _focused_widget;
+    uint32_t ref = (new_idx != 0) ? new_idx : prev_focus;
     void* frame = find_parent_native_handle(ref);
     if (frame) platform_invalidate(frame);
 #endif

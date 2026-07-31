@@ -10,11 +10,18 @@
 //   * caching        - resolution is probed once per (name, scale band); in
 //                      particular NOT once per paint, which is what the cache
 //                      exists for
-//   * negative cache - a declining client is not re-asked
+//   * one decode     - the probe's pixels are parked for the load that wanted
+//                      them, so a cold load decodes (and provides) once
+//   * band keys      - one name served by the client at two scales gets two
+//                      cache keys, so the derived path-keyed caches cannot serve
+//                      the wrong resolution
+//   * negative cache - a declining client is not re-asked per paint, while an
+//                      explicit load re-probes; clear() drops outcomes too
 //   * kinds_mask     - a client that only serves images is never asked for fonts
 //   * release        - paired with every provide() that returned true
 //   * bad bytes      - a blob that fails to decode falls through to the file
-//                      rather than shadowing it
+//                      rather than shadowing it, on EVERY load and not just the
+//                      probe that decided the route
 //
 // Uses a counting fake loader + a scripted fake client, so no host, no backend
 // and no real files are involved.
@@ -148,12 +155,71 @@ TEST_CASE("resource provider: client is asked before the filesystem")
   // Client won: it was asked, and the @Nx ladder never ran.
   CHECK(g_fc.names[0] == "knob.png");
   CHECK_EQ(CountingLoader::s_path_calls, 0);
-  // Documented cold-load cost: one validating probe (does the blob decode?)
-  // plus one fetch for the pixels actually kept.
-  CHECK_EQ((int)g_fc.names.size(), 2);
-  CHECK_EQ(CountingLoader::s_mem_calls, 2);
-  CHECK_EQ(g_fc.provides, 2);
-  CHECK_EQ(g_fc.releases, 2);          // release paired with every hit
+  // Cold-load cost: the validating probe's pixels are PARKED and handed to the
+  // load that wanted them, so one provide() and one decode - not two of each.
+  CHECK_EQ((int)g_fc.names.size(), 1);
+  CHECK_EQ(CountingLoader::s_mem_calls, 1);
+  CHECK_EQ(g_fc.provides, 1);
+  CHECK_EQ(g_fc.releases, 1);          // release paired with every hit
+}
+
+TEST_CASE("resource provider: a cold filesystem load decodes once, not twice")
+{
+  CountingLoader::reset({ "bg.png" });
+  AssetStore<CountingLoader> store;    // no provider at all
+
+  CHECK(store.allocate_from_file("bg.png", 1.0f) != 0);
+  // resolve_path has to decode a candidate to know it exists; those pixels are
+  // parked for the load rather than thrown away.
+  CHECK_EQ(CountingLoader::s_path_calls, 1);
+}
+
+TEST_CASE("resource provider: client routes do not collapse across scale bands")
+{
+  CountingLoader::reset();
+  g_fc = FakeClient{};
+  g_fc.serves = { "logo.png" };
+
+  AssetStore<CountingLoader> store;
+  neui_resource_client_t iface{};
+  store.set_resource_provider(make_provider(iface, 0));
+
+  // Same name, two display scales. The client is free to answer each band with
+  // different pixels, so the two routes must not share a cache_key - a
+  // path-keyed cache downstream stores one entry per key, and collapsing them
+  // serves the first band's bitmap at every other scale.
+  const std::string k1 = store.image_route("logo.png", 1.0f).cache_key;
+  const std::string k2 = store.image_route("logo.png", 2.0f).cache_key;
+  CHECK(store.image_route("logo.png", 1.0f).from_client);
+  CHECK(!k1.empty());
+  CHECK(k1 != k2);
+  // ... and neither may be mistakable for a filesystem path.
+  CHECK(k1.find("logo.png") != std::string::npos);
+  CHECK(k1[0] == '\x01');
+}
+
+TEST_CASE("resource provider: a client route still falls back to the file")
+{
+  CountingLoader::reset({ "logo.png" });     // the file is there all along
+  g_fc = FakeClient{};
+  g_fc.serves = { "logo.png" };
+
+  AssetStore<CountingLoader> store;
+  neui_resource_client_t iface{};
+  store.set_resource_provider(make_provider(iface, 0));
+
+  CHECK(store.allocate_from_file("logo.png", 1.0f) != 0);
+  CHECK(store.image_route("logo.png", 1.0f).from_client);
+  CHECK_EQ(CountingLoader::s_path_calls, 0);
+
+  // The provider now stops answering (a transient container failure, a bug on a
+  // second call). The route is already cached as from_client, but the load must
+  // still succeed off the filesystem instead of failing for the rest of the
+  // session - "a buggy provider cannot shadow a good file" applies to every
+  // load, not only to the probe that decided the route.
+  g_fc.serves.clear();
+  CHECK(store.allocate_from_file("logo.png", 1.0f) != 0);
+  CHECK(CountingLoader::s_path_calls > 0);
 }
 
 TEST_CASE("resource provider: raw name and scale hint reach the client")
@@ -232,8 +298,12 @@ TEST_CASE("resource provider: a missing resource is negatively cached")
   const int probes = CountingLoader::s_path_calls;   // the @Nx ladder ran once
   CHECK(probes > 0);
 
+  // The per-frame resolve is where stickiness has to hold: an IMAGE widget
+  // pointing at a missing file must not re-ask the client - or re-run the ladder
+  // - on every paint. (An explicit allocate_from_file deliberately DOES get
+  // another look; see "an explicit load re-probes a cached miss".)
   for (int i = 0; i < 5; ++i)
-    CHECK_EQ((int)store.allocate_from_file("nope.png", 1.0f), 0);
+    CHECK(!store.image_route("nope.png", 1.0f).found);
 
   CHECK_EQ((int)g_fc.names.size(), 1);               // asked once, ever
   CHECK_EQ(CountingLoader::s_path_calls, probes);    // ladder not re-run
@@ -243,6 +313,40 @@ TEST_CASE("resource provider: a missing resource is negatively cached")
   store.clear_image_routes();
   CHECK_EQ((int)store.allocate_from_file("nope.png", 1.0f), 0);
   CHECK_EQ((int)g_fc.names.size(), 2);
+}
+
+TEST_CASE("resource provider: an explicit load re-probes a cached miss")
+{
+  CountingLoader::reset();             // late.png does not exist yet
+  AssetStore<CountingLoader> store;    // no provider - filesystem only
+
+  CHECK_EQ((int)store.allocate_from_file("late.png", 1.0f), 0);
+
+  // The per-frame resolve stays sticky: a repaint must not re-run the @Nx ladder.
+  const int after_miss = CountingLoader::s_path_calls;
+  for (int i = 0; i < 5; ++i) CHECK(!store.image_route("late.png", 1.0f).found);
+  CHECK_EQ(CountingLoader::s_path_calls, after_miss);
+
+  // An explicit create_from_file is a client-initiated load, so it gets another
+  // look - a file written after the first attempt (a downloader, a save-then-
+  // reload, a designer tool rewriting an asset) must not stay unloadable for the
+  // rest of the session.
+  CountingLoader::s_existing.push_back("late.png");
+  CHECK(store.allocate_from_file("late.png", 1.0f) != 0);
+  CHECK(store.image_route("late.png", 1.0f).found);
+}
+
+TEST_CASE("resource provider: clear() drops resolution outcomes with the assets")
+{
+  CountingLoader::reset();
+  AssetStore<CountingLoader> store;
+
+  CHECK(!store.image_route("later.png", 1.0f).found);
+  CountingLoader::s_existing.push_back("later.png");
+  CHECK(!store.image_route("later.png", 1.0f).found);   // still the cached miss
+
+  store.clear(nullptr);                                 // full asset reset
+  CHECK(store.image_route("later.png", 1.0f).found);
 }
 
 TEST_CASE("resource provider: different scale bands resolve independently")
@@ -256,11 +360,11 @@ TEST_CASE("resource provider: different scale bands resolve independently")
   store.set_resource_provider(make_provider(iface, 0));
 
   const AssetStore<CountingLoader>::ImageRoute& r1 = store.image_route("k.png", 1.0f);
-  CHECK(r1.path == "k.png");
+  CHECK(r1.file_path == "k.png");
   CHECK_EQ(r1.scale, 1.0f);
 
   const AssetStore<CountingLoader>::ImageRoute& r2 = store.image_route("k.png", 2.0f);
-  CHECK(r2.path == "k@2x.png");
+  CHECK(r2.file_path == "k@2x.png");
   CHECK_EQ(r2.scale, 2.0f);
 
   // Two bands -> the client was consulted once per band, not once per variant.
@@ -319,7 +423,7 @@ TEST_CASE("resource provider: undecodable client bytes fall through to the file"
 
   const AssetStore<CountingLoader>::ImageRoute& r = store.image_route("logo.png", 1.0f);
   CHECK(!r.from_client);
-  CHECK(r.path == "logo.png");
+  CHECK(r.file_path == "logo.png");
   CHECK(CountingLoader::s_path_calls > 0);
   CHECK_EQ(g_fc.releases, 1);                // the rejected blob was released
 }

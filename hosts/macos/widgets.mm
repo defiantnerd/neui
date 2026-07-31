@@ -9,7 +9,6 @@
 
 #import <AppKit/AppKit.h>
 
-#include <fstream>
 #include <string>
 #include "host.h"
 #include "checkbox_image.h"
