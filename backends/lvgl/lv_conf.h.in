@@ -41,6 +41,12 @@
 /* Anti-aliased vector paths (KNOB arcs, compound PATH layers) via LVGL's
  * bundled ThorVG (open question resolved: ThorVG, not a hand-rolled
  * scanline rasteriser). */
+/* neui gradients carry an arbitrary stop list (neui_gradient_t is a pointer +
+ * count); LVGL's gradient descriptors are fixed-size arrays and it silently
+ * truncates - and logs - anything longer. The default of 2 would reduce every
+ * multi-stop compound gradient to a plain two-colour ramp. */
+#define LV_GRADIENT_MAX_STOPS 16
+
 #define LV_USE_FLOAT          1  /* required by LV_USE_MATRIX */
 #define LV_USE_MATRIX         1
 #define LV_USE_VECTOR_GRAPHIC 1

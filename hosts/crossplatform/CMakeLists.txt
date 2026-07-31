@@ -23,7 +23,9 @@ if(WIN32 AND NEUI_WITH_LVGL)
   target_compile_definitions(neui-xplhost PRIVATE NEUI_PLATFORM_LVGL=1)
   target_include_directories(neui-xplhost SYSTEM PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/stb)
-  target_link_libraries(neui-xplhost PRIVATE neui-backend-lvgl)
+  # windowsapp.lib as in the native-Win32 branch below: host.cpp compiles the
+  # C++/WinRT theme provider on every _WIN32 build, LVGL or not.
+  target_link_libraries(neui-xplhost PRIVATE neui-backend-lvgl windowsapp)
 elseif(WIN32)
   target_sources(neui-xplhost PRIVATE platform_win32.cpp)
   # windowsapp.lib supplies RoGetActivationFactory / RoOriginateLanguageException

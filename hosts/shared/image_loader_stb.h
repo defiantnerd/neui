@@ -1,16 +1,21 @@
 #pragma once
 
-#if defined(__linux__) || (defined(__unix__) && !defined(__APPLE__))
-
-// Linux image loader - mirror of hosts/shared/macos/image_loader_macos.h,
-// using the vendored stb_image (third_party/stb/stb_image.h). Decodes any
-// stb-supported format (PNG / JPG / BMP / GIF / ...) into a heap-allocated
-// BGRA8-premultiplied, top-down buffer matching what the cairo / d2d / cg
-// backends expect.
+// stb_image-based file loader - the fallback decoder for platform layers with
+// no OS imaging framework worth calling (Linux/X11, and the LVGL prototype host
+// on Windows, which runs without COM). Decodes any stb-supported format
+// (PNG / JPG / BMP / GIF / ...) into a heap-allocated BGRA8-premultiplied,
+// top-down buffer matching what the cairo / d2d / cg / lvgl backends expect.
+// The macOS / native-Windows counterparts are
+// hosts/shared/macos/image_loader_macos.h and
+// hosts/shared/win32/image_loader_win32.h (ImageIO / WIC).
+//
+// Platform-neutral by design - no OS guard - so every stb-based platform layer
+// shares one copy of the premultiply + overflow-guard logic.
 //
 // stb_image's implementation must be emitted in exactly ONE translation unit:
 // the includer defines STB_IMAGE_IMPLEMENTATION before including this header
-// (platform_linux.cpp does). Every other includer gets declarations only.
+// (platform_linux.cpp and platform_lvgl.cpp do, one per build). Every other
+// includer gets declarations only.
 
 #include <stb_image.h>
 
@@ -19,10 +24,10 @@
 namespace neui_detail
 {
   // Decode `path` into a new[]-allocated BGRA8-premultiplied buffer. Caller
-  // releases via free_image_bgra8_linux. Returns nullptr on failure.
-  inline uint8_t* load_image_bgra8_linux(const char* path,
-                                         uint32_t* width_out,
-                                         uint32_t* height_out)
+  // releases via free_image_bgra8_stb. Returns nullptr on failure.
+  inline uint8_t* load_image_bgra8_stb(const char* path,
+                                       uint32_t* width_out,
+                                       uint32_t* height_out)
   {
     if (!path || !*path) return nullptr;
     int w = 0, h = 0, n = 0;
@@ -54,8 +59,6 @@ namespace neui_detail
     return out;
   }
 
-  inline void free_image_bgra8_linux(uint8_t* pixels) { delete[] pixels; }
+  inline void free_image_bgra8_stb(uint8_t* pixels) { delete[] pixels; }
 
 } // namespace neui_detail
-
-#endif // linux

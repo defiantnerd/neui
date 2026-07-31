@@ -29,8 +29,10 @@
 // the last display dies mid-loop); frames are not repositionable after
 // creation.
 
+#include <algorithm>
 #include <string>
 #include <deque>
+#include <functional>
 #include <vector>
 #include <cstring>
 #include <cmath>
@@ -52,11 +54,12 @@
 #include <windows.h>
 #include <windowsx.h>
 
-// stb_image supplies platform_load_image (same decoder the Linux platform
-// uses); implementation compiled here for the LVGL build.
+// platform_load_image uses the shared stb decoder (the WIC loader the native
+// Windows platform layer uses needs COM, which this host never initialises).
+// This TU emits the single stb_image implementation for the LVGL build.
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_WINDOWS_UTF8
-#include <stb_image.h>
+#include "../shared/image_loader_stb.h"
 
 namespace xpl_host
 {
@@ -151,6 +154,53 @@ namespace xpl_host
     LvLockGuard() : locked(t_inside_lv == 0) { if (locked) lv_lock(); }
     ~LvLockGuard() { if (locked) lv_unlock(); }
   };
+
+  // Same policy exposed to the render backend, which performs LVGL allocations
+  // of its own outside any draw dispatch (Tiny TTF instance creation and glyph
+  // cache fills from measure_text on the host's non-painting sizing paths; the
+  // vector path / dsc deletes in destroy_context). Those mutate LVGL's global
+  // allocator + cache state, which a display thread can be inside under
+  // lv_lock. Counting into t_inside_lv keeps the guard re-entrant, since the
+  // OSAL mutex is not, and makes nested backend calls see the lock as held.
+  static void backend_lv_lock()
+  {
+    if (t_inside_lv == 0) lv_lock();
+    ++t_inside_lv;
+  }
+
+  static void backend_lv_unlock()
+  {
+    if (--t_inside_lv == 0) lv_unlock();
+  }
+
+  // Deferred main-thread USER32 work.
+  //
+  // lv_timer_handler holds the global LVGL lock for the whole refresh, and the
+  // draw callbacks dispatch WIDGET_PREUPDATE / WIDGET_PAINT into client code
+  // that may legally call widgets->set_text / set_pos, or show / close a
+  // dialog. Those land on SetWindowTextW / SetWindowPos / EnableWindow /
+  // SetForegroundWindow, which BLOCK until the target window's own thread
+  // processes the sent message - and that thread's WndProc takes lv_lock on
+  // entry. Calling them while holding the lock is a hard deadlock, so queue
+  // them and run them from the main loop once the lock is released.
+  static std::vector<std::function<void()>> g_deferred_calls;
+
+  static bool defer_if_locked(std::function<void()> fn)
+  {
+    if (t_inside_lv == 0) return false;
+    g_deferred_calls.push_back(std::move(fn));
+    SetEvent(g_wake);   // make sure the loop wakes to run it
+    return true;
+  }
+
+  static void run_deferred_calls()
+  {
+    while (!g_deferred_calls.empty()) {
+      std::vector<std::function<void()>> batch;
+      batch.swap(g_deferred_calls);
+      for (auto& fn : batch) fn();
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Display-thread side: subclass WndProc -> input queue
@@ -758,11 +808,18 @@ namespace xpl_host
         const int raw   = GET_WHEEL_DELTA_WPARAM(m.wp);
         const int lines = static_cast<int>(wheel_lines(raw, horizontal));
         int delta = (raw * lines) / WHEEL_DELTA;
-        bool shift_held = (m.wp & MK_SHIFT) != 0;
-        bool is_horiz   = horizontal || shift_held;
-        if (horizontal || shift_held) delta = -delta;
+        const bool is_horiz = horizontal || (m.wp & MK_SHIFT) != 0;
 
+        // The combo drop list scrolls on the vertical convention - intercept
+        // before the horizontal sign flip below, so shift+wheel over an open
+        // list scrolls the same direction a plain wheel does (platform_win32
+        // hands handle_combo_wheel the unflipped delta too).
         if (!horizontal && s->handle_combo_wheel(lx, ly, delta)) break;
+
+        // WM_MOUSEHWHEEL's positive delta means "to the right", the opposite of
+        // the vertical convention; platform_win32 flips it the same way. Shift +
+        // vertical wheel is the same gesture.
+        if (is_horiz) delta = -delta;
 
         uint32_t hit = s->widget_at(lx, ly, w->widget_index);
         if (hit == 0) break;
@@ -885,38 +942,54 @@ namespace xpl_host
   // allowed, hides the window + decrements the quit count; DIALOG re-enables
   // its owner and unwinds a modal pump. Windows are hidden, not destroyed
   // (see the file header note about the driver watchdog).
-  static void handle_close_request(WindowData* w)
+  //
+  // This is the bookkeeping half - it asks the client nothing. The APP_QUIT veto
+  // belongs to handle_close_request alone, so the teardown path
+  // (platform_destroy_window) cannot re-enter the client mid-destroy.
+  static void close_window_silently(WindowData* w)
   {
     Session* s  = w->session;
+    if (!s || w->closed) return;
     auto*    wd = s->get_widget(w->widget_index);
-    if (!wd || w->closed) return;
+
+    w->closed = true;
+    ShowWindowAsync(w->hwnd, SW_HIDE);
+    if (!wd) return;
 
     if (wd->type && !strcmp(wd->type, NEUI_W_APPWINDOW)) {
-      neui_event_t ev = {};
-      ev.type = NEUI_EVENT_APP_QUIT;
-      bool allow = s->dispatch_event(&ev);
-      if (!allow) return;
-      w->closed = true;
-      ShowWindowAsync(w->hwnd, SW_HIDE);
       if (--g_appwindow_count <= 0) g_quit = true;
       return;
     }
 
-    // DIALOG (and PLUGWINDOW): hide; for modal dialogs re-enable + refocus
-    // the owner and drop the nested pump so widget_show returns.
-    w->closed = true;
-    ShowWindowAsync(w->hwnd, SW_HIDE);
+    // DIALOG (and PLUGWINDOW): for modal dialogs re-enable + refocus the owner
+    // and drop the nested pump so widget_show returns. Both USER32 calls block
+    // on the owner's thread, so they go through the deferring seams.
     if (wd->is_dialog() && wd->owner_index != 0 &&
         s->_widgets.exists(wd->owner_index)) {
       bool is_modal = !wd->attrs || wd->attrs->get_int(NEUI_ATTR_MODAL, 1) != 0;
       void* owner_native = s->_widgets[wd->owner_index].native_handle;
       if (is_modal && owner_native) {
-        EnableWindow(static_cast<HWND>(owner_native), TRUE);
-        SetForegroundWindow(static_cast<HWND>(owner_native));
+        platform_set_window_enabled(owner_native, true);
+        platform_activate_window(owner_native);
       }
     }
     if (auto* fw = dynamic_cast<FrameWidget*>(wd))
       fw->modal_pump_active = false;
+  }
+
+  static void handle_close_request(WindowData* w)
+  {
+    Session* s  = w->session;
+    if (!s || w->closed) return;
+    auto*    wd = s->get_widget(w->widget_index);
+    if (!wd) return;
+
+    if (wd->type && !strcmp(wd->type, NEUI_W_APPWINDOW)) {
+      neui_event_t ev = {};
+      ev.type = NEUI_EVENT_APP_QUIT;
+      if (!s->dispatch_event(&ev)) return;   // client vetoed the close
+    }
+    close_window_silently(w);
   }
 
   // -------------------------------------------------------------------------
@@ -930,6 +1003,10 @@ namespace xpl_host
     g_wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     read_retained_env();
     lv_init();   // also runs lv_windows_platform_init() under LV_USE_WINDOWS
+    // Let the backend guard the LVGL allocations it makes outside a draw
+    // dispatch (font instances / glyph caches from measure_text, path deletes
+    // in destroy_context) with this layer's re-entrant lock policy.
+    neui_lvgl_backend::set_lock_hooks(backend_lv_lock, backend_lv_unlock);
   }
 
   neui_render_backend_t* platform_get_backend()
@@ -988,10 +1065,15 @@ namespace xpl_host
     }
 
     // Input bridge: context prop + WndProc subclass (the window lives on the
-    // driver's thread; the subclass only enqueues).
+    // driver's thread; the subclass only enqueues). Read and store the chained
+    // proc BEFORE swapping: the window is already being pumped by the driver's
+    // own thread, so subclass_proc can run the instant the swap takes effect -
+    // and it tail-calls CallWindowProcW(w->prev_proc, ...).
+    w->prev_proc = reinterpret_cast<WNDPROC>(
+        GetWindowLongPtrW(hwnd, GWLP_WNDPROC));
     SetPropW(hwnd, L"neui.lvgl.wdata", w);
-    w->prev_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
-        hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(subclass_proc)));
+    SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
+                      reinterpret_cast<LONG_PTR>(subclass_proc));
 
     wd.native_handle = hwnd;
     wd.dpi           = 96;   // logical == LVGL px == physical (see header)
@@ -1033,6 +1115,65 @@ namespace xpl_host
     return nullptr;
   }
 
+  // The driver owns the HWND + lv_display, and its watchdog exit(0)s the
+  // process if a display dies mid-loop (see the file header), so a destroyed
+  // frame keeps its window - hidden - for the process lifetime. Everything neui
+  // put on top of it does go away here: the retained mirror objects, the screen
+  // draw callbacks, the toast timer, the WndProc subclass, and any input still
+  // queued for this window.
+  //
+  // The WindowData itself is retired rather than freed: subclass_proc runs on
+  // the driver's thread and a call may already be in flight holding this
+  // pointer, with no way to join that thread. It is inert once `session` is
+  // null - drain_one and every draw callback bail on that.
+  static std::vector<WindowData*> g_retired_windows;
+
+  static void retire_window(WindowData* w)
+  {
+    // 1. Stop the display thread referencing it, then drop what it already
+    //    queued (those InputMsgs would otherwise drain against a dead window).
+    if (w->hwnd) {
+      if (w->prev_proc)
+        SetWindowLongPtrW(w->hwnd, GWLP_WNDPROC,
+                          reinterpret_cast<LONG_PTR>(w->prev_proc));
+      RemovePropW(w->hwnd, L"neui.lvgl.wdata");
+    }
+    {
+      EnterCriticalSection(&g_queue_lock);
+      for (auto it = g_queue.begin(); it != g_queue.end();)
+        it = (it->w == w) ? g_queue.erase(it) : it + 1;
+      LeaveCriticalSection(&g_queue_lock);
+    }
+
+    // 2. Release the LVGL objects neui created. Every mirror (and SECTION body)
+    //    is a descendant of the screen, so one clean drops the whole tree; the
+    //    MirrorRefs die with the map entries afterwards.
+    {
+      LvLockGuard lock;
+      if (w->toast_timer) {
+        lv_timer_delete(w->toast_timer);
+        w->toast_timer = nullptr;
+      }
+      if (w->screen) {
+        lv_obj_clean(w->screen);
+        lv_obj_remove_event_cb(w->screen, screen_draw_cb);
+        lv_obj_remove_event_cb(w->screen, frame_bg_draw_cb);
+        lv_obj_remove_event_cb(w->screen, frame_overlay_draw_cb);
+      }
+    }
+    w->mirrors.clear();
+    w->pending_widget_invals.clear();
+    w->pending_invalidate = false;
+
+    // 3. Out of g_windows so the per-turn walks skip it, and inert for anything
+    //    that still holds the pointer.
+    w->session = nullptr;
+    w->screen  = nullptr;
+    g_windows.erase(std::remove(g_windows.begin(), g_windows.end(), w),
+                    g_windows.end());
+    g_retired_windows.push_back(w);
+  }
+
   void platform_set_embed_parent(Session*, uint32_t, unsigned long) {}
   int  platform_embed_event_fd(void*) { return -1; }
   void platform_embed_pump_and_tick(void*) {}
@@ -1041,10 +1182,13 @@ namespace xpl_host
   {
     WindowData* w = find_window(wd.native_handle);
     if (w) {
-      // Programmatic destroy (e.g. the client closing a dialog): unwind the
-      // same paths a WM_CLOSE would have.
-      if (!w->closed) handle_close_request(w);
-      w->session = nullptr;   // draw cb + drain become no-ops for this window
+      // Programmatic destroy (client closing a dialog, or session teardown):
+      // run the close bookkeeping WITHOUT asking the client. handle_close_request
+      // would dispatch APP_QUIT into a client whose widgets are being destroyed,
+      // and a veto there would leave the window visible while the render context
+      // below is freed anyway.
+      close_window_silently(w);
+      retire_window(w);
     }
     if (wd.render_ctx) {
       auto* backend = platform_get_backend();
@@ -1074,23 +1218,37 @@ namespace xpl_host
       ShowWindowAsync(static_cast<HWND>(native_handle), SW_HIDE);
   }
 
+  // The four seams below all issue BLOCKING cross-thread USER32 calls - see the
+  // defer_if_locked note near the top of the file. Each captures its arguments
+  // by value so the deferred copy stays valid.
+
   void platform_set_window_enabled(void* native_handle, bool enabled)
   {
-    if (native_handle)
-      EnableWindow(static_cast<HWND>(native_handle), enabled ? TRUE : FALSE);
+    HWND hwnd = static_cast<HWND>(native_handle);
+    if (!hwnd) return;
+    if (defer_if_locked([hwnd, enabled] {
+          EnableWindow(hwnd, enabled ? TRUE : FALSE);
+        }))
+      return;
+    EnableWindow(hwnd, enabled ? TRUE : FALSE);
   }
 
   void platform_activate_window(void* native_handle)
   {
-    if (!native_handle) return;
-    SetForegroundWindow(static_cast<HWND>(native_handle));
+    HWND hwnd = static_cast<HWND>(native_handle);
+    if (!hwnd) return;
+    if (defer_if_locked([hwnd] { SetForegroundWindow(hwnd); })) return;
+    SetForegroundWindow(hwnd);
   }
 
   void platform_set_window_title(void* native_handle, const char* text)
   {
-    if (native_handle)
-      SetWindowTextW(static_cast<HWND>(native_handle),
-                     to_wide(text ? text : "").c_str());
+    HWND hwnd = static_cast<HWND>(native_handle);
+    if (!hwnd) return;
+    std::wstring wide = to_wide(text ? text : "");
+    if (defer_if_locked([hwnd, wide] { SetWindowTextW(hwnd, wide.c_str()); }))
+      return;
+    SetWindowTextW(hwnd, wide.c_str());
   }
 
   void platform_set_window_pos(void* native_handle,
@@ -1101,6 +1259,10 @@ namespace xpl_host
     // so grow by the current non-client frame.
     HWND hwnd = static_cast<HWND>(native_handle);
     if (!hwnd) return;
+    if (defer_if_locked([hwnd, x, y, w, h] {
+          platform_set_window_pos(hwnd, x, y, w, h, 96);
+        }))
+      return;
     RECT wr = { 0, 0, w, h };
     DWORD style    = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
     DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
@@ -1166,31 +1328,12 @@ namespace xpl_host
   uint8_t* platform_load_image(const char* path,
                                uint32_t* width_out, uint32_t* height_out)
   {
-    if (!path || !width_out || !height_out) return nullptr;
-    int w = 0, h = 0, comp = 0;
-    unsigned char* rgba = stbi_load(path, &w, &h, &comp, 4);
-    if (!rgba || w <= 0 || h <= 0) { if (rgba) stbi_image_free(rgba); return nullptr; }
-    // Straight RGBA -> premultiplied BGRA (the loader contract).
-    auto* out = static_cast<uint8_t*>(malloc(static_cast<size_t>(w) * h * 4));
-    if (!out) { stbi_image_free(rgba); return nullptr; }
-    const size_t n = static_cast<size_t>(w) * h;
-    for (size_t i = 0; i < n; ++i) {
-      const uint8_t r = rgba[i * 4 + 0], g = rgba[i * 4 + 1];
-      const uint8_t b = rgba[i * 4 + 2], a = rgba[i * 4 + 3];
-      out[i * 4 + 0] = static_cast<uint8_t>((b * a + 127) / 255);
-      out[i * 4 + 1] = static_cast<uint8_t>((g * a + 127) / 255);
-      out[i * 4 + 2] = static_cast<uint8_t>((r * a + 127) / 255);
-      out[i * 4 + 3] = a;
-    }
-    stbi_image_free(rgba);
-    *width_out  = static_cast<uint32_t>(w);
-    *height_out = static_cast<uint32_t>(h);
-    return out;
+    return neui_detail::load_image_bgra8_stb(path, width_out, height_out);
   }
 
   void platform_free_image(uint8_t* pixels)
   {
-    free(pixels);
+    neui_detail::free_image_bgra8_stb(pixels);
   }
 
   // One main-loop turn: drain queued input, run LVGL timers/refresh, wait for
@@ -1216,6 +1359,7 @@ namespace xpl_host
     collect_deferred_all();
     sync_dirty_trees();          // a draw dispatch may have marked dirt
     flush_pending_invalidates();
+    run_deferred_calls();        // blocking USER32 work a draw dispatch queued
     if (g_quit) return;
     if (wait == LV_NO_TIMER_READY) wait = 10;
     else if (wait > 10) wait = 10;
@@ -1239,6 +1383,7 @@ namespace xpl_host
       collect_deferred_all();
       sync_dirty_trees();
       flush_pending_invalidates();
+      run_deferred_calls();
     }
     return !g_quit;
   }

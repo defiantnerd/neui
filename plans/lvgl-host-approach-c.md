@@ -159,7 +159,8 @@ Then build the retained layer:
 Open questions were resolved with the user before implementation: **Tiny TTF** (font engine),
 **ThorVG** via `LV_USE_VECTOR_GRAPHIC` (path fill), **native `LV_USE_WINDOWS`** driver (no SDL),
 **XRGB8888**, and a **knob-heavy audio panel** as the M3 screen. LVGL fetched from git master
-(9.6.0-dev, commit 066d8db0, 2026-07-30) - version pin remains a follow-up.
+(9.6.0-dev, commit 066d8db0, 2026-07-30); `FetchContent_Declare` now **pins that commit hash**
+rather than tracking `master` (post-review follow-up, done - see the code-review pass below).
 
 ### What was built
 
@@ -306,17 +307,101 @@ Reading of the numbers:
   Windows fonts directory instead); no DPI scaling (logical px == LVGL px == physical px);
   dialogs are resizable; smooth-scroll kinetics not wired (stepped wheel only).
 - Overlay changes (combo/popup/toast) still invalidate the whole frame - transient, acceptable.
-- LVGL pinned to `master` at fetch time - **pin a release tag before any further work**.
-- Synthetic-input caveat for future test automation: PostMessage'd mouse input to the driver
-  window is unreliable; SendMessageTimeout works (subclass runs either way for real input).
+- LVGL is pinned to commit `066d8db0` (the revision measured here). Move to a release tag when
+  one carrying the `lv_draw_vector_dsc_*` API lands.
+- Synthetic-input note for test automation: PostMessage'd mouse input to the driver window works
+  fine, but the *sender* must set the same DPI awareness as the app
+  (`SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`) - otherwise Windows DPI-virtualizes the
+  message coordinates on the way in and a click at (310, 42) arrives as (465, 63) at 150%
+  scaling. (An earlier note here blamed PostMessage itself; the cause was the missing awareness.)
 
 ### Suggested next steps (if the direction is pursued)
 
-1. Pin LVGL to a tagged release; move the retained layer from prototype to reviewed design
-   (reparenting, mid-order sibling inserts, mirror teardown on window destroy).
+1. Move the retained layer from prototype to reviewed design (reparenting, mid-order sibling
+   inserts). Mirror teardown on window destroy and the LVGL commit pin are done - see the
+   code-review pass below.
 2. Per-widget appearance cache (render-once-to-image for static-but-expensive chrome) - the
    biggest remaining MCU win per lvgl.txt sec 7.
 3. An embedded display driver (fbdev / vendor flush_cb) replacing the Windows driver, and a
    VGLite draw-unit path for the vector half on RT1176-class silicon.
 4. Wire smooth-scroll kinetics (the shared `scroll_kinetics` on a 16 ms lv_timer) and the
    remaining stubs as needed by the product.
+
+---
+
+## CODE-REVIEW PASS (2026-07-31)
+
+A review of the prototype branch found 15 issues; all were fixed. Verified by rebuilding both
+`neui_lvgl_example` and `neui_example` against the LVGL host (warning-clean) and comparing the
+rendered result side by side with the D2D build of the same example.
+
+**Rendering parity (`backends/lvgl/lvgl_backend.cpp`)** - all four were visible in every frame:
+
+- `draw_text` drew at the TOP of the passed rect while D2D
+  (`DWRITE_PARAGRAPH_ALIGNMENT_CENTER`), Cairo and CG all vertically center the text block in it -
+  and the widget paints pass the full widget rect and rely on that. Now measures the block and
+  positions a tight box centered in the rect.
+- `draw_text` word-wrapped at the rect width; D2D is explicitly `NO_WRAP` and Cairo / CG break only
+  on an explicit `\n`. Now sets `LV_TEXT_FLAG_EXPAND` (which also keeps the draw-task area tight,
+  so the label never wraps regardless of the box width) and clips at the rect.
+- `measure_text` returned 0 for a null ctx, but two host sizing paths pass null deliberately
+  (`ComboBoxWidget::drop_width`, `popup_total_width`) exactly as they do to `d2d_measure_text` -
+  collapsing combo drop widths and popup menu widths to their minimums. `resolve_font` now
+  tolerates a null ctx (default family / weight, identity CTM).
+- `draw_bitmap` mapped the tint's ALPHA byte to LVGL's recolor *mix weight* and never folded it
+  into the draw opacity, so a translucent tint rendered fully opaque and "no colour change"
+  became a 50% white wash. Alpha now scales `dsc.opa`; the RGB drives a full-strength recolor
+  (LVGL has no multiply - documented approximation).
+- Gradients were pushed with their full stop list while `LV_GRADIENT_MAX_STOPS` defaulted to 2, so
+  every 3+-stop gradient silently became a two-colour ramp plus a per-frame warning on stdout.
+  `lv_conf.h.in` raises it to 16 and the backend clamps rather than letting LVGL log.
+
+**Threading / lifetime (`hosts/crossplatform/platform_lvgl.cpp`)**:
+
+- The WndProc subclass was installed before `w->prev_proc` was stored. The window is already being
+  pumped by the driver's own thread, so `subclass_proc` could run with a null chained proc. The old
+  proc is now read with `GetWindowLongPtrW` and stored first.
+- `SetWindowTextW` / `SetWindowPos` / `EnableWindow` / `SetForegroundWindow` block until the target
+  window's thread processes the sent message, and that thread's WndProc takes `lv_lock` on entry -
+  so calling them from client code running inside a draw dispatch (which holds the lock for the
+  whole refresh) is a hard hang. They now queue through `defer_if_locked` and run from the main
+  loop after `lv_timer_handler` returns.
+- The backend performed LVGL allocations from unlocked paths (Tiny TTF instance + glyph-cache fills
+  on the first use of a font size, which can happen in a click handler; the vector deletes in
+  `destroy_context`). The platform layer now installs a re-entrant lock/unlock pair via
+  `neui_lvgl_backend::set_lock_hooks`.
+- `platform_destroy_window` only nulled `session`: the WndProc subclass and window prop stayed
+  installed, the `WindowData` stayed in `g_windows` with a stale hwnd, every mirror `lv_obj` leaked,
+  and for a still-open frame it dispatched `APP_QUIT` into a client being torn down. Added
+  `retire_window` (unsubclass, drop queued input for that window, `lv_obj_clean` the screen, remove
+  the screen draw callbacks, delete the toast timer, out of `g_windows`) plus
+  `close_window_silently` for the teardown path. The `WindowData` allocation is retired to a
+  graveyard rather than freed - an in-flight `subclass_proc` on the driver's thread may still hold
+  the pointer and there is no way to join that thread.
+
+**Build**:
+
+- The `WIN32 AND NEUI_WITH_LVGL` branch of `hosts/crossplatform/CMakeLists.txt` dropped the
+  `windowsapp` link that `host.cpp`'s C++/WinRT theme provider needs on every `_WIN32` build. It
+  linked only because `neui_lvgl_example` also pulls `neui-win32host`; a client linking just
+  `neui` + `neui-xplhost` got unresolved WinRT externals.
+- The directory-scope warning scrub in `backends/lvgl/CMakeLists.txt` removed `/W4 /wd4100` but not
+  `/WX`, so `-DNEUI_WERROR=ON -DNEUI_WITH_LVGL=ON` turned the first LVGL / ThorVG warning into a
+  hard error - the exact outcome the scrub exists to prevent.
+- `GIT_TAG master` pinned to the measured commit (see above).
+
+**Cleanups**:
+
+- `resolve_font` re-ran full font-file resolution (`GetWindowsDirectoryA` + string building + two
+  `std::map<std::string>` lookups) on *every* `draw_text` / `measure_text`, i.e. hundreds of times
+  per refresh on the paint hot path. Added a front cache on `(family, weight, size_px)` and hoisted
+  the fonts directory into a function-local static.
+- `platform_load_image` re-implemented the shared stb loader and dropped its size-overflow guard.
+  The Linux-only `hosts/shared/linux/image_loader_linux.h` was platform-neutral all along: moved to
+  `hosts/shared/image_loader_stb.h` (`load_image_bgra8_stb`), now used by both platform layers.
+  Note the LVGL host therefore cannot load `.rc`-embedded images the way the WIC-based native
+  Windows loader does (pre-existing; `neui_example`'s resource-only `lemur.jpg` shows the
+  failed-load placeholder).
+- The wheel handler computed `is_horiz` then re-tested the same predicate to negate the delta, and
+  negated *before* handing it to `handle_combo_wheel` - so shift+wheel scrolled an open combo drop
+  list backwards relative to a plain wheel.

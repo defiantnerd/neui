@@ -223,6 +223,26 @@ namespace neui_lvgl_backend
   }
 
   // -------------------------------------------------------------------------
+  // LVGL lock hooks (see lvgl_backend.h). Installed by the platform layer;
+  // absent, the guard is a no-op.
+
+  static void (*g_lv_lock)()   = nullptr;
+  static void (*g_lv_unlock)() = nullptr;
+
+  void set_lock_hooks(void (*lock)(), void (*unlock)())
+  {
+    g_lv_lock   = lock;
+    g_lv_unlock = unlock;
+  }
+
+  struct LvGuard {
+    LvGuard()  { if (g_lv_lock)   g_lv_lock();   }
+    ~LvGuard() { if (g_lv_unlock) g_lv_unlock(); }
+    LvGuard(const LvGuard&) = delete;
+    LvGuard& operator=(const LvGuard&) = delete;
+  };
+
+  // -------------------------------------------------------------------------
   // Fonts: (family, weight, size) -> Tiny TTF instance over a Windows font
   // file. Factory-level caches; every call is on the UI thread.
 
@@ -252,6 +272,28 @@ namespace neui_lvgl_backend
     return m;
   }
 
+  // Front cache keyed on what the caller actually passes. The file-resolution
+  // path below builds strings and touches the filesystem, which is far too
+  // expensive for a hot paint path (an INPUTBOX repaint alone issues one
+  // measure_text per caret / selection query, a MULTILINE one per visual row).
+  struct FontLookupKey {
+    std::string family;
+    int         weight;
+    int         size_px;
+    bool operator<(const FontLookupKey& o) const
+    {
+      if (size_px != o.size_px) return size_px < o.size_px;
+      if (weight != o.weight) return weight < o.weight;
+      return family < o.family;
+    }
+  };
+
+  static std::map<FontLookupKey, const lv_font_t*>& font_lookup()
+  {
+    static std::map<FontLookupKey, const lv_font_t*> m;
+    return m;
+  }
+
   static std::string lower_nospace(const char* s)
   {
     std::string out;
@@ -264,12 +306,17 @@ namespace neui_lvgl_backend
     return out;
   }
 
-  static std::string windows_fonts_dir()
+  // Resolved once - draw_text / measure_text run per glyph run and per caret
+  // query, so nothing on that path may issue a syscall or build a path string.
+  static const std::string& windows_fonts_dir()
   {
-    char buf[MAX_PATH] = {};
-    UINT n = GetWindowsDirectoryA(buf, MAX_PATH);
-    std::string dir = (n > 0 && n < MAX_PATH) ? std::string(buf) : "C:\\Windows";
-    return dir + "\\Fonts\\";
+    static const std::string dir = [] {
+      char buf[MAX_PATH] = {};
+      UINT n = GetWindowsDirectoryA(buf, MAX_PATH);
+      std::string d = (n > 0 && n < MAX_PATH) ? std::string(buf) : "C:\\Windows";
+      return d + "\\Fonts\\";
+    }();
+    return dir;
   }
 
   static std::shared_ptr<FontFile> load_font_file(const std::string& path)
@@ -302,7 +349,7 @@ namespace neui_lvgl_backend
   static std::shared_ptr<FontFile> resolve_font_file(const char* family, int weight)
   {
     const bool bold = weight >= 600;
-    const std::string dir = windows_fonts_dir();
+    const std::string& dir = windows_fonts_dir();
     std::string fam = lower_nospace(family);
 
     struct Known { const char* fam; const char* normal; const char* bold; };
@@ -331,32 +378,49 @@ namespace neui_lvgl_backend
     return load_font_file(dir + "segoeui.ttf");
   }
 
+  // `c` may be null: measure_text is called from the host's non-painting
+  // sizing paths (ComboBoxWidget::drop_width, popup_total_width), which have no
+  // bound context. Those get the default selection (family "", weight 0) and an
+  // identity CTM - the same thing d2d_measure_text does with a null ctx.
   static const lv_font_t* resolve_font(LvglCtx* c, float font_size)
   {
     const char* family = "";
     int weight = 0;
-    if (!c->font_stack.empty()) {
+    if (c && !c->font_stack.empty()) {
       family = c->font_stack.back().family.c_str();
       weight = c->font_stack.back().weight;
     }
 
     // Fold any CTM scale into the pixel size (rare; text is normally drawn
     // under translation-only transforms).
-    float eff = font_size * (mat_is_axis_aligned(c->tf) ? std::fabs(c->tf.d) : 1.0f);
-    int size_px = static_cast<int>(std::lround(eff));
+    const float scale = (c && mat_is_axis_aligned(c->tf)) ? std::fabs(c->tf.d) : 1.0f;
+    int size_px = static_cast<int>(std::lround(font_size * scale));
     if (size_px < 1) size_px = 1;
 
-    auto ff = resolve_font_file(family, weight);
-    if (!ff) return lv_font_get_default();
+    FontLookupKey key{ family, weight, size_px };
+    auto lit = font_lookup().find(key);
+    if (lit != font_lookup().end()) return lit->second;
 
-    FontInstanceKey key{ ff.get(), size_px };
-    auto it = font_instances().find(key);
-    if (it != font_instances().end()) return it->second;
-
-    lv_font_t* font = lv_tiny_ttf_create_data(
-        ff->bytes.data(), ff->bytes.size(), size_px);
-    font_instances()[key] = font;  // null cached too (falls back below)
-    return font ? font : lv_font_get_default();
+    const lv_font_t* result = nullptr;
+    if (auto ff = resolve_font_file(family, weight)) {
+      FontInstanceKey ikey{ ff.get(), size_px };
+      auto it = font_instances().find(ikey);
+      if (it != font_instances().end()) {
+        result = it->second;
+      } else {
+        // Allocates through LVGL and registers glyph caches - guard it, this
+        // runs on the first use of a (font, size) pair, which can be a click
+        // handler outside any draw dispatch.
+        LvGuard guard;
+        lv_font_t* font = lv_tiny_ttf_create_data(
+            ff->bytes.data(), ff->bytes.size(), size_px);
+        font_instances()[ikey] = font;  // null cached too (falls back below)
+        result = font;
+      }
+    }
+    if (!result) result = lv_font_get_default();
+    font_lookup()[key] = result;
+    return result;
   }
 
   // -------------------------------------------------------------------------
@@ -375,8 +439,13 @@ namespace neui_lvgl_backend
   {
     auto* c = static_cast<LvglCtx*>(raw);
     if (!c) return;
-    if (c->batch) lv_draw_vector_dsc_delete(c->batch);
-    if (c->path) lv_vector_path_delete(c->path);
+    {
+      // Window teardown, not a draw dispatch: these free through LVGL's
+      // allocator, which a display thread can be inside under lv_lock.
+      LvGuard guard;
+      if (c->batch) lv_draw_vector_dsc_delete(c->batch);
+      if (c->path) lv_vector_path_delete(c->path);
+    }
     delete c;
   }
 
@@ -554,13 +623,34 @@ namespace neui_lvgl_backend
     dsc.font       = font;
     dsc.color      = to_color(argb);
     dsc.opa        = fold_opa(c, argb);
+    // NO wrap, for parity with every other backend: D2D sets
+    // DWRITE_WORD_WRAPPING_NO_WRAP, Cairo / CG break only on an explicit '\n'.
+    // Overflow clips at the rect edge (bracket below). Without this LVGL would
+    // word-wrap at the rect width, which also breaks the single-line caret /
+    // selection math the text widgets do against measure_text.
+    dsc.flag = LV_TEXT_FLAG_EXPAND;
 
     lv_area_t a = map_rect(c, x, y, w, h);
-    // D2D parity: DrawText(..., CLIP) wraps at the rect width and clips to
-    // the rect. LVGL wraps at the area width; add the clip bracket here.
+
+    // Vertical centering of the text block inside the rect, matching D2D
+    // (DWRITE_PARAGRAPH_ALIGNMENT_CENTER), Cairo and CG. Widget paints pass the
+    // full widget rect and rely on it. LVGL always draws from coords.y1, so
+    // position a tight measured box instead: EXPAND makes the label ignore the
+    // box width for line breaking, so the box stays tight (cheap draw-task
+    // dependency bookkeeping) while the text still never wraps.
+    lv_point_t block{};
+    lv_text_get_size(&block, text, font, dsc.letter_space, dsc.line_space,
+                     LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    const int32_t box_h = a.y2 - a.y1 + 1;
+    lv_area_t la = a;
+    la.y1 = a.y1 + static_cast<int32_t>(
+                       std::lround((box_h - block.y) * 0.5f));
+    la.y2 = la.y1 + (block.y > 0 ? block.y : 1) - 1;
+    la.x2 = la.x1 + (block.x > 0 ? block.x : 1) - 1;
+
     lv_area_t saved = c->layer->_clip_area;
     c->layer->_clip_area = intersect(saved, a);
-    lv_draw_label(c->layer, &dsc, &a);
+    lv_draw_label(c->layer, &dsc, &la);
     c->layer->_clip_area = saved;
   }
 
@@ -568,9 +658,16 @@ namespace neui_lvgl_backend
                                         const char* text, int text_len,
                                         float font_size)
   {
+    // NOTE: raw may legitimately be null - the host's non-painting sizing paths
+    // (ComboBoxWidget::drop_width, popup_total_width) measure without a bound
+    // context, exactly as they do against d2d_measure_text. Returning 0 there
+    // collapses combo drop widths and popup menu widths to their minimums.
     auto* c = static_cast<LvglCtx*>(raw);
-    if (!c || !text || !*text) return 0.0f;
+    if (!text || !*text) return 0.0f;
 
+    // Measuring fills the Tiny TTF glyph cache, i.e. mutates LVGL state - and
+    // this is reachable from the host's input handlers, not just from paint.
+    LvGuard guard;
     const lv_font_t* font = resolve_font(c, font_size);
     if (!font) return 0.0f;
 
@@ -685,11 +782,21 @@ namespace neui_lvgl_backend
     lv_draw_image_dsc_t dsc;
     lv_draw_image_dsc_init(&dsc);
     dsc.src   = &sub->dsc;
-    dsc.opa   = fold_opa(c, 0xFF000000u);
-    if (tint != 0xFFFFFFFFu) {
-      // Approximation of the multiplicative tint with LVGL's recolor mix.
+    // `tint` is a multiplicative ARGB (renderer.h): its alpha scales the draw
+    // opacity on top of the ctx alpha stack, its RGB multiplies the pixels.
+    // d2d/cg fold both into a colour-matrix; cairo paints at alpha then
+    // MULTIPLYs the RGB through the image's own alpha mask.
+    dsc.opa = fold_opa(c, tint);
+    if ((tint & 0x00FFFFFFu) != 0x00FFFFFFu) {
+      // LVGL offers no multiply - only recolor, a mix toward a flat colour. At
+      // full strength that reproduces the multiply exactly for the dominant
+      // case (a white / greyscale glyph or icon colourised by the tint RGB).
+      // A darkening grey tint over already-coloured pixels flattens rather than
+      // scaling; accepted prototype approximation. Driving recolor_opa from the
+      // ALPHA byte, as this did, is wrong twice over: it made a translucent
+      // tint fully opaque and turned "no colour change" into a 50% white wash.
       dsc.recolor     = to_color(tint);
-      dsc.recolor_opa = static_cast<lv_opa_t>(tint >> 24);
+      dsc.recolor_opa = LV_OPA_COVER;
     }
     // Place the image's natural (physical-px) extent at the dst origin and
     // scale it around the top-left pivot onto the dst rect. Fold in any
@@ -858,8 +965,13 @@ namespace neui_lvgl_backend
                                   const neui_gradient_t* grad,
                                   LvglCtx* c, bool stroke)
   {
-    std::vector<lv_grad_stop_t> stops(grad->stop_count);
-    for (uint32_t i = 0; i < grad->stop_count; ++i) {
+    // lv_conf.h raises LV_GRADIENT_MAX_STOPS to 16 for us, but neui's stop list
+    // is unbounded - clamp here rather than letting LVGL truncate with a
+    // per-frame LV_LOG_WARN on stdout.
+    uint32_t stop_count = grad->stop_count;
+    if (stop_count > LV_GRADIENT_MAX_STOPS) stop_count = LV_GRADIENT_MAX_STOPS;
+    std::vector<lv_grad_stop_t> stops(stop_count);
+    for (uint32_t i = 0; i < stop_count; ++i) {
       const auto& s = grad->stops[i];
       float off = s.offset;
       if (off < 0.0f) off = 0.0f;

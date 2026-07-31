@@ -23,24 +23,42 @@ set(LV_BUILD_CONF_PATH "${CMAKE_CURRENT_BINARY_DIR}/lv_conf.h" CACHE PATH
 set(CONFIG_LV_BUILD_DEMOS    OFF CACHE BOOL "" FORCE)
 set(CONFIG_LV_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 
-# Fetched from git main per the prototype plan. Version pin is a deliberate
-# follow-up before this leaves prototype status (note in the plan).
+# Pinned to the exact upstream commit this backend was written and measured
+# against. LVGL master churns the very APIs lvgl_backend.cpp uses (the
+# lv_draw_vector_dsc_* naming, the lv_obj flag setters that already log
+# LV_LOG_DEPRECATED), so tracking `master` meant a fresh configure could fail to
+# compile for reasons unrelated to any neui change - and, because CMake caches
+# the clone, an existing tree would silently keep building an older revision.
+# Bump deliberately, re-running the measurements in plans/lvgl-host-approach-c.md.
+#
+# GIT_SHALLOW is off: a shallow clone checks out a branch tip, which cannot
+# resolve a bare commit hash. The full clone is a one-time configure cost on a
+# build that goes on to compile all of LVGL + ThorVG anyway.
 FetchContent_Declare(lvgl
   GIT_REPOSITORY https://github.com/lvgl/lvgl.git
-  GIT_TAG        master
-  GIT_SHALLOW    TRUE
+  GIT_TAG        066d8db0b54819223357731f68961a90b3d785b4  # master, 2026-07-30
 )
 
 # neui compiles at /W4 (its warnings-as-linter policy), but that directory
 # property would also apply to the fetched LVGL + ThorVG sources and drown
 # the build in third-party noise. Drop the high-warning flags from this
 # directory's inherited options and re-apply them to neui's own targets below.
+# This MUST cover the NEUI_WERROR flags too: leaving /WX (or -Werror) on the
+# directory turns the first third-party warning in LVGL or ThorVG into a hard
+# build failure that no neui change can fix - the exact outcome this scrub
+# exists to prevent. Keep in sync with the top-level CMakeLists.
 get_directory_property(_neui_dir_opts COMPILE_OPTIONS)
 set(_neui_own_warnings "")
 if(MSVC)
   set(_neui_own_warnings /W4 /wd4100)
+  if(NEUI_WERROR)
+    list(APPEND _neui_own_warnings /WX /wd4996)
+  endif()
 else()
   set(_neui_own_warnings -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
+  if(NEUI_WERROR)
+    list(APPEND _neui_own_warnings -Werror -Wno-error=deprecated-declarations)
+  endif()
 endif()
 foreach(_flag IN LISTS _neui_own_warnings)
   list(REMOVE_ITEM _neui_dir_opts "${_flag}")
