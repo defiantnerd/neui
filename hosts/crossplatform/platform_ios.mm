@@ -2422,6 +2422,11 @@ namespace xpl_host
     return *m;
   }
 
+  // iOS: touch coords come raw from locationInView: and the view sizing
+  // ignores the zoom, so scaling paint alone would hit-test in a different
+  // space than it draws. Inert here rather than broken - deferred, not denied.
+  bool platform_supports_ui_scale() { return false; }
+
   void platform_timer_start(Session* session, uint32_t interval_ms)
   {
     if (!session || interval_ms == 0) return;

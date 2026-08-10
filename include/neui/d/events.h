@@ -358,9 +358,20 @@ extern "C" {
   // when the Dynamic Type content-size category changes, or on rotation /
   // safe-area change. Desktop hosts do not fire this today (metrics are
   // static there). `widget` is the frame whose client should re-run its
-  // responsive layout; `ui_scale` is the new painted/text UI scale (the same
-  // value metrics_api->ui_scale returns), provided inline so a handler that
-  // only scales its own layout need not call back into the API.
+  // responsive layout; `ui_scale` is the new UI scale, inline so a handler need
+  // not call back into the API.
+  //
+  // CAUTION - two different scales reach this field, and they ask for OPPOSITE
+  // responses:
+  //   - iOS Dynamic Type (the value metrics_api->ui_scale returns): the client's
+  //     logical space is unchanged but default text got bigger, so a handler
+  //     that lays out by hand SHOULD re-scale.
+  //   - a frame's NEUI_ATTR_UI_SCALE zoom (crossplatform host): everything
+  //     already scales through the paint transform, so a handler MUST NOT
+  //     re-scale - doing so double-applies it.
+  // A handler that multiplies its layout by this value therefore breaks under
+  // zoom. Distinguish by source: the zoom is per-frame and readable from the
+  // frame's own attr, while metrics_api->ui_scale stays 1.0 on desktop.
   typedef struct neui_event_metrics
   {
     neui_widget_t widget;     // the frame

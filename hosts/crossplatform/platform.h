@@ -101,6 +101,13 @@ namespace xpl_host
   void platform_set_window_title(void* native_handle, const char* text);
 
   // Resize / reposition a native window. Coordinates are logical pixels (96 DPI base).
+  // Sentinel for platform_set_window_pos's x / y: "leave the window where it
+  // is, change only the size". Needed because no xpl platform tracks user
+  // window moves back into wd.x/y, so passing the stored position would
+  // teleport a window the user had dragged - which is what a live zoom change
+  // would otherwise do on every adjustment.
+  static constexpr int NEUI_WINDOW_POS_KEEP = (-2147483647 - 1);   // INT_MIN
+
   void platform_set_window_pos(void* native_handle,
                                 int x, int y, int w, int h, uint32_t dpi);
 
@@ -399,6 +406,15 @@ namespace xpl_host
   // Must work under run(), under a hand-rolled pump_once() loop, and under
   // NEUI_API_EMBED - i.e. it has to hang off whatever already services the
   // session, not off a thread of its own.
+  // True when this platform layer implements the INPUT half of
+  // NEUI_ATTR_UI_SCALE: dividing mouse / touch coordinates by the zoom and
+  // scaling the native window. The paint-side CTM in Session::paint_frame is
+  // platform-independent, so a platform that scales paint without dividing
+  // input would hit-test in a different space than it draws - which is worse
+  // than not zooming. WidgetData::ui_scale() returns 1.0 when this is false,
+  // making the attr inert rather than broken.
+  bool platform_supports_ui_scale();
+
   void platform_timer_start(Session* session, uint32_t interval_ms);
   void platform_timer_stop(Session* session);
 

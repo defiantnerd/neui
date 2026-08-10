@@ -369,9 +369,50 @@ plus live change / METRICS_CHANGED / reset), both Wave 0.1 resize harnesses stil
 pass (programmatic *and* the 21-event AppKit `performZoom` stream), and the suite
 is 385 cases / 2081 checks green.
 
-Its own documented gaps (kept in `docs/deferred-issues.md`): baked SURFACEs and
-`@Nx` assets are not re-baked on a zoom change (client's call, as for DPI), and
-DnD drop coordinates are not zoom-divided on win32 or Linux.
+**Its review found seven findings; all addressed.** Four were exactly the
+"recovered code vs. newer waves" disagreements the cherry-pick was warned about:
+- **win32 `platform_menubar_attach` was not zoom-aware** while both sibling
+  sizing seams in the same file were — so attaching a menubar to a zoomed frame
+  resized it back to the *unzoomed* client size, and the resulting `WM_SIZE`
+  then divided that by the full factor: a 400-wide frame at zoom 2 stored
+  `wd.width = 200`. That destroys the layout, and it fires at `widget_show` for
+  every frame with a MENUBAR plus on every menubar rebuild. Fixed.
+- **Fractional-zoom drift, reproduced empirically.** `logical -> native ->
+  logical` double-rounds: 402 px at zoom 0.75 became 403 and fired a spurious
+  RESIZE, so the commit's own stated invariant broke at z < 1 (and win32
+  *truncated*, drifting down at z > 1). Root fix: stop round-tripping at all
+  when *we* set the size — `wd.width/height` are already authoritative then.
+  macOS/win32 bracket the call with a self-resize flag; Linux records an
+  expected size instead, because X11's `ConfigureNotify` is asynchronous and a
+  flag would never still be live. win32's `WM_SIZE` also now rounds instead of
+  truncating, and got the RESIZE suppression macOS had (it was asymmetric).
+- **A live zoom change teleported a user-moved window** to its create position,
+  because no xpl platform tracks moves back into `wd.x/y`. Added a documented
+  `NEUI_WINDOW_POS_KEEP` sentinel; the zoom only ever wanted to change the size.
+- **iOS scaled paint but not input.** `paint_frame`'s CTM is
+  platform-unconditional, but the iOS layer (which landed *after* this commit
+  was authored) divides no touch coordinates — a zoomed iOS frame would have
+  drawn in one space and hit-tested in another. New
+  `platform_supports_ui_scale()` gate makes the attr inert on iOS and null.
+Plus: min/max constraints ignored the zoom on win32 and macOS (a MIN_WIDTH of
+400 at zoom 2 let the user shrink to logical 200) and went stale on every zoom
+change everywhere — both fixed; and two public contracts were simply false —
+`NEUI_ATTR_PAINT_DEVICE_PIXELS` claims *physical* pixels but only undoes the
+zoom, and `events.h` equated `METRICS_CHANGED.ui_scale` with
+`metrics_api->ui_scale` when the two now differ *and imply opposite responses*
+(iOS Dynamic Type says "re-scale your layout", zoom says "do not"). Documented
+honestly rather than papered over.
+
+Verified after the fixes: the fractional-zoom harness passes at 0.75 / 1.25 /
+1.5 / 0.5 / 2.0 / 1.0 with the client rect pinned at 402x302 and **zero**
+spurious RESIZEs, a genuine `set_size` while zoomed still lands exactly, and a
+user-moved window keeps its top-left across three zoom changes while its
+min-size constraint tracks the zoom.
+
+Remaining documented gaps in `docs/deferred-issues.md`: baked SURFACEs and `@Nx`
+assets are not re-baked on a zoom change (client's call, as for DPI), scroll
+deltas are not zoom-divided, DnD drop coords are not zoom-divided on
+win32/Linux, and Linux scales window position while win32/macOS do not.
 
 ### Wave 4 — cursor, popups, file dialog
 

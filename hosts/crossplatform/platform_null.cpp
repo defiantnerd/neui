@@ -121,6 +121,9 @@ namespace xpl_host
   void     platform_set_cursor(int /*kind*/)                                  {}
   // No event loop on the null platform, so nothing can drive a tick; add_timer
   // still returns an id and the table stays consistent, it just never fires.
+  // null: no input at all, so the zoom would only skew paint.
+  bool platform_supports_ui_scale() { return false; }
+
   void     platform_timer_start(Session*, uint32_t)                            {}
   void     platform_timer_stop(Session*)                                       {}
 

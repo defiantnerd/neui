@@ -215,9 +215,17 @@ extern "C" {
 // int (bool): CUSTOMDRAW only. 0 / unset = the WIDGET_PAINT callback draws in
 // logical pixels and the framework scales the result (the default, and what
 // most clients want - one layout for every zoom / DPI). 1 = the callback is
-// handed DEVICE pixels instead: neui_event_paint_t width/height arrive
-// pre-multiplied by neui_event_paint_t::scale, the zoom / DPI transform is not
-// applied under the callback, and one unit really is one physical pixel. Use
+// handed ZOOM-EXPANDED pixels instead: neui_event_paint_t width/height arrive
+// pre-multiplied by the frame's ZOOM and the zoom transform is not applied
+// under the callback, so one drawn unit is one *unzoomed logical* pixel.
+//
+// It undoes the ZOOM, not the DPI. On a HiDPI display one unit is still
+// 1/backing_scale of a true physical pixel, and width/height are NOT
+// `logical * neui_event_paint_t::scale` (that value folds in the backing scale
+// as well). Read `scale` if you need the physical figure - e.g. to size an
+// offscreen buffer - and expect the two to coincide only at backing 1.0. The
+// zoom is what this mode exists to escape, because it is the factor a user
+// changes at runtime; the DPI transform is what keeps a widget crisp. Use
 // it for content that must be pixel-exact at native resolution - meters,
 // spectrum analysers, waveform and scope views - where a scaled-up logical
 // render would look soft.

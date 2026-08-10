@@ -25,6 +25,11 @@ namespace xpl_host
 {
   class Session;
 
+  // Defined per platform in platform_*.cpp; declared here (rather than pulling
+  // in platform.h, which itself depends on this header) so WidgetData::ui_scale
+  // can gate the zoom on platforms that divide input by it.
+  bool platform_supports_ui_scale();
+
   // -------------------------------------------------------------------------
   // Base widget class - holds all common fields and the virtual interface.
   // Derived classes add type-specific fields and override virtual methods.
@@ -101,6 +106,10 @@ namespace xpl_host
     // client rect all fall out of sync.
     float ui_scale() const
     {
+      // Inert on a platform layer that does not divide input by the zoom (iOS,
+      // null): scaling paint without scaling hit-testing is worse than not
+      // zooming, so the attr does nothing there rather than half-working.
+      if (!platform_supports_ui_scale()) return 1.0f;
       float z = attrs ? attrs->get_float(NEUI_ATTR_UI_SCALE, 1.0f) : 1.0f;
       if (!(z > 0.0f)) return 1.0f;              // 0 / negative / NaN -> off
       if (z < NEUI_UI_SCALE_MIN) return NEUI_UI_SCALE_MIN;

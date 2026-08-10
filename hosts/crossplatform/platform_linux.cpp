@@ -94,6 +94,15 @@ namespace
   // Per-frame window record, stashed on WidgetData::native_handle.
   struct LinuxWindow
   {
+    // The logical size WE last asked X for, or 0 when none is outstanding.
+    // ConfigureNotify is asynchronous, so unlike win32/macOS a set-and-clear
+    // flag around the request would never still be live when the notify lands.
+    // Instead the notify snaps to this value when the size it derives is within
+    // rounding distance: `logical -> physical -> logical` is lossy at fractional
+    // zoom (402 px at zoom 0.75 round-trips to 403), and accepting the drifted
+    // value would corrupt wd.width and fire a spurious RESIZE.
+    int expect_w = 0;
+    int expect_h = 0;
     Display*     dpy          = nullptr;   // == g_display for standalone; own connection when embedded
     bool         owns_display = false;     // true => embedded (dedicated XOpenDisplay)
     uint64_t     last_tick_ms = 0;         // 16 ms gate for host-driven embedded ticks
@@ -1466,6 +1475,15 @@ namespace
           float scale = window_scale(lw);
           int wlog = static_cast<int>(static_cast<float>(wphys) / scale + 0.5f);
           int hlog = static_cast<int>(static_cast<float>(hphys) / scale + 0.5f);
+          // Snap back to what we asked for when this notify is the echo of our
+          // own request, so a fractional-zoom round-trip cannot drift the
+          // logical size (and so a zoom change reports no resize at all).
+          if (lw->expect_w > 0 && wlog >= lw->expect_w - 1 && wlog <= lw->expect_w + 1 &&
+              hlog >= lw->expect_h - 1 && hlog <= lw->expect_h + 1) {
+            wlog = lw->expect_w;
+            hlog = lw->expect_h;
+            lw->expect_w = lw->expect_h = 0;   // consumed
+          }
           if (wd->width != wlog || wd->height != hlog) {
             wd->width  = wlog;
             wd->height = hlog;
@@ -2174,11 +2192,22 @@ namespace
     if (dpi && lw->dpi && dpi != lw->dpi)
       scale *= static_cast<float>(dpi) / static_cast<float>(lw->dpi);
     if (!(scale > 0.0f)) scale = 1.0f;
-    XMoveResizeWindow(lw->dpy, lw->win,
-                      static_cast<int>(static_cast<float>(x) * scale + 0.5f),
-                      static_cast<int>(static_cast<float>(y) * scale + 0.5f),
-                      static_cast<unsigned int>(static_cast<float>(w) * scale + 0.5f),
-                      static_cast<unsigned int>(static_cast<float>(h) * scale + 0.5f));
+    // Record the logical size we are asking for so the asynchronous
+    // ConfigureNotify can recognise its own echo (see LinuxWindow::expect_w).
+    lw->expect_w = w;
+    lw->expect_h = h;
+    const unsigned int pw = static_cast<unsigned int>(static_cast<float>(w) * scale + 0.5f);
+    const unsigned int ph = static_cast<unsigned int>(static_cast<float>(h) * scale + 0.5f);
+    if (x == NEUI_WINDOW_POS_KEEP || y == NEUI_WINDOW_POS_KEEP) {
+      // Size-only: XResizeWindow leaves the position to the window manager,
+      // which is exactly "keep where the user put it".
+      XResizeWindow(lw->dpy, lw->win, pw, ph);
+    } else {
+      XMoveResizeWindow(lw->dpy, lw->win,
+                        static_cast<int>(static_cast<float>(x) * scale + 0.5f),
+                        static_cast<int>(static_cast<float>(y) * scale + 0.5f),
+                        pw, ph);
+    }
     XFlush(lw->dpy);
   }
 
@@ -2656,6 +2685,9 @@ namespace
     XSetErrorHandler(old_err);
     return result;
   }
+
+  // linux: window_scale folds the zoom into every conversion.
+  bool platform_supports_ui_scale() { return true; }
 
   void platform_timer_start(Session* session, uint32_t interval_ms)
   {

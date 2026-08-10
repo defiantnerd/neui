@@ -121,10 +121,19 @@ void wake_app_event_pump()
   // so every programmatic resize would suppress itself.
   int                _reported_w;
   int                _reported_h;
+  // Set while platform_set_window_pos is applying OUR OWN geometry. Such a
+  // resize must neither report a RESIZE (the client asked for it, and
+  // wd.width/height are already authoritative) nor recompute the logical size
+  // by dividing the native size back out: `logical -> native -> logical` is
+  // lossy at fractional zoom. 402 px at zoom 0.75 rounds to 302 native, which
+  // divides back to 403 - a silent 1 px growth per call plus a spurious RESIZE.
+  BOOL               _self_resizing;
 }
 - (void)toastStart;
 - (void)toastStop;
 - (void)seedReportedSize:(int)w height:(int)h;
+- (void)beginSelfResize:(int)w height:(int)h;
+- (void)endSelfResize;
 @end
 
 @implementation NEUIView
@@ -134,6 +143,17 @@ void wake_app_event_pump()
   _reported_w = w;
   _reported_h = h;
 }
+
+- (void)beginSelfResize:(int)w height:(int)h
+{
+  // Record the INTENDED logical size, not whatever the native round-trip
+  // produces, so the next externally-driven resize compares against the truth.
+  _self_resizing = YES;
+  _reported_w = w;
+  _reported_h = h;
+}
+
+- (void)endSelfResize { _self_resizing = NO; }
 
 - (BOOL)isFlipped { return YES; }
 
@@ -196,6 +216,9 @@ void wake_app_event_pump()
   // session is nil until install_view_and_context / the embed path assigns it,
   // so the initWithFrame: sizing never reaches a client.
   if (!session) return;
+  // Our own geometry application - beginSelfResize already recorded the
+  // intended logical size, and wd.width/height are authoritative.
+  if (_self_resizing) return;
 
   // Divide out the frame zoom. The view's frame is in ZOOMED points (that is
   // what platform_set_window_pos sets it to), but wd.width/height and every
@@ -1779,10 +1802,19 @@ namespace xpl_host
     const int zw = (int)((float)w * z + 0.5f);
     const int zh = (int)((float)h * z + 0.5f);
 
+    // Bracket the geometry application so -setFrameSize: knows this resize is
+    // ours: it must not re-derive the logical size from the native one (lossy
+    // at fractional zoom) nor report a RESIZE the client just asked for.
+    NEUIView* nv = nil;
+    if (NSView* cv = frame_content_view(native_handle))
+      if ([cv isKindOfClass:[NEUIView class]]) nv = (NEUIView*)cv;
+    [nv beginSelfResize:w height:h];
+
     if (is_embedded_view(native_handle)) {
       // (x, y) is parent-view-relative in the parent's coordinate system;
       // drawRect: reads bounds each frame so the render follows the resize.
       [frame_content_view(native_handle) setFrame:NSMakeRect(x, y, zw, zh)];
+      [nv endSelfResize];
       return;
     }
     NSWindow* win = native_window(native_handle);
@@ -1795,7 +1827,23 @@ namespace xpl_host
     // rect's screen origin and grows the frame upward, so the position
     // semantics match create() too.
     NSRect content = logical_window_rect(x, y, zw, zh);
+    if (x == NEUI_WINDOW_POS_KEEP || y == NEUI_WINDOW_POS_KEEP) {
+      // Size-only: keep the window's current top-left on screen. In AppKit's
+      // Y-up frame space the TOP edge is origin.y + height, so preserve that
+      // rather than the origin, or the window would creep as it grows.
+      NSRect cur = [win frame];
+      NSRect want = [win frameRectForContentRect:content];
+      want.origin.x = cur.origin.x;
+      want.origin.y = cur.origin.y + cur.size.height - want.size.height;
+      [win setFrame:want display:YES];
+      [nv endSelfResize];
+      return;
+    }
     [win setFrame:[win frameRectForContentRect:content] display:YES];
+    // Cleared unconditionally after the call, not inside the hook: setFrame:
+    // does not invoke -setFrameSize: when the size is unchanged, and a leaked
+    // flag would swallow the next genuine user resize.
+    [nv endSelfResize];
   }
 
   void platform_post_close(void* native_handle)
@@ -2047,10 +2095,21 @@ namespace xpl_host
     // host's window.
     if (is_embedded_view(native_handle)) return;
     NSWindow* w = native_window(native_handle);
-    NSSize min_sz = NSMakeSize(min_w > 0 ? min_w : 0,
-                                min_h > 0 ? min_h : 0);
-    NSSize max_sz = NSMakeSize(max_w > 0 ? max_w : FLT_MAX,
-                                max_h > 0 ? max_h : FLT_MAX);
+    // The constraints are LOGICAL, but setContentMinSize:/MaxSize: bound the
+    // window in POINTS - which the zoom has already scaled. Without the factor
+    // a MIN_WIDTH of 400 at zoom 2 lets the user drag down to logical 200.
+    float z = 1.0f;
+    if (NSView* cv = frame_content_view(native_handle))
+      if ([cv isKindOfClass:[NEUIView class]]) {
+        NEUIView* nv = (NEUIView*)cv;
+        if (nv->session)
+          if (auto* wd = nv->session->get_widget(nv->widget_index)) z = wd->ui_scale();
+      }
+    if (!(z > 0.0f)) z = 1.0f;
+    NSSize min_sz = NSMakeSize(min_w > 0 ? min_w * z : 0,
+                                min_h > 0 ? min_h * z : 0);
+    NSSize max_sz = NSMakeSize(max_w > 0 ? max_w * z : FLT_MAX,
+                                max_h > 0 ? max_h * z : FLT_MAX);
     [w setContentMinSize:min_sz];
     [w setContentMaxSize:max_sz];
   }
@@ -2218,6 +2277,9 @@ namespace xpl_host
     static auto* m = new std::unordered_map<Session*, NSTimer*>();
     return *m;
   }
+
+  // macOS: localPointForEvent divides by frameZoom.
+  bool platform_supports_ui_scale() { return true; }
 
   void platform_timer_start(Session* session, uint32_t interval_ms)
   {

@@ -891,8 +891,22 @@ namespace xpl_host
     // already carries a ui_scale and is exactly this event on iOS.
     if (wd.is_frame() && !strcmp(key, NEUI_ATTR_UI_SCALE)) {
       if (wd.native_handle) {
-        platform_set_window_pos(wd.native_handle, wd.x, wd.y,
+        // Size only - NEUI_WINDOW_POS_KEEP leaves the window where the user
+        // dragged it. Passing wd.x/wd.y would teleport it back to the create
+        // position, since no xpl platform tracks moves into those fields.
+        platform_set_window_pos(wd.native_handle,
+                                 NEUI_WINDOW_POS_KEEP, NEUI_WINDOW_POS_KEEP,
                                  wd.width, wd.height, wd.dpi);
+        // Min/max constraints are LOGICAL but bound the ZOOMED native window,
+        // so they go stale the moment the zoom changes - re-apply them.
+        if (wd.attrs) {
+          int mn_w = wd.attrs->get_int(NEUI_ATTR_MIN_WIDTH,  0);
+          int mn_h = wd.attrs->get_int(NEUI_ATTR_MIN_HEIGHT, 0);
+          int mx_w = wd.attrs->get_int(NEUI_ATTR_MAX_WIDTH,  0);
+          int mx_h = wd.attrs->get_int(NEUI_ATTR_MAX_HEIGHT, 0);
+          if (mn_w || mn_h || mx_w || mx_h)
+            platform_apply_size_constraints(wd.native_handle, mn_w, mn_h, mx_w, mx_h);
+        }
         platform_invalidate(wd.native_handle);
       }
       neui_event_t ev{};

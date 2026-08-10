@@ -44,6 +44,13 @@ namespace xpl_host
     Session* session;
     uint32_t widget_index;
     bool     tracking_mouse    = false;  // true while TrackMouseEvent is active
+    // Set while WE are applying geometry (platform_set_window_pos,
+    // platform_menubar_attach). The resulting WM_SIZE must not re-derive the
+    // logical size from the physical one - `logical -> physical -> logical` is
+    // lossy once a fractional zoom is involved - and must not report a RESIZE
+    // the client just asked for. wd.width/height are already authoritative on
+    // those paths (widget_set_size / the zoom handler set them first).
+    bool     self_resizing     = false;
     WCHAR    pending_surrogate = 0;      // high surrogate waiting for its low pair
     // SMOOTH-scroll grid bounce timer: when a grid overscrolls in SMOOTH mode
     // we SetTimer the FRAME's HWND (grids on xpl have no HWND of their own)
@@ -569,12 +576,20 @@ namespace xpl_host
       int max_w = fwd->attrs->get_int(NEUI_ATTR_MAX_WIDTH,  0);
       int max_h = fwd->attrs->get_int(NEUI_ATTR_MAX_HEIGHT, 0);
 
-      if (min_w > 0) mmi->ptMinTrackSize.x = MulDiv(min_w, static_cast<int>(dpi), 96);
-      if (min_h > 0) mmi->ptMinTrackSize.y = MulDiv(min_h, static_cast<int>(dpi), 96);
+      // Constraints are LOGICAL, but they bound the ZOOMED native window, so
+      // they need the same zoom factor the sizing paths use - otherwise a
+      // MIN_WIDTH of 400 at zoom 2 lets the user drag down to logical 200.
+      float mm_zoom = 1.0f;
+      if (auto* zwud = get_wud(hwnd))
+        if (zwud->session)
+          if (auto* zfwd = zwud->session->get_widget(zwud->widget_index))
+            mm_zoom = zfwd->ui_scale();
+      if (min_w > 0) mmi->ptMinTrackSize.x = static_cast<int>(MulDiv(min_w, static_cast<int>(dpi), 96) * mm_zoom + 0.5f);
+      if (min_h > 0) mmi->ptMinTrackSize.y = static_cast<int>(MulDiv(min_h, static_cast<int>(dpi), 96) * mm_zoom + 0.5f);
       if (max_w > 0 && (min_w <= 0 || max_w >= min_w))
-        mmi->ptMaxTrackSize.x = MulDiv(max_w, static_cast<int>(dpi), 96);
+        mmi->ptMaxTrackSize.x = static_cast<int>(MulDiv(max_w, static_cast<int>(dpi), 96) * mm_zoom + 0.5f);
       if (max_h > 0 && (min_h <= 0 || max_h >= min_h))
-        mmi->ptMaxTrackSize.y = MulDiv(max_h, static_cast<int>(dpi), 96);
+        mmi->ptMaxTrackSize.y = static_cast<int>(MulDiv(max_h, static_cast<int>(dpi), 96) * mm_zoom + 0.5f);
       return 0;
     }
 
@@ -591,9 +606,15 @@ namespace xpl_host
         wud->session->resize_render_ctx(wud->widget_index, w_phys, h_phys);
 
         auto* fwd = wud->session->get_widget(wud->widget_index);
-        if (fwd) {
-          int w_log = static_cast<int>(phys_to_log(static_cast<int>(w_phys), *fwd));
-          int h_log = static_cast<int>(phys_to_log(static_cast<int>(h_phys), *fwd));
+        // Our own geometry application: wd.width/height are authoritative and
+        // the client did not "get resized". Skipping also avoids the lossy
+        // round-trip below - truncation used to drift a 401-wide frame at zoom
+        // 1.25 down to 400 (501 physical / 1.25 = 400.8 -> 400).
+        if (fwd && !wud->self_resizing) {
+          // Round, don't truncate: phys_to_log divides by (dpi/96 * zoom), so
+          // truncation loses up to a pixel on every externally-driven resize.
+          int w_log = static_cast<int>(phys_to_log(static_cast<int>(w_phys), *fwd) + 0.5f);
+          int h_log = static_cast<int>(phys_to_log(static_cast<int>(h_phys), *fwd) + 0.5f);
           fwd->width  = w_log;
           fwd->height = h_log;
 
@@ -1671,12 +1692,19 @@ namespace xpl_host
     DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
     BOOL  has_menu = GetMenu(hwnd) != nullptr;
     AdjustWindowRectExForDpi(&wr, style, has_menu, ex_style, dpi);
+    // Bracket the call so the resulting WM_SIZE knows this resize is ours (see
+    // WindowUserData::self_resizing). SetWindowPos dispatches WM_SIZE
+    // synchronously, so the flag is live for exactly the right window.
+    auto* wud_flag = get_wud(hwnd);
+    if (wud_flag) wud_flag->self_resizing = true;
+    const bool keep_pos = (x == NEUI_WINDOW_POS_KEEP || y == NEUI_WINDOW_POS_KEEP);
     SetWindowPos(hwnd, nullptr,
-      MulDiv(x, static_cast<int>(dpi), 96),
-      MulDiv(y, static_cast<int>(dpi), 96),
+      keep_pos ? 0 : MulDiv(x, static_cast<int>(dpi), 96),
+      keep_pos ? 0 : MulDiv(y, static_cast<int>(dpi), 96),
       wr.right - wr.left,
       wr.bottom - wr.top,
-      SWP_NOZORDER | SWP_NOACTIVATE);
+      SWP_NOZORDER | SWP_NOACTIVATE | (keep_pos ? SWP_NOMOVE : 0u));
+    if (wud_flag) wud_flag->self_resizing = false;
   }
 
   void platform_post_close(void* native_handle)
@@ -1806,15 +1834,25 @@ namespace xpl_host
     auto& wd = wud->session->_widgets[wud->widget_index];
     UINT dpi = wd.dpi ? wd.dpi : GetDpiForWindow(hwnd);
     if (dpi == 0) dpi = 96;
+    // MUST include the frame zoom, exactly like create_native_window and
+    // platform_set_window_pos. Without it, attaching a menubar to a zoomed
+    // frame resizes the window back to the UNZOOMED client size, and the
+    // resulting WM_SIZE then divides that by the full factor - so a 400-wide
+    // frame at zoom 2 ends up storing wd.width = 200 and the layout is
+    // destroyed, not merely mis-sized. This runs at widget_show for any frame
+    // with a MENUBAR child and again on every menubar rebuild.
+    const float zoom = wd.ui_scale();
     RECT wr = { 0, 0,
-                MulDiv(wd.width,  static_cast<int>(dpi), 96),
-                MulDiv(wd.height, static_cast<int>(dpi), 96) };
+                static_cast<int>(MulDiv(wd.width,  static_cast<int>(dpi), 96) * zoom + 0.5f),
+                static_cast<int>(MulDiv(wd.height, static_cast<int>(dpi), 96) * zoom + 0.5f) };
     DWORD style    = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
     DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
     AdjustWindowRectExForDpi(&wr, style, TRUE, ex_style, dpi);
+    wud->self_resizing = true;
     SetWindowPos(hwnd, nullptr, 0, 0,
                  wr.right - wr.left, wr.bottom - wr.top,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    wud->self_resizing = false;
   }
 
   void platform_menubar_refresh(void* frame_hwnd)
@@ -2098,6 +2136,9 @@ namespace xpl_host
     if (it == m.end() || !it->second) return;
     it->second->tick_client_timers();
   }
+
+  // win32: phys_to_log divides every input coord by the zoom.
+  bool platform_supports_ui_scale() { return true; }
 
   void platform_timer_start(Session* session, uint32_t interval_ms)
   {
