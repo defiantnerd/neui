@@ -345,6 +345,25 @@ void wake_app_event_pump()
                             event:(NSEvent*)event
 {
   if (!session) return;
+
+  // Relative (unbounded) pointer mode: the cursor is decoupled from the device
+  // (CGAssociateMouseAndMouseCursorPosition(false)), so localPointForEvent: is
+  // frozen at the anchor and useless. Consume the raw delta instead and let
+  // Session report an accumulated virtual position.
+  //
+  // NSEvent's mouse deltaY is in DEVICE orientation (positive = downward), which
+  // already matches the y-down widget space this view uses - no flip, unlike the
+  // scroll-wheel deltas elsewhere in this file.
+  //
+  // Only MOVE is redirected: a button DOWN / UP still carries a meaningful
+  // position (the anchor), and end_relative_pointer runs off the UP.
+  if (type == NEUI_EVENT_MOUSE_MOVE && session->is_relative_pointer()) {
+    session->dispatch_relative_motion((float)event.deltaX, (float)event.deltaY,
+                                        mac_buttonmap(NSEvent.pressedMouseButtons,
+                                                       event.modifierFlags));
+    return;
+  }
+
   NSPoint p = [self localPointForEvent:event];
   float lx = (float)p.x;
   float ly = (float)p.y;
@@ -2404,6 +2423,61 @@ namespace xpl_host
   {
     g_cursor_kind = kind;
     mac_apply_cursor(kind);
+  }
+
+  // -------------------------------------------------------------------------
+  // Relative (unbounded) pointer mode.
+  //
+  // macOS has the cleanest primitive of the three platforms:
+  // CGAssociateMouseAndMouseCursorPosition(false) stops the cursor tracking the
+  // device while NSEvent keeps delivering deltaX/deltaY. So there is no
+  // per-move warp and no synthetic motion event to filter out - unlike win32
+  // and X11, which must warp back on every move.
+  //
+  // The hide is done directly rather than through platform_set_cursor, so it is
+  // independent of NEUI_ATTR_CURSOR: a drag must not clobber the widget's
+  // configured shape, and on end the widget's own cursor has to come back. Kept
+  // balanced with an explicit flag for the same reason g_cursor_hidden exists -
+  // hide/unhide is a counter, and an unbalanced hide costs the process its
+  // pointer for good.
+
+  static bool g_relative_hidden = false;
+
+  bool platform_supports_relative_pointer() { return true; }
+
+  bool platform_begin_relative_pointer(void* native_handle,
+                                        int* out_anchor_x, int* out_anchor_y)
+  {
+    (void)native_handle;
+    // Anchor in Quartz GLOBAL DISPLAY coordinates (y DOWN from the top-left of
+    // the main display) because that is what CGWarpMouseCursorPosition consumes
+    // on the way back. NSEvent.mouseLocation is y-UP in Cocoa screen space, so
+    // it is flipped here once rather than at the (easier to forget) warp site.
+    const NSPoint cocoa = [NSEvent mouseLocation];
+    const CGFloat screen_h = NSMaxY([[NSScreen screens] firstObject].frame);
+    if (out_anchor_x) *out_anchor_x = (int)(cocoa.x + 0.5);
+    if (out_anchor_y) *out_anchor_y = (int)(screen_h - cocoa.y + 0.5);
+
+    // Decouple cursor from device. Deltas keep arriving; the cursor stops.
+    CGAssociateMouseAndMouseCursorPosition(false);
+    if (!g_relative_hidden) { [NSCursor hide]; g_relative_hidden = true; }
+    return true;
+  }
+
+  void platform_end_relative_pointer(void* native_handle,
+                                      int anchor_x, int anchor_y)
+  {
+    (void)native_handle;
+    // Re-associate BEFORE warping: while the cursor is decoupled the warp still
+    // moves it, but leaving the association off would strand the device offset
+    // that accumulated during the drag, so the next physical move would jump.
+    CGAssociateMouseAndMouseCursorPosition(true);
+    CGWarpMouseCursorPosition(CGPointMake((CGFloat)anchor_x, (CGFloat)anchor_y));
+    if (g_relative_hidden) { [NSCursor unhide]; g_relative_hidden = false; }
+    // Re-apply the widget's own cursor: the hide above bypassed
+    // platform_set_cursor, so g_cursor_kind is still whatever the widget asked
+    // for and simply needs re-asserting now that the pointer is visible again.
+    mac_apply_cursor(g_cursor_kind);
   }
 
   // -------------------------------------------------------------------------

@@ -23,6 +23,7 @@ add_executable(neui_tests
   test_painter_text.cpp
   test_timer_table.cpp
   test_cursor_kind.cpp
+  test_relative_pointer.cpp
   test_image_filter.cpp
   test_filter_graph.cpp
   test_backend_util.cpp
@@ -85,6 +86,19 @@ if(APPLE AND NOT NEUI_IOS)
   target_compile_features(neui_cursor_smoke_macos PRIVATE cxx_std_17)
   target_link_libraries(neui_cursor_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
+
+  # Relative-pointer harness (NEUI_API_POINTER): asserts the begin/end state
+  # machine, that MOUSE_MOVE coordinates are unbounded and widget-local, that
+  # sub-pixel deltas accumulate, and that a session destroyed mid-drag leaves the
+  # cursor re-associated. Realizes a real NSWindow and warps the pointer, so built
+  # but NOT ctest-registered.
+  add_executable(neui_pointer_smoke_macos pointer_smoke_macos.mm)
+  target_include_directories(neui_pointer_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_pointer_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_pointer_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost
+    "-framework AppKit" "-framework CoreGraphics")
 endif()
 
 # Linux-only: Cairo software backend offscreen smoke test. Unlike neui_tests

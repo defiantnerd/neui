@@ -2,6 +2,7 @@
 
 #include <neui/neui.h>
 #include "../shared/cursor_kind.h"
+#include "../shared/relative_pointer.h"
 #include "../shared/tree.h"
 #include "../shared/attrs.h"
 #include "../shared/clipboard_item.h"
@@ -989,6 +990,21 @@ namespace xpl_host
     // pointer hidden process-wide.
     void forget_dead_hover();
 
+    // ---- Relative (unbounded) pointer mode (NEUI_API_POINTER) -----------
+    // Enter / leave relative mode for a drag on `widget_idx`. begin returns
+    // false when the platform has no warping seam, the widget is invalid, or
+    // the mode is already active (not reference-counted - a second begin
+    // without an end is a bug, not a nesting request).
+    bool begin_relative_pointer(uint32_t widget_idx);
+    void end_relative_pointer();
+    bool is_relative_pointer() const { return _relative.active; }
+
+    // Feed a raw device delta (LOGICAL px) from the platform's motion handler
+    // while relative mode is active. Advances the virtual position and
+    // dispatches a MOUSE_MOVE carrying it, so an existing drag handler sees
+    // ordinary absolute coordinates that are simply no longer screen-bounded.
+    void dispatch_relative_motion(float dx, float dy, uint32_t buttonmap);
+
     // Restore the OS default cursor if this session had changed it. Called from
     // ~Session: a hidden pointer (NEUI_CURSOR_NONE) survives the session that
     // hid it, and on macOS [NSCursor hide]/unhide is a balanced counter, so an
@@ -1134,6 +1150,20 @@ namespace xpl_host
     int      _cursor_override       = NEUI_CURSOR_DEFAULT;
     int      _cursor_applied        = -1;
     uint32_t _cursor_override_owner = 0;
+
+    // Relative (unbounded) pointer mode. The virtual-position bookkeeping is
+    // portable (hosts/shared/relative_pointer.h, Tier-1 tested); the anchor is
+    // whatever opaque coordinates the platform handed back at begin, kept here
+    // only to pass straight back at end.
+    neui_detail::RelativePointer _relative;
+    // Last pointer position seen by dispatch_mouse_event, FRAME-local logical
+    // px. Only used to seed a relative drag from its real press point.
+    float _last_mouse_frame_x = 0.0f;
+    float _last_mouse_frame_y = 0.0f;
+    bool  _last_mouse_valid   = false;
+    int  _relative_anchor_x = 0;
+    int  _relative_anchor_y = 0;
+    void* _relative_native  = nullptr;
 
     // Client timers. _timer_native_interval caches what the platform tick is
     // currently armed at, so we only re-arm when the shortest interval moves.

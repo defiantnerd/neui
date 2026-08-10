@@ -2410,6 +2410,14 @@ namespace xpl_host
   // No mouse cursor on touch (iPad pointer styles are a later milestone).
   void     platform_set_cursor(int /*kind*/)                                  {}
 
+  // No pointer warping: iOS (touch input) has no mouse cursor to pin, so relative
+  // (unbounded) pointer mode reports unsupported and NEUI_API_POINTER's
+  // begin_relative returns false. A client's drag then behaves as an ordinary
+  // bounded one rather than silently doing nothing.
+  bool platform_supports_relative_pointer()                                   { return false; }
+  bool platform_begin_relative_pointer(void*, int*, int*)                     { return false; }
+  void platform_end_relative_pointer(void*, int, int)                         {}
+
   // Client timers (NEUI_API_TIMER). Same shape as the macOS seam: session-
   // scoped, so it hangs off the main runloop rather than off a view, and it
   // joins NSRunLoopCommonModes so the tick survives UIKit tracking loops

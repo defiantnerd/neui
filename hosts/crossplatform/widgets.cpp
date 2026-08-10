@@ -2105,6 +2105,38 @@ namespace xpl_host
   };
 
   // ---------------------------------------------------------------------------
+  // Pointer API (NEUI_API_POINTER) - relative (unbounded) pointer mode, so a
+  // knob drag doesn't die at the screen edge. Thin validation over
+  // Session::begin/end_relative_pointer; the virtual-position math is portable
+  // (hosts/shared/relative_pointer.h) and the warp is one platform seam.
+
+  static bool NEUI_ABI ptr_begin_relative(neui_session_t session,
+                                            neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return false;
+    return s->begin_relative_pointer(WidgetToIndex(widget));
+  }
+
+  static void NEUI_ABI ptr_end_relative(neui_session_t session)
+  {
+    if (auto* s = get_session(session)) s->end_relative_pointer();
+  }
+
+  static bool NEUI_ABI ptr_is_relative(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    return s ? s->is_relative_pointer() : false;
+  }
+
+  neui_pointer_api_t pointer_api = {
+    NEUI_VERSION,
+    ptr_begin_relative,
+    ptr_end_relative,
+    ptr_is_relative,
+  };
+
+  // ---------------------------------------------------------------------------
   // Asset API (NEUI_API_ASSETS) - session-scoped media handles backed by
   // the AssetManager's handle table. Handles encode the session id in the
   // upper 16 bits like neui_widget_t; cross-session handles are dropped.

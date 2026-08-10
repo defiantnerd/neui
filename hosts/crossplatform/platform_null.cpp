@@ -119,6 +119,14 @@ namespace xpl_host
                                        float /*scale*/)                       { return nullptr; }
 
   void     platform_set_cursor(int /*kind*/)                                  {}
+
+  // No pointer warping: the null platform has no mouse cursor to pin, so relative
+  // (unbounded) pointer mode reports unsupported and NEUI_API_POINTER's
+  // begin_relative returns false. A client's drag then behaves as an ordinary
+  // bounded one rather than silently doing nothing.
+  bool platform_supports_relative_pointer()                                   { return false; }
+  bool platform_begin_relative_pointer(void*, int*, int*)                     { return false; }
+  void platform_end_relative_pointer(void*, int, int)                         {}
   // No event loop on the null platform, so nothing can drive a tick; add_timer
   // still returns an id and the table stays consistent, it just never fires.
   // null: no input at all, so the zoom would only skew paint.

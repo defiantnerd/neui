@@ -502,6 +502,49 @@ corresponding check fail. The review also independently cleared X11 cursor lifet
 the GRID override ownership logic against the real capture code, and `set_hovered`
 re-entrancy.
 
+**4.1b status: DONE** (pointer warping). `NEUI_API_POINTER` (`include/neui/d/pointer.h`):
+`begin_relative` / `end_relative` / `is_relative`, bracketed around a drag exactly as
+the plan wanted so it pairs 1:1 with the gesture events.
+
+The design decision that matters: relative mode does **not** switch the event payload
+to deltas. It keeps reporting ordinary absolute widget-local `x`/`y` that simply stop
+being screen-bounded, seeded from the press point and advanced by each raw device
+delta while the platform pins the visible cursor. Every existing drag handler
+(KnobWidget, the behavior runtime's `DRAG_*`, scrollbar drags) already computes its own
+delta from the press point, so all of them gain unbounded travel with **zero** changes -
+where delta-valued events would have required touching every one and would have made
+`x`/`y` mean two different things depending on invisible state.
+
+The three platforms are deliberately not the same shape: macOS uses
+`CGAssociateMouseAndMouseCursorPosition(false)`, which decouples cursor from device
+*without* moving it, so there is no warp and no echo event; win32 (`SetCursorPos`) and
+X11 (`XWarpPointer`) must warp back on every move and filter the synthetic motion event
+each warp generates, or the handler reads delta then -delta and the drag sits still.
+iOS / null report unsupported so `begin_relative` fails honestly instead of pinning
+nothing.
+
+Kept opt-in: the built-in KNOB / SLIDER and the behavior `DRAG_*` handlers do not enter
+the mode themselves, because hiding the cursor is a visible change and a client drawing
+a readout at the pointer should not have it forced on.
+
+Two bugs caught during implementation rather than after:
+- I reintroduced the **exact** declaration-order defect the 4.1 review had just found -
+  `s_relative_active` read by `WM_SETCURSOR` far above its definition. Caught by
+  remembering the lesson, not by a compiler, since win32 still cannot be built here.
+- `dispatch_mouse_event` takes FRAME-local coordinates and subtracts `abs_x/abs_y`
+  itself, so passing it the widget-local virtual position **double-subtracted**. The
+  harness pins the test widget at a non-zero offset specifically so this cannot hide;
+  negative-probed, and removing the `+ wd.abs_x` makes two checks fail.
+
+Verification: 8 new Tier-1 cases (403 total) over the accumulator - including that
+sub-pixel deltas accumulate rather than truncate, and that rounding is symmetric so an
+upward drag travels exactly as far as an identical downward one; plus a 17-check macOS
+harness injecting real deltas via `CGEvent` -> `+[NSEvent eventWithCGEvent:]`. That
+harness **cannot** test sub-pixel accumulation - AppKit quantises `kCGMouseEventDelta*`
+to an integer (measured: 2.5 -> 2.0, 0.3 -> 0.0) - so it proves exact integer
+accumulation and the float path stays Tier-1 only. Recorded in
+`docs/deferred-issues.md` rather than left as an unstated gap.
+
 **Deferred out of 4.1 into 4.1b**: the behavior asset's per-handler `cursor` prop is
 still a no-op. The infrastructure it was blocked on now exists, but wiring it needs a
 per-handler hit-region hover track plus a new `BehaviorDispatchCtx` callback across

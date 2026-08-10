@@ -31,6 +31,7 @@
 #include "d/metrics.h"
 #include "d/embed.h"
 #include "d/timer.h"
+#include "d/pointer.h"
 
 #ifdef __cplusplus
 extern "C" {

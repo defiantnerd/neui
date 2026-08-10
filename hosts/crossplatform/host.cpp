@@ -119,6 +119,7 @@ namespace xpl_host
   extern neui_notify_api_t    notify_api;
   extern neui_embed_api_t     embed_api;
   extern neui_timer_api_t     timer_api;
+  extern neui_pointer_api_t   pointer_api;
 
   // Resolve a Session* from a 1-based session id (the upper 16 bits of a
   // widget id). Used by the iOS platform layer's NEUI_API_METRICS seam to walk
@@ -179,6 +180,7 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_METRICS))   return &neui_detail::k_metrics_api;
     if (!strcmp(iface, NEUI_API_EMBED))     return &embed_api;
     if (!strcmp(iface, NEUI_API_TIMER))     return &timer_api;
+    if (!strcmp(iface, NEUI_API_POINTER))   return &pointer_api;
     return nullptr;
   }
 
@@ -276,6 +278,11 @@ namespace xpl_host
     _timers.clear();
     _timer_native_interval = 0;
     platform_timer_stop(this);
+
+    // Leave relative pointer mode if a drag was still in flight. This un-hides
+    // the pointer and re-associates it with the device; skipping it would leave
+    // the whole machine with a cursor that does not follow the mouse.
+    end_relative_pointer();
 
     // Hand the cursor back to the OS. A hidden pointer (NEUI_CURSOR_NONE)
     // outlives the session that hid it, and on macOS hide/unhide is a balanced
@@ -1028,6 +1035,81 @@ namespace xpl_host
     }
 
     if (changed) refresh_cursor();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Relative (unbounded) pointer mode (NEUI_API_POINTER).
+
+  bool Session::begin_relative_pointer(uint32_t widget_idx)
+  {
+    if (_relative.active)                 return false;   // not re-entrant
+    if (!platform_supports_relative_pointer()) return false;
+    if (widget_idx == 0 || !_widgets.exists(widget_idx)) return false;
+
+    void* native = find_parent_native_handle(widget_idx);
+    if (!native) return false;   // not realized yet: nothing to pin against
+
+    int ax = 0, ay = 0;
+    if (!platform_begin_relative_pointer(native, &ax, &ay)) return false;
+
+    // Seed the virtual position from where the pointer actually is in
+    // widget-local space, so the first MOUSE_MOVE is continuous with the press
+    // that started the drag. Falling back to the widget centre would put a
+    // visible jump at the start of every drag.
+    auto& wd = _widgets[widget_idx];
+    float start_x = (float)wd.width  * 0.5f;
+    float start_y = (float)wd.height * 0.5f;
+    if (_last_mouse_valid) {
+      // _last_mouse_frame_* is FRAME-local; the virtual position is WIDGET-local
+      // (that is what the event payload carries), hence the abs_* subtraction.
+      start_x = _last_mouse_frame_x - (float)wd.abs_x;
+      start_y = _last_mouse_frame_y - (float)wd.abs_y;
+    }
+
+    _relative_anchor_x = ax;
+    _relative_anchor_y = ay;
+    _relative_native   = native;
+    _relative.begin(widget_idx, start_x, start_y);
+    return true;
+  }
+
+  void Session::end_relative_pointer()
+  {
+    if (!_relative.active) return;   // safe to call unconditionally from an UP
+    void* native = _relative_native;
+    _relative.end();
+    _relative_native = nullptr;
+    platform_end_relative_pointer(native, _relative_anchor_x, _relative_anchor_y);
+  }
+
+  void Session::dispatch_relative_motion(float dx, float dy, uint32_t buttonmap)
+  {
+    if (!_relative.active) return;
+
+    // The owner can be destroyed mid-drag (a client rebuilding its UI from a
+    // parameter change). Bail out of the whole mode rather than dispatching at a
+    // freed slot - and go through end_relative_pointer so the cursor is unhidden
+    // and warped back, which forget_dead_hover alone would not do.
+    if (!_widgets.exists(_relative.widget)) { end_relative_pointer(); return; }
+
+    _relative.accumulate(dx, dy);
+
+    auto& wd = _widgets[_relative.widget];
+    neui_event_t ev = {};
+    ev.type                 = NEUI_EVENT_MOUSE_MOVE;
+    ev.data.mouse.widget    = { wd.widget_id };
+    // dispatch_mouse_event takes FRAME-local coordinates and converts to
+    // widget-local for the client itself, so the widget-local virtual position
+    // has to be shifted back up by abs_* here. Handing it widget-local
+    // coordinates would subtract abs_* a second time.
+    ev.data.mouse.x         = _relative.report_x() + wd.abs_x;
+    ev.data.mouse.y         = _relative.report_y() + wd.abs_y;
+    ev.data.mouse.buttonmap = buttonmap;
+
+    // Straight to the owner: hit-testing would be meaningless here, since the
+    // virtual position deliberately leaves the widget (that is the entire point)
+    // and the real pointer never moves at all.
+    dispatch_mouse_event(_relative.widget, &ev);
   }
 
   void Session::release_cursor()
@@ -2571,6 +2653,19 @@ namespace xpl_host
     // handler, which subtracts abs_x/abs_y itself.
     const int frame_x = ev->data.mouse.x;
     const int frame_y = ev->data.mouse.y;
+
+    // Remember where the pointer was, in FRAME-local px, so
+    // begin_relative_pointer can seed its virtual position from the actual press
+    // point. It is called from a client's MOUSE_BUTTON_DOWN handler, i.e. from
+    // inside this very dispatch, so the value is always fresh at that moment.
+    // Skipped while relative mode is active: those coordinates are virtual and
+    // unbounded, and feeding them back would corrupt the next drag's seed.
+    if (!_relative.active) {
+      _last_mouse_frame_x = (float)frame_x;
+      _last_mouse_frame_y = (float)frame_y;
+      _last_mouse_valid   = true;
+    }
+
     ev->data.mouse.x = frame_x - w.abs_x;
     ev->data.mouse.y = frame_y - w.abs_y;
     const bool handled = dispatch_event(ev);

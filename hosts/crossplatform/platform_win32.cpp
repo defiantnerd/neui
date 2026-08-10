@@ -23,6 +23,7 @@
 #include "../shared/win32/dnd_source_win32.h"
 #include "../shared/win32/keys_win32.h"
 #include "../shared/win32/cursor_win32.h"
+#include "../shared/relative_pointer.h"
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
 
@@ -400,6 +401,18 @@ namespace xpl_host
   // pointer at a time, and Session::refresh_cursor is the single writer.
   static int s_cursor_kind = NEUI_CURSOR_DEFAULT;
 
+  // Relative (unbounded) pointer mode - see platform_begin_relative_pointer
+  // further down for the rationale. Declared here for the same reason
+  // s_cursor_kind is: both the WM_SETCURSOR and the WM_MOUSEMOVE cases below
+  // read them, and a definition next to their implementation would not be in
+  // scope at the point of use.
+  //
+  // Process-wide, not per-window: only one pointer, so only one drag can be in
+  // relative mode at a time. The anchor is in SCREEN px, which is what both
+  // GetCursorPos and SetCursorPos speak.
+  static bool  s_relative_active = false;
+  static POINT s_relative_anchor = { 0, 0 };
+
   // -------------------------------------------------------------------------
   // Window procedure
 
@@ -730,6 +743,10 @@ namespace xpl_host
     // which a client would otherwise lose the moment it set any cursor.
     case WM_SETCURSOR: {
       if (LOWORD(lParam) != HTCLIENT) break;   // -> DefWindowProc
+      // In relative mode the pointer is deliberately hidden for the duration of
+      // the drag. Re-applying the widget's shape here would un-hide it on the
+      // very first move and defeat the whole mode.
+      if (s_relative_active) { SetCursor(nullptr); return TRUE; }
       neui_detail::win32_apply_cursor(s_cursor_kind);
       return TRUE;                             // "I handled it, don't reset"
     }
@@ -748,6 +765,36 @@ namespace xpl_host
         TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
         TrackMouseEvent(&tme);
         wud->tracking_mouse = true;
+      }
+
+      // Relative (unbounded) pointer mode: consume the raw screen-space delta,
+      // warp back to the anchor, and let Session report an accumulated virtual
+      // position instead of this event's clamped one.
+      //
+      // The echo check is essential: our own SetCursorPos below generates
+      // another WM_MOUSEMOVE, landing exactly on the anchor. Without dropping it
+      // the handler would see delta, then -delta, and the drag would sit still.
+      if (s_relative_active) {
+        POINT sp{};
+        if (GetCursorPos(&sp)) {
+          if (neui_detail::relative_is_warp_echo((int)sp.x, (int)sp.y,
+                                                   (int)s_relative_anchor.x,
+                                                   (int)s_relative_anchor.y))
+            return 0;                                   // our own warp-back
+          // Deltas are DEVICE px; divide by the frame's full logical->physical
+          // factor (DPI ratio AND NEUI_ATTR_UI_SCALE) so the virtual position
+          // stays in logical px like every other mouse coordinate. This is the
+          // same factor phys_to_log applies, just to a delta rather than a
+          // point, so no origin is involved.
+          const float f  = fwd->logical_to_physical();
+          const float sc = (f > 0.0f) ? f : 1.0f;
+          wud->session->dispatch_relative_motion(
+            (float)(sp.x - s_relative_anchor.x) / sc,
+            (float)(sp.y - s_relative_anchor.y) / sc,
+            neui_detail::win32_buttonmap(wParam));
+          SetCursorPos(s_relative_anchor.x, s_relative_anchor.y);
+        }
+        return 0;
       }
 
       float lx = phys_to_log(mouse_x(lParam), *fwd);
@@ -2193,6 +2240,50 @@ namespace xpl_host
       if (it->second == session) { KillTimer(nullptr, it->first); it = m.erase(it); }
       else                        ++it;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Relative (unbounded) pointer mode.
+  //
+  // win32 has no "decouple cursor from device" primitive the way macOS does, so
+  // the cursor is warped back to the anchor after every move. SetCursorPos
+  // generates a fresh WM_MOUSEMOVE for the warp itself, which the motion handler
+  // recognises via relative_is_warp_echo and drops - without that filter the
+  // echo reads as an equal-and-opposite delta and the pointer looks frozen.
+  //
+  // The hide goes through SetCursor(NULL) directly rather than
+  // platform_set_cursor, so a drag doesn't clobber the widget's NEUI_ATTR_CURSOR
+  // shape; s_cursor_kind is left alone and simply re-applied on end. The
+  // WM_SETCURSOR handler would otherwise undo the hide on the very next move, so
+  // s_relative_active gates it - which is why both statics are declared up with
+  // s_cursor_kind, above XplWndProc, rather than here.
+
+  bool platform_supports_relative_pointer() { return true; }
+
+  bool platform_begin_relative_pointer(void* native_handle,
+                                        int* out_anchor_x, int* out_anchor_y)
+  {
+    (void)native_handle;
+    POINT p{};
+    if (!GetCursorPos(&p)) return false;    // screen px, what SetCursorPos wants
+    s_relative_anchor  = p;
+    s_relative_active  = true;
+    if (out_anchor_x) *out_anchor_x = (int)p.x;
+    if (out_anchor_y) *out_anchor_y = (int)p.y;
+    SetCursor(nullptr);                     // hide for the duration of the drag
+    return true;
+  }
+
+  void platform_end_relative_pointer(void* native_handle,
+                                      int anchor_x, int anchor_y)
+  {
+    (void)native_handle;
+    s_relative_active = false;
+    SetCursorPos(anchor_x, anchor_y);
+    // Re-assert the widget's own cursor now the pointer is visible again: the
+    // hide above bypassed platform_set_cursor, so s_cursor_kind still holds
+    // whatever the widget asked for.
+    neui_detail::win32_apply_cursor(s_cursor_kind);
   }
 
   void platform_set_cursor(int kind)

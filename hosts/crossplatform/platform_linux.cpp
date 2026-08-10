@@ -93,6 +93,21 @@ namespace
   int g_cursor_kind = NEUI_CURSOR_DEFAULT;
   std::unordered_map<Display*, std::unordered_map<int, Cursor>> g_cursors;
 
+  // Relative (unbounded) pointer mode - see platform_begin_relative_pointer.
+  // Declared up here with the other module state because dispatch_motion (far
+  // above the implementation) reads all four.
+  //
+  // Process-wide, not per-window: one pointer, so one relative drag at a time.
+  // g_relative_window pins the mode to the window that started it, so a motion
+  // event arriving for a DIFFERENT window of ours is handled normally rather
+  // than being mistaken for drag motion. The anchor is in ROOT (screen) px,
+  // which is what XWarpPointer and MotionNotify's x_root/y_root both speak.
+  struct LinuxWindow;
+  bool         g_relative_active   = false;
+  LinuxWindow* g_relative_window   = nullptr;
+  int          g_relative_anchor_x = 0;
+  int          g_relative_anchor_y = 0;
+
   // The X font-cursor glyph for a kind. X11 is the richest of the three
   // platforms here - the cursor font has a direct equivalent for every kind
   // except "none", which is a mode (an empty pixmap, built separately).
@@ -781,6 +796,32 @@ namespace
 
   void dispatch_motion(LinuxWindow* lw, XMotionEvent& me)
   {
+    // Relative (unbounded) pointer mode. Like win32 and unlike macOS, X11 has no
+    // decouple-cursor-from-device primitive, so the pointer is warped back to
+    // the anchor after every move - and XWarpPointer generates a fresh
+    // MotionNotify for the warp itself, which must be dropped or the handler
+    // sees delta then -delta and the drag sits still.
+    //
+    // The anchor is in ROOT (screen) coordinates because that is what
+    // XWarpPointer takes; me.x_root/y_root are the matching space.
+    if (g_relative_active && lw == g_relative_window) {
+      if (neui_detail::relative_is_warp_echo(me.x_root, me.y_root,
+                                               g_relative_anchor_x,
+                                               g_relative_anchor_y))
+        return;                                        // our own warp-back
+      const float scale = window_scale(lw);
+      if (Session* s = lw->session) {
+        s->dispatch_relative_motion(
+          static_cast<float>(me.x_root - g_relative_anchor_x) / scale,
+          static_cast<float>(me.y_root - g_relative_anchor_y) / scale,
+          neui_detail::x11_buttonmap(me.state));
+      }
+      XWarpPointer(lw->dpy, None, DefaultRootWindow(lw->dpy), 0, 0, 0, 0,
+                    g_relative_anchor_x, g_relative_anchor_y);
+      XFlush(lw->dpy);
+      return;
+    }
+
     float scale = window_scale(lw);
     do_motion(lw, static_cast<float>(me.x) / scale, static_cast<float>(me.y) / scale, me.state);
   }
@@ -2761,6 +2802,62 @@ namespace
     if (!session) return;
     client_timer_sessions().erase(session);
     refresh_timer_arm();
+  }
+
+  // -------------------------------------------------------------------------
+  // Relative (unbounded) pointer mode. Warp-back model, same as win32; see
+  // dispatch_motion for the echo filtering and platform.h for why macOS differs.
+  //
+  // The hide uses the cached empty-pixmap cursor directly rather than going
+  // through platform_set_cursor, so a drag does not clobber the widget's
+  // NEUI_ATTR_CURSOR shape - g_cursor_kind is left alone and re-asserted on end.
+
+  bool platform_supports_relative_pointer() { return true; }
+
+  bool platform_begin_relative_pointer(void* native_handle,
+                                        int* out_anchor_x, int* out_anchor_y)
+  {
+    auto* lw = static_cast<LinuxWindow*>(native_handle);
+    if (!lw || !lw->dpy || !lw->win) return false;
+
+    // Current pointer position in ROOT coordinates - the space XWarpPointer and
+    // MotionNotify's x_root/y_root use.
+    Window       root = None, child = None;
+    int          rx = 0, ry = 0, wx = 0, wy = 0;
+    unsigned int mask = 0;
+    if (!XQueryPointer(lw->dpy, lw->win, &root, &child, &rx, &ry, &wx, &wy, &mask))
+      return false;
+
+    g_relative_active   = true;
+    g_relative_window   = lw;
+    g_relative_anchor_x = rx;
+    g_relative_anchor_y = ry;
+    if (out_anchor_x) *out_anchor_x = rx;
+    if (out_anchor_y) *out_anchor_y = ry;
+
+    if (Cursor hidden = x11_cursor_for(lw->dpy, lw->win, NEUI_CURSOR_NONE)) {
+      XDefineCursor(lw->dpy, lw->win, hidden);
+      XFlush(lw->dpy);
+    }
+    return true;
+  }
+
+  void platform_end_relative_pointer(void* native_handle,
+                                      int anchor_x, int anchor_y)
+  {
+    auto* lw = static_cast<LinuxWindow*>(native_handle);
+    g_relative_active = false;
+    g_relative_window = nullptr;
+    if (!lw || !lw->dpy || !lw->win) return;
+
+    XWarpPointer(lw->dpy, None, DefaultRootWindow(lw->dpy), 0, 0, 0, 0,
+                  anchor_x, anchor_y);
+    // Re-assert the widget's own shape. platform_set_cursor short-circuits when
+    // the kind is unchanged, and g_cursor_kind was never touched by the hide, so
+    // the cached value has to be cleared to force the re-apply.
+    const int restore = g_cursor_kind;
+    g_cursor_kind = -1;
+    platform_set_cursor(restore);
   }
 
   void platform_set_cursor(int kind)

@@ -410,6 +410,36 @@ namespace xpl_host
   void platform_set_cursor(int kind /* neui_cursor_kind */);
 
   // -------------------------------------------------------------------------
+  // Relative (unbounded) pointer mode (NEUI_API_POINTER, <neui/d/pointer.h>).
+  //
+  // Pins the visible cursor while a drag keeps consuming device motion, so a
+  // knob drag doesn't die at the screen edge. Session owns the virtual-position
+  // bookkeeping (hosts/shared/relative_pointer.h); these three calls are only
+  // the platform mechanics.
+  //
+  // platform_begin_relative_pointer records the anchor in whatever coordinates
+  // that platform needs for the warp-back (SCREEN px on every current
+  // platform - deliberately opaque to the caller, which only passes them back)
+  // and returns false when the platform has no seam at all (iOS / null), so
+  // begin_relative can honestly report failure instead of pinning nothing.
+  //
+  // The three implementations are NOT the same shape, and the difference is
+  // load-bearing:
+  //   - macOS uses CGAssociateMouseAndMouseCursorPosition(false), which
+  //     decouples the cursor from the device WITHOUT moving it. No per-move
+  //     warp, and therefore no synthetic motion event to filter.
+  //   - win32 (SetCursorPos) and X11 (XWarpPointer) must warp back on every
+  //     move, and each warp generates a fresh motion event that has to be
+  //     recognised and dropped - see relative_is_warp_echo. A handler that
+  //     misses this reads the echo as an equal-and-opposite delta and the
+  //     pointer appears frozen.
+  bool platform_supports_relative_pointer();
+  bool platform_begin_relative_pointer(void* native_handle,
+                                        int* out_anchor_x, int* out_anchor_y);
+  void platform_end_relative_pointer(void* native_handle,
+                                      int anchor_x, int anchor_y);
+
+  // -------------------------------------------------------------------------
   // Client timers (NEUI_API_TIMER, <neui/d/timer.h>).
   //
   // ONE native periodic tick per session, not one per client timer: the
