@@ -461,6 +461,19 @@ namespace xpl_host
   // making the attr inert rather than broken.
   bool platform_supports_ui_scale();
 
+  // True when this platform layer routes input to the standalone tree popup
+  // (widgets->popup_tree_menu): press / move / release plus Esc-to-dismiss, and
+  // draining Session::tree_popup_take_release.
+  //
+  // Session::paint_frame paints the cascade platform-independently, so a
+  // platform that paints it without wiring input would put up a menu that the
+  // user can neither pick from nor dismiss, and whose taps fall THROUGH to the
+  // widgets underneath - strictly worse than not offering the feature.
+  // show_tree_popup therefore refuses when this is false, so the API fails
+  // honestly instead of painting something inert. (Same shape as
+  // platform_supports_ui_scale, and as begin_relative on iOS / null.)
+  bool platform_supports_tree_popup();
+
   void platform_timer_start(Session* session, uint32_t interval_ms);
   void platform_timer_stop(Session* session);
 

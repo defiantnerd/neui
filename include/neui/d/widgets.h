@@ -201,8 +201,15 @@ typedef struct neui_widget_api {
   // is NOT the frame's menu bar - a frame can carry both. Build it once and
   // re-show it, or rebuild per click with tree->clear.
   //
-  // XPL HOST ONLY (all three platforms: win32, macOS and Linux). The native
-  // win32 / macOS / iOS hosts leave this slot NULL - see the comment at each.
+  // Unlike a MENUBAR's, a POPUPMENU's shortcut LABEL is drawn by neui itself, so
+  // it uses the running platform's convention: "Ctrl+Shift+Z" on Windows/Linux,
+  // the Cocoa glyphs on macOS ("^<shift-glyph><cmd-glyph>Z").
+  //
+  // XPL HOST ONLY, and only where that host routes input to the popup: win32,
+  // macOS and Linux do; iOS does NOT (its touch path has no tree-popup
+  // hit-test), so this returns false there rather than painting a menu that
+  // cannot be picked or dismissed. The native win32 / macOS / iOS hosts leave
+  // the slot NULL entirely - see the comment at each.
   // (Vtable-appended; check the api version / pointer before calling.)
   bool               (NEUI_ABI *popup_tree_menu)(neui_session_t session, neui_widget_t anchor,
                                                  int x, int y, neui_widget_t menu);

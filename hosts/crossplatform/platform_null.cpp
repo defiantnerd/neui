@@ -131,6 +131,8 @@ namespace xpl_host
   // still returns an id and the table stays consistent, it just never fires.
   // null: no input at all, so the zoom would only skew paint.
   bool platform_supports_ui_scale() { return false; }
+  // No surface, no input: nothing to route.
+  bool platform_supports_tree_popup() { return false; }
 
   void     platform_timer_start(Session*, uint32_t)                            {}
   void     platform_timer_stop(Session*)                                       {}

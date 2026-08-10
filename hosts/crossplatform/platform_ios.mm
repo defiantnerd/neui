@@ -2434,6 +2434,11 @@ namespace xpl_host
   // ignores the zoom, so scaling paint alone would hit-test in a different
   // space than it draws. Inert here rather than broken - deferred, not denied.
   bool platform_supports_ui_scale() { return false; }
+  // Not wired: the iOS touch path has no tree-popup hit-test, so the cascade
+  // would paint over the UI with taps falling through it and nothing able to
+  // dismiss it (there is no Esc). A UIMenu / UIContextMenuInteraction bridge is
+  // the right answer here, not a port of the pointer-shaped hit-testing.
+  bool platform_supports_tree_popup() { return false; }
 
   void platform_timer_start(Session* session, uint32_t interval_ms)
   {

@@ -119,6 +119,19 @@ void click_at(float lx, float ly, int click_count = 1)
   [v mouseUp:make_mouse_event(NSEventTypeLeftMouseUp, lx, ly, click_count)];
 }
 
+// A press with NO paired release. Models the gesture that produced the
+// stale-swallow defect: on win32 a press consumed by the popup takes no mouse
+// capture, so dragging off the window and releasing outside delivers no
+// WM_LBUTTONUP at all. macOS/X11 do guarantee paired delivery, so this cannot
+// happen there for real - but the SESSION-level flag is shared by all three
+// platforms, so the fix is testable here.
+void press_only_at(float lx, float ly)
+{
+  NSView* v = [g_window contentView];
+  if (!v) return;
+  [v mouseDown:make_mouse_event(NSEventTypeLeftMouseDown, lx, ly, 1)];
+}
+
 void move_to(float lx, float ly)
 {
   NSView* v = [g_window contentView];
@@ -359,7 +372,7 @@ int main()
     // a miss for "reported nothing".
     const int pitch  = count_y(r_cut.id);
     const int y_more = y_copy + 2 * pitch;
-    check(col[(size_t)y_more] == 0 && y_more < kScan,
+    check(y_more < kScan && col[(size_t)y_more] == 0,
           "precondition: the row two pitches past Copy is the submenu parent");
     bool nested_ok = false;
     for (int dx = 0; dx < 320 && !nested_ok; dx += 6) {
@@ -463,6 +476,21 @@ int main()
     click_at(px, (float)kAnchorY + (float)y_cut);
     check(g_rec.under_down == 1,
           "after an outside-click dismiss, input reaches widgets again");
+
+    // The armed release-swallow must not outlive its own gesture. Consume a
+    // press inside the popup and never deliver its release (see press_only_at);
+    // the NEXT, unrelated click must be complete. Before the press-time clear,
+    // that click got a DOWN with no UP and no CLICK, left _pressed_widget stuck,
+    // and on a KNOB / SLIDER would have left a GESTURE_BEGIN with no
+    // GESTURE_END - a stuck beginEdit for a DAW automation client.
+    reset_rec();
+    open_popup(win, pm);
+    press_only_at(px, (float)kAnchorY + (float)y_cut);
+    check(g_rec.popup_count == 1, "precondition: the unpaired press was consumed by the popup");
+    reset_rec();
+    click_at(px, (float)kAnchorY + (float)y_cut);
+    check(g_rec.under_down == 1 && g_rec.under_up == 1 && g_rec.under_click == 1,
+          "an armed release-swallow does not eat a later, unrelated click's UP");
 
     // A double-click inside the popup must pick, not bypass the menu. AppKit
     // sends clickCount == 2 on the second press, which -mouseDown: used to

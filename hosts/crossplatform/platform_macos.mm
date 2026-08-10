@@ -423,6 +423,7 @@ void wake_app_event_pump()
   // The standalone tree popup is checked BEFORE the clickCount branch: a
   // double-click inside an open menu must pick the row it lands on, not bypass
   // the menu entirely and deliver a DBLCLICK to the widget underneath it.
+  session->tree_popup_discard_pending_release();
   if (session->_tree_popup_active) {
     NSPoint tp = [self localPointForEvent:event];
     if (session->handle_tree_popup_click(widget_index, (float)tp.x, (float)tp.y))
@@ -530,8 +531,11 @@ void wake_app_event_pump()
 - (void)rightMouseDown:(NSEvent*)event
 {
   if (!session) return;
-  // A right-click while a tree popup is open dismisses / re-targets it rather
-  // than opening a second one on top.
+  session->tree_popup_discard_pending_release();
+  // A right-click while a tree popup is open goes to it rather than opening a
+  // second menu on top: it picks the row under the cursor, descends a cascade,
+  // or dismisses, exactly as a left-click does (matching NSMenu, which also
+  // actuates on the right button).
   if (session->_tree_popup_active) {
     NSPoint tp = [self localPointForEvent:event];
     if (session->handle_tree_popup_click(widget_index, (float)tp.x, (float)tp.y))
@@ -780,6 +784,11 @@ void wake_app_event_pump()
 - (void)scrollWheel:(NSEvent*)event
 {
   if (!session) return;
+  // An open tree popup absorbs the wheel. Without this a scrolling SECTION
+  // or GRID *under* the visible menu scrolls away beneath it, which no OS
+  // menu does. No scroll-the-menu behaviour yet - a cascade taller than the
+  // frame clamps (see docs/deferred-issues.md).
+  if (session->_tree_popup_active) return;
   NSPoint p = [self localPointForEvent:event];
   float lx = (float)p.x;
   float ly = (float)p.y;
@@ -2569,6 +2578,7 @@ namespace xpl_host
 
   // macOS: localPointForEvent divides by frameZoom.
   bool platform_supports_ui_scale() { return true; }
+  bool platform_supports_tree_popup() { return true; }
 
   void platform_timer_start(Session* session, uint32_t interval_ms)
   {

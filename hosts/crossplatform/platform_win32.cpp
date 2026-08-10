@@ -880,6 +880,7 @@ namespace xpl_host
       // Standalone tree popup: picks / descends / dismisses. Not consumed only
       // when the popup belongs to another frame (it dismisses and the click
       // proceeds here).
+      wud->session->tree_popup_discard_pending_release();
       if (wud->session->_tree_popup_active &&
           wud->session->handle_tree_popup_click(wud->widget_index, lx, ly))
         return 0;
@@ -941,6 +942,7 @@ namespace xpl_host
 
       // A double-click inside an open tree popup must pick the row it lands on,
       // not bypass the menu and DBLCLICK the widget underneath.
+      wud->session->tree_popup_discard_pending_release();
       if (wud->session->_tree_popup_active &&
           wud->session->handle_tree_popup_click(wud->widget_index, lx, ly))
         return 0;
@@ -1031,8 +1033,9 @@ namespace xpl_host
       if (!fwd) break;
       float lx = phys_to_log(mouse_x(lParam), *fwd);
       float ly = phys_to_log(mouse_y(lParam), *fwd);
-      // A right-click while a tree popup is open dismisses / re-targets it
-      // rather than stacking a second menu on top.
+      // A right-click while a tree popup is open goes to the menu (pick /
+      // descend / dismiss) rather than stacking a second one on top.
+      wud->session->tree_popup_discard_pending_release();
       if (wud->session->_tree_popup_active &&
           wud->session->handle_tree_popup_click(wud->widget_index, lx, ly))
         return 0;
@@ -1082,6 +1085,12 @@ namespace xpl_host
       if (!wud) break;
       auto* fwd = wud->session->get_widget(wud->widget_index);
       if (!fwd) break;
+
+      // An open tree popup absorbs the wheel. Without this a scrolling SECTION
+      // or GRID *under* the visible menu scrolls away beneath it, which no OS
+      // menu does. No scroll-the-menu behaviour yet - a cascade taller than the
+      // frame clamps (see docs/deferred-issues.md).
+      if (wud->session->_tree_popup_active) return 0;
 
       // WM_MOUSEWHEEL gives screen coordinates - convert to client.
       POINT pt = { mouse_x(lParam), mouse_y(lParam) };
@@ -2251,6 +2260,7 @@ namespace xpl_host
 
   // win32: phys_to_log divides every input coord by the zoom.
   bool platform_supports_ui_scale() { return true; }
+  bool platform_supports_tree_popup() { return true; }
 
   void platform_timer_start(Session* session, uint32_t interval_ms)
   {

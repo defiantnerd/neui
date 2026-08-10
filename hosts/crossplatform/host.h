@@ -1039,6 +1039,14 @@ namespace xpl_host
     // CLICK). Mirrors LinuxWindow::swallow_release, but lives on the Session
     // because the popup works on all three platforms.
     bool tree_popup_take_release();
+    // Called from every platform's button-DOWN path BEFORE the popup is offered
+    // the press. Guarantees the armed flag can never outlive its own gesture: if
+    // the paired release never arrives - drag off the window and release outside,
+    // which on win32 means no WM_LBUTTONUP at all because a consumed press takes
+    // no capture - the flag would otherwise swallow the UP of an unrelated later
+    // click, leaving that widget with a DOWN and no UP/CLICK, _pressed_widget
+    // stuck, and (on KNOB / SLIDER) a GESTURE_BEGIN with no GESTURE_END.
+    void tree_popup_discard_pending_release() { _tree_popup_swallow_release = false; }
 
     // Update the hovered widget, firing mouse enter/leave events.
     void set_hovered(uint32_t new_idx);

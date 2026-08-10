@@ -1633,7 +1633,12 @@ namespace xpl_host
       it->second.shortcut_mods = modifiers;
       it->second.shortcut_key  = key;
       it->second.shortcut      =
-        neui_detail::format_shortcut_label_win(modifiers, key);
+        // Platform-appropriate glyphs. This string is only ever DRAWN by us -
+        // the Linux in-frame band and the POPUPMENU cascade - because the native
+        // NSMenu / HMENU paths strip it and use keyEquivalent / HACCEL instead.
+        // The popup is the first macOS surface that draws it, so "Win+Z" on a
+        // Mac would have been newly visible.
+        neui_detail::format_shortcut_label(modifiers, key);
       if (mb.uses_native_menu() && !it->second.submenu && !it->second.is_separator) {
         std::string dt = make_menu_text(it->second.text.c_str(),
                                         it->second.shortcut.c_str());

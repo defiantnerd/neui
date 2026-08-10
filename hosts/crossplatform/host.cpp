@@ -4944,6 +4944,13 @@ namespace xpl_host
 
   bool Session::show_tree_popup(uint32_t anchor_idx, int x, int y, uint32_t menu_idx)
   {
+    // Refuse where the platform layer does not route input to the popup (iOS,
+    // null). paint_frame would still PAINT the cascade - it is
+    // platform-independent - so without this the API would put up a menu that
+    // cannot be picked or dismissed and whose taps fall through to the widgets
+    // underneath. Failing honestly is strictly better.
+    if (!platform_supports_tree_popup()) return false;
+
     if (!_widgets.exists(menu_idx)) return false;
     auto* pm = dynamic_cast<PopupMenuWidget*>(&_widgets[menu_idx]);
     if (!pm) return false;                       // not a POPUPMENU
@@ -5076,9 +5083,12 @@ namespace xpl_host
     if (frame_index != s->_tree_popup_frame) { s->close_tree_popup(); return 0; }
     if (!s->_widgets.exists(frame_index))    { s->close_tree_popup(); return 0; }
     if (!tp_build(s, s->_widgets[frame_index].render_ctx, frame_index, cols)) {
-      // The menu widget is gone or has become empty while open. Without this the
-      // popup would stay "active" with nothing to hit, and every subsequent
-      // click in the frame would be swallowed for the rest of its life.
+      // The menu widget is gone (destroyed, or no longer a POPUPMENU). Close so
+      // the popup cannot stay "active" with nothing to hit. Note this does NOT
+      // catch an EMPTIED menu: mb_build_columns still pushes one zero-row column
+      // for the root, so tp_build returns true. tree->clear closes the popup
+      // itself (t_clear in widgets.cpp) - that is where the empty case is
+      // handled, not here.
       s->close_tree_popup();
       return 0;
     }

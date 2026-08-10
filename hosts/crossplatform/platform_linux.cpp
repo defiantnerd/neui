@@ -620,6 +620,11 @@ namespace
   void dispatch_wheel(LinuxWindow* lw, XButtonEvent& be, float scale)
   {
     Session* s = lw->session;
+    // An open tree popup absorbs the wheel. Without this a scrolling SECTION
+    // or GRID *under* the visible menu scrolls away beneath it, which no OS
+    // menu does. No scroll-the-menu behaviour yet - a cascade taller than the
+    // frame clamps (see docs/deferred-issues.md).
+    if (s->_tree_popup_active) return;
     float lx = static_cast<float>(be.x) / scale, ly = static_cast<float>(be.y) / scale;
     int  delta = 0;
     bool horizontal = false;
@@ -670,6 +675,7 @@ namespace
       // Standalone tree popup first, and BEFORE the double-click detection
       // below, so a double-click inside an open menu picks the row it lands on
       // instead of bypassing the menu entirely.
+      s->tree_popup_discard_pending_release();
       if (s->_tree_popup_active && s->handle_tree_popup_click(lw->widget_index, lx, ly))
         return;   // release swallowed via Session::tree_popup_take_release below
       if (s->_popup_active) { s->handle_popup_click(lx, ly); return; }
@@ -706,6 +712,10 @@ namespace
 
     if (be.button == 2) {
       // Middle-click paste (X PRIMARY): into the text widget under the cursor.
+      // An open menu owns the button first - otherwise the paste lands in a text
+      // widget UNDER the visible menu and the menu stays up.
+      s->tree_popup_discard_pending_release();
+      if (s->_tree_popup_active) { s->close_tree_popup(); return; }
       if (s->_menu_open) { s->close_menubar_menu(); return; }
       uint32_t hit = s->widget_at(lx, ly, lw->widget_index);
       auto* hw = s->get_widget(hit);
@@ -723,7 +733,9 @@ namespace
     }
 
     if (be.button == 3) {
-      // A right-click while a tree popup is open dismisses / re-targets it.
+      // A right-click while a tree popup is open goes to the menu (pick /
+      // descend / dismiss) rather than stacking a second one on top.
+      s->tree_popup_discard_pending_release();
       if (s->_tree_popup_active && s->handle_tree_popup_click(lw->widget_index, lx, ly))
         return;   // release swallowed via Session::tree_popup_take_release below
       if (s->_popup_active) { s->handle_popup_click(lx, ly); return; }
@@ -1665,7 +1677,15 @@ namespace
       case KeyRelease:    dispatch_key_release(lw, ev.xkey);        break;
 
       case FocusIn:  s->_os_focused = true;  lw->needs_paint = true; break;
-      case FocusOut: s->_os_focused = false; s->close_menubar_menu(); lw->needs_paint = true; break;
+      case FocusOut:
+        s->_os_focused = false;
+        // Both menu surfaces must go, and close_tree_popup explicitly: the popup
+        // borrows _menu_path, so close_menubar_menu would CLEAR the path while
+        // leaving _tree_popup_active set - a popup with no cascade to build.
+        s->close_menubar_menu();
+        s->close_tree_popup();
+        lw->needs_paint = true;
+        break;
 
       case LeaveNotify:
         s->set_hovered(0);
@@ -2829,6 +2849,7 @@ namespace
 
   // linux: window_scale folds the zoom into every conversion.
   bool platform_supports_ui_scale() { return true; }
+  bool platform_supports_tree_popup() { return true; }
 
   void platform_timer_start(Session* session, uint32_t interval_ms)
   {

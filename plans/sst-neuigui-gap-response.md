@@ -682,6 +682,52 @@ Still open: `popup_tree_menu` is an explicit `nullptr` on the native win32 / mac
 hosts (each with a comment naming what it would need - `TrackPopupMenuEx` /
 `popUpMenuPositioningItem` / `UIMenu`).
 
+**4.2 review follow-up** (7 findings, all fixed). The predicate split itself came back
+clean at every call site, and all seven original findings were confirmed fixed - but two
+new ones were real:
+
+1. **Stale release-swallow, win32-only.** A press consumed by the popup armed the
+   swallow flag but took **no mouse capture**, so dragging off the window and releasing
+   outside delivered no `WM_LBUTTONUP` at all. The flag then ate the UP of the *next*,
+   unrelated click: that widget got a DOWN with no UP and no CLICK, `_pressed_widget`
+   stayed stuck, and on a KNOB / SLIDER it would have left a `GESTURE_BEGIN` with no
+   `GESTURE_END` - a stuck `beginEdit` for a DAW automation client. Fixed with
+   `tree_popup_discard_pending_release()` at the top of every button-DOWN path on all
+   three platforms, which is stronger than taking capture: the flag now cannot outlive
+   its own gesture on any platform, for any reason. Exactly the blind spot the commit
+   admitted to - win32 is the platform that cannot be compiled here.
+2. **iOS xpl painted an unpickable, undismissable menu.** `paint_frame` paints the
+   cascade platform-independently and `w_popup_tree_menu` was in the shared xpl vtable,
+   but `platform_ios.mm` has no tree-popup input path at all - so the menu went up,
+   taps fell *through* it to the widgets underneath, and nothing could dismiss it (no
+   Esc on iOS). This is the same defect class as the first review's finding 6, recurring
+   on the fourth platform the commit never mentioned, with the header and all three docs
+   silent about iOS. Fixed with a `platform_supports_tree_popup()` seam (the same shape
+   as `platform_supports_ui_scale`) that `show_tree_popup` checks, so the API fails
+   honestly on iOS / null instead of painting something inert.
+
+The rest: the harness had an out-of-bounds subscript evaluated *before* its own bounds
+check (benign today, UB after any row-height change); Linux `FocusOut` called
+`close_menubar_menu`, which clears the `_menu_path` the popup borrows while leaving
+`_tree_popup_active` set; Linux middle-click and the wheel on all three platforms
+bypassed an open popup (so a SECTION under the visible menu scrolled away beneath it);
+and two comments described code that does something else - `tp_claim` does **not** catch
+an emptied menu (`tree->clear` does), and right-click **picks** rather than dismisses.
+
+One genuinely new fix rather than a correction: `t_set_shortcut` now uses
+`format_shortcut_label` (Cocoa glyphs on macOS, `Ctrl+`/`Alt+`/`Shift+` elsewhere). The
+Windows-style string was never macOS-visible before, because the native NSMenu path
+strips the `"	Shortcut"` suffix and shows `keyEquivalent` - the POPUPMENU cascade is the
+first macOS surface that draws the label itself, so it would have shown "Win+Z" on a Mac.
+5 new Tier-1 cases (408 total, 2340 checks) cover the glyph order, that CTRL stays
+Control rather than becoming Command, and that the platform picker resolves to exactly
+one style.
+
+Harness 39 -> 41 checks; the new stale-release check is negative-probed (removing the
+press-time clear fails it). Also recorded: the stuck-grab check needs **all three**
+teardown guards removed before it fails, so the harness now says outright that it asserts
+the outcome and pins no single mechanism.
+
 - **4.2 — rich popups (his #8).** Reuse the tree model rather than inventing a
   second one: build the popup as a `MENUBAR`-shaped tree (a widget the client
   populates with `tree->add` / `set_shortcut` / `set_checked` / `set_menu_cmd`),
