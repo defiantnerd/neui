@@ -826,6 +826,14 @@ namespace macos_host
     w_get_enabled,
     w_get_client_rect,
     w_create_from_component,
+    // popup_tree_menu: NOT implemented on this host. Building the cascade from
+    // the tree model, with submenus / checkmarks / shortcuts / validate, is the
+    // crossplatform host's (see Session::show_tree_popup); this host would need
+    // it rebuilt over NSMenu + popUpMenuPositioningItem. Explicit nullptr rather than a
+    // missing initializer so it reads as a decision, not an oversight - clients
+    // must null-check appended vtable slots (<neui/d/widgets.h>). The flat
+    // popup_menu above works on every host.
+    nullptr,
   };
 
   // -------------------------------------------------------------------------

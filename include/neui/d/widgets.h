@@ -150,6 +150,57 @@ typedef struct neui_widget_api {
   neui_widget_t      (NEUI_ABI *create_from_component)(neui_session_t session, neui_widget_t parent,
                                                        neui_asset_t component,
                                                        int x, int y, int width, int height);
+
+  // Show a context menu built from a NEUI_W_POPUPMENU widget's TREE model,
+  // rather than from a flat string array like popup_menu above.
+  //
+  // Why this exists alongside popup_menu: everything a real context menu needs -
+  // submenus to arbitrary depth, per-item enable/disable, checkmarks, shortcut
+  // labels, built-in command routing, and NEUI_API_MENU_CLIENT::validate - was
+  // already implemented for NEUI_W_MENUBAR and reachable only there. A
+  // `const char* const*` cannot express any of it. This points the same machinery
+  // at a standalone popup. popup_menu stays for simple one-level menus and is
+  // unchanged.
+  //
+  // Build the menu the same way you build a menubar, using the generic tree API
+  // on a NEUI_W_POPUPMENU widget - the items directly under tree_item_root become
+  // the popup's rows, and any item with children becomes a cascading submenu:
+  //
+  //   neui_widget_t pm = widgets->create(sess, win, NEUI_W_POPUPMENU, 0,0,0,0, NULL);
+  //   neui_item_t   it = tree->add(sess, pm, tree_item_root, "Copy", NULL);
+  //   tree->set_shortcut(sess, pm, it, NEUI_KMOD_CTRL, NEUI_KEY_C);
+  //   tree->set_menu_cmd(sess, pm, it, NEUI_CMD_COPY);
+  //   tree->add(sess, pm, tree_item_root, "-", NULL);          // separator
+  //   ...
+  //   widgets->popup_tree_menu(sess, anchor, x, y, pm);
+  //
+  // (x, y) are in `anchor`'s local logical coordinates, as for popup_menu.
+  //
+  // ASYNCHRONOUS, unlike popup_menu: this returns immediately and the pick
+  // arrives later as NEUI_EVENT_ITEM_SELECTED on the POPUPMENU widget, with
+  // `index` carrying the neui_item_t id of the chosen item. Dismissal without a
+  // pick fires nothing. Async because a blocking popup needs a nested event pump,
+  // which suppresses NEUI_EVENT_TIMER for its duration (see <neui/d/timer.h>) and
+  // re-enters the client from inside its own handler; and because an item bound
+  // with set_menu_cmd routes through the built-in command path on its own, with no
+  // return value for the client to inspect.
+  //
+  // A "section header" is just a disabled item (tree->set_enabled false): it
+  // draws greyed and cannot be picked. Custom widgets inside a menu are
+  // deliberately out of scope - draw a type-in overlay on your own surface
+  // instead.
+  //
+  // The POPUPMENU widget is reusable: keep it for the lifetime of the client and
+  // re-show it, or rebuild its tree between shows. It never renders on its own -
+  // it has no on-screen presence until this call, and it is not a menu BAR (a
+  // NEUI_W_MENUBAR child of a frame reserves an in-frame band on hosts that draw
+  // their own menu bar).
+  //
+  // Returns false on a bad widget, a non-POPUPMENU widget, an empty menu, or a
+  // host with no popup support. (Vtable-appended; check the api version / pointer
+  // before calling.)
+  bool               (NEUI_ABI *popup_tree_menu)(neui_session_t session, neui_widget_t anchor,
+                                                  int x, int y, neui_widget_t menu);
 } neui_widget_api_t;
 
 #define NEUI_W_APPWINDOW  "neui.std.appwindow"
@@ -165,6 +216,12 @@ typedef struct neui_widget_api {
 #define NEUI_W_MULTILINE  "neui.std.multiline"
 #define NEUI_W_TREEVIEW   "neui.std.treeview"
 #define NEUI_W_MENUBAR    "neui.std.menubar"
+// Model-only widget for popup_tree_menu: shares the MENUBAR tree model but is
+// never a frame's menu band, so it reserves no space and paints nothing until
+// popup_tree_menu shows it. Kept a distinct type rather than reusing MENUBAR
+// precisely so "is this the frame's menu bar?" never becomes a question the host
+// has to answer from context.
+#define NEUI_W_POPUPMENU  "neui.std.popupmenu"
 #define NEUI_W_IMAGE      "neui.std.image"
 #define NEUI_W_SLIDER     "neui.std.slider"
 #define NEUI_W_KNOB       "neui.std.knob"

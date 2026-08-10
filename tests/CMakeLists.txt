@@ -92,6 +92,18 @@ if(APPLE AND NOT NEUI_IOS)
   # sub-pixel deltas accumulate, and that a session destroyed mid-drag leaves the
   # cursor re-associated. Realizes a real NSWindow and warps the pointer, so built
   # but NOT ctest-registered.
+  # Tree-model popup harness (NEUI_W_POPUPMENU + popup_tree_menu): asserts the
+  # popup opens at the anchor, that a leaf pick reports asynchronously via
+  # ITEM_SELECTED, that submenus cascade, and that separators / disabled items /
+  # outside clicks report nothing. Realizes a real NSWindow, so built but NOT
+  # ctest-registered.
+  add_executable(neui_popup_tree_smoke_macos popup_tree_smoke_macos.mm)
+  target_include_directories(neui_popup_tree_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_popup_tree_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_popup_tree_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
   add_executable(neui_pointer_smoke_macos pointer_smoke_macos.mm)
   target_include_directories(neui_pointer_smoke_macos PRIVATE
     ${PROJECT_SOURCE_DIR}/include)
