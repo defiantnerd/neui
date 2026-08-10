@@ -2039,6 +2039,51 @@ namespace xpl_host
 
   static int s_cursor_kind = NEUI_CURSOR_DEFAULT;
 
+  // Client timers (NEUI_API_TIMER). A THREAD timer - SetTimer(NULL, ...) with a
+  // TIMERPROC - rather than a window timer, because timers are session-scoped
+  // and a session may own several frames (or, embedded, a frame whose lifetime
+  // the DAW controls).
+  //
+  // The payoff is that one mechanism covers all three loops: WM_TIMER with a
+  // NULL hwnd lands on the THREAD queue, so PeekMessage/GetMessage picks it up
+  // and DispatchMessageW invokes the TIMERPROC - which is exactly what
+  // platform_run, platform_pump_once, AND a DAW's own pump all do. No extra
+  // plumbing per loop.
+  static std::unordered_map<UINT_PTR, Session*>& w32_session_timers()
+  {
+    static std::unordered_map<UINT_PTR, Session*> m;
+    return m;
+  }
+
+  static void CALLBACK w32_client_timer_proc(HWND, UINT, UINT_PTR id, DWORD)
+  {
+    auto& m = w32_session_timers();
+    auto it = m.find(id);
+    // Re-check membership: a session torn down between fires would otherwise
+    // be a dangling pointer.
+    if (it == m.end() || !it->second) return;
+    it->second->tick_client_timers();
+  }
+
+  void platform_timer_start(Session* session, uint32_t interval_ms)
+  {
+    if (!session || interval_ms == 0) return;
+    platform_timer_stop(session);   // idempotent re-arm at the new interval
+    // id 0 asks the system to allocate one; the return value is the real id.
+    UINT_PTR id = SetTimer(nullptr, 0, interval_ms, w32_client_timer_proc);
+    if (id) w32_session_timers()[id] = session;
+  }
+
+  void platform_timer_stop(Session* session)
+  {
+    if (!session) return;
+    auto& m = w32_session_timers();
+    for (auto it = m.begin(); it != m.end(); ) {
+      if (it->second == session) { KillTimer(nullptr, it->first); it = m.erase(it); }
+      else                        ++it;
+    }
+  }
+
   void platform_set_cursor(int kind)
   {
     s_cursor_kind = kind;

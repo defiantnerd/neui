@@ -119,6 +119,10 @@ namespace xpl_host
                                        float /*scale*/)                       { return nullptr; }
 
   void     platform_set_cursor(int /*kind*/)                                  {}
+  // No event loop on the null platform, so nothing can drive a tick; add_timer
+  // still returns an id and the table stays consistent, it just never fires.
+  void     platform_timer_start(Session*, uint32_t)                            {}
+  void     platform_timer_stop(Session*)                                       {}
 
   // Toast animation - no platform timer on the null host; toasts will
   // still paint a single frame if the client invalidates manually.

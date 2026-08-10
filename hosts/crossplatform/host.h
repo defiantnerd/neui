@@ -6,6 +6,7 @@
 #include "../shared/clipboard_item.h"
 #include "../shared/edit_history.h"
 #include "../shared/theme_palette.h"
+#include "../shared/timer_table.h"
 #include "../shared/behavior_runtime.h"
 #include "../shared/grid_model.h"
 #include "../shared/widget_section_scroll.h"
@@ -818,6 +819,17 @@ namespace xpl_host
     WidgetData* get_widget(uint32_t index);
     bool        dispatch_event(neui_event_t* event);
 
+    // Client timers (NEUI_API_TIMER). The table + deadline math are portable
+    // (hosts/shared/timer_table.h); these wrap it with the platform tick.
+    uint32_t timer_add(uint32_t interval_ms);
+    bool     timer_remove(uint32_t timer_id);
+    bool     timer_set_interval(uint32_t timer_id, uint32_t interval_ms);
+    // Called by the platform layer on every native tick.
+    void     tick_client_timers();
+  private:
+    void     sync_timer_tick();
+  public:
+
     // Route a menu command (Win32 WM_COMMAND) to NEUI_EVENT_TREE_ITEM_ACTIVATED.
     bool dispatch_menu_event(uint32_t cmd_id);
 
@@ -1025,6 +1037,12 @@ namespace xpl_host
     uint32_t _hovered_widget = 0;
     uint32_t _pressed_widget = 0;
     uint32_t _focused_widget = 0;
+
+    // Client timers. _timer_native_interval caches what the platform tick is
+    // currently armed at, so we only re-arm when the shortest interval moves.
+    neui_detail::TimerTable            _timers;
+    uint32_t                           _timer_native_interval = 0;
+    std::vector<neui_detail::TimerEntry> _timer_due_scratch;
     bool     _os_focused     = true;  // frame currently has OS keyboard focus
     uint32_t _open_combo     = 0;   // tree index of the currently open ComboBoxWidget, or 0
 

@@ -386,4 +386,20 @@ namespace xpl_host
 
   void platform_set_cursor(int kind /* CursorKind */);
 
+  // -------------------------------------------------------------------------
+  // Client timers (NEUI_API_TIMER, <neui/d/timer.h>).
+  //
+  // ONE native periodic tick per session, not one per client timer: the
+  // portable TimerTable (hosts/shared/timer_table.h) owns deadlines and
+  // multiplexes, so the platform only has to fire session->tick_client_timers()
+  // every `interval_ms`. Start is idempotent and re-arms at a new interval when
+  // the shortest live timer changes; stop is called as soon as the last timer
+  // goes away so an idle session burns no wakeups.
+  //
+  // Must work under run(), under a hand-rolled pump_once() loop, and under
+  // NEUI_API_EMBED - i.e. it has to hang off whatever already services the
+  // session, not off a thread of its own.
+  void platform_timer_start(Session* session, uint32_t interval_ms);
+  void platform_timer_stop(Session* session);
+
 } // namespace xpl_host

@@ -2410,6 +2410,41 @@ namespace xpl_host
   // No mouse cursor on touch (iPad pointer styles are a later milestone).
   void     platform_set_cursor(int /*kind*/)                                  {}
 
+  // Client timers (NEUI_API_TIMER). Same shape as the macOS seam: session-
+  // scoped, so it hangs off the main runloop rather than off a view, and it
+  // joins NSRunLoopCommonModes so the tick survives UIKit tracking loops
+  // (a scroll / drag in progress must not freeze a client animation).
+  static std::unordered_map<Session*, NSTimer*>& ios_session_timers()
+  {
+    static std::unordered_map<Session*, NSTimer*> m;
+    return m;
+  }
+
+  void platform_timer_start(Session* session, uint32_t interval_ms)
+  {
+    if (!session || interval_ms == 0) return;
+    platform_timer_stop(session);
+    NSTimer* t = [NSTimer timerWithTimeInterval:(double)interval_ms / 1000.0
+                                        repeats:YES
+                                          block:^(NSTimer*) {
+      auto& m = ios_session_timers();
+      if (m.find(session) == m.end()) return;   // torn down between fires
+      session->tick_client_timers();
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
+    ios_session_timers()[session] = t;
+  }
+
+  void platform_timer_stop(Session* session)
+  {
+    if (!session) return;
+    auto& m = ios_session_timers();
+    auto it = m.find(session);
+    if (it == m.end()) return;
+    [it->second invalidate];
+    m.erase(it);
+  }
+
   // Toast animation heartbeat. The toast is painted inside the frame's NEUIView
   // (shared Session::paint_toast, topmost in the paint pass), so we just kick
   // that view's CADisplayLink, which calls setNeedsDisplay each vsync until the

@@ -118,6 +118,7 @@ namespace xpl_host
   extern neui_tabs_api_t      tabs_api;
   extern neui_notify_api_t    notify_api;
   extern neui_embed_api_t     embed_api;
+  extern neui_timer_api_t     timer_api;
 
   // Resolve a Session* from a 1-based session id (the upper 16 bits of a
   // widget id). Used by the iOS platform layer's NEUI_API_METRICS seam to walk
@@ -177,6 +178,7 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_NOTIFY))    return &notify_api;
     if (!strcmp(iface, NEUI_API_METRICS))   return &neui_detail::k_metrics_api;
     if (!strcmp(iface, NEUI_API_EMBED))     return &embed_api;
+    if (!strcmp(iface, NEUI_API_TIMER))     return &timer_api;
     return nullptr;
   }
 
@@ -267,6 +269,14 @@ namespace xpl_host
 
   Session::~Session()
   {
+    // Drop the native timer tick FIRST. Every platform's tick callback holds a
+    // raw Session* and re-checks its registry before dereferencing, so a leaked
+    // tick would be inert rather than a use-after-free - but leaving one armed
+    // would still burn wakeups for the life of the process.
+    _timers.clear();
+    _timer_native_interval = 0;
+    platform_timer_stop(this);
+
     if (_theme_listener_handle != 0) {
       neui_detail::unregister_theme_listener(_theme_listener_handle);
       _theme_listener_handle = 0;
@@ -406,6 +416,60 @@ namespace xpl_host
       }
       idx = _widgets.next(idx);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Client timers (NEUI_API_TIMER). The deadline math lives in the portable
+  // TimerTable; this layer only owns re-arming the single native tick.
+
+  void Session::sync_timer_tick()
+  {
+    const uint32_t want = _timers.native_interval_ms();
+    if (want == _timer_native_interval) return;   // already armed correctly
+    _timer_native_interval = want;
+    if (want == 0) platform_timer_stop(this);      // last timer went away
+    else           platform_timer_start(this, want);
+  }
+
+  uint32_t Session::timer_add(uint32_t interval_ms)
+  {
+    const uint32_t id = _timers.add(interval_ms, platform_now_ms());
+    if (id) sync_timer_tick();
+    return id;
+  }
+
+  bool Session::timer_remove(uint32_t timer_id)
+  {
+    if (!_timers.remove(timer_id)) return false;
+    // Safe during a tick: the table tombstones, and sync_timer_tick only
+    // touches the native tick, never the walk.
+    sync_timer_tick();
+    return true;
+  }
+
+  bool Session::timer_set_interval(uint32_t timer_id, uint32_t interval_ms)
+  {
+    if (!_timers.set_interval(timer_id, interval_ms, platform_now_ms())) return false;
+    sync_timer_tick();
+    return true;
+  }
+
+  void Session::tick_client_timers()
+  {
+    _timers.tick(platform_now_ms(), _timer_due_scratch);
+    for (const auto& e : _timer_due_scratch) {
+      // The due list is a snapshot: a handler earlier in this loop may have
+      // removed a later timer, and it must not then fire.
+      if (!_timers.is_live(e.id)) continue;
+      neui_event_t ev = {};
+      ev.type                  = NEUI_EVENT_TIMER;
+      ev.data.timer.timer_id    = e.id;
+      ev.data.timer.interval_ms = e.interval_ms;
+      dispatch_event(&ev);
+    }
+    // A handler may have added or removed timers; re-arm if the shortest
+    // interval moved.
+    sync_timer_tick();
   }
 
   bool Session::dispatch_event(neui_event_t* event)

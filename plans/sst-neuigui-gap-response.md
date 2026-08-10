@@ -250,22 +250,57 @@ established convention for this repo's cross-machine flow.
 - **1.4 — wrapped text at painter level** — deferred unless asked; the wrap
   algorithm exists in the MULTILINE widget and is liftable.
 
-### Wave 2 — timer / idle
+### Wave 2 — timer / idle — **DONE**
 
-- **2.1 — platform seam.** Add `platform_timer_start(id, interval_ms)` /
-  `platform_timer_stop(id)` to `hosts/crossplatform/platform.h` and implement
-  on win32 (`SetTimer`, joining the existing `XPL_*_TIMER_ID` family), macOS
-  (`NSTimer` on the runloop, plus the embedded-view case), Linux (multiplex on
-  the existing `timerfd` heartbeat rather than adding fds), iOS, null.
-- **2.2 — public API.** New `NEUI_API_TIMER` (`include/neui/d/timer.h`):
-  `add_timer(session, interval_ms) -> id`, `remove_timer(session, id)`, and a
-  `NEUI_EVENT_TIMER` payload `{ timer_id }`. Prefer this over an `on_idle`
-  callback — a plugin wants a stated rate, and an idle callback has no defined
-  frequency.
-- **2.3 — embedded contract.** Document (and honour) that in embedded mode the
-  timer is serviced by the DAW pump on win32/macOS and by `pump_and_tick` on
-  Linux — i.e. it composes with `NEUI_API_EMBED` rather than needing `run()`.
-  This is the piece that makes it genuinely useful to him.
+- **2.1 — platform seam.** `platform_timer_start(Session*, interval_ms)` /
+  `platform_timer_stop(Session*)`, implemented on win32 / macOS / Linux / iOS /
+  null. The design point: **one native tick per session at the shortest live
+  interval**, not one native timer per client timer — the portable
+  `hosts/shared/timer_table.h` owns ids, deadlines and multiplexing, so each
+  platform layer is ~30 lines and everything error-prone is Tier-1 tested.
+  - win32 uses a **thread** timer (`SetTimer(NULL, …, TIMERPROC)`) rather than a
+    window timer, because timers are session-scoped and a session may own
+    several frames (or, embedded, a frame the DAW owns). The payoff: `WM_TIMER`
+    with a NULL hwnd lands on the thread queue, so `platform_run`,
+    `platform_pump_once` **and a DAW's own pump** all dispatch it with no
+    per-loop plumbing.
+  - macOS / iOS use an `NSTimer` in `NSRunLoopCommonModes` (not the default
+    mode) so a client animation keeps running during AppKit/UIKit tracking
+    loops instead of freezing while a button is held.
+  - Linux multiplexes the existing 16 ms `timerfd` heartbeat rather than adding
+    an fd — but the heartbeat is **shared with animations**, so `arm_timer`
+    became interval-aware (`refresh_timer_arm` takes the min of both demands):
+    a client asking for 8 ms must not be slowed to the animation's 16 ms, and an
+    animation must not be starved by a client's 1000 ms timer.
+  - Two paths needed fixing to honour the documented contract:
+    `platform_pump_once` never read the timerfd (so timers would have worked
+    only under `run()`), and `platform_embed_pump_and_tick` gated everything
+    behind its 16 ms animation window (which would have halved an 8 ms plugin
+    timer). Client timers now bypass that gate — their own deadlines already
+    decide what is due.
+- **2.2 — public API.** `NEUI_API_TIMER` (`include/neui/d/timer.h`):
+  `add_timer` / `remove_timer` / `set_timer_interval` + `NEUI_EVENT_TIMER`.
+  Chosen over an `on_idle` callback because a plugin wants a *stated rate*,
+  and idle has no defined frequency. Session-scoped, and deliberately the **only
+  event with no `.widget`** — a timer does not belong to a widget, and omitting
+  the field stops a handler being written as though it did.
+  - `interval_ms` is a minimum, clamped up to `NEUI_TIMER_MIN_INTERVAL_MS` (4);
+    0 is rejected rather than becoming a spin loop. A late tick fires **once**
+    rather than catching up, so a slow handler cannot accumulate a backlog of
+    its own events.
+  - Mutation from inside a handler is safe (the table tombstones rather than
+    erases, so the dispatch walk stays valid), including a timer removing
+    itself.
+- **2.3 — embedded contract.** Documented and honoured: no thread, no `run()`
+  from a plugin; the DAW's pump services win32/macOS and `pump_and_tick` drives
+  Linux.
+- Verified: 17 Tier-1 cases over the table (clamping, deadlines, late-tick
+  coalescing, shortest-interval arming, self-removal, add-during-tick,
+  tombstone reaping) plus an end-to-end run on macOS under a **hand-rolled
+  `pump_once` loop** — the standalone case the review called out as impossible:
+  16 ms fired 23× and 100 ms 5× over ~600 ms, a self-removing timer fired
+  exactly once, retiming took effect, and the tick went silent after the last
+  removal.
 
 ### Wave 3 — per-frame UI scale (his #9)
 

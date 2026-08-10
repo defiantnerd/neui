@@ -65,6 +65,8 @@ extern "C" {
     NEUI_EVENT_GESTURE_BEGIN            = DEF_WIDGET_EVENT(0xB),// user grabbed a value control (see neui_event_gesture_t)
     NEUI_EVENT_GESTURE_END              = DEF_WIDGET_EVENT(0xC),// user released it (always paired with a BEGIN)
 
+    NEUI_EVENT_TIMER                    = DEF_APP_EVENT(2),   // a NEUI_API_TIMER timer elapsed (session-scoped; see neui_event_timer_t)
+
     NEUI_EVENT_ITEM_SELECTED            = DEF_ITEM_EVENT(1),  // fired when selection changes in listbox/combobox
 
     NEUI_EVENT_TREE_ITEM_SELECTED       = DEF_TREE_EVENT(1),  // treeview: selection changed
@@ -365,6 +367,19 @@ extern "C" {
     float         ui_scale;   // new painted / text UI scale
   } neui_event_metrics_t;
 
+  // Timer-elapsed event (NEUI_API_TIMER, <neui/d/timer.h>). Deliberately the
+  // ONLY event with no `.widget`: a timer belongs to the session, not to a
+  // widget, and omitting the field keeps a handler from being written as though
+  // it did. Gate on `timer_id` instead - the same discipline, one field over.
+  //
+  // A tick that arrives late fires once rather than catching up on missed
+  // periods, so a slow handler cannot accumulate a backlog of its own events.
+  typedef struct neui_event_timer
+  {
+    uint32_t timer_id;        // the id add_timer returned
+    uint32_t interval_ms;     // the timer's configured interval (as clamped)
+  } neui_event_timer_t;
+
   // Grid sort-changed event - fires after a user-driven header click that
   // mutates the sort stack (or removes a level). Carries the column that
   // was clicked and its new direction in the stack; clients that need the
@@ -447,6 +462,7 @@ extern "C" {
       neui_event_scroll_t             scroll;
       neui_event_tab_t                tab;
       neui_event_metrics_t            metrics;
+      neui_event_timer_t              timer;
     } data;
 
     // more event data can be added here

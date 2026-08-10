@@ -297,17 +297,51 @@ namespace
     // select() on the X fd alone instead of waking 60x/s for nothing.
   }
 
-  // Arm / disarm the 16 ms animation heartbeat. it_value == 0 disarms.
-  void arm_timer(bool on)
+  // Sessions with live NEUI_API_TIMER timers, and the shortest interval any of
+  // them wants. The heartbeat is SHARED with the animation ticks, so the armed
+  // period is the minimum of the two demands - a client asking for 8 ms must not
+  // be slowed to the animation's 16 ms, and an animation must not be starved by
+  // a client's 1000 ms timer.
+  std::unordered_map<Session*, uint32_t> g_client_timer_sessions;
+
+  uint32_t client_timer_min_ms()
+  {
+    uint32_t best = 0;
+    for (auto& kv : g_client_timer_sessions)
+      if (best == 0 || kv.second < best) best = kv.second;
+    return best;
+  }
+
+  // Arm the heartbeat at `period_ms`, or disarm when 0.
+  void arm_timer_ms(uint32_t period_ms)
   {
     if (g_timerfd < 0) return;
     struct itimerspec its; std::memset(&its, 0, sizeof its);
-    if (on) {
-      its.it_interval.tv_nsec = 16 * 1000 * 1000;  // 16 ms
+    if (period_ms > 0) {
+      its.it_interval.tv_sec  = period_ms / 1000;
+      its.it_interval.tv_nsec = (long)(period_ms % 1000) * 1000 * 1000;
       its.it_value = its.it_interval;
     }
     timerfd_settime(g_timerfd, 0, &its, nullptr);
   }
+
+  bool any_window_animating();
+
+  // Single place that decides the heartbeat period from both demands. Every
+  // start/stop path routes through here so the two can never fight.
+  void refresh_timer_arm()
+  {
+    const uint32_t client = client_timer_min_ms();
+    const uint32_t anim   = any_window_animating() ? 16u : 0u;
+    uint32_t period = 0;
+    if (client && anim) period = (client < anim) ? client : anim;
+    else                period = client ? client : anim;
+    arm_timer_ms(period);
+  }
+
+  // Back-compat shim for the animation call sites: they only ever meant
+  // "animation wants / no longer wants the heartbeat".
+  void arm_timer(bool /*on*/) { refresh_timer_arm(); }
 
   bool any_window_animating()
   {
@@ -384,10 +418,19 @@ namespace
       if (kv.second->toast_anim) kv.second->needs_paint = true;
       step_scroll_bounce(kv.second);
     }
-    // Once nothing is animating, drop back to a blocking select() (no 60 Hz
-    // wakeups). Toast start/stop also touch arm_timer; this catches the
-    // bounce-settled case.
-    if (!any_window_animating()) arm_timer(false);
+    // Client timers ride the same heartbeat. Snapshot first: a handler may
+    // add or remove a session's timers, which mutates the map we are walking.
+    if (!g_client_timer_sessions.empty()) {
+      std::vector<Session*> due;
+      due.reserve(g_client_timer_sessions.size());
+      for (auto& kv : g_client_timer_sessions) due.push_back(kv.first);
+      for (Session* s : due)
+        if (g_client_timer_sessions.count(s)) s->tick_client_timers();
+    }
+    // Drop back to a blocking select() once NEITHER demand is live (no 60 Hz
+    // wakeups). Catches the bounce-settled case; the client-timer paths call
+    // refresh_timer_arm themselves.
+    refresh_timer_arm();
   }
 
   // ---- Window teardown ------------------------------------------------------
@@ -1983,6 +2026,12 @@ namespace
       step_scroll_bounce(lw);   // advance any GRID/SECTION spring-back
       neui_detail::theme_dbus_dispatch();   // pick up system dark/light changes
     }
+    // Client timers (NEUI_API_TIMER) are NOT gated by the 16 ms animation
+    // window: their own deadlines already decide what is due, and a plugin
+    // asking for 8 ms must not be halved. There is no timerfd in the picture
+    // here - the DAW's cadence is the tick source.
+    if (lw->session && g_client_timer_sessions.count(lw->session))
+      lw->session->tick_client_timers();
     if (lw->needs_paint) paint_window(lw);
     XFlush(lw->dpy);
   }
@@ -2139,6 +2188,18 @@ namespace
   {
     if (!g_display) return true;
     drain_events();
+    // Service the heartbeat non-blockingly: platform_run() reads the timerfd
+    // out of its select(), but a client driving the loop by hand never gets
+    // there, and client timers are documented to work under pump_once too.
+    if (g_timerfd >= 0) {
+      fd_set rfds; FD_ZERO(&rfds); FD_SET(g_timerfd, &rfds);
+      struct timeval zero; zero.tv_sec = 0; zero.tv_usec = 0;
+      if (select(g_timerfd + 1, &rfds, nullptr, nullptr, &zero) > 0 &&
+          FD_ISSET(g_timerfd, &rfds)) {
+        uint64_t exp = 0; ssize_t rd = read(g_timerfd, &exp, sizeof(exp)); (void)rd;
+        tick_animations();
+      }
+    }
     flush_pending_paints();
     XFlush(g_display);
     return !g_quit;
@@ -2545,6 +2606,21 @@ namespace
     XSync(d, False);
     XSetErrorHandler(old_err);
     return result;
+  }
+
+  void platform_timer_start(Session* session, uint32_t interval_ms)
+  {
+    if (!session || interval_ms == 0) return;
+    ensure_timerfd();
+    g_client_timer_sessions[session] = interval_ms;
+    refresh_timer_arm();
+  }
+
+  void platform_timer_stop(Session* session)
+  {
+    if (!session) return;
+    g_client_timer_sessions.erase(session);
+    refresh_timer_arm();
   }
 
   void platform_set_cursor(int kind)

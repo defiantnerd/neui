@@ -21,6 +21,7 @@ add_executable(neui_tests
   test_asset_font.cpp
   test_asset_filmstrip.cpp
   test_painter_text.cpp
+  test_timer_table.cpp
   test_image_filter.cpp
   test_filter_graph.cpp
   test_backend_util.cpp

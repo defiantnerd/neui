@@ -2,6 +2,8 @@
 
 ## Deferred Issues
 
+- **Timer follow-ups** (`NEUI_API_TIMER` ships - see `<neui/d/timer.h>`): no one-shot timers (a client removes the timer from its own handler, which is tested and safe); no sub-millisecond or vsync-locked cadence (the tick is a plain OS timer, and `NEUI_TIMER_MIN_INTERVAL_MS` = 4 is the floor); the interval is a minimum with no drift compensation, since a late tick deliberately fires once rather than catching up; the null platform accepts timers and never fires them (it has no loop to hang a tick off).
+
 - **Deduplication non-goals** (a 2026-06 dedup campaign consolidated the asset managers, draw_asset thunks, DnD dispatch/seam/helpers, macOS window helpers and backend colour/alpha math into `hosts/shared/` + `backends/shared/`; these were deliberately left per-host/per-backend - do not "unify" them): DnD hit-test walkers (xpl virtual `hit_test` vs native on-the-fly coord accumulation - different contracts), the two macOS window delegates' close logic (native drives sheet `endSheet:` in `windowShouldClose:`, xpl tears down the render ctx in `windowWillClose:`), backend transform/clip stacks (CG `SaveGState` saves clip+CTM atomically), font-cache containers (D2D struct-keyed wstring vs CG string key), the null backend's explicit no-op vtable (documents the interface), example scaffolding.
 - **KNOB not a keyboard tab-stop on macOS** - the NSView refuses first responder. Needs focusable + arrow-key value handling.
 - **macOS Tab participation follows the system Full-Keyboard-Access setting** - traversal *order* matches win32, but *which* control types Tab visits beyond text fields / lists is OS policy. Hand-roll Tab for fully deterministic traversal.

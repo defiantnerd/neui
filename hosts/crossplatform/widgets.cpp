@@ -1996,6 +1996,41 @@ namespace xpl_host
   };
 
   // ---------------------------------------------------------------------------
+  // Timer API (NEUI_API_TIMER) - session-scoped periodic timers. Thin
+  // validation over Session::timer_*; the deadline math is portable
+  // (hosts/shared/timer_table.h) and the native tick is one platform seam.
+
+  static uint32_t NEUI_ABI timer_add(neui_session_t session, uint32_t interval_ms)
+  {
+    auto* s = get_session(session);
+    if (!s) return 0;
+    return s->timer_add(interval_ms);
+  }
+
+  static bool NEUI_ABI timer_remove(neui_session_t session, uint32_t timer_id)
+  {
+    auto* s = get_session(session);
+    if (!s) return false;
+    return s->timer_remove(timer_id);
+  }
+
+  static bool NEUI_ABI timer_set_interval(neui_session_t session,
+                                            uint32_t timer_id,
+                                            uint32_t interval_ms)
+  {
+    auto* s = get_session(session);
+    if (!s) return false;
+    return s->timer_set_interval(timer_id, interval_ms);
+  }
+
+  neui_timer_api_t timer_api = {
+    NEUI_VERSION,
+    timer_add,
+    timer_remove,
+    timer_set_interval,
+  };
+
+  // ---------------------------------------------------------------------------
   // Asset API (NEUI_API_ASSETS) - session-scoped media handles backed by
   // the AssetManager's handle table. Handles encode the session id in the
   // upper 16 bits like neui_widget_t; cross-session handles are dropped.

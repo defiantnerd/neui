@@ -23,6 +23,8 @@
 
 #include "host.h"
 #include "platform.h"
+
+#include <unordered_map>
 #include "../shared/macos/modal_pump_macos.h"
 #include "../../backends/cg/cg_backend.h"
 #include "../shared/macos/clipboard_macos.h"
@@ -2100,6 +2102,48 @@ namespace xpl_host
     if ([cv isKindOfClass:[NEUIView class]]) {
       [(NEUIView*)cv toastStop];
     }
+  }
+
+  // Client timers (NEUI_API_TIMER). Session-scoped, so this hangs off the main
+  // runloop rather than off a view - unlike the toast heartbeat above, there is
+  // no one frame that owns it.
+  //
+  // NSRunLoopCommonModes (not the default mode) so the tick keeps running while
+  // AppKit is in a modal / event-tracking loop - i.e. an animation driven by a
+  // client timer does not freeze while the user holds a mouse button down. In a
+  // DAW the host's own runloop services this exactly the same way, which is what
+  // makes timers work under NEUI_API_EMBED with no loop of our own.
+  static std::unordered_map<Session*, NSTimer*>& mac_session_timers()
+  {
+    static std::unordered_map<Session*, NSTimer*> m;
+    return m;
+  }
+
+  void platform_timer_start(Session* session, uint32_t interval_ms)
+  {
+    if (!session || interval_ms == 0) return;
+    platform_timer_stop(session);   // idempotent re-arm at the new interval
+    NSTimer* t = [NSTimer timerWithTimeInterval:(double)interval_ms / 1000.0
+                                        repeats:YES
+                                          block:^(NSTimer*) {
+      // Re-check membership: a session torn down between fires would otherwise
+      // be a dangling pointer, since the block captures the raw Session*.
+      auto& m = mac_session_timers();
+      if (m.find(session) == m.end()) return;
+      session->tick_client_timers();
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
+    mac_session_timers()[session] = t;
+  }
+
+  void platform_timer_stop(Session* session)
+  {
+    if (!session) return;
+    auto& m = mac_session_timers();
+    auto it = m.find(session);
+    if (it == m.end()) return;
+    [it->second invalidate];
+    m.erase(it);
   }
 
   uint64_t platform_now_ms()
