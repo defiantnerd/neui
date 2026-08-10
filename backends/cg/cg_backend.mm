@@ -451,6 +451,34 @@ namespace neui_cg_backend
     CFRelease(line);
   }
 
+  // Vertical metrics of the active font. line_height must match what
+  // cg_draw_text uses for block layout above (ascent + descent + leading).
+  // Measured off a CTLine for a representative string rather than the CTFont
+  // directly so it goes through the exact same make_ctline path draw_text does
+  // (font stack, registered families, fallback) - the numbers are then
+  // guaranteed consistent with what actually gets drawn.
+  static void cg_font_metrics(neui_render_ctx_t raw, float font_size,
+                               float* out_ascent, float* out_descent,
+                               float* out_line_height)
+  {
+    if (out_ascent)      *out_ascent      = 0.0f;
+    if (out_descent)     *out_descent     = 0.0f;
+    if (out_line_height) *out_line_height = 0.0f;
+    auto* st = static_cast<CGContextState*>(raw);
+    if (!st || font_size <= 0.0f) return;
+    // "Hxp" spans a cap-height ascender and a descender, so the line's
+    // typographic bounds resolve to the font's own metrics.
+    CTLineRef line = make_ctline(st, "Hxp", -1, font_size);
+    if (!line) return;
+    CGFloat ascent = 0, descent = 0, leading = 0;
+    CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
+    CFRelease(line);
+    if (out_ascent)      *out_ascent      = static_cast<float>(ascent);
+    if (out_descent)     *out_descent     = static_cast<float>(descent);
+    if (out_line_height) *out_line_height =
+      static_cast<float>(ascent + descent + leading);
+  }
+
   static float cg_measure_text(neui_render_ctx_t raw,
                                 const char* text, int text_len,
                                 float font_size)
@@ -1260,6 +1288,7 @@ namespace neui_cg_backend
     cg_set_fill_rule,
     cg_stroke_path_styled,
     cg_stroke_path_gradient,
+    cg_font_metrics,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

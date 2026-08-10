@@ -565,6 +565,28 @@ namespace neui_cairo_backend
     cairo_restore(st->cr);
   }
 
+  // Vertical metrics of the active font. line_height must match what
+  // cairo_draw_text uses for block layout above: cairo_font_extents' ascent +
+  // descent, deliberately WITHOUT fe.height (which folds in leading) so the
+  // two stay in lockstep.
+  static void cairo_font_metrics(neui_render_ctx_t raw, float font_size,
+                                  float* out_ascent, float* out_descent,
+                                  float* out_line_height)
+  {
+    if (out_ascent)      *out_ascent      = 0.0f;
+    if (out_descent)     *out_descent     = 0.0f;
+    if (out_line_height) *out_line_height = 0.0f;
+    auto* st = static_cast<CairoCtx*>(raw);
+    if (!st || !st->cr || font_size <= 0.0f) return;
+    if (!apply_font(st, font_size)) return;
+    cairo_font_extents_t fe;
+    cairo_font_extents(st->cr, &fe);
+    if (out_ascent)      *out_ascent      = static_cast<float>(fe.ascent);
+    if (out_descent)     *out_descent     = static_cast<float>(fe.descent);
+    if (out_line_height) *out_line_height =
+      static_cast<float>(fe.ascent + fe.descent);
+  }
+
   static float cairo_measure_text(neui_render_ctx_t raw,
                                   const char* text, int text_len, float font_size)
   {
@@ -1208,6 +1230,7 @@ namespace neui_cairo_backend
     cairo_set_fill_rule_fn,
     cairo_stroke_path_styled,
     cairo_stroke_path_gradient,
+    cairo_font_metrics,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

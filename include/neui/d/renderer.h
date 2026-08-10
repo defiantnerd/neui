@@ -337,6 +337,25 @@ typedef struct neui_render_backend {
                                         const neui_gradient_t* grad,
                                         const neui_stroke_style_t* style);
 
+  // Vertical metrics of the ACTIVE font (family + weight from the font stack,
+  // see push_font) at `font_size`, in logical pixels. Any out-pointer may be
+  // NULL. Unlike measure_text these are properties of the FONT, not of a
+  // string, so no text is passed.
+  //
+  // `line_height` is specifically the per-line advance THIS backend uses when
+  // draw_text lays out its block, so a caller can reproduce draw_text's own
+  // vertical placement exactly: the block is `line_height * line_count` tall
+  // and is centred in the rect. Backends legitimately differ in whether that
+  // includes leading (CoreGraphics counts it, cairo does not) - each reports
+  // what its own draw_text uses, which is what makes the reproduction exact.
+  //
+  // This is the only text information the client could not reach before: it is
+  // what makes explicit top / bottom alignment and baseline-accurate layout
+  // possible on top of draw_text's fixed vertical centring.
+  void (NEUI_ABI *font_metrics)(neui_render_ctx_t ctx, float font_size,
+                                float* ascent, float* descent,
+                                float* line_height);
+
 } neui_render_backend_t;
 
 #ifdef __cplusplus

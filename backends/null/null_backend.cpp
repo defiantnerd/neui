@@ -54,6 +54,8 @@ namespace neui_null_backend
   static void  null_set_fill_rule(neui_render_ctx_t, neui_fill_rule_t) {}
   static void  null_stroke_path_styled(neui_render_ctx_t, float, uint32_t, const neui_stroke_style_t*) {}
   static void  null_stroke_path_gradient(neui_render_ctx_t, float, const neui_gradient_t*, const neui_stroke_style_t*) {}
+  static void  null_font_metrics(neui_render_ctx_t, float, float* a, float* d, float* lh)
+  { if (a) *a = 0.0f; if (d) *d = 0.0f; if (lh) *lh = 0.0f; }
 
   static neui_render_backend_t backend = {
     NEUI_VERSION,
@@ -102,6 +104,7 @@ namespace neui_null_backend
     null_set_fill_rule,
     null_stroke_path_styled,
     null_stroke_path_gradient,
+    null_font_metrics,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

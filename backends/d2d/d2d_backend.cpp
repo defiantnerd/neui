@@ -1040,6 +1040,44 @@ namespace neui_d2d_backend
     return metrics.widthIncludingTrailingWhitespace;
   }
 
+  // Vertical metrics of the active font. DirectWrite exposes these per LINE
+  // rather than per font, so measure a one-line layout through the same
+  // get_text_format path draw_text uses (font stack, registered families,
+  // fallback) - the numbers are then guaranteed consistent with what actually
+  // gets drawn. DWRITE_LINE_METRICS gives baseline (== ascent) and height,
+  // which is exactly the per-line advance PARAGRAPH_ALIGNMENT_CENTER lays the
+  // block out with, so line_height matches draw_text's own math.
+  static void d2d_font_metrics(neui_render_ctx_t raw, float font_size,
+                                float* out_ascent, float* out_descent,
+                                float* out_line_height)
+  {
+    if (out_ascent)      *out_ascent      = 0.0f;
+    if (out_descent)     *out_descent     = 0.0f;
+    if (out_line_height) *out_line_height = 0.0f;
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!g_dwrite_factory || font_size <= 0.0f) return;
+    IDWriteTextFormat* fmt = get_text_format(ctx, font_size);
+    if (!fmt) return;
+
+    // "Hxp" spans a cap-height ascender and a descender; any single line would
+    // do, since DWRITE_LINE_METRICS reports the font's line box, not the ink.
+    static const wchar_t probe[] = L"Hxp";
+    IDWriteTextLayout* layout = nullptr;
+    HRESULT hr = g_dwrite_factory->CreateTextLayout(
+      probe, 3, fmt, 100000.0f, 100000.0f, &layout);
+    if (FAILED(hr) || !layout) return;
+
+    DWRITE_LINE_METRICS lm = {};
+    UINT32 line_count = 0;
+    hr = layout->GetLineMetrics(&lm, 1, &line_count);
+    layout->Release();
+    if (FAILED(hr) || line_count == 0) return;
+
+    if (out_ascent)      *out_ascent      = lm.baseline;
+    if (out_descent)     *out_descent     = lm.height - lm.baseline;
+    if (out_line_height) *out_line_height = lm.height;
+  }
+
   static void* d2d_create_bitmap(neui_render_ctx_t raw,
                                   uint32_t width_px, uint32_t height_px,
                                   const uint8_t* bgra_pixels,
@@ -1866,6 +1904,7 @@ namespace neui_d2d_backend
     d2d_set_fill_rule,
     d2d_stroke_path_styled,
     d2d_stroke_path_gradient,
+    d2d_font_metrics,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

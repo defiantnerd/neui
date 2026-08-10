@@ -37,6 +37,25 @@ extern "C" {
   // painter_api call.
   typedef struct neui_painter neui_painter_t;
 
+  // Text alignment for draw_text_aligned. The zero value of each is the
+  // behaviour plain draw_text has always had (left, vertically centred), so
+  // a zero-initialized pair reproduces it.
+  //
+  // There is deliberately no BASELINE vertical mode: with a rect to align in,
+  // "baseline" has no unambiguous meaning. Use font_metrics + VALIGN_TOP - the
+  // first line's baseline sits `ascent` below the rect top.
+  typedef enum neui_text_halign {
+    NEUI_TEXT_ALIGN_START  = 0,   // left  (== plain draw_text)
+    NEUI_TEXT_ALIGN_CENTER = 1,
+    NEUI_TEXT_ALIGN_END    = 2    // right
+  } neui_text_halign_t;
+
+  typedef enum neui_text_valign {
+    NEUI_TEXT_VALIGN_MIDDLE = 0,  // vertically centred (== plain draw_text)
+    NEUI_TEXT_VALIGN_TOP    = 1,
+    NEUI_TEXT_VALIGN_BOTTOM = 2
+  } neui_text_valign_t;
+
   typedef struct neui_painter_api {
     uint32_t neui_version;
 
@@ -193,6 +212,69 @@ extern "C" {
     void (NEUI_ABI *stroke_path_gradient)(neui_painter_t* p, float stroke_width,
                                           const neui_gradient_t* grad,
                                           const neui_stroke_style_t* style);
+
+    // ---- Text metrics + explicit alignment ---------------------------------
+    // (Vtable-appended; check the api version / pointer before calling.)
+
+    // Vertical metrics of the active font (family + weight from the font stack)
+    // at `font_size`, in logical pixels. Any out-pointer may be NULL. These are
+    // properties of the FONT, not of a string, which is why no text is passed -
+    // use measure_text for the width of a particular string.
+    //
+    // `line_height` is the per-line advance the backend itself uses to lay out
+    // a text block, so `line_height * line_count` reproduces exactly the block
+    // height draw_text centres in its rect. Whether it includes leading is a
+    // per-backend property (CoreGraphics counts it, cairo does not); each
+    // reports what its own draw_text uses, which is what keeps the two exact.
+    //
+    // For baseline-accurate placement, combine with NEUI_TEXT_VALIGN_TOP: the
+    // first line's baseline sits `ascent` below the rect's top edge.
+    void (NEUI_ABI *font_metrics)(neui_painter_t* p, float font_size,
+                                  float* ascent, float* descent,
+                                  float* line_height);
+
+    // draw_text with explicit alignment inside (x, y, w, h). Plain draw_text is
+    // equivalent to (NEUI_TEXT_ALIGN_START, NEUI_TEXT_VALIGN_MIDDLE), which is
+    // why those are the zero values - the defaults are the old behaviour.
+    //
+    // Text is always clipped to the rect. Overflow degrades predictably rather
+    // than bleeding into neighbouring widgets: a string wider than `w` is
+    // pinned to the left edge (never drawn left of `x`), and a block taller
+    // than `h` is pinned to the top edge.
+    void (NEUI_ABI *draw_text_aligned)(neui_painter_t* p,
+                                        float x, float y, float w, float h,
+                                        const char* utf8,
+                                        float font_size, uint32_t argb,
+                                        neui_text_halign_t halign,
+                                        neui_text_valign_t valign);
+
+    // ---- Convenience shapes ------------------------------------------------
+    // (Vtable-appended; check the api version / pointer before calling.)
+    //
+    // Rounded rect, ellipse and line. All three are built on the path API - no
+    // backend has a native primitive for any of them - and exist because every
+    // client would otherwise write the same three helpers. `radius` clamps to
+    // half the shorter side, so an over-large radius gives a stadium/circle
+    // rather than a corrupted outline; radius 0 is a plain rectangle.
+    //
+    // A full ellipse here traces the same cubic approximation as the compound
+    // arc layer, so a value ring and a fill_ellipse agree on their outline.
+    void (NEUI_ABI *fill_round_rect)(neui_painter_t* p,
+                                      float x, float y, float w, float h,
+                                      float radius, uint32_t argb);
+    void (NEUI_ABI *draw_round_rect)(neui_painter_t* p,
+                                      float x, float y, float w, float h,
+                                      float radius, float stroke_width,
+                                      uint32_t argb);
+    void (NEUI_ABI *fill_ellipse)(neui_painter_t* p,
+                                   float x, float y, float w, float h,
+                                   uint32_t argb);
+    void (NEUI_ABI *draw_ellipse)(neui_painter_t* p,
+                                   float x, float y, float w, float h,
+                                   float stroke_width, uint32_t argb);
+    void (NEUI_ABI *draw_line)(neui_painter_t* p,
+                                float x0, float y0, float x1, float y1,
+                                float stroke_width, uint32_t argb);
   } neui_painter_api_t;
 
 #ifdef __cplusplus

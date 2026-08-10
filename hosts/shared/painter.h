@@ -382,6 +382,257 @@ namespace neui_detail {
   { if (p && p->backend && p->backend->stroke_path_gradient)
       p->backend->stroke_path_gradient(p->ctx, stroke_w, grad, style); }
 
+  inline void NEUI_ABI painter_font_metrics(neui_painter_t* p, float font_size,
+                                             float* ascent, float* descent,
+                                             float* line_height)
+  {
+    if (ascent)      *ascent      = 0.0f;
+    if (descent)     *descent     = 0.0f;
+    if (line_height) *line_height = 0.0f;
+    if (p && p->backend && p->backend->font_metrics)
+      p->backend->font_metrics(p->ctx, font_size, ascent, descent, line_height);
+  }
+
+  // Count the lines draw_text will lay out. Mirrors the backends' own split:
+  // they break on '\n' (tolerating CRLF), so an empty string is one line and a
+  // trailing newline opens another.
+  inline int painter_text_line_count(const char* utf8)
+  {
+    int lines = 1;
+    for (const char* c = utf8; *c; ++c)
+      if (*c == '\n') ++lines;
+    return lines;
+  }
+
+  // Width of the WIDEST line - draw_text lays out a block, so horizontal
+  // alignment has to align the block, not the first line.
+  inline float painter_text_block_width(neui_painter_t* p, const char* utf8,
+                                         float font_size)
+  {
+    if (!p || !p->backend || !p->backend->measure_text) return 0.0f;
+    float widest = 0.0f;
+    const char* start = utf8;
+    for (const char* c = utf8;; ++c) {
+      if (*c == '\n' || *c == '\0') {
+        int len = static_cast<int>(c - start);
+        if (len && start[len - 1] == '\r') --len;   // CRLF
+        if (len > 0) {
+          float w = p->backend->measure_text(p->ctx, start, len, font_size);
+          if (w > widest) widest = w;
+        }
+        if (*c == '\0') break;
+        start = c + 1;
+      }
+    }
+    return widest;
+  }
+
+  // Explicit alignment on top of draw_text's fixed "left, vertically centred"
+  // placement. No backend text call is needed beyond font_metrics: because the
+  // backends derive the block position FROM the rect they are given, handing
+  // them a tightened rect places the block exactly where we want it.
+  inline void NEUI_ABI painter_draw_text_aligned(neui_painter_t* p,
+                                                  float x, float y,
+                                                  float w, float h,
+                                                  const char* utf8,
+                                                  float font_size,
+                                                  uint32_t argb,
+                                                  neui_text_halign_t halign,
+                                                  neui_text_valign_t valign)
+  {
+    if (!p || !p->backend || !p->backend->draw_text || !utf8 || !*utf8) return;
+
+    float dx = x, dw = w, dy = y, dh = h;
+
+    if (halign != NEUI_TEXT_ALIGN_START) {
+      const float tw = painter_text_block_width(p, utf8, font_size);
+      if (tw > 0.0f) {
+        dx = (halign == NEUI_TEXT_ALIGN_CENTER) ? (x + (w - tw) * 0.5f)
+                                                : (x + (w - tw));
+        // Never start left of the rect: an over-long string then clips at the
+        // right edge (same degradation as unaligned draw_text) instead of
+        // bleeding out the left side of the widget.
+        if (dx < x) dx = x;
+        // Keep the clip rect's RIGHT edge where the caller put it, rather than
+        // shrinking it to the text width - so overflow clips to the widget.
+        dw = (x + w) - dx;
+        if (dw < 0.0f) dw = 0.0f;
+      }
+    }
+
+    if (valign != NEUI_TEXT_VALIGN_MIDDLE) {
+      float line_height = 0.0f;
+      painter_font_metrics(p, font_size, nullptr, nullptr, &line_height);
+      if (line_height > 0.0f) {
+        const float block =
+          line_height * static_cast<float>(painter_text_line_count(utf8));
+        if (block >= h) {
+          // Taller than the rect: pin to the top and let it clip, which is what
+          // the backends' own centring clamp already does.
+          dy = y; dh = h;
+        } else if (valign == NEUI_TEXT_VALIGN_TOP) {
+          dy = y; dh = block;
+        } else {   // NEUI_TEXT_VALIGN_BOTTOM
+          dy = y + h - block; dh = block;
+        }
+      }
+    }
+
+    p->backend->draw_text(p->ctx, dx, dy, dw, dh, utf8, font_size, argb);
+  }
+
+  // Build a rounded-rectangle path on the painter's path API. Traversal is
+  // clockwise in screen space (Y-down), so the four quarter-arcs sweep:
+  //   top-left:     pi      -> 1.5*pi   (left  -> top)
+  //   top-right:    1.5*pi  -> 2*pi     (top   -> right)
+  //   bottom-right: 0       -> 0.5*pi   (right -> bottom)
+  //   bottom-left:  0.5*pi  -> pi       (bottom -> left)
+  // Caller is responsible for begin_path before and a single
+  // fill_path / stroke_path after (path persists across both on D2D + CG).
+  inline void build_rounded_rect_path(neui_painter_t* p,
+                                        float x, float y,
+                                        float w, float h,
+                                        float r)
+  {
+    const float PI = 3.14159265358979323846f;
+    float max_r = (w < h ? w : h) * 0.5f;
+    if (r > max_r) r = max_r;
+    if (r < 0.0f)  r = 0.0f;
+
+    painter_begin_path(p);
+    if (r <= 0.0f) {
+      painter_move_to(p, x,     y);
+      painter_line_to(p, x + w, y);
+      painter_line_to(p, x + w, y + h);
+      painter_line_to(p, x,     y + h);
+      painter_close_path(p);
+      return;
+    }
+
+    painter_move_to(p, x,     y + r);
+    painter_arc(p, x + r,     y + r,     r, PI,           1.5f * PI);
+    painter_line_to(p, x + w - r, y);
+    painter_arc(p, x + w - r, y + r,     r, 1.5f * PI,    2.0f * PI);
+    painter_line_to(p, x + w,     y + h - r);
+    painter_arc(p, x + w - r, y + h - r, r, 0.0f,         0.5f * PI);
+    painter_line_to(p, x + r,     y + h);
+    painter_arc(p, x + r,     y + h - r, r, 0.5f * PI,    PI);
+    painter_close_path(p);
+  }
+
+  // Append an elliptical-arc approximation (cubic Bezier segments) to the
+  // painter's current open path, from angle a0 to a1 (renderer radians: 0 =
+  // +x / 3 o'clock, +y down so increasing angle sweeps clockwise on screen)
+  // on the ellipse centred (cx, cy) with radii (rx, ry). The caller must have
+  // already placed the current point at the arc start (move_to for a ring;
+  // move_to(centre) + line_to(start) for a pie). The range is split into
+  // <= 90 deg segments, each using the standard handle length
+  // k = 4/3 * tan(dtheta / 4) - exact for a circle and affine-correct for an
+  // ellipse (the cubic is an affine image of the circular-arc cubic). Works on
+  // any backend with cubic_to; nothing is emitted for a zero sweep.
+  inline void append_elliptical_arc(neui_painter_t* p,
+                                     float cx, float cy, float rx, float ry,
+                                     float a0, float a1)
+  {
+    const float PI = 3.14159265358979323846f;
+    float total = a1 - a0;
+    if (total == 0.0f) return;
+    int segs = static_cast<int>(std::ceil(std::fabs(total) / (PI * 0.5f)));
+    if (segs < 1) segs = 1;
+    const float seg = total / static_cast<float>(segs);
+    const float k   = (4.0f / 3.0f) * std::tan(seg * 0.25f);
+    float t0 = a0;
+    for (int i = 0; i < segs; ++i) {
+      const float t1 = t0 + seg;
+      const float c0 = std::cos(t0), s0 = std::sin(t0);
+      const float c1 = std::cos(t1), s1 = std::sin(t1);
+      // tangent of (rx cos t, ry sin t) is (-rx sin t, ry cos t).
+      const float p1x = cx + rx * c0,         p1y = cy + ry * s0;
+      const float h1x = p1x + k * (-rx * s0), h1y = p1y + k * (ry * c0);
+      const float p2x = cx + rx * c1,         p2y = cy + ry * s1;
+      const float h2x = p2x - k * (-rx * s1), h2y = p2y - k * (ry * c1);
+      painter_cubic_to(p, h1x, h1y, h2x, h2y, p2x, p2y);
+      t0 = t1;
+    }
+  }
+
+  // --- Convenience primitives -------------------------------------------
+  // Rounded rect, ellipse and line, all built on the existing path API. No
+  // backend has a native primitive for any of these (the compound `rect`
+  // layer's corner_radius has always been emulated with build_rounded_rect_path
+  // above), so these need no backend work at all - they exist because every
+  // client would otherwise write the same three helpers.
+
+  inline void NEUI_ABI painter_fill_round_rect(neui_painter_t* p,
+                                                float x, float y,
+                                                float w, float h,
+                                                float radius, uint32_t argb)
+  {
+    if (!p || w <= 0.0f || h <= 0.0f) return;
+    build_rounded_rect_path(p, x, y, w, h, radius);
+    painter_fill_path(p, argb);
+  }
+
+  inline void NEUI_ABI painter_draw_round_rect(neui_painter_t* p,
+                                                float x, float y,
+                                                float w, float h,
+                                                float radius,
+                                                float stroke_width,
+                                                uint32_t argb)
+  {
+    if (!p || w <= 0.0f || h <= 0.0f) return;
+    build_rounded_rect_path(p, x, y, w, h, radius);
+    painter_stroke_path(p, stroke_width, argb);
+  }
+
+  // Full-sweep ellipse inscribed in (x, y, w, h). Uses the same cubic
+  // approximation as the compound arc layer, so a full ring and a
+  // fill_ellipse agree exactly on their outline.
+  inline void painter_build_ellipse_path(neui_painter_t* p,
+                                          float x, float y, float w, float h)
+  {
+    const float PI = 3.14159265358979323846f;
+    const float rx = w * 0.5f, ry = h * 0.5f;
+    const float cx = x + rx,   cy = y + ry;
+    painter_begin_path(p);
+    painter_move_to(p, cx + rx, cy);              // angle 0 == 3 o'clock
+    append_elliptical_arc(p, cx, cy, rx, ry, 0.0f, 2.0f * PI);
+    painter_close_path(p);
+  }
+
+  inline void NEUI_ABI painter_fill_ellipse(neui_painter_t* p,
+                                            float x, float y,
+                                            float w, float h, uint32_t argb)
+  {
+    if (!p || w <= 0.0f || h <= 0.0f) return;
+    painter_build_ellipse_path(p, x, y, w, h);
+    painter_fill_path(p, argb);
+  }
+
+  inline void NEUI_ABI painter_draw_ellipse(neui_painter_t* p,
+                                             float x, float y,
+                                             float w, float h,
+                                             float stroke_width, uint32_t argb)
+  {
+    if (!p || w <= 0.0f || h <= 0.0f) return;
+    painter_build_ellipse_path(p, x, y, w, h);
+    painter_stroke_path(p, stroke_width, argb);
+  }
+
+  inline void NEUI_ABI painter_draw_line(neui_painter_t* p,
+                                          float x0, float y0,
+                                          float x1, float y1,
+                                          float stroke_width, uint32_t argb)
+  {
+    if (!p) return;
+    painter_begin_path(p);
+    painter_move_to(p, x0, y0);
+    painter_line_to(p, x1, y1);
+    // Deliberately NOT closed: closing a 2-point path can make some backends
+    // emit a join at the start cap instead of the configured line cap.
+    painter_stroke_path(p, stroke_width, argb);
+  }
+
   // The static api table. Each host extern-references this from its
   // paint dispatch and stamps it into neui_event_paint_t::painter_api.
   // `inline` storage makes this ODR-safe across the two TUs that include
@@ -420,6 +671,13 @@ namespace neui_detail {
     painter_set_fill_rule,
     painter_stroke_path_styled,
     painter_stroke_path_gradient,
+    painter_font_metrics,
+    painter_draw_text_aligned,
+    painter_fill_round_rect,
+    painter_draw_round_rect,
+    painter_fill_ellipse,
+    painter_draw_ellipse,
+    painter_draw_line,
   };
 
 } // namespace neui_detail

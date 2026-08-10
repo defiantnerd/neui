@@ -33,80 +33,10 @@
 
 namespace neui_detail
 {
-  // Build a rounded-rectangle path on the painter's path API. Traversal is
-  // clockwise in screen space (Y-down), so the four quarter-arcs sweep:
-  //   top-left:     pi      -> 1.5*pi   (left  -> top)
-  //   top-right:    1.5*pi  -> 2*pi     (top   -> right)
-  //   bottom-right: 0       -> 0.5*pi   (right -> bottom)
-  //   bottom-left:  0.5*pi  -> pi       (bottom -> left)
-  // Caller is responsible for begin_path before and a single
-  // fill_path / stroke_path after (path persists across both on D2D + CG).
-  inline void build_rounded_rect_path(neui_painter_t* p,
-                                        float x, float y,
-                                        float w, float h,
-                                        float r)
-  {
-    const float PI = 3.14159265358979323846f;
-    float max_r = (w < h ? w : h) * 0.5f;
-    if (r > max_r) r = max_r;
-    if (r < 0.0f)  r = 0.0f;
-
-    k_painter_api.begin_path(p);
-    if (r <= 0.0f) {
-      k_painter_api.move_to(p, x,     y);
-      k_painter_api.line_to(p, x + w, y);
-      k_painter_api.line_to(p, x + w, y + h);
-      k_painter_api.line_to(p, x,     y + h);
-      k_painter_api.close_path(p);
-      return;
-    }
-
-    k_painter_api.move_to(p, x,     y + r);
-    k_painter_api.arc    (p, x + r,     y + r,     r, PI,           1.5f * PI);
-    k_painter_api.line_to(p, x + w - r, y);
-    k_painter_api.arc    (p, x + w - r, y + r,     r, 1.5f * PI,    2.0f * PI);
-    k_painter_api.line_to(p, x + w,     y + h - r);
-    k_painter_api.arc    (p, x + w - r, y + h - r, r, 0.0f,         0.5f * PI);
-    k_painter_api.line_to(p, x + r,     y + h);
-    k_painter_api.arc    (p, x + r,     y + h - r, r, 0.5f * PI,    PI);
-    k_painter_api.close_path(p);
-  }
-
-  // Append an elliptical-arc approximation (cubic Bezier segments) to the
-  // painter's current open path, from angle a0 to a1 (renderer radians: 0 =
-  // +x / 3 o'clock, +y down so increasing angle sweeps clockwise on screen)
-  // on the ellipse centred (cx, cy) with radii (rx, ry). The caller must have
-  // already placed the current point at the arc start (move_to for a ring;
-  // move_to(centre) + line_to(start) for a pie). The range is split into
-  // <= 90 deg segments, each using the standard handle length
-  // k = 4/3 * tan(dtheta / 4) - exact for a circle and affine-correct for an
-  // ellipse (the cubic is an affine image of the circular-arc cubic). Works on
-  // any backend with cubic_to; nothing is emitted for a zero sweep.
-  inline void append_elliptical_arc(neui_painter_t* p,
-                                     float cx, float cy, float rx, float ry,
-                                     float a0, float a1)
-  {
-    const float PI = 3.14159265358979323846f;
-    float total = a1 - a0;
-    if (total == 0.0f) return;
-    int segs = static_cast<int>(std::ceil(std::fabs(total) / (PI * 0.5f)));
-    if (segs < 1) segs = 1;
-    const float seg = total / static_cast<float>(segs);
-    const float k   = (4.0f / 3.0f) * std::tan(seg * 0.25f);
-    float t0 = a0;
-    for (int i = 0; i < segs; ++i) {
-      const float t1 = t0 + seg;
-      const float c0 = std::cos(t0), s0 = std::sin(t0);
-      const float c1 = std::cos(t1), s1 = std::sin(t1);
-      // tangent of (rx cos t, ry sin t) is (-rx sin t, ry cos t).
-      const float p1x = cx + rx * c0,         p1y = cy + ry * s0;
-      const float h1x = p1x + k * (-rx * s0), h1y = p1y + k * (ry * c0);
-      const float p2x = cx + rx * c1,         p2y = cy + ry * s1;
-      const float h2x = p2x - k * (-rx * s1), h2y = p2y - k * (ry * c1);
-      k_painter_api.cubic_to(p, h1x, h1y, h2x, h2y, p2x, p2y);
-      t0 = t1;
-    }
-  }
+  // build_rounded_rect_path + append_elliptical_arc now live in painter.h -
+  // they back the painter's public fill/draw_round_rect + ellipse entries, and
+  // the compound layers below use them from there (same namespace, and
+  // painter.h is included above).
 
   // Arc-length stroke trim for the PATH layer (§A). Flattens the layer's
   // command list into polyline vertices (each carrying a `move` flag = start

@@ -205,39 +205,40 @@ Verified: `cmake --build` clean and warning-free on macOS (Xcode/Debug);
 are **compile-unverified locally** (authored on macOS), matching the
 established convention for this repo's cross-machine flow.
 
-### Wave 1 — painter completeness
+### Wave 1 — painter completeness — **1.1 + 1.2 DONE**
 
-The "annoys you daily" wave. Almost all of it is `hosts/shared/painter.h` plus
-one header.
-
-- **1.1 — text metrics + alignment.** Two parts:
-  - Backend: add a metrics query returning **ascent / descent / line-height**
-    (and keep width). Every backend already computes these — DirectWrite
-    `IDWriteFontFace` / `DWRITE_LINE_METRICS`, `CTLineGetTypographicBounds`,
-    `cairo_font_extents`. Append to `neui_render_backend_t`.
-  - Painter: append a metrics accessor, and an **explicit alignment** form of
-    `draw_text` taking horizontal (`start` / `centre` / `end`) and vertical
-    (`top` / `middle` / `baseline` / `bottom`) enums. Keep the existing
-    `draw_text` as-is (left / centred) so nothing regresses; the compound text
-    layer's manual `measure_text` x-offset dance
-    (`widget_paint_compound.h:484-495`) then collapses onto it, and the
-    `align_y` "approximated by shifting the rect" comment goes away.
-  - Bonus in the same pass: make `NEUI_API_METRICS::measure_text` exact on
-    desktop (route it through a text-only measure context) and drop the
-    "best-effort estimate" caveat.
-- **1.2 — rounded rect / ellipse / line.** Ship as **painter-level helpers over
-  the existing path API** — no backend or `renderer.h` change. Promote
-  `build_rounded_rect_path()` out of `widget_paint_compound.h` into
-  `hosts/shared/painter.h`, then append `fill_round_rect` / `draw_round_rect` /
-  `fill_ellipse` / `draw_ellipse` / `draw_line` to `neui_painter_api_t`. Have
-  the compound `rect` layer call the new helpers so there is one implementation.
-- **1.3 — italic.** Add a style axis to `push_font` (append a new
-  `push_font_styled` rather than changing the existing signature). All three
-  backends carry style in their font descriptors already.
-- **1.4 — wrapped text at painter level** *(defer unless he asks)*. The
-  algorithm exists in the MULTILINE widget; lifting it into
-  `hosts/shared/painter.h` as a measure-and-break helper is a follow-up, not a
-  blocker — his ported paint code lays out its own text.
+- **1.1 — text metrics + alignment.** **Done.** The design question was where the
+  numbers live, and the answer shaped the API: ascent/descent/line-height are
+  properties of the **font at a size**, not of a string, so they became a
+  separate `font_metrics(p, size, &a, &d, &lh)` rather than an extension of the
+  string-level `measure_text` (whose "pen advance" meaning the grid caret math
+  and compound centring already depend on).
+  - Backend gets **one** new method. `line_height` is contractually *the
+    per-line advance that backend's own `draw_text` uses* (CoreGraphics counts
+    leading, cairo does not) — and that equivalence is the trick: because every
+    backend derives the block position **from the rect it is handed**,
+    `draw_text_aligned` needs **zero** backend work. Alignment is implemented in
+    `hosts/shared/painter.h` by passing a tightened rect.
+  - Overflow degrades deliberately: horizontal alignment keeps the rect's right
+    edge (so over-wide text clips to the *widget*, not to the text box) and
+    clamps so text never draws left of `x`; an over-tall block pins to the top.
+  - No `BASELINE` mode — with a rect to align in it has no unambiguous meaning.
+    `font_metrics` + `VALIGN_TOP` is the documented recipe.
+  - Verified two ways: 22 Tier-1 cases with a mock backend recording the exact
+    rect that reaches `draw_text`, plus an on-device check of the real
+    CoreGraphics numbers (at 20 px: ascent 19.34 / descent 4.22 / line_height
+    23.55, scaling exactly 2.0× to 40 px).
+- **1.2 — rounded rect / ellipse / line.** **Done**, and confirmed to need **no
+  backend or `renderer.h` change at all**: `build_rounded_rect_path` and
+  `append_elliptical_arc` moved from `widget_paint_compound.h` into
+  `hosts/shared/painter.h`, so the compound layers and the five new public
+  entries share one implementation (a value ring and a `fill_ellipse` agree on
+  their outline). 10 Tier-1 cases, including the radius clamp and the
+  deliberately-open `draw_line` path.
+- **1.3 — italic.** Still open. Needs a style axis on `push_font`, which means
+  touching each backend's font cache key (currently family + weight).
+- **1.4 — wrapped text at painter level** — deferred unless asked; the wrap
+  algorithm exists in the MULTILINE widget and is liftable.
 
 ### Wave 2 — timer / idle
 
