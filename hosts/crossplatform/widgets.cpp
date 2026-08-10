@@ -740,8 +740,19 @@ namespace xpl_host
     // Map any widget invalidation to a frame-level repaint - on the xpl
     // host the entire frame paints in one pass, so per-widget invalidation
     // would have to invalidate the frame anyway.
-    if (void* frame = s->find_parent_native_handle(idx))
-      platform_invalidate(frame);
+    //
+    // The widget's OWN handle first, then its ancestors'.
+    // find_parent_native_handle alone is not enough: it walks parents only, so
+    // invalidating a top-level APPWINDOW / PLUGWINDOW - the obvious way for a
+    // client to ask for "repaint everything" - resolved to nullptr and did
+    // nothing at all, silently. The documented contract only excuses a no-op
+    // before show() or for a widget that does not exist, and a shown frame is
+    // neither. Fixed here rather than in find_parent_native_handle because its
+    // other callers genuinely want the CONTAINING frame (a DIALOG asking that
+    // question means its owner, not itself).
+    void* target = s->_widgets[idx].native_handle;
+    if (!target) target = s->find_parent_native_handle(idx);
+    if (target) platform_invalidate(target);
   }
 
   neui_widget_api_t widgets_api = {

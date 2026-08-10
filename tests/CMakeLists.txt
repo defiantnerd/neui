@@ -116,6 +116,18 @@ if(APPLE AND NOT NEUI_IOS)
   target_link_libraries(neui_file_dialog_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
+  # Repaint throughput benchmark (wave 5 / Phase 0a): times one full-frame
+  # repaint of an NxN CUSTOMDRAW mesh on the xpl host and reports it against a
+  # 60 Hz budget, plus the single-widget-invalidate baseline that partial
+  # repaint has to improve on. Realizes a real window, so built but NOT
+  # ctest-registered; run ./tests/<config>/neui_repaint_bench.
+  add_executable(neui_repaint_bench repaint_bench.cpp)
+  target_include_directories(neui_repaint_bench PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_repaint_bench PRIVATE cxx_std_17)
+  target_link_libraries(neui_repaint_bench PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
   # Relative-pointer harness (NEUI_API_POINTER): asserts the begin/end state
   # machine, that MOUSE_MOVE coordinates are unbounded and widget-local, that
   # sub-pixel deltas accumulate, and that a session destroyed mid-drag leaves the

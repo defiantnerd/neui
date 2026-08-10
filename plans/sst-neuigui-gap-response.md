@@ -877,6 +877,67 @@ them). It cannot verify real API signatures.
 
 ### Wave 5 — xpl partial repaint
 
+**MEASURED FIRST, per this plan's own instruction - and the number changes the
+recommendation.** `tests/repaint_bench.cpp` (new, xpl host, built not
+ctest-registered) times one full-frame repaint of an NxN CUSTOMDRAW mesh
+against a 60 Hz budget. Apple M-series, Release, macOS / CG backend:
+
+| CUSTOMDRAW widgets | ms per full repaint | % of a 60 Hz frame | fps ceiling |
+|---|---|---|---|
+| 100  | 0.84  | 5 %  | ~1200 |
+| 400  | 3.33  | 20 % | ~300  |
+| 900  | 8.44  | 51 % | ~118  |
+| 1600 | 13.73 | 82 % | ~73   |
+
+**A 100-widget CUSTOMDRAW frame repaints entirely in 5 % of a 60 Hz budget.**
+Cost is linear in widget count, and partial repaint only starts to matter
+somewhere past ~900 widgets - far above any realistic plugin UI. This is the
+Phase 0a measurement the plan wanted handed over, and it retires the
+granularity anxiety outright rather than arguing about it.
+
+Two further findings that redirect the effort:
+
+- **Release ≈ Debug** (0.86 vs 0.93 ms at 100 widgets). neui's own paint walk
+  and event dispatch are *not* the cost; the platform draw calls are. So a
+  dirty-rect optimisation would remove platform calls, not framework overhead -
+  there is no cheap C++ win hiding here.
+- **Text is 59 % of a repaint** (0.49 ms of 0.84 ms at 100 widgets; shapes are
+  the other 41 %). If anything deserves optimising first it is text, not the
+  widget walk - a per-widget cached text layout would buy more than partial
+  repaint does at every widget count below ~900.
+
+**One real bug the benchmark found on its first run**, unrelated to perf:
+`widgets->invalidate()` on a **top-level frame was a silent no-op**.
+`w_invalidate` resolved the target through `find_parent_native_handle`, which
+walks *parents only* - so a client asking for "repaint everything" the obvious
+way (invalidate the APPWINDOW / PLUGWINDOW) got nothing at all, with no error.
+The documented contract only excuses a no-op before `show()` or for a widget
+that does not exist. Fixed in `w_invalidate` (own handle first, then
+ancestors') rather than in `find_parent_native_handle`, whose other callers
+genuinely mean the *containing* frame - a DIALOG asking that question means its
+owner, not itself. Worth noting the benchmark caught this because it measured
+zero paints where it expected 100; no test covered invalidating a frame.
+
+**Recommendation: bank the measurement and do NOT build the dirty-rect
+machinery yet.** Beyond the payoff being ~0 at realistic widget counts, the
+implementation is not the small change the original bullet implies:
+`begin_frame` clears the whole surface on every backend, so a clipped repaint
+needs a clipped clear plus a guarantee that the previous frame's pixels
+persisted - and that guarantee differs per backend (Cairo renders into a
+retained in-memory image and blits, so it holds; CG's context lives only for
+the duration of `drawRect:` and AppKit's own clip already narrows it; D2D
+depends on the present model). It also needs the accumulated dirty rect
+reconciled with the platform's *own* damage region, or a genuine expose after
+occlusion paints only the dirty part and leaves stale pixels. ~30
+`platform_invalidate` call sites would each need classifying as rect or
+full. That is a real project with a real stale-pixel risk, in exchange for
+headroom that is already there.
+
+The original plan text follows, unchanged, for when a case for it does appear
+(a very large grid, or a low-power target where 5 % becomes 25 %).
+
+
+
 Not in his list; it is the perf item that actually applies to him.
 
 - Accumulate a per-frame dirty rect union from `w_invalidate`
