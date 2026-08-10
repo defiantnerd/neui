@@ -916,6 +916,86 @@ TEST_CASE("gesture: WHEEL that cannot move the value emits nothing")
   CHECK_EQ(log.recs.size(), (size_t)0);
 }
 
+// ---------------------------------------------------------------------------
+// WHEEL fine modifier. neui_event_wheel_t grew a NEUI_MK_* buttonmap, so a
+// modified notch now scales by fine_scale like a fine DRAG - it used to be a
+// documented no-op because the payload carried no modifier bits.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("WHEEL: unmodified notch advances by the full step")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
+  behavior_get_handler(ba, slot)->step = 0.1f;   // fine_scale defaults to 0.2
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  neui_widget_t wid = { 1 };
+  neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
+  wheel.data.wheel = { wid, 10, 10, -1, 0, 0 };   // no modifier held
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10));
+  CHECK_APPROX(bag.get_float(NEUI_PARAM_VALUE, -1.0f), 0.1);
+}
+
+TEST_CASE("WHEEL: the configured fine modifier scales the notch by fine_scale")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
+  behavior_get_handler(ba, slot)->step = 0.1f;   // fine_modifier = Shift
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  neui_widget_t wid = { 1 };
+  neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
+  wheel.data.wheel = { wid, 10, 10, -1, 0, NEUI_MK_SHIFT };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10));
+  CHECK_APPROX(bag.get_float(NEUI_PARAM_VALUE, -1.0f), 0.1 * 0.2);
+}
+
+TEST_CASE("WHEEL: a modifier the handler didn't ask for stays coarse")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
+  behavior_get_handler(ba, slot)->step = 0.1f;   // fine_modifier = Shift
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  neui_widget_t wid = { 1 };
+  neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
+  wheel.data.wheel = { wid, 10, 10, -1, 0, NEUI_MK_CONTROL };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10));
+  CHECK_APPROX(bag.get_float(NEUI_PARAM_VALUE, -1.0f), 0.1);
+}
+
+TEST_CASE("WHEEL: fine scaling multiplies through the line count")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
+  behavior_get_handler(ba, slot)->step = 0.1f;
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  // Win32 delivers SPI_GETWHEELSCROLLLINES lines per notch; fine applies to
+  // the whole notch, not per line.
+  neui_widget_t wid = { 1 };
+  neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
+  wheel.data.wheel = { wid, 10, 10, -3, 0, NEUI_MK_SHIFT };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10));
+  CHECK_APPROX(bag.get_float(NEUI_PARAM_VALUE, -1.0f), 3 * 0.1 * 0.2);
+}
+
 TEST_CASE("gesture: KEY_STEP pairs per keypress")
 {
   BehaviorAsset ba;

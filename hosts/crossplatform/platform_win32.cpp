@@ -21,6 +21,7 @@
 #include "../shared/win32/clipboard_win32.h"
 #include "../shared/win32/dnd_target_win32.h"
 #include "../shared/win32/dnd_source_win32.h"
+#include "../shared/win32/keys_win32.h"
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
 
@@ -181,16 +182,13 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // Keyboard helpers
 
-  // Build a modifier bitmask from current key state.
-  // Bit layout matches a simple convention (not yet exposed in the public API):
-  //   bit 0 = Shift, bit 1 = Ctrl, bit 2 = Alt/Menu
+  // Build a NEUI_KMOD_* bitmask from the current key state. The bits ARE the
+  // public ones (<neui/d/keys.h>) - the old comment here claimed a private
+  // convention that merely happened to have the same values, which would have
+  // broken silently if the enum were ever reordered.
   static uint32_t build_modifiers()
   {
-    uint32_t m = 0;
-    if (GetKeyState(VK_SHIFT)   & 0x8000) m |= 1;
-    if (GetKeyState(VK_CONTROL) & 0x8000) m |= 2;
-    if (GetKeyState(VK_MENU)    & 0x8000) m |= 4;
-    return m;
+    return neui_detail::win32_kmod_from_state();
   }
 
   // Dispatch a key event: client gets first chance; if it returns false the
@@ -711,8 +709,13 @@ namespace xpl_host
           ev.data.mouse.widget = { hw->widget_id };
           ev.data.mouse.x      = static_cast<int>(lx);
           ev.data.mouse.y      = static_cast<int>(ly);
-          ev.data.mouse.buttonmap = static_cast<uint32_t>(wParam)
-                                    & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON);
+          // Was masked to the three button bits only, which dropped MK_SHIFT /
+          // MK_CONTROL on every MOUSE_MOVE - so Shift-for-fine on a KNOB /
+          // SLIDER drag saw the modifier on the initial DOWN and then lost it
+          // for the rest of the drag. The shared helper keeps all five
+          // documented bits (and, unlike a raw wParam forward, drops
+          // MK_XBUTTON1 = 0x0020, which would otherwise read as NEUI_MK_ALT).
+          ev.data.mouse.buttonmap = neui_detail::win32_buttonmap(wParam);
           wud->session->dispatch_mouse_event(target, &ev);
         }
       }
@@ -785,7 +788,7 @@ namespace xpl_host
           ev.data.mouse.widget = { hw->widget_id };
           ev.data.mouse.x      = static_cast<int>(lx);
           ev.data.mouse.y      = static_cast<int>(ly);
-          ev.data.mouse.buttonmap = static_cast<uint32_t>(wParam);
+          ev.data.mouse.buttonmap = neui_detail::win32_buttonmap(wParam);
           wud->session->dispatch_mouse_event(hit, &ev);
         }
       }
@@ -821,7 +824,7 @@ namespace xpl_host
           ev.data.mouse.widget    = { hw->widget_id };
           ev.data.mouse.x         = static_cast<int>(lx);
           ev.data.mouse.y         = static_cast<int>(ly);
-          ev.data.mouse.buttonmap = static_cast<uint32_t>(wParam);
+          ev.data.mouse.buttonmap = neui_detail::win32_buttonmap(wParam);
           wud->session->dispatch_mouse_event(hit, &ev);
         }
       }
@@ -857,7 +860,7 @@ namespace xpl_host
           ev.data.mouse.widget    = { hw->widget_id };
           ev.data.mouse.x         = static_cast<int>(lx);
           ev.data.mouse.y         = static_cast<int>(ly);
-          ev.data.mouse.buttonmap = 0;
+          ev.data.mouse.buttonmap = neui_detail::win32_buttonmap(wParam);
 
           ev.type = NEUI_EVENT_MOUSE_BUTTON_UP;
           wud->session->dispatch_mouse_event(hit, &ev);
@@ -893,7 +896,7 @@ namespace xpl_host
       ev.data.mouse.widget    = { hw->widget_id };
       ev.data.mouse.x         = static_cast<int>(lx);
       ev.data.mouse.y         = static_cast<int>(ly);
-      ev.data.mouse.buttonmap = 0;
+      ev.data.mouse.buttonmap = neui_detail::win32_buttonmap(wParam);
       wud->session->dispatch_mouse_event(hit, &ev);
       return 0;
     }
@@ -914,7 +917,7 @@ namespace xpl_host
       ev.data.mouse.widget    = { hw->widget_id };
       ev.data.mouse.x         = static_cast<int>(lx);
       ev.data.mouse.y         = static_cast<int>(ly);
-      ev.data.mouse.buttonmap = 0;
+      ev.data.mouse.buttonmap = neui_detail::win32_buttonmap(wParam);
       wud->session->dispatch_mouse_event(hit, &ev);
       return 0;
     }
@@ -980,6 +983,10 @@ namespace xpl_host
       bool shift_held = (wParam & MK_SHIFT) != 0;
       ev.data.wheel.delta         = shift_held ? -delta : delta;
       ev.data.wheel.is_horizontal = shift_held ? 1 : 0;
+      // NEUI_MK_* values match Win32 MK_*, so the low word of wParam (which
+      // carries the virtual-key / button state for both wheel messages)
+      // forwards unmodified - same contract as the mouse-message path.
+      ev.data.wheel.buttonmap     = static_cast<uint32_t>(GET_KEYSTATE_WPARAM(wParam));
 
       // Scrolling SECTION (the hit itself or its nearest ancestor): widgets
       // below the section get first refusal via a bounded bubble; when
@@ -1041,6 +1048,7 @@ namespace xpl_host
       ev.data.wheel.y             = static_cast<int>(ly);
       ev.data.wheel.delta         = delta;
       ev.data.wheel.is_horizontal = 1;
+      ev.data.wheel.buttonmap     = static_cast<uint32_t>(GET_KEYSTATE_WPARAM(wParam));
 
       // Scrolling SECTION: bounded bubble below, kinetics on the section -
       // same shape as the WM_MOUSEWHEEL branch above.

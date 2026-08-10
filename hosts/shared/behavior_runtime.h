@@ -522,14 +522,21 @@ namespace neui_detail
       // +/-1 per notch). Multiply by |delta| so one notch advances by
       // `step * lines_per_notch` rather than a single `step`, otherwise
       // wheel feels imperceptible at typical step values (~0.01..0.05).
-      // The wheel event payload doesn't carry modifier bits today
-      // (neui_event_wheel_t has no buttonmap), so fine_modifier on WHEEL
-      // is a no-op in v1.
+      // fine_modifier applies on the wheel too: neui_event_wheel_t carries the
+      // same NEUI_MK_* buttonmap as the mouse events, so a Shift / Ctrl / Alt
+      // notch scales by fine_scale exactly as a fine DRAG does.
+      //
+      // Caveat worth knowing: a host may already have spent Shift turning a
+      // vertical notch into a horizontal one (is_horizontal = 1 with
+      // NEUI_MK_SHIFT set). A handler configured for Shift-fine therefore also
+      // reads a Shift-flipped horizontal notch as fine, which is the intended
+      // reading for a value handler - it has no horizontal axis to scroll.
       int   delta   = event->data.wheel.delta;
       if (delta == 0) return true;
       float sign    = (delta > 0) ? -1.0f : 1.0f;
       int   mag     = (delta > 0) ? delta : -delta;
-      float change  = sign * H->step * static_cast<float>(mag);
+      float fine    = behavior_fine_mul(*H, event->data.wheel.buttonmap);
+      float change  = sign * H->step * fine * static_cast<float>(mag);
       float current = behavior_read_value(*H, ctx.bag);
       behavior_write_value_gesture(*H, ctx, H->target, current + change);
       return true;

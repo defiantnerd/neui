@@ -1021,6 +1021,11 @@ namespace win32_host
         out_ev.data.wheel.x      = lx;
         out_ev.data.wheel.y      = ly;
         out_ev.data.wheel.delta  = delta / WHEEL_DELTA;
+        // On the wheel messages wParam packs the delta in the HIGH word and
+        // the key/button state in the LOW word, so unlike the mouse cases
+        // above it needs GET_KEYSTATE_WPARAM rather than the whole wParam.
+        out_ev.data.wheel.buttonmap =
+          static_cast<uint32_t>(GET_KEYSTATE_WPARAM(wParam));
         return true;
       }
       default:

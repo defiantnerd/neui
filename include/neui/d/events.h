@@ -150,6 +150,13 @@ extern "C" {
   // neui_event_mouse_t): relative to the widget named by .widget, which on a
   // bubbling wheel is the actual recipient (an inner widget or the scrolling
   // ancestor that consumed it).
+  // buttonmap carries the same NEUI_MK_* bits as neui_event_mouse_t, so a
+  // client can implement Shift-for-fine / Ctrl-for-page on the wheel without
+  // tracking key state itself. Note the platform layer may already have
+  // consumed Shift to synthesise a horizontal wheel (see is_horizontal above);
+  // when it does, is_horizontal = 1 AND NEUI_MK_SHIFT is set, so a handler
+  // that wants Shift purely as a fine modifier should check is_horizontal
+  // first.
   typedef struct neui_event_wheel
   {
     neui_widget_t widget;
@@ -157,6 +164,7 @@ extern "C" {
     int y;
     int delta;
     int is_horizontal;
+    uint32_t buttonmap;
   } neui_event_wheel_t;
 
   // event_key for all events like keydown/keyup/emitted key

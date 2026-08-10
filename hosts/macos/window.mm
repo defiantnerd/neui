@@ -2475,6 +2475,8 @@ static float neui_snap_to_steps(float v, int steps)
   ev.data.wheel.x      = (int)p.x;
   ev.data.wheel.y      = (int)p.y;
   ev.data.wheel.delta  = ticks;
+  ev.data.wheel.buttonmap = neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons,
+                                                        event.modifierFlags);
   sess->dispatch_event(&ev);
   macos_host::dispatch_behavior_mouse(widget_id, &ev, (float)p.x, (float)p.y);
 }

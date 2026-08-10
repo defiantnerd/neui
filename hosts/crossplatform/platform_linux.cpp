@@ -478,6 +478,7 @@ namespace
     ev.data.wheel.y             = static_cast<int>(ly);
     ev.data.wheel.delta         = delta;
     ev.data.wheel.is_horizontal = horizontal ? 1 : 0;
+    ev.data.wheel.buttonmap     = neui_detail::x11_buttonmap(be.state);
     s->dispatch_wheel_event(hit, &ev);   // bubbles to scrolling ancestors
   }
 
@@ -1167,9 +1168,16 @@ namespace
   // logical (lx, ly). Mirrors platform_win32's WM_MOUSEWHEEL routing: combo
   // overlay first, then GRID-smooth / SECTION kinetics (pixel-precise), else a
   // classic line-quantised MOUSE_WHEEL event for stepped surfaces.
-  void feed_scroll(LinuxWindow* lw, float lx, float ly, double dv, double dh)
+  // `state` is an X11 modifier/button mask (ShiftMask / ControlMask /
+  // Button1Mask ...) forwarded into the wheel payload's NEUI_MK_* buttonmap.
+  // The XI2 caller passes XIModifierState::effective, which shares the core
+  // modifier bit layout but carries no button bits - a wheel notch mid-drag
+  // therefore reports modifiers only on that path.
+  void feed_scroll(LinuxWindow* lw, float lx, float ly, double dv, double dh,
+                    unsigned int state)
   {
     using namespace neui_detail;
+    const uint32_t mk = x11_buttonmap(state);
     Session* s = lw->session;
     int vline = take_lines(lw->scroll_v_accum, dv);
     int hline = take_lines(lw->scroll_h_accum, dh);
@@ -1208,6 +1216,7 @@ namespace
         ev.type          = NEUI_EVENT_MOUSE_WHEEL;
         ev.data.wheel.x  = (int)lx;
         ev.data.wheel.y  = (int)ly;
+        ev.data.wheel.buttonmap = mk;
         if (vline != 0) {
           ev.data.wheel.delta = vline; ev.data.wheel.is_horizontal = 0;
           if (s->dispatch_wheel_event(hit, &ev, sec_idx)) return;
@@ -1229,6 +1238,7 @@ namespace
       ev.type = NEUI_EVENT_MOUSE_WHEEL;
       ev.data.wheel.x = (int)lx; ev.data.wheel.y = (int)ly;
       ev.data.wheel.delta = vline; ev.data.wheel.is_horizontal = 0;
+      ev.data.wheel.buttonmap = mk;
       s->dispatch_wheel_event(hit, &ev);
     }
     if (hline != 0) {
@@ -1236,6 +1246,7 @@ namespace
       ev.type = NEUI_EVENT_MOUSE_WHEEL;
       ev.data.wheel.x = (int)lx; ev.data.wheel.y = (int)ly;
       ev.data.wheel.delta = hline; ev.data.wheel.is_horizontal = 1;
+      ev.data.wheel.buttonmap = mk;
       s->dispatch_wheel_event(hit, &ev);
     }
   }
@@ -1270,7 +1281,8 @@ namespace
     g_xi2_scroll_seen = true;   // XI2 scroll works here -> suppress core Button 4-7
 
     float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
-    feed_scroll(lw, static_cast<float>(de->event_x) / scale, static_cast<float>(de->event_y) / scale, dv, dh);
+    feed_scroll(lw, static_cast<float>(de->event_x) / scale, static_cast<float>(de->event_y) / scale, dv, dh,
+                 static_cast<unsigned int>(de->mods.effective));
   }
 
   // Unpack an XI2 GenericEvent cookie and dispatch XI_Motion scroll. Returns

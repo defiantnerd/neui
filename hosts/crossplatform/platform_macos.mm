@@ -160,6 +160,46 @@ void wake_app_event_pump()
   }
 }
 
+// Frame resize -> NEUI_EVENT_RESIZE with the new client size in logical px.
+// Hooked on the VIEW rather than the window delegate on purpose: NEUIView is
+// the content view of a standalone frame (AppKit resizes it with the window)
+// AND the root subview of a DAW-embedded PLUGWINDOW, where there is no
+// NSWindow of ours to get a windowDidResize: from. One hook covers both.
+// Mirrors the win32 xpl WM_SIZE path and the macOS-native windowDidResize:.
+//
+// The view is isFlipped with a backing-scale CTM, so its size is already in
+// logical points (= logical px at 96 DPI). Programmatic resizes report too,
+// matching win32 (SetWindowPos also raises WM_SIZE).
+- (void)setFrameSize:(NSSize)newSize
+{
+  const NSSize old = self.frame.size;
+  [super setFrameSize:newSize];
+
+  // session is nil until install_view_and_context / the embed path assigns it,
+  // so the initWithFrame: sizing never reaches a client.
+  if (!session) return;
+  const int w_log = (int)newSize.width;
+  const int h_log = (int)newSize.height;
+  if ((int)old.width == w_log && (int)old.height == h_log) return;
+
+  xpl_host::WidgetData* wd = session->get_widget(widget_index);
+  if (!wd) return;
+  wd->width  = w_log;
+  wd->height = h_log;
+
+  // Report the height BELOW any in-frame menubar band so client layout matches
+  // the other hosts. 0 on macOS (the menubar is the system menu bar), but
+  // routing through the accessor keeps the three xpl platforms identical.
+  const int inset = session->frame_top_inset(widget_index);
+
+  neui_event_t ev = {};
+  ev.type               = NEUI_EVENT_RESIZE;
+  ev.data.resize.widget = { wd->widget_id };
+  ev.data.resize.width  = w_log;
+  ev.data.resize.height = h_log - inset;
+  session->dispatch_event(&ev);
+}
+
 - (void)drawRect:(NSRect)dirtyRect
 {
   (void)dirtyRect;
@@ -723,6 +763,9 @@ void wake_app_event_pump()
   ev.data.wheel.y             = (int)ly;
   ev.data.wheel.delta         = delta;
   ev.data.wheel.is_horizontal = horizontal ? 1 : 0;
+  // Same NEUI_MK_* bits as the mouse path, from the same shared helper.
+  ev.data.wheel.buttonmap     = mac_buttonmap(NSEvent.pressedMouseButtons,
+                                               event.modifierFlags);
 
   if (sec_idx != 0) {
     // Bounded bubble: only the widgets strictly below the section get the
@@ -1643,7 +1686,15 @@ namespace xpl_host
       return;
     }
     NSWindow* win = native_window(native_handle);
-    [win setFrame:logical_window_rect(x, y, w, h) display:YES];
+    // (w, h) is the CLIENT area - the same contract create() uses (it passes
+    // this rect to initWithContentRect:) and the same one win32 maintains via
+    // AdjustWindowRectExForDpi. Sizing the OUTER frame to (w, h) instead let
+    // the title bar eat into the client, so a set_size(520, 300) produced a
+    // 520x268 client and every subsequent layout was short by the chrome.
+    // frameRectForContentRect: preserves the content rect's screen origin and
+    // grows the frame upward, so the position semantics match create() too.
+    NSRect content = logical_window_rect(x, y, w, h);
+    [win setFrame:[win frameRectForContentRect:content] display:YES];
   }
 
   void platform_post_close(void* native_handle)
