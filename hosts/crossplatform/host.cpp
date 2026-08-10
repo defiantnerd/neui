@@ -493,30 +493,42 @@ namespace xpl_host
     return false;
   }
 
+  bool Session::dispatch_menu_command(MenubarWidget& mb, uint32_t cmd_id)
+  {
+    auto it = mb.menu_cmd_map.find(cmd_id);
+    if (it == mb.menu_cmd_map.end()) return false;
+    uint32_t neui_id = it->second;
+
+    // If this item is bound to a built-in command, try the focused
+    // widget first. Only if no widget consumes it do we fall through
+    // to the client.
+    auto data_it = mb.menu_items.find(neui_id);
+    if (data_it != mb.menu_items.end()) {
+      uint32_t cmd = data_it->second.menu_cmd;
+      if (cmd != 0 && cmd < NEUI_CMD_USER_BASE) {
+        if (invoke_focused_command(cmd)) return true;
+      }
+    }
+
+    neui_event_t ev = {};
+    ev.type      = NEUI_EVENT_TREE_ITEM_ACTIVATED;
+    ev.data.tree = { { mb.widget_id }, { neui_id } };
+    dispatch_event(&ev);
+    // The command WAS routed, whether or not the client consumed the event -
+    // the caller uses this to decide "did this menu own the id", not "did
+    // anyone handle it".
+    return true;
+  }
+
   bool Session::dispatch_menu_event(uint32_t cmd_id)
   {
+    // _menubars holds menu BARS only (POPUPMENU is deliberately absent - see
+    // PopupMenuWidget), so a popup's ids can never be matched here by accident.
     for (uint32_t mb_idx : _menubars) {
       if (!_widgets.exists(mb_idx)) continue;
-      auto& mb = dynamic_cast<MenubarWidget&>(_widgets[mb_idx]);
-      auto it = mb.menu_cmd_map.find(cmd_id);
-      if (it == mb.menu_cmd_map.end()) continue;
-      uint32_t neui_id = it->second;
-
-      // If this item is bound to a built-in command, try the focused
-      // widget first. Only if no widget consumes it do we fall through
-      // to the client.
-      auto data_it = mb.menu_items.find(neui_id);
-      if (data_it != mb.menu_items.end()) {
-        uint32_t cmd = data_it->second.menu_cmd;
-        if (cmd != 0 && cmd < NEUI_CMD_USER_BASE) {
-          if (invoke_focused_command(cmd)) return true;
-        }
-      }
-
-      neui_event_t ev = {};
-      ev.type      = NEUI_EVENT_TREE_ITEM_ACTIVATED;
-      ev.data.tree = { { mb.widget_id }, { neui_id } };
-      return dispatch_event(&ev);
+      auto* mb = dynamic_cast<MenubarWidget*>(&_widgets[mb_idx]);
+      if (!mb) continue;
+      if (dispatch_menu_command(*mb, cmd_id)) return true;
     }
     return false;
   }
@@ -568,7 +580,7 @@ namespace xpl_host
     while (idx != 0) {
       if (widgets.exists(idx)) {
         auto& wd = widgets[idx];
-        if (!wd.native_handle && !wd.is_menubar() && wd.visible) {
+        if (!wd.native_handle && !wd.is_menu_model() && wd.visible) {
           if (wd.hit_test(x, y)) {
             // Disabled widgets are click-transparent: they don't claim
             // the hit, but children remain hit-testable. This matches
@@ -639,7 +651,7 @@ namespace xpl_host
     while (idx != 0) {
       if (widgets.exists(idx)) {
         auto& wd = widgets[idx];
-        if (!wd.native_handle && !wd.is_menubar() && wd.visible) {
+        if (!wd.native_handle && !wd.is_menu_model() && wd.visible) {
           if (wd.hit_test(x, y)) {
             if (wd.enabled && wd.drop_target &&
                 dnd_formats_match(wd.accepted_mimes, formats, formats_count)) {
@@ -2419,7 +2431,7 @@ namespace xpl_host
         auto& wd = widgets[idx];
         wd.abs_x = parent_abs_x + wd.x;
         wd.abs_y = parent_abs_y + wd.y;
-        if (!wd.native_handle && !wd.is_menubar() && wd.visible && wd.width > 0 && wd.height > 0) {
+        if (!wd.native_handle && !wd.is_menu_model() && wd.visible && wd.width > 0 && wd.height > 0) {
           // Fire WIDGET_PREUPDATE to opted-in widgets so the client can
           // refresh attribute-driven state (e.g. NEUI_PARAM_VALUE) before
           // we read it during paint.
@@ -2486,7 +2498,7 @@ namespace xpl_host
         // translated by (wd.x, wd.y) above and have not popped yet).
         // Used by CUSTOMDRAW + compound to paint z>=0 layers above the
         // child-widget pass; default implementation is a no-op.
-        if (!wd.native_handle && !wd.is_menubar() && wd.visible && wd.width > 0 && wd.height > 0) {
+        if (!wd.native_handle && !wd.is_menu_model() && wd.visible && wd.width > 0 && wd.height > 0) {
           wd.paint_after_children(backend, ctx, idx == focused_widget);
         }
         if (backend->pop_transform) backend->pop_transform(ctx);
@@ -2623,6 +2635,9 @@ namespace xpl_host
     paint_menubar(ctx, parent_index);
     // Popup-menu overlay sits on top of the combo overlay.
     paint_popup_menu(ctx);
+    // Standalone tree popup (widgets->popup_tree_menu) - above the menubar's own
+    // cascade, since it is the thing the user just opened.
+    paint_tree_popup(ctx, parent_index);
     // Toast overlay sits on top of every other overlay.
     paint_toast(ctx, parent_index);
 
@@ -2647,7 +2662,7 @@ namespace xpl_host
     while (idx != 0) {
       if (widgets.exists(idx)) {
         auto& wd = widgets[idx];
-        if (!wd.native_handle && !wd.is_menubar() && wd.visible && wd.tab_stop && wd.enabled)
+        if (!wd.native_handle && !wd.is_menu_model() && wd.visible && wd.tab_stop && wd.enabled)
           out.push_back(idx);
         collect_tab_stops(widgets, idx, out);
       }
@@ -4631,11 +4646,20 @@ namespace xpl_host
 
   // Build the chain of open dropdown columns from `path`, positioning each
   // below/beside its parent and clamping to the frame so cascades stay visible.
+  //
+  // Serves BOTH the in-frame menubar and the standalone tree popup
+  // (popup_tree_menu). The two differ in exactly one thing - where level 0 goes -
+  // so an empty `band` means "standalone popup: put level 0 at (root_x, root_y)"
+  // and a non-empty `band` means "menubar: put level 0 under its band item".
+  // Everything else (row sizing, arbitrary-depth cascade placement, right/bottom
+  // clamping, the submenu left-flip, the checkmark gutter, shortcut columns, and
+  // validate-driven enabling) is already origin-agnostic and shared verbatim.
   static void mb_build_columns(Session* s, neui_render_ctx_t ctx,
                                const MenubarWidget& mb, int frame_w, int frame_h,
                                const std::vector<MenuBandItem>& band,
                                const std::vector<uint32_t>& path,
-                               std::vector<MenuColL>& out)
+                               std::vector<MenuColL>& out,
+                               int root_x = 0, int root_y = 0)
   {
     for (size_t level = 0; level < path.size(); ++level) {
       uint32_t parent_id = path[level];
@@ -4687,10 +4711,16 @@ namespace xpl_host
       col.check_gutter = any_check;
 
       if (level == 0) {
-        int bx = 0;
-        for (auto& b : band) if (b.item_id == parent_id) { bx = b.x; break; }
-        col.x = bx;
-        col.y = MENUBAR_BAND_H;
+        if (band.empty()) {
+          // Standalone popup: level 0 opens AT the anchor point.
+          col.x = root_x;
+          col.y = root_y;
+        } else {
+          int bx = 0;
+          for (auto& b : band) if (b.item_id == parent_id) { bx = b.x; break; }
+          col.x = bx;
+          col.y = MENUBAR_BAND_H;
+        }
       } else {
         const MenuColL& prev = out[level - 1];
         int py = prev.y;
@@ -4780,6 +4810,74 @@ namespace xpl_host
       platform_invalidate(_widgets[frame].native_handle);
   }
 
+  // Paint an open cascade of dropdown columns. Shared verbatim by the in-frame
+  // menubar and by the standalone tree popup - the columns are already
+  // positioned by mb_build_columns, so nothing here knows or cares which one it
+  // is drawing.
+  static void paint_menu_columns(Session* s, neui_render_ctx_t ctx,
+                                 const std::vector<MenuColL>& cols,
+                                 const std::vector<uint32_t>& path,
+                                 uint32_t hover_item)
+  {
+    auto* _backend = s->_backend;
+    using neui_detail::ColorRole;
+    auto C = [](ColorRole r) { return neui_detail::color(r); };
+    for (auto& col : cols) {
+      _backend->fill_rect(ctx, (float)col.x, (float)col.y, (float)col.w, (float)col.h,
+                          C(ColorRole::control_bg_alt));
+      _backend->draw_rect(ctx, (float)col.x, (float)col.y, (float)col.w, (float)col.h, 1.0f,
+                          C(ColorRole::border));
+      for (auto& r : col.rows) {
+        float ry = (float)(col.y + r.y);
+        if (r.separator) {
+          _backend->fill_rect(ctx, (float)col.x + 4.0f, ry + (float)POPUP_SEP_H * 0.5f,
+                              (float)col.w - 8.0f, 1.0f, C(ColorRole::scrollbar_separator));
+          continue;
+        }
+        // Highlight the hovered row, or the row whose submenu is currently open.
+        bool open_sub = false;
+        for (uint32_t pid : path) if (pid == r.item_id) { open_sub = true; break; }
+        bool hl = (r.item_id == hover_item) || open_sub;
+        if (hl)
+          _backend->fill_rect(ctx, (float)col.x + 1.0f, ry, (float)col.w - 2.0f, (float)r.h,
+                              C(ColorRole::accent));
+        uint32_t tcol = !r.enabled ? C(ColorRole::text_disabled)
+                      : hl          ? C(ColorRole::accent_text)
+                                    : C(ColorRole::text_primary);
+        // When the column reserves a checkmark gutter, text is indented past it
+        // and a check glyph is drawn in the gutter for checked rows.
+        int gutter = col.check_gutter ? MENU_CHECK_W : 0;
+        if (r.checked) {
+          _backend->draw_text(ctx, (float)(col.x + POPUP_PAD_X), ry,
+                              (float)MENU_CHECK_W, (float)r.h,
+                              "\xE2\x9C\x93" /* U+2713 check mark */,
+                              (float)MENUBAR_FONT_PX, tcol);
+        }
+        _backend->draw_text(ctx, (float)(col.x + POPUP_PAD_X + gutter), ry,
+                            (float)(col.w - POPUP_PAD_X * 2 - gutter), (float)r.h,
+                            r.text.c_str(), (float)MENUBAR_FONT_PX, tcol);
+        if (!r.shortcut.empty()) {
+          int sw = menu_measure(_backend, ctx, r.shortcut);
+          int sx = col.x + col.w - POPUP_PAD_X - (r.submenu ? MENU_ARROW_W : 0) - sw;
+          uint32_t scol = !r.enabled ? C(ColorRole::text_disabled)
+                        : hl          ? C(ColorRole::accent_text)
+                                      : C(ColorRole::text_secondary);
+          _backend->draw_text(ctx, (float)sx, ry, (float)sw, (float)r.h,
+                              r.shortcut.c_str(), (float)MENUBAR_FONT_PX, scol);
+        }
+        if (r.submenu) {
+          uint32_t acol = !r.enabled ? C(ColorRole::text_disabled)
+                        : hl          ? C(ColorRole::accent_text)
+                                      : C(ColorRole::text_secondary);
+          _backend->draw_text(ctx, (float)(col.x + col.w - MENU_ARROW_W), ry,
+                              (float)MENU_ARROW_W, (float)r.h,
+                              "\xE2\x96\xB8" /* U+25B8 small right triangle */,
+                              (float)MENUBAR_FONT_PX, acol);
+        }
+      }
+    }
+  }
+
   void Session::paint_menubar(neui_render_ctx_t ctx, uint32_t frame_index)
   {
     if (!_backend) return;
@@ -4826,60 +4924,273 @@ namespace xpl_host
 
     std::vector<MenuColL> cols;
     mb_build_columns(this, ctx, mb, fw, fh, band, _menu_path, cols);
-    for (auto& col : cols) {
-      _backend->fill_rect(ctx, (float)col.x, (float)col.y, (float)col.w, (float)col.h,
-                          C(ColorRole::control_bg_alt));
-      _backend->draw_rect(ctx, (float)col.x, (float)col.y, (float)col.w, (float)col.h, 1.0f,
-                          C(ColorRole::border));
-      for (auto& r : col.rows) {
-        float ry = (float)(col.y + r.y);
-        if (r.separator) {
-          _backend->fill_rect(ctx, (float)col.x + 4.0f, ry + (float)POPUP_SEP_H * 0.5f,
-                              (float)col.w - 8.0f, 1.0f, C(ColorRole::scrollbar_separator));
-          continue;
-        }
-        // Highlight the hovered row, or the row whose submenu is currently open.
-        bool open_sub = false;
-        for (uint32_t pid : _menu_path) if (pid == r.item_id) { open_sub = true; break; }
-        bool hl = (r.item_id == _menu_hover_item) || open_sub;
-        if (hl)
-          _backend->fill_rect(ctx, (float)col.x + 1.0f, ry, (float)col.w - 2.0f, (float)r.h,
-                              C(ColorRole::accent));
-        uint32_t tcol = !r.enabled ? C(ColorRole::text_disabled)
-                      : hl          ? C(ColorRole::accent_text)
-                                    : C(ColorRole::text_primary);
-        // When the column reserves a checkmark gutter, text is indented past it
-        // and a check glyph is drawn in the gutter for checked rows.
-        int gutter = col.check_gutter ? MENU_CHECK_W : 0;
-        if (r.checked) {
-          _backend->draw_text(ctx, (float)(col.x + POPUP_PAD_X), ry,
-                              (float)MENU_CHECK_W, (float)r.h,
-                              "\xE2\x9C\x93" /* U+2713 check mark */,
-                              (float)MENUBAR_FONT_PX, tcol);
-        }
-        _backend->draw_text(ctx, (float)(col.x + POPUP_PAD_X + gutter), ry,
-                            (float)(col.w - POPUP_PAD_X * 2 - gutter), (float)r.h,
-                            r.text.c_str(), (float)MENUBAR_FONT_PX, tcol);
-        if (!r.shortcut.empty()) {
-          int sw = menu_measure(_backend, ctx, r.shortcut);
-          int sx = col.x + col.w - POPUP_PAD_X - (r.submenu ? MENU_ARROW_W : 0) - sw;
-          uint32_t scol = !r.enabled ? C(ColorRole::text_disabled)
-                        : hl          ? C(ColorRole::accent_text)
-                                      : C(ColorRole::text_secondary);
-          _backend->draw_text(ctx, (float)sx, ry, (float)sw, (float)r.h,
-                              r.shortcut.c_str(), (float)MENUBAR_FONT_PX, scol);
-        }
-        if (r.submenu) {
-          uint32_t acol = !r.enabled ? C(ColorRole::text_disabled)
-                        : hl          ? C(ColorRole::accent_text)
-                                      : C(ColorRole::text_secondary);
-          _backend->draw_text(ctx, (float)(col.x + col.w - MENU_ARROW_W), ry,
-                              (float)MENU_ARROW_W, (float)r.h,
-                              "\xE2\x96\xB8" /* U+25B8 small right triangle */,
-                              (float)MENUBAR_FONT_PX, acol);
-        }
+    paint_menu_columns(this, ctx, cols, _menu_path, _menu_hover_item);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Standalone tree popup (widgets->popup_tree_menu).
+  //
+  // Deliberately thin: every hard part - cascade layout, edge clamping, submenu
+  // flipping, checkmark gutters, shortcut columns, per-item enable via
+  // NEUI_API_MENU_CLIENT::validate, and painting - is the menubar's, reused
+  // unchanged. Only two things differ: level 0 opens at an anchor point instead
+  // of under a band item (a mb_build_columns parameter), and a pick reports as
+  // NEUI_EVENT_ITEM_SELECTED instead of driving a menu bar.
+  //
+  // Unlike the menubar cascade - which only ever runs where the host draws its
+  // own menu band (Linux) - this runs on ALL THREE platforms, so it owns its
+  // input plumbing rather than borrowing the menubar's: every platform layer
+  // routes press / move / release / Esc through the handlers below.
+
+  bool Session::show_tree_popup(uint32_t anchor_idx, int x, int y, uint32_t menu_idx)
+  {
+    if (!_widgets.exists(menu_idx)) return false;
+    auto* pm = dynamic_cast<PopupMenuWidget*>(&_widgets[menu_idx]);
+    if (!pm) return false;                       // not a POPUPMENU
+
+    // An empty menu must not open: a 1-row-high empty box that swallows the next
+    // click is worse than doing nothing.
+    std::vector<uint32_t> roots;
+    menu_children(*pm, 0, roots);
+    if (roots.empty()) return false;
+
+    // Resolve the anchor to frame-local logical px. The anchor's own frame owns
+    // the overlay, since that is the surface the popup paints on.
+    uint32_t frame_idx = anchor_idx;
+    while (frame_idx != 0 && _widgets.exists(frame_idx) &&
+           !_widgets[frame_idx].is_frame())
+      frame_idx = _widgets.get_parent(frame_idx);
+    if (frame_idx == 0 || !_widgets.exists(frame_idx)) return false;
+
+    int ax = x, ay = y;
+    if (anchor_idx != frame_idx && _widgets.exists(anchor_idx)) {
+      ax += _widgets[anchor_idx].abs_x;
+      ay += _widgets[anchor_idx].abs_y;
+    }
+
+    // Close whatever menu cascade is open first: only one at a time, matching
+    // the OS menus this mirrors. (Both share _menu_path / _menu_hover_item.)
+    close_menubar_menu();
+    close_tree_popup();
+
+    _tree_popup_active = true;
+    _tree_popup_menu   = menu_idx;
+    _tree_popup_frame  = frame_idx;
+    _tree_popup_x      = ax;
+    _tree_popup_y      = ay;
+    // Level 0's "parent" is the tree root, so the popup's rows are the items
+    // directly under tree_item_root - exactly what a client added there.
+    _menu_path         = { 0 };
+    _menu_hover_item   = 0;
+
+    if (void* native = _widgets[frame_idx].native_handle)
+      platform_invalidate(native);
+    return true;
+  }
+
+  void Session::close_tree_popup()
+  {
+    if (!_tree_popup_active) return;
+    uint32_t frame_idx = _tree_popup_frame;
+    _tree_popup_active = false;
+    _tree_popup_menu   = 0;
+    _tree_popup_frame  = 0;
+    _menu_path.clear();
+    _menu_hover_item   = 0;
+    if (frame_idx != 0 && _widgets.exists(frame_idx)) {
+      if (void* native = _widgets[frame_idx].native_handle)
+        platform_invalidate(native);
+    }
+  }
+
+  void Session::close_tree_popup_if_within(uint32_t subtree_root)
+  {
+    if (!_tree_popup_active || subtree_root == 0) return;
+    if (subtree_root == _tree_popup_menu || subtree_root == _tree_popup_frame) {
+      close_tree_popup();
+      return;
+    }
+    // Also catch an ancestor going away (destroying the frame takes the popup
+    // widget with it, and destroying a SECTION can take the menu widget).
+    for (uint32_t probe : { _tree_popup_menu, _tree_popup_frame }) {
+      if (probe == 0 || !_widgets.exists(probe)) continue;
+      for (uint32_t p : _widgets.get_all_parents(probe)) {
+        if (p == subtree_root) { close_tree_popup(); return; }
       }
     }
+  }
+
+  void Session::refresh_open_tree_popup(uint32_t menu_idx)
+  {
+    if (!_tree_popup_active || _tree_popup_menu != menu_idx) return;
+    if (!_widgets.exists(_tree_popup_frame)) return;
+    if (void* native = _widgets[_tree_popup_frame].native_handle)
+      platform_invalidate(native);
+  }
+
+  bool Session::tree_popup_take_release()
+  {
+    if (!_tree_popup_swallow_release) return false;
+    _tree_popup_swallow_release = false;
+    return true;
+  }
+
+  // Build the open cascade for the active popup. Returns false when there is
+  // nothing to show, so paint / hit-test share one guard.
+  static bool tp_build(Session* s, neui_render_ctx_t ctx, uint32_t frame_index,
+                       std::vector<MenuColL>& cols)
+  {
+    if (!s->_tree_popup_active || frame_index != s->_tree_popup_frame) return false;
+    if (!s->_widgets.exists(s->_tree_popup_menu)) return false;
+    auto* pm = dynamic_cast<PopupMenuWidget*>(&s->_widgets[s->_tree_popup_menu]);
+    if (!pm) return false;
+    const auto& fw = s->_widgets[frame_index];
+    // Empty band == standalone popup: mb_build_columns then puts level 0 at
+    // (root_x, root_y) rather than under a band item.
+    static const std::vector<MenuBandItem> kNoBand;
+    mb_build_columns(s, ctx, *pm, fw.width, fw.height, kNoBand, s->_menu_path,
+                     cols, s->_tree_popup_x, s->_tree_popup_y);
+    return !cols.empty();
+  }
+
+  void Session::paint_tree_popup(neui_render_ctx_t ctx, uint32_t frame_index)
+  {
+    if (!_backend) return;
+    std::vector<MenuColL> cols;
+    if (!tp_build(this, ctx, frame_index, cols)) return;
+    paint_menu_columns(this, ctx, cols, _menu_path, _menu_hover_item);
+  }
+
+  // Shared front half of the click / hover handlers: decides whether this input
+  // belongs to the popup at all, and self-heals the two states that would
+  // otherwise leave an invisible modal grab swallowing input forever.
+  //
+  // Returns 0 = not ours (caller returns false and the input proceeds normally),
+  // 1 = ours, `cols` is built.
+  static int tp_claim(Session* s, uint32_t frame_index, std::vector<MenuColL>& cols)
+  {
+    if (!s->_tree_popup_active || !s->_backend) return 0;
+    // Input on a DIFFERENT frame: the popup loses its grab, exactly like an OS
+    // menu when another window is clicked. Dismiss, but do NOT consume - the
+    // click belongs to that other frame.
+    if (frame_index != s->_tree_popup_frame) { s->close_tree_popup(); return 0; }
+    if (!s->_widgets.exists(frame_index))    { s->close_tree_popup(); return 0; }
+    if (!tp_build(s, s->_widgets[frame_index].render_ctx, frame_index, cols)) {
+      // The menu widget is gone or has become empty while open. Without this the
+      // popup would stay "active" with nothing to hit, and every subsequent
+      // click in the frame would be swallowed for the rest of its life.
+      s->close_tree_popup();
+      return 0;
+    }
+    return 1;
+  }
+
+  bool Session::handle_tree_popup_click(uint32_t frame_index, float lx, float ly)
+  {
+    std::vector<MenuColL> cols;
+    if (!tp_claim(this, frame_index, cols)) return false;
+
+    // Any click the popup consumes also owns the matching release, so the widget
+    // under the dismissed popup can't see an UP (and synthesise a CLICK).
+    _tree_popup_swallow_release = true;
+
+    for (size_t level = 0; level < cols.size(); ++level) {
+      const MenuColL& col = cols[level];
+      if (lx < col.x || lx >= col.x + col.w || ly < col.y || ly >= col.y + col.h)
+        continue;
+      for (const auto& r : col.rows) {
+        float ry = (float)(col.y + r.y);
+        if (ly < ry || ly >= ry + (float)r.h) continue;
+        if (r.separator || !r.enabled) return true;   // consumed, no action
+        if (r.submenu) {
+          // Open the submenu: truncate the path to this level and descend.
+          _menu_path.resize(level + 1);
+          _menu_path.push_back(r.item_id);
+          _menu_hover_item = r.item_id;
+          if (void* native = _widgets[frame_index].native_handle)
+            platform_invalidate(native);
+          return true;
+        }
+        // A leaf: report it, then close. The item id is captured BEFORE closing
+        // because close_tree_popup clears the state the id came from.
+        const uint32_t menu_idx = _tree_popup_menu;
+        const uint32_t item_id  = r.item_id;
+        uint32_t menu_cmd = 0;
+        if (_widgets.exists(menu_idx)) {
+          if (auto* pm = dynamic_cast<PopupMenuWidget*>(&_widgets[menu_idx])) {
+            auto it = pm->menu_items.find(item_id);
+            if (it != pm->menu_items.end()) menu_cmd = it->second.menu_cmd;
+          }
+        }
+        close_tree_popup();
+
+        // Built-in command routing first (set_menu_cmd with NEUI_CMD_COPY and
+        // friends): offer it to the focused widget, exactly as the menu bar does.
+        //
+        // Deliberately NOT dispatch_menu_event / dispatch_menu_command: cmd ids
+        // restart at 0x8000 per menu widget, so the _menubars scan would hand a
+        // popup's pick to whichever menu BAR happens to hold the same id. And
+        // going through dispatch_menu_command even with the right widget would
+        // fire TREE_ITEM_ACTIVATED for EVERY row (every leaf carries a cmd_id,
+        // bound or not), making ITEM_SELECTED a redundant second event per pick.
+        // One pick, one client-facing event.
+        if (menu_cmd != 0 && menu_cmd < NEUI_CMD_USER_BASE)
+          invoke_focused_command(menu_cmd);
+        if (_widgets.exists(menu_idx)) {
+          neui_event_t ev = {};
+          ev.type              = NEUI_EVENT_ITEM_SELECTED;
+          ev.data.item.widget  = { _widgets[menu_idx].widget_id };
+          ev.data.item.index   = item_id;
+          dispatch_event(&ev);
+        }
+        return true;
+      }
+      return true;   // inside the column but between rows: swallow
+    }
+
+    // Outside every column: dismiss without picking. The click is consumed, as
+    // it is on both native platforms - dismissing a menu does not also actuate
+    // whatever was under the pointer.
+    close_tree_popup();
+    return true;
+  }
+
+  bool Session::handle_tree_popup_hover(uint32_t frame_index, float lx, float ly)
+  {
+    std::vector<MenuColL> cols;
+    if (!tp_claim(this, frame_index, cols)) return false;
+
+    for (size_t level = 0; level < cols.size(); ++level) {
+      const MenuColL& col = cols[level];
+      if (lx < col.x || lx >= col.x + col.w || ly < col.y || ly >= col.y + col.h)
+        continue;
+      for (const auto& r : col.rows) {
+        float ry = (float)(col.y + r.y);
+        if (ly < ry || ly >= ry + (float)r.h) continue;
+        if (r.separator) return true;
+        // Hover-to-open submenus, and hover-to-collapse a deeper cascade, which
+        // is what makes a cascading menu feel native.
+        std::vector<uint32_t> want(_menu_path.begin(),
+                                   _menu_path.begin() + (long)level + 1);
+        if (r.submenu && r.enabled) want.push_back(r.item_id);
+        if (want != _menu_path || _menu_hover_item != r.item_id) {
+          _menu_path       = want;
+          _menu_hover_item = r.item_id;
+          if (void* native = _widgets[frame_index].native_handle)
+            platform_invalidate(native);
+        }
+        return true;
+      }
+      return true;
+    }
+    return true;   // still inside the popup's modal-ish grab: swallow hover
+  }
+
+  bool Session::handle_tree_popup_key(uint32_t keycode)
+  {
+    if (!_tree_popup_active) return false;
+    if (keycode == NEUI_KEY_ESCAPE) { close_tree_popup(); return true; }
+    return false;
   }
 
   // Find the index of the visible menubar child of `frame_index` (0 if none).

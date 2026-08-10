@@ -4816,6 +4816,13 @@ namespace win32_host
     get_enabled,
     get_client_rect_api,
     create_from_component,
+    // popup_tree_menu: not implemented on the native win32 host. Would need
+    // TrackPopupMenuEx on an HMENU built from the POPUPMENU's item model
+    // (which this host does not keep - its menus live in HMENUs directly).
+    // Explicit nullptr so this reads as a decision, not a missed initializer;
+    // clients null-check appended slots per <neui/d/widgets.h>. Use the xpl
+    // host (neui.host.crossplatform) for a tree-model context menu.
+    nullptr,
   };
 
   // -------------------------------------------------------------------------

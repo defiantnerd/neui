@@ -611,6 +611,77 @@ Original plan text for 4.1 follows.
     `CGWarpMouseCursorPosition` on macOS, `XWarpPointer` on Linux. Needed for
     good knob feel; design it as begin/end bracketing so it pairs with the
     existing gesture events.
+The original plan text is the bullet that follows this status block.
+
+**4.2 status: DONE on the second attempt.** `NEUI_W_POPUPMENU` +
+`widgets->popup_tree_menu(session, anchor, x, y, menu)`, exactly the shape the plan
+asked for: the menu is a MENUBAR-shaped tree the client fills with `tree->add` /
+`set_shortcut` / `set_checked` / `set_menu_cmd`, dispatched **async by item id** via
+`NEUI_EVENT_ITEM_SELECTED` on the menu widget, with `NEUI_API_MENU_CLIENT::validate`
+applying unchanged. The flat `popup_menu` is untouched. Section headers are a disabled
+item, as planned. Custom components in menus remain out of scope.
+
+Almost entirely reuse, and the reuse point was one branch: `mb_build_columns` already
+handled row sizing, arbitrary-depth cascade placement, edge clamping, the submenu
+left-flip, checkmark gutters, shortcut columns and validate-driven enabling - all
+origin-agnostic - so an empty `band` now means "standalone popup: level 0 at
+`(root_x, root_y)`", and the column painter came out of `paint_menubar` as
+`paint_menu_columns`, shared verbatim.
+
+**The first attempt was reverted (`98c7bf4`), and the reason is the lesson.** It made
+`PopupMenuWidget : MenubarWidget` without overriding `is_menubar()`. The rationale for
+a separate widget TYPE - "a popup must never be mistaken for the frame's menu bar" -
+was written into three files and **implemented in none**: every one of the ~15
+`is_menubar()` call sites, none of which the diff touched, still said yes. So a
+POPUPMENU child of a frame replaced the app's real menu bar on `show()`, its root rows
+silently ignored `set_menu_cmd` / `set_checked` / `"-"`, and a pick routed through
+`dispatch_menu_event`'s `_menubars` scan to whichever menu bar held the same
+(per-widget, restarting at `0x8000`) cmd id. Seven confirmed findings. The generalisable
+part: **when a design's whole justification is a distinction, the distinction has to be
+a code change, not a comment** - and a predicate that already has many call sites is
+never a safe thing to inherit silently.
+
+The redo splits it into three predicates, which is what the feature actually needed:
+`is_menubar()` = "IS the frame's menu bar" (MENUBAR only - gates the native menu,
+`SetMenu` / `setMainMenu:`, the Linux band, `frame_menubar_index`, `_menubars`);
+`is_menu_model()` = "stores the MenubarWidget item model" (both - gates the tree API's
+`dynamic_cast` and the layout / paint / hit-test / tab walks); and
+`uses_native_menu()` = "owns an HMENU / NSMenu the `platform_menubar_*` seam mutates"
+(MENUBAR only). A popup therefore keeps the item model and owns no native menu at all.
+
+Two behaviours changed from the first attempt on their own merits, not just to fix
+findings. A popup pick now fires **one** `ITEM_SELECTED` and no `TREE_ITEM_ACTIVATED`:
+routing through `dispatch_menu_command` would have fired the menubar's pick event for
+*every* row, since every leaf carries a cmd_id whether bound or not, making
+`ITEM_SELECTED` a redundant second event. Built-in commands (`< NEUI_CMD_USER_BASE`)
+still reach the focused widget via `invoke_focused_command`, so a "Copy" row works with
+no client code; USER-range bindings do nothing and the header says so. And a popup's
+per-item shortcut is documented as a **label**, because the widget is deliberately
+absent from `_menubars` and nothing can translate it.
+
+Verification: `tests/popup_tree_smoke_macos.mm`, 39 checks driving real
+`-mouseDown:`/`-mouseUp:` pairs, aimed at the seams rather than the happy path -
+`[NSApp mainMenu]` still holding the app's own titles, a per-pixel map of the column
+proving the separator is short and unpickable (the earlier harness added a separator
+and never clicked it, which is precisely why that bug shipped), a `NEUI_CMD_PASTE` row
+verified end-to-end through the clipboard, and no DOWN/UP/CLICK/DBLCLICK leaking to a
+BUTTON deliberately placed under the menu. **Every** check negative-probed: reinstating
+`is_menubar() → true` fails 2, `uses_native_menu() → true` fails 5, routing by cmd_id
+fails 3, dropping the release swallow fails 2, moving the dblclick branch back ahead of
+the popup fails 2, and dropping the empty-menu guard fails 2. The stuck-grab check needs
+**all three** teardown guards removed before it fails - recorded in the harness as
+defence-in-depth rather than left implying any one is load-bearing.
+
+Honest limitation: **only macOS is verified at runtime.** win32 and Linux are wired at
+the same call sites as the existing `_popup_active` overlay (press / move / release /
+Esc, plus the release swallow), and Linux additionally has no native host to fall back
+on - but neither can be compiled here, so that is plumbing-by-inspection, not a tested
+claim.
+
+Still open: `popup_tree_menu` is an explicit `nullptr` on the native win32 / macOS / iOS
+hosts (each with a comment naming what it would need - `TrackPopupMenuEx` /
+`popUpMenuPositioningItem` / `UIMenu`).
+
 - **4.2 — rich popups (his #8).** Reuse the tree model rather than inventing a
   second one: build the popup as a `MENUBAR`-shaped tree (a widget the client
   populates with `tree->add` / `set_shortcut` / `set_checked` / `set_menu_cmd`),
@@ -621,6 +692,7 @@ Original plan text for 4.1 follows.
   item kind. **Custom components in menus: explicitly out of scope** — agree
   with his own suggestion that a type-in overlay drawn on the surface is the
   better answer.
+
 - **4.3 — file dialog (his #10).** Append `open_file` / `save_file` to
   `NEUI_API_NOTIFY` alongside `message_box`: filter list, initial dir/name,
   multi-select flag, returns paths. `IFileDialog` on win32, `NSOpenPanel` /

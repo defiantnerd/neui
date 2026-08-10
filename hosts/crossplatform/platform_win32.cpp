@@ -800,6 +800,12 @@ namespace xpl_host
       float lx = phys_to_log(mouse_x(lParam), *fwd);
       float ly = phys_to_log(mouse_y(lParam), *fwd);
 
+      // Standalone tree popup (widgets->popup_tree_menu) owns hover while open:
+      // that is what drives cascade open/collapse and row highlighting.
+      if (wud->session->_tree_popup_active &&
+          wud->session->handle_tree_popup_hover(wud->widget_index, lx, ly))
+        return 0;
+
       // Popup-menu overlay (right-click context menu) takes priority over
       // everything else. While active it absorbs all hover updates inside
       // its rect and falls through to normal hover only when outside.
@@ -871,6 +877,13 @@ namespace xpl_host
       float lx = phys_to_log(mouse_x(lParam), *fwd);
       float ly = phys_to_log(mouse_y(lParam), *fwd);
 
+      // Standalone tree popup: picks / descends / dismisses. Not consumed only
+      // when the popup belongs to another frame (it dismisses and the click
+      // proceeds here).
+      if (wud->session->_tree_popup_active &&
+          wud->session->handle_tree_popup_click(wud->widget_index, lx, ly))
+        return 0;
+
       // Popup menu overlay absorbs the click - picks an item or dismisses.
       // The nested message pump in open_popup_menu will see _popup_running
       // flip to false and return.
@@ -926,6 +939,12 @@ namespace xpl_host
       float lx = phys_to_log(mouse_x(lParam), *fwd);
       float ly = phys_to_log(mouse_y(lParam), *fwd);
 
+      // A double-click inside an open tree popup must pick the row it lands on,
+      // not bypass the menu and DBLCLICK the widget underneath.
+      if (wud->session->_tree_popup_active &&
+          wud->session->handle_tree_popup_click(wud->widget_index, lx, ly))
+        return 0;
+
       uint32_t hit = wud->session->widget_at(lx, ly, wud->widget_index);
 
       // The OS replaces the second press of a rapid pair with DBLCLK (the
@@ -958,6 +977,14 @@ namespace xpl_host
       if (!wud) break;
       auto* fwd = wud->session->get_widget(wud->widget_index);
       if (!fwd) break;
+
+      // Swallow the release that pairs with a press the tree popup consumed -
+      // otherwise the widget under the just-dismissed menu sees an UP with no
+      // DOWN and synthesises a CLICK.
+      if (wud->session->tree_popup_take_release()) {
+        ReleaseCapture();
+        return 0;
+      }
 
       // End a combo overlay scrollbar drag if one was active.
       if (wud->session->_combo_sb_dragging) {
@@ -1004,6 +1031,11 @@ namespace xpl_host
       if (!fwd) break;
       float lx = phys_to_log(mouse_x(lParam), *fwd);
       float ly = phys_to_log(mouse_y(lParam), *fwd);
+      // A right-click while a tree popup is open dismisses / re-targets it
+      // rather than stacking a second menu on top.
+      if (wud->session->_tree_popup_active &&
+          wud->session->handle_tree_popup_click(wud->widget_index, lx, ly))
+        return 0;
       // If a popup is up, a right-click outside dismisses it.
       if (wud->session->_popup_active) {
         wud->session->handle_popup_click(lx, ly);
@@ -1028,6 +1060,7 @@ namespace xpl_host
       if (!wud) break;
       auto* fwd = wud->session->get_widget(wud->widget_index);
       if (!fwd) break;
+      if (wud->session->tree_popup_take_release()) return 0;
       float lx = phys_to_log(mouse_x(lParam), *fwd);
       float ly = phys_to_log(mouse_y(lParam), *fwd);
       uint32_t hit = wud->session->widget_at(lx, ly, wud->widget_index);
@@ -1258,6 +1291,9 @@ namespace xpl_host
     case WM_KEYDOWN: {
       auto* wud = get_wud(hwnd);
       if (!wud) break;
+      // Esc dismisses an open tree popup.
+      if (wud->session->handle_tree_popup_key(static_cast<uint32_t>(wParam)))
+        return 0;
       // Popup menu absorbs Esc / Enter / Space / arrow keys.
       if (wud->session->_popup_active &&
           wud->session->handle_popup_key(static_cast<uint32_t>(wParam))) {

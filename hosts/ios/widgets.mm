@@ -624,6 +624,11 @@ namespace ios_host
     w_get_enabled,
     w_get_client_rect,
     w_create_from_component,
+    // popup_tree_menu: not implemented on the native iOS host. Would need a
+    // UIMenu / UIContextMenuInteraction built from the POPUPMENU's item model.
+    // Explicit nullptr so this reads as a decision, not a missed initializer;
+    // clients null-check appended slots per <neui/d/widgets.h>.
+    nullptr,
   };
 
   // -------------------------------------------------------------------------

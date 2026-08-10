@@ -826,6 +826,12 @@ namespace macos_host
     w_get_enabled,
     w_get_client_rect,
     w_create_from_component,
+    // popup_tree_menu: not implemented on the native macOS host. Would need
+    // -[NSMenu popUpMenuPositioningItem:atLocation:inView:] over an NSMenu
+    // built from the POPUPMENU's item model. Explicit nullptr so this reads as
+    // a decision, not a missed initializer; clients null-check appended slots
+    // per <neui/d/widgets.h>. Use the xpl host for a tree-model context menu.
+    nullptr,
   };
 
   // -------------------------------------------------------------------------

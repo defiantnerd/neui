@@ -667,6 +667,11 @@ namespace
 
     if (be.button == 1) {
       // Overlay pre-checks (mirror macOS mouseDown: order).
+      // Standalone tree popup first, and BEFORE the double-click detection
+      // below, so a double-click inside an open menu picks the row it lands on
+      // instead of bypassing the menu entirely.
+      if (s->_tree_popup_active && s->handle_tree_popup_click(lw->widget_index, lx, ly))
+        return;   // release swallowed via Session::tree_popup_take_release below
       if (s->_popup_active) { s->handle_popup_click(lx, ly); return; }
       if (s->handle_toast_click(lw->widget_index, lx, ly)) return;
       if (s->handle_combo_click(lx, ly)) return;
@@ -718,6 +723,9 @@ namespace
     }
 
     if (be.button == 3) {
+      // A right-click while a tree popup is open dismisses / re-targets it.
+      if (s->_tree_popup_active && s->handle_tree_popup_click(lw->widget_index, lx, ly))
+        return;   // release swallowed via Session::tree_popup_take_release below
       if (s->_popup_active) { s->handle_popup_click(lx, ly); return; }
       if (s->_menu_open) { s->close_menubar_menu(); return; }
       uint32_t hit = s->widget_at(lx, ly, lw->widget_index);
@@ -733,6 +741,9 @@ namespace
     float lx = static_cast<float>(be.x) / scale, ly = static_cast<float>(be.y) / scale;
 
     if (be.button == 1) {
+      // A press the tree popup consumed owns its release too, or the widget
+      // under the dismissed menu sees an UP with no DOWN (and a CLICK).
+      if (s->tree_popup_take_release()) return;
       if (lw->swallow_release) { lw->swallow_release = false; return; }
       if (s->_combo_sb_dragging) { s->_combo_sb_dragging = false; return; }
       uint32_t hit     = s->widget_at(lx, ly, lw->widget_index);
@@ -754,6 +765,7 @@ namespace
       return;
     }
     if (be.button == 3) {
+      if (s->tree_popup_take_release()) return;
       uint32_t hit = s->widget_at(lx, ly, lw->widget_index);
       if (hit == 0) return;
       auto* hw = s->get_widget(hit);
@@ -781,6 +793,8 @@ namespace
     // Button1Mask and drag-driven widgets (SLIDER / KNOB) see it as a hover and
     // end the drag. Harmless on the core path (the bit is already set there).
     if (s->_pressed_widget != 0) state |= Button1Mask;
+    if (s->_tree_popup_active && s->handle_tree_popup_hover(lw->widget_index, lx, ly))
+      return;
     if (s->_popup_active) { s->handle_popup_hover(lx, ly); return; }
     if (s->_menu_open) {
       if (s->handle_menubar_hover(lw->widget_index, lx, ly)) return;
@@ -866,6 +880,9 @@ namespace
 
     uint32_t mods    = neui_detail::x11_modifiers_to_neui(ke.state);
     uint32_t keycode = neui_detail::x11_keysym_to_neui(ks);
+
+    // Esc dismisses an open tree popup, before anything else claims the key.
+    if (s->handle_tree_popup_key(keycode)) return;
 
     // Tab cycles logical focus (hand-rolled traversal, like win32/macOS).
     if (keycode == NEUI_KEY_TAB) {

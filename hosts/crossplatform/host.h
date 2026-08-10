@@ -185,7 +185,21 @@ namespace xpl_host
 
     // Type classification - avoids strcmp in hot paths.
     virtual bool is_frame()   const { return false; }
+    // "This widget IS its containing frame's menu bar." True for NEUI_W_MENUBAR
+    // ONLY. Everything that makes a widget a menu BAR keys off this: the native
+    // HMENU / NSMenu created at widget_create, SetMenu / [NSApp setMainMenu:] at
+    // widget_show, the reserved in-frame band on Linux, frame_menubar_index, and
+    // registration in Session::_menubars (accelerator translation).
     virtual bool is_menubar() const { return false; }
+    // "This widget stores the MenubarWidget menu-item model." True for both
+    // NEUI_W_MENUBAR and NEUI_W_POPUPMENU. The distinction matters: the tree API
+    // (add / remove / clear / set_shortcut / set_checked / set_menu_cmd /
+    // set_enabled) dynamic_cast<MenubarWidget&> on the strength of this
+    // predicate, and the layout / paint / hit-test / tab walks must skip both -
+    // but only a real menu bar may be attached to a frame as its menu.
+    // Splitting these two is not cosmetic: a POPUPMENU that answers yes to
+    // is_menubar() replaces the frame's actual menu bar on show().
+    virtual bool is_menu_model() const { return false; }
     // Editable text surfaces (INPUTBOX / MULTILINE). Lets the platform layer
     // target X11 middle-click PRIMARY paste at the right widget. insert_text
     // inserts UTF-8 at the caret (replacing any selection); returns true if it
@@ -788,8 +802,46 @@ namespace xpl_host
     // Owned accelerator table (HACCEL on Win32, void* opaque elsewhere).
     void*                                      native_accel = nullptr;
 
-    bool is_menubar() const override { return true; }
+    bool is_menubar()    const override { return true; }
+    bool is_menu_model() const override { return true; }
+    // "This widget owns a native HMENU / NSMenu that the platform_menubar_*
+    // seam manipulates." A real menu bar does; a POPUPMENU does not - the xpl
+    // host paints its cascade itself, and every platform_menubar_* call on a
+    // popup would either mutate a menu the user can see (macOS / win32 attach
+    // theirs to the app) or be a no-op (Linux). Gating on this keeps the SHARED
+    // part - the item model - and drops the native part.
+    virtual bool uses_native_menu() const { return true; }
     void on_destroy(Session* s) override;
+  };
+
+  // NEUI_W_POPUPMENU - the model behind widgets->popup_tree_menu.
+  //
+  // Reuses MenubarWidget's ITEM MODEL wholesale: same menu_items map, same
+  // tree->add / set_shortcut / set_checked / set_menu_cmd handling, same cascade
+  // layout and painting (mb_build_columns / paint_menu_columns are already
+  // origin-agnostic). What it deliberately does NOT reuse is menu-BAR-ness:
+  //
+  //   is_menubar()       false - so widget_create does not build a native menu,
+  //                              widget_show does not attach it to the frame
+  //                              (that would replace the app's real menu bar),
+  //                              frame_menubar_index skips it, and it never
+  //                              lands in Session::_menubars.
+  //   uses_native_menu() false - so tree->add / remove / clear touch the item
+  //                              model only, never platform_menubar_*.
+  //
+  // Consequences worth knowing: a popup's per-item shortcuts are LABELS, not
+  // accelerators (nothing translates them - bind the real accelerator on the
+  // menu bar), and a pick reports as a single NEUI_EVENT_ITEM_SELECTED rather
+  // than going through dispatch_menu_event, whose _menubars scan would match a
+  // menu bar holding the same (per-widget) cmd id.
+  //
+  // Has no on-screen presence of its own: no events, never painted except while
+  // Session::_tree_popup_active names it.
+  class PopupMenuWidget : public MenubarWidget {
+  public:
+    PopupMenuWidget() { emit_events = false; }
+    bool is_menubar()       const override { return false; }
+    bool uses_native_menu() const override { return false; }
   };
 
   // -------------------------------------------------------------------------
@@ -874,7 +926,14 @@ namespace xpl_host
   public:
 
     // Route a menu command (Win32 WM_COMMAND) to NEUI_EVENT_TREE_ITEM_ACTIVATED.
+    // Searches every registered menu BAR for the cmd_id - which is why it must
+    // not be used for a POPUPMENU pick: next_menu_cmd_id restarts at 0x8000 per
+    // widget, so ids collide across menus and the first bar holding a matching
+    // id wins. A popup calls dispatch_menu_command directly with its own widget.
     bool dispatch_menu_event(uint32_t cmd_id);
+    // Route `cmd_id` within ONE menu-model widget. Returns false if that widget
+    // has no such command.
+    bool dispatch_menu_command(MenubarWidget& mb, uint32_t cmd_id);
 
     // Walk up the widget tree from widget_index and return the first
     // ancestor's native_handle (the frame HWND). Returns nullptr if none.
@@ -946,6 +1005,40 @@ namespace xpl_host
     // there's no scrolling ancestor or the widget is already visible.
     // Called from set_focus and the public NEUI_API_SCROLL::ensure_visible.
     void ensure_widget_visible(uint32_t widget_idx);
+
+    // ---- Standalone tree popup (widgets->popup_tree_menu) -------------------
+    // Show `menu_idx` (a NEUI_W_POPUPMENU) anchored at `anchor_idx` + (x, y) in
+    // the anchor's local logical px. Returns false for a bad / non-POPUPMENU
+    // widget or an empty menu. Asynchronous: the pick arrives later as
+    // NEUI_EVENT_ITEM_SELECTED on the menu widget.
+    bool show_tree_popup(uint32_t anchor_idx, int x, int y, uint32_t menu_idx);
+    void close_tree_popup();
+    // Close the popup if the widget being destroyed is the popup itself, its
+    // frame, or an ancestor of either. Called from widget_destroy BEFORE the
+    // subtree goes away, so _tree_popup_active can never name a dead widget -
+    // which would otherwise leave an invisible modal grab swallowing every
+    // click for the rest of the frame's life.
+    void close_tree_popup_if_within(uint32_t subtree_root);
+    // Repaint the frame hosting an open tree popup, if `menu_idx` is that popup.
+    // Item-model mutations (text / enabled / checked / shortcut) change what the
+    // open cascade should look like - and its column widths - so only a repaint
+    // makes them visible. A no-op unless that exact popup is on screen.
+    void refresh_open_tree_popup(uint32_t menu_idx);
+    void paint_tree_popup(neui_render_ctx_t ctx, uint32_t frame_index);
+    // Return true only when the popup actually consumed the input. A click on a
+    // DIFFERENT frame dismisses the popup and returns false, so the click still
+    // reaches that frame - a menu losing its grab does not eat the click that
+    // took it away.
+    bool handle_tree_popup_click(uint32_t frame_index, float lx, float ly);
+    bool handle_tree_popup_hover(uint32_t frame_index, float lx, float ly);
+    // Esc dismisses. Returns true if the key was consumed.
+    bool handle_tree_popup_key(uint32_t keycode);
+    // A press consumed by the popup arms this; the platform layer's button-UP
+    // path calls it to swallow the matching release exactly once, so the widget
+    // under the dismissed popup does not also see an UP (and synthesise a
+    // CLICK). Mirrors LinuxWindow::swallow_release, but lives on the Session
+    // because the popup works on all three platforms.
+    bool tree_popup_take_release();
 
     // Update the hovered widget, firing mouse enter/leave events.
     void set_hovered(uint32_t new_idx);
@@ -1220,6 +1313,20 @@ namespace xpl_host
     // feedback before opening; 0 = none). When a menu is open, highlighting
     // uses _menu_path / _menu_hover_item instead.
     uint32_t              _menu_band_hover  = 0;
+
+    // Standalone tree popup (widgets->popup_tree_menu). Borrows _menu_path /
+    // _menu_hover_item for the open cascade, so exactly one menu cascade can be
+    // open at a time - which is also true of the OS menus this mirrors.
+    // _tree_popup_x/_y are the anchor in FRAME-local logical px. The three
+    // platform layers test _tree_popup_active in their mouse paths, exactly as
+    // they already do for _popup_active / _menu_open.
+    bool                  _tree_popup_active = false;
+    uint32_t              _tree_popup_menu   = 0;   // POPUPMENU widget index
+    uint32_t              _tree_popup_frame  = 0;
+    int                   _tree_popup_x      = 0;
+    int                   _tree_popup_y      = 0;
+    // Set when a press was consumed by the popup; see tree_popup_take_release.
+    bool                  _tree_popup_swallow_release = false;
 
     // Overlay scrollbar drag state (managed by handle_combo_click / handle_combo_scroll_drag).
     bool     _combo_sb_dragging       = false;

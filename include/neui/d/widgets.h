@@ -150,6 +150,62 @@ typedef struct neui_widget_api {
   neui_widget_t      (NEUI_ABI *create_from_component)(neui_session_t session, neui_widget_t parent,
                                                        neui_asset_t component,
                                                        int x, int y, int width, int height);
+  // Show a NEUI_W_POPUPMENU as a context menu anchored to a widget. Everything a
+  // real context menu needs - submenus to arbitrary depth, per-item
+  // enable/disable, checkmarks, shortcut LABELS, built-in command routing via
+  // tree->set_menu_cmd, and NEUI_API_MENU_CLIENT::validate - is reachable,
+  // because the menu is described with the same NEUI_API_TREE calls that build a
+  // NEUI_W_MENUBAR. popup_menu's flat `const char* const*` can express none of
+  // that; this is the rich alternative, not a replacement (popup_menu still
+  // works everywhere and is unchanged).
+  //
+  // (x, y) are in the anchor's local logical coordinates, like popup_menu.
+  //
+  // ASYNCHRONOUS, unlike popup_menu, which blocks and returns the pick. This
+  // call returns true as soon as the menu is on screen; the pick arrives later
+  // as NEUI_EVENT_ITEM_SELECTED on the MENU widget, with .index carrying the
+  // neui_item_t id that tree->add returned. Returns false without showing
+  // anything for a non-POPUPMENU widget, a cross-session handle, an anchor with
+  // no frame, or an EMPTY menu (an empty box that swallows the next click is
+  // worse than doing nothing). Dismissal without a pick reports nothing at all.
+  // A blocking variant would need a nested pump, which suppresses
+  // NEUI_EVENT_TIMER for its duration and re-enters the client from inside its
+  // own event handler.
+  //
+  // Exactly ONE ITEM_SELECTED per pick, and no NEUI_EVENT_TREE_ITEM_ACTIVATED
+  // (which is the MENUBAR's pick event) - so a popup pick is never ambiguous
+  // with a menu-bar pick.
+  //
+  // A row bound with tree->set_menu_cmd to a BUILT-IN command (< NEUI_CMD_USER_BASE,
+  // e.g. NEUI_CMD_COPY) is offered to the focused widget first, exactly as the
+  // menu bar does, so a "Copy" row on a context menu just works with no client
+  // code. ITEM_SELECTED still fires afterwards either way. Binding a command in
+  // the USER range has no effect here - handle those from ITEM_SELECTED, which
+  // carries the item id you bound.
+  //
+  //   neui_widget_t m = widgets->create(sess, frame, NEUI_W_POPUPMENU, 0,0,0,0, NULL);
+  //   neui_item_t cut  = tree->add(sess, m, tree_item_root, "Cut",  NULL);
+  //   tree->set_menu_cmd(sess, m, cut, NEUI_CMD_CUT);
+  //   tree->add(sess, m, tree_item_root, "-", NULL);          /* separator */
+  //   neui_item_t more = tree->add(sess, m, tree_item_root, "More", NULL);
+  //   tree->add(sess, m, more, "Nested", NULL);               /* submenu */
+  //   widgets->popup_tree_menu(sess, knob, mx, my, m);        /* on RBUTTON_DOWN */
+  //
+  // Unlike a MENUBAR's, a POPUPMENU's per-item shortcut is a LABEL only - it is
+  // drawn in the row, but nothing translates it into an accelerator. Bind the
+  // real accelerator on the menu bar and use the label to show which key does
+  // the same thing.
+  //
+  // Create the menu widget as a child of the frame (or of the anchor); it has no
+  // size, position or visual presence of its own, and unlike NEUI_W_MENUBAR it
+  // is NOT the frame's menu bar - a frame can carry both. Build it once and
+  // re-show it, or rebuild per click with tree->clear.
+  //
+  // XPL HOST ONLY (all three platforms: win32, macOS and Linux). The native
+  // win32 / macOS / iOS hosts leave this slot NULL - see the comment at each.
+  // (Vtable-appended; check the api version / pointer before calling.)
+  bool               (NEUI_ABI *popup_tree_menu)(neui_session_t session, neui_widget_t anchor,
+                                                 int x, int y, neui_widget_t menu);
 } neui_widget_api_t;
 
 #define NEUI_W_APPWINDOW  "neui.std.appwindow"
@@ -165,6 +221,10 @@ typedef struct neui_widget_api {
 #define NEUI_W_MULTILINE  "neui.std.multiline"
 #define NEUI_W_TREEVIEW   "neui.std.treeview"
 #define NEUI_W_MENUBAR    "neui.std.menubar"
+// Model for widgets->popup_tree_menu. Built with the same NEUI_API_TREE calls as
+// a MENUBAR, but it is NOT a menu bar: it is never attached to the frame, never
+// reserves an in-frame band, and a frame may carry both.
+#define NEUI_W_POPUPMENU  "neui.std.popupmenu"
 #define NEUI_W_IMAGE      "neui.std.image"
 #define NEUI_W_SLIDER     "neui.std.slider"
 #define NEUI_W_KNOB       "neui.std.knob"

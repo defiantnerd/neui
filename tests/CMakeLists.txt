@@ -87,6 +87,21 @@ if(APPLE AND NOT NEUI_IOS)
   target_link_libraries(neui_cursor_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
+  # Tree-model context-menu harness (NEUI_W_POPUPMENU + popup_tree_menu):
+  # asserts a POPUPMENU never becomes the frame's menu bar (read from
+  # [NSApp mainMenu]), that its ROOT rows are ordinary pickable rows with
+  # working separators / checkmarks / command routing, that a pick routes to the
+  # popup rather than a menu bar holding the same cmd id, that nothing leaks
+  # through to the widget beneath, and that clear / empty / destroy while open
+  # leave no invisible modal grab. Realizes a real NSWindow, so built but NOT
+  # ctest-registered.
+  add_executable(neui_popup_tree_smoke_macos popup_tree_smoke_macos.mm)
+  target_include_directories(neui_popup_tree_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_popup_tree_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_popup_tree_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
   # Relative-pointer harness (NEUI_API_POINTER): asserts the begin/end state
   # machine, that MOUSE_MOVE coordinates are unbounded and widget-local, that
   # sub-pixel deltas accumulate, and that a session destroyed mid-drag leaves the

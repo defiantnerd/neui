@@ -143,6 +143,8 @@ namespace xpl_host
       return std::make_unique<TreeviewWidget>();
     if (!strcmp(type, NEUI_W_MENUBAR))
       return std::make_unique<MenubarWidget>();
+    if (!strcmp(type, NEUI_W_POPUPMENU))
+      return std::make_unique<PopupMenuWidget>();
     if (!strcmp(type, NEUI_W_IMAGE))
       return std::make_unique<ImageWidget>();
     if (!strcmp(type, NEUI_W_SLIDER))
@@ -189,7 +191,7 @@ namespace xpl_host
     obj->visible   = true;
     obj->session   = s;
     obj->session_id = session.session;
-    obj->isroot    = obj->is_frame() || obj->is_menubar();
+    obj->isroot    = obj->is_frame() || obj->is_menu_model();
 
     obj->tab_stop  = !strcmp(type, NEUI_W_BUTTON)    ||
                      !strcmp(type, NEUI_W_INPUTBOX)   ||
@@ -285,6 +287,13 @@ namespace xpl_host
     // than a crash on macOS: the cursor stays decoupled from the device AND
     // hidden, machine-wide, with no event left to un-stick it.
     s->end_relative_pointer_if_within(idx);
+
+    // Same shape, same reason: an open tree popup names a POPUPMENU widget and a
+    // frame. Destroy either (or an ancestor of either - closing the editor takes
+    // the whole tree) and _tree_popup_active would keep claiming input for a
+    // cascade that can no longer be built, i.e. an INVISIBLE modal grab
+    // swallowing every click and hover in that frame for the rest of its life.
+    s->close_tree_popup_if_within(idx);
 
     destroy_recursive(s, idx, client_api, token);
 
@@ -707,6 +716,21 @@ namespace xpl_host
     return s->open_popup_menu(aidx, x, y, v);
   }
 
+  // Tree-model context menu (NEUI_W_POPUPMENU + popup_tree_menu). Async by
+  // design - see <neui/d/widgets.h> for why, and Session::show_tree_popup for
+  // the machinery, which is the menubar's, reused.
+  static bool NEUI_ABI w_popup_tree_menu(neui_session_t session, neui_widget_t anchor,
+                                         int x, int y, neui_widget_t menu)
+  {
+    auto* s = get_session_for_widget(session, anchor);
+    if (!s) return false;
+    // The menu widget must belong to the same session as the anchor; a
+    // cross-session handle is dropped like everywhere else in the API.
+    auto* s2 = get_session_for_widget(session, menu);
+    if (s2 != s) return false;
+    return s->show_tree_popup(WidgetToIndex(anchor), x, y, WidgetToIndex(menu));
+  }
+
   static void NEUI_ABI w_invalidate(neui_session_t session, neui_widget_t widget)
   {
     auto* s = get_session_for_widget(session, widget);
@@ -747,6 +771,7 @@ namespace xpl_host
     w_get_enabled,
     w_get_client_rect,
     w_create_from_component,
+    w_popup_tree_menu,
   };
 
   // -------------------------------------------------------------------------
@@ -1178,10 +1203,11 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return { UINT32_MAX };
     auto& wd = s->_widgets[idx];
 
-    // ---- menubar ----
-    if (wd.is_menubar()) {
+    // ---- menubar / popup menu ----
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
-      if (!mb.hmenu) return { UINT32_MAX };
+      const bool native = mb.uses_native_menu();
+      if (native && !mb.hmenu) return { UINT32_MAX };
       uint32_t neui_id = mb.next_menu_item_id++;
       MenubarWidget::MenuItemData data;
       data.text           = text ? text : "";
@@ -1189,35 +1215,48 @@ namespace xpl_host
       data.userdata       = userdata;
       data.parent_item_id = parent.id;
 
-      if (parent.id == 0) {
+      // A menu BAR's root children are its top-level titles ("File", "Edit"):
+      // native popups, never selectable, no command id. A POPUPMENU has no such
+      // band - its root children ARE its first column of ordinary rows, so they
+      // must get a command id, honour "-" as a separator, and be pickable. This
+      // is the whole difference; every deeper level is identical.
+      if (native && parent.id == 0) {
         void* popup = platform_menubar_add_popup(mb.hmenu, data.text.c_str());
         data.parent_hmenu = mb.hmenu;
         data.submenu      = popup;
         data.cmd_id       = 0;
       } else {
-        auto pit = mb.menu_items.find(parent.id);
-        void* parent_popup = (pit != mb.menu_items.end() && pit->second.submenu)
-                             ? pit->second.submenu
-                             : mb.hmenu;
         uint32_t cmd_id = mb.next_menu_cmd_id++;
-        data.parent_hmenu = parent_popup;
-        data.submenu      = nullptr;
-        data.cmd_id       = cmd_id;
+        data.submenu     = nullptr;
+        data.cmd_id      = cmd_id;
+        data.is_separator = (data.text == "-");
+        if (!data.is_separator) mb.menu_cmd_map[cmd_id] = neui_id;
 
-        if (strcmp(data.text.c_str(), "-") == 0) {
-          data.is_separator = true;
-          platform_menubar_add_separator(parent_popup, cmd_id);
-        } else {
-          platform_menubar_add_item(parent_popup, cmd_id, data.text.c_str());
-          mb.menu_cmd_map[cmd_id] = neui_id;
+        if (native) {
+          auto pit = mb.menu_items.find(parent.id);
+          void* parent_popup = (pit != mb.menu_items.end() && pit->second.submenu)
+                               ? pit->second.submenu
+                               : mb.hmenu;
+          data.parent_hmenu = parent_popup;
+          if (data.is_separator)
+            platform_menubar_add_separator(parent_popup, cmd_id);
+          else
+            platform_menubar_add_item(parent_popup, cmd_id, data.text.c_str());
         }
+        // Non-native (POPUPMENU): the item model IS the whole representation.
+        // The xpl host paints the cascade from menu_items / parent_item_id, and
+        // menu_item_has_children drives submenu arrows, so arbitrary depth needs
+        // no native counterpart. Calling platform_menubar_* here would mutate a
+        // menu the user can actually see on macOS / win32.
       }
 
       mb.menu_items[neui_id] = std::move(data);
       mb.menu_item_ids_ordered.push_back(neui_id);
 
-      void* frame = s->find_parent_native_handle(idx);
-      if (frame) platform_menubar_refresh(frame);
+      if (native) {
+        void* frame = s->find_parent_native_handle(idx);
+        if (frame) platform_menubar_refresh(frame);
+      }
       return { neui_id };
     }
 
@@ -1245,15 +1284,16 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       if (it == mb.menu_items.end()) return;
       auto& data = it->second;
-      if (data.submenu) {
+      const bool native = mb.uses_native_menu();
+      if (native && data.submenu) {
         platform_menubar_remove_popup(data.parent_hmenu, data.submenu);
       } else {
-        platform_menubar_remove_item(data.parent_hmenu, data.cmd_id);
+        if (native) platform_menubar_remove_item(data.parent_hmenu, data.cmd_id);
         mb.menu_cmd_map.erase(data.cmd_id);
       }
       bool had_shortcut = (data.shortcut_key != NEUI_KEY_NONE);
@@ -1262,9 +1302,19 @@ namespace xpl_host
                     mb.menu_item_ids_ordered.end(), item.id),
         mb.menu_item_ids_ordered.end());
       mb.menu_items.erase(it);
-      if (had_shortcut) rebuild_menubar_accel(mb);
-      void* frame = s->find_parent_native_handle(idx);
-      if (frame) platform_menubar_refresh(frame);
+      if (had_shortcut && native) rebuild_menubar_accel(mb);
+      if (native) {
+        void* frame = s->find_parent_native_handle(idx);
+        if (frame) platform_menubar_refresh(frame);
+      }
+      // Removing the row that is currently open / hovered in a live popup would
+      // leave _menu_path pointing at a dead item id. tp_claim rebuilds the
+      // cascade from the model on the next input, and mb_build_columns skips ids
+      // it can't find, so a stale path degrades to an empty column rather than
+      // reading freed memory - but close it anyway: a menu that silently loses
+      // rows under the cursor is not something to leave on screen.
+      if (s->_tree_popup_active && s->_tree_popup_menu == idx)
+        s->close_tree_popup();
       return;
     }
 
@@ -1284,7 +1334,7 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       // Do NOT release the submenus individually - same defect, same reason, as
       // MenubarWidget::on_destroy (see the comment there): a submenu is owned by
@@ -1310,10 +1360,19 @@ namespace xpl_host
       // to tear down here.
       mb.native_accel = nullptr;
 #endif
-      platform_menubar_destroy(mb.hmenu);
-      mb.hmenu = platform_menubar_create(IndexToWidget(s->_session_id, idx).id);
-      void* frame = s->find_parent_native_handle(idx);
-      if (frame) platform_menubar_attach(frame, mb.hmenu);
+      // A POPUPMENU owns no native menu, so there is nothing to destroy or
+      // re-attach - clearing the item model above already emptied it. Rebuilding
+      // a root here would also re-attach it to the frame on the native-menu
+      // platforms, i.e. replace the app's real menu bar with an empty one.
+      if (mb.uses_native_menu()) {
+        platform_menubar_destroy(mb.hmenu);
+        mb.hmenu = platform_menubar_create(IndexToWidget(s->_session_id, idx).id);
+        void* frame = s->find_parent_native_handle(idx);
+        if (frame) platform_menubar_attach(frame, mb.hmenu);
+      }
+      // The open cascade named items that no longer exist.
+      if (s->_tree_popup_active && s->_tree_popup_menu == idx)
+        s->close_tree_popup();
       return;
     }
 
@@ -1333,7 +1392,7 @@ namespace xpl_host
     auto& wd = s->_widgets[idx];
 
     const std::string* text = nullptr;
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       if (it == mb.menu_items.end()) return -1;
@@ -1363,12 +1422,12 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       if (it == mb.menu_items.end()) return;
       it->second.text = text ? text : "";
-      if (!it->second.submenu && !it->second.is_separator) {
+      if (mb.uses_native_menu() && !it->second.submenu && !it->second.is_separator) {
         std::string dt = make_menu_text(it->second.text.c_str(),
                                         it->second.shortcut.c_str());
         platform_menubar_set_item_text(it->second.parent_hmenu,
@@ -1376,6 +1435,8 @@ namespace xpl_host
         void* frame = s->find_parent_native_handle(idx);
         if (frame) platform_menubar_refresh(frame);
       }
+      // A POPUPMENU has no native item to relabel; the painter reads .text.
+      s->refresh_open_tree_popup(idx);
       return;
     }
 
@@ -1394,7 +1455,7 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return nullptr;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       return it != mb.menu_items.end() ? it->second.userdata : nullptr;
@@ -1414,20 +1475,23 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       if (it == mb.menu_items.end()) return;
       it->second.enabled = enabled;
-      if (it->second.submenu) {
-        platform_menubar_enable_popup(it->second.parent_hmenu,
-                                      it->second.submenu, enabled);
-      } else {
-        platform_menubar_enable_item(it->second.parent_hmenu,
-                                     it->second.cmd_id, enabled);
+      if (mb.uses_native_menu()) {
+        if (it->second.submenu) {
+          platform_menubar_enable_popup(it->second.parent_hmenu,
+                                        it->second.submenu, enabled);
+        } else {
+          platform_menubar_enable_item(it->second.parent_hmenu,
+                                       it->second.cmd_id, enabled);
+        }
+        void* frame = s->find_parent_native_handle(idx);
+        if (frame) platform_menubar_refresh(frame);
       }
-      void* frame = s->find_parent_native_handle(idx);
-      if (frame) platform_menubar_refresh(frame);
+      s->refresh_open_tree_popup(idx);
       return;
     }
 
@@ -1446,7 +1510,7 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return false;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       return it != mb.menu_items.end() && it->second.enabled;
@@ -1465,7 +1529,7 @@ namespace xpl_host
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
-    if (!wd.is_menubar()) return;   // treeview ignores
+    if (!wd.is_menu_model()) return;   // treeview ignores
 
     auto& mb = dynamic_cast<MenubarWidget&>(wd);
     auto it = mb.menu_items.find(item.id);
@@ -1473,11 +1537,14 @@ namespace xpl_host
     if (it == mb.menu_items.end() || it->second.is_separator || it->second.submenu) return;
     it->second.checked = checked;
     // Native menubars (win32 / macOS) apply the mark through the seam; the
-    // Linux in-frame menu reads MenuItemData::checked straight from the model
-    // when it paints, so the refresh below is enough there.
-    platform_menubar_check_item(it->second.parent_hmenu, it->second.cmd_id, checked);
-    void* frame = s->find_parent_native_handle(idx);
-    if (frame) platform_menubar_refresh(frame);
+    // Linux in-frame menu and the POPUPMENU cascade read MenuItemData::checked
+    // straight from the model when they paint, so a repaint is enough there.
+    if (mb.uses_native_menu()) {
+      platform_menubar_check_item(it->second.parent_hmenu, it->second.cmd_id, checked);
+      void* frame = s->find_parent_native_handle(idx);
+      if (frame) platform_menubar_refresh(frame);
+    }
+    s->refresh_open_tree_popup(idx);
   }
 
   static bool NEUI_ABI t_get_checked(neui_session_t session,
@@ -1488,7 +1555,7 @@ namespace xpl_host
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return false;
     auto& wd = s->_widgets[idx];
-    if (!wd.is_menubar()) return false;
+    if (!wd.is_menu_model()) return false;
     auto& mb = dynamic_cast<MenubarWidget&>(wd);
     auto it = mb.menu_items.find(item.id);
     return it != mb.menu_items.end() && it->second.checked;
@@ -1559,7 +1626,7 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       if (it == mb.menu_items.end()) return;
@@ -1567,7 +1634,7 @@ namespace xpl_host
       it->second.shortcut_key  = key;
       it->second.shortcut      =
         neui_detail::format_shortcut_label_win(modifiers, key);
-      if (!it->second.submenu && !it->second.is_separator) {
+      if (mb.uses_native_menu() && !it->second.submenu && !it->second.is_separator) {
         std::string dt = make_menu_text(it->second.text.c_str(),
                                         it->second.shortcut.c_str());
         platform_menubar_set_item_text(it->second.parent_hmenu,
@@ -1582,7 +1649,14 @@ namespace xpl_host
         void* frame = s->find_parent_native_handle(idx);
         if (frame) platform_menubar_refresh(frame);
       }
-      rebuild_menubar_accel(mb);
+      // On a POPUPMENU a shortcut is a LABEL, not an accelerator: the widget is
+      // absent from Session::_menubars, so neither try_menubar_accel nor
+      // try_translate_accel can ever see it. Building an HACCEL nothing
+      // translates would just be an allocation to leak on the next rebuild.
+      // Bind the real accelerator on the menu bar; use this to show the user
+      // which key does the same thing.
+      if (mb.uses_native_menu()) rebuild_menubar_accel(mb);
+      s->refresh_open_tree_popup(idx);
       return;
     }
     // Treeview: shortcut is ignored (no accelerator semantics for tree items).
@@ -1663,7 +1737,7 @@ namespace xpl_host
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
-    if (!wd.is_menubar()) return;   // treeview ignores menu_cmd
+    if (!wd.is_menu_model()) return;   // treeview ignores menu_cmd
     auto& mb = dynamic_cast<MenubarWidget&>(wd);
     auto it = mb.menu_items.find(item.id);
     if (it != mb.menu_items.end()) it->second.menu_cmd = command;

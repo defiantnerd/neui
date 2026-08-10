@@ -420,6 +420,16 @@ void wake_app_event_pump()
   // for keyboard input to route here. No-op when already first responder.
   if (self.window && self.window.firstResponder != self)
     [self.window makeFirstResponder:self];
+  // The standalone tree popup is checked BEFORE the clickCount branch: a
+  // double-click inside an open menu must pick the row it lands on, not bypass
+  // the menu entirely and deliver a DBLCLICK to the widget underneath it.
+  if (session->_tree_popup_active) {
+    NSPoint tp = [self localPointForEvent:event];
+    if (session->handle_tree_popup_click(widget_index, (float)tp.x, (float)tp.y))
+      return;
+    // Not consumed (the popup belongs to another frame and has now dismissed):
+    // fall through so this frame still gets the click.
+  }
   // clickCount == 2 -> DBLCLICK; clickCount >= 3 not modeled.
   if (event.clickCount == 2) {
     [self dispatchMouseEventForType:NEUI_EVENT_MOUSE_BUTTON_DBLCLICK event:event];
@@ -451,6 +461,9 @@ void wake_app_event_pump()
 {
   if (!session) return NO;
   NSPoint p = [self localPointForEvent:event];
+  if (session->_tree_popup_active &&
+      session->handle_tree_popup_hover(widget_index, (float)p.x, (float)p.y))
+    return YES;
   if (session->_popup_active) {
     session->handle_popup_hover((float)p.x, (float)p.y);
     return YES;
@@ -472,6 +485,11 @@ void wake_app_event_pump()
 - (void)mouseUp:(NSEvent*)event
 {
   if (!session) return;
+  // Swallow the release that pairs with a press the tree popup consumed.
+  // Without this the widget under the just-dismissed menu sees an UP with no
+  // DOWN and synthesises a CLICK - i.e. picking a context-menu row would also
+  // actuate the button beneath it.
+  if (session->tree_popup_take_release()) return;
   // End a combo overlay scrollbar drag if one was active (win32 parity).
   if (session->_combo_sb_dragging) {
     session->_combo_sb_dragging = false;
@@ -512,6 +530,13 @@ void wake_app_event_pump()
 - (void)rightMouseDown:(NSEvent*)event
 {
   if (!session) return;
+  // A right-click while a tree popup is open dismisses / re-targets it rather
+  // than opening a second one on top.
+  if (session->_tree_popup_active) {
+    NSPoint tp = [self localPointForEvent:event];
+    if (session->handle_tree_popup_click(widget_index, (float)tp.x, (float)tp.y))
+      return;
+  }
   // If a popup is up, a right-click outside dismisses it (win32 parity).
   if (session->_popup_active) {
     NSPoint p = [self localPointForEvent:event];
@@ -524,6 +549,7 @@ void wake_app_event_pump()
 - (void)rightMouseUp:(NSEvent*)event
 {
   if (!session) return;
+  if (session->tree_popup_take_release()) return;
   NSPoint p = [self localPointForEvent:event];
   float lx = (float)p.x;
   float ly = (float)p.y;
@@ -918,6 +944,9 @@ void wake_app_event_pump()
   if (!session) return;
   uint32_t mods = mac_modifiers_to_neui(event.modifierFlags);
   uint32_t keycode = mac_keycode_to_neui(event.keyCode);
+
+  // Esc dismisses an open tree popup, before anything else can claim the key.
+  if (session->handle_tree_popup_key(keycode)) return;
 
   // Tab cycles logical focus inside our hand-rolled Tab traversal - same as
   // the win32 path. Consume here; the focus_next path doesn't fire KEYDOWN.
