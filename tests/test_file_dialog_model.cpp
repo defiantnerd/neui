@@ -98,14 +98,52 @@ TEST_CASE("file dialog: no filters at all decodes to an empty list")
 
 TEST_CASE("file dialog: default_filter clamps instead of going out of range")
 {
+  neui_file_filter_t f[] = { { "A", "*.a" }, { "B", "*.b" }, { "C", "*.c" } };
   neui_file_dialog_t d = {};
-  d.default_filter = 0;  CHECK_EQ(clamp_default_filter(&d, 3), (size_t)0);
-  d.default_filter = 2;  CHECK_EQ(clamp_default_filter(&d, 3), (size_t)2);
-  d.default_filter = 3;  CHECK_EQ(clamp_default_filter(&d, 3), (size_t)0);
-  d.default_filter = 99; CHECK_EQ(clamp_default_filter(&d, 3), (size_t)0);
+  d.filters = f; d.filter_count = 3;
+  auto fl = parse_filters(&d);
+  CHECK_EQ(fl.size(), (size_t)3);
+
+  d.default_filter = 0;  CHECK_EQ(clamp_default_filter(&d, fl), (size_t)0);
+  d.default_filter = 2;  CHECK_EQ(clamp_default_filter(&d, fl), (size_t)2);
+  d.default_filter = 3;  CHECK_EQ(clamp_default_filter(&d, fl), (size_t)0);
+  d.default_filter = 99; CHECK_EQ(clamp_default_filter(&d, fl), (size_t)0);
   // Empty list -> 0 regardless (callers must not index with it).
-  d.default_filter = 5;  CHECK_EQ(clamp_default_filter(&d, 0), (size_t)0);
-  CHECK_EQ(clamp_default_filter(nullptr, 3), (size_t)0);
+  std::vector<FileFilter> none;
+  d.default_filter = 5;  CHECK_EQ(clamp_default_filter(&d, none), (size_t)0);
+  CHECK_EQ(clamp_default_filter(nullptr, fl), (size_t)0);
+}
+
+TEST_CASE("file dialog: default_filter follows the entry, not the parsed slot")
+{
+  // parse_filters DROPS the malformed entry, so the client's index 2 ("C") is
+  // at parsed slot 1. A plain `index < size()` clamp would see 2 >= 2 and pick
+  // slot 0 ("B") - silently the wrong filter, which is worse than the
+  // documented fallback because nothing about it looks like a fallback.
+  neui_file_filter_t f[] = {
+    { "A", ""      },   // no usable pattern -> dropped
+    { "B", "*.b"   },
+    { "C", "*.c"   },
+  };
+  neui_file_dialog_t d = {};
+  d.filters = f; d.filter_count = 3;
+  auto fl = parse_filters(&d);
+  CHECK_EQ(fl.size(), (size_t)2);
+  CHECK_EQ(fl[0].source_index, (uint32_t)1);
+  CHECK_EQ(fl[1].source_index, (uint32_t)2);
+
+  d.default_filter = 2;
+  CHECK_EQ(clamp_default_filter(&d, fl), (size_t)1);
+  CHECK_EQ(fl[clamp_default_filter(&d, fl)].label, std::string("C"));
+
+  d.default_filter = 1;
+  CHECK_EQ(clamp_default_filter(&d, fl), (size_t)0);
+
+  // An index that named a DROPPED entry has no surviving answer -> fall back
+  // to 0 rather than guessing at the neighbour the client did not ask for.
+  d.default_filter = 0;
+  CHECK_EQ(clamp_default_filter(&d, fl), (size_t)0);
+  CHECK_EQ(fl[clamp_default_filter(&d, fl)].label, std::string("B"));
 }
 
 TEST_CASE("file dialog: filter_accepts folds the pattern list")

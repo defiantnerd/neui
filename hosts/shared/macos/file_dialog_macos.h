@@ -159,7 +159,7 @@ namespace neui_detail
     // rule has to cover. tests/file_dialog_smoke_macos.mm reaches this branch
     // directly, since it ends the modal session rather than clicking Save.
     if (!filters.empty()) {
-      size_t fi = clamp_default_filter(desc, filters.size());
+      size_t fi = clamp_default_filter(desc, filters);
       std::string leaf      = path_leaf(path);
       std::string completed = complete_extension(leaf, filters[fi]);
       if (completed != leaf) path = path_join(path_parent(path), completed);

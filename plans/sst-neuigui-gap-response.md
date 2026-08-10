@@ -776,7 +776,7 @@ degrades to a working dialog instead of breaking the feature. Only an explicit
 second dialog on top of a dismissed first is worse than no portal path at all.
 
 **Honest limitation: only macOS is verified at runtime.**
-`tests/file_dialog_smoke_macos.mm` (34 checks) drives real modal panels on
+`tests/file_dialog_smoke_macos.mm` (38 checks) drives real modal panels on
 *both* macOS hosts - including the native one, which is what
 `examples/main.cpp` actually uses there - resolving them from
 `[NSApp modalWindow]`. Cancel goes through the panel's own `-cancel:`; confirm
@@ -802,6 +802,71 @@ overlay (scrim + panel, non-destructive answer on both Enter and Esc, wheel
 absorbed) rather than a nested `run_message_box`, because that helper disables
 a `LinuxWindow*` owner and the browser's X window is not one - a nested box
 would leave the browser clickable underneath.
+
+**4.3 REVIEW FOLLOW-UP.** The fable review found 11 issues; 7 confirmed, and
+the two that mattered were both in the Linux path inspection had signed off on.
+
+**A folder-picker double-click returned a path the user never chose.**
+`activate_row` had no `dir_mode` guard on its non-directory branch, so
+double-clicking one of the greyed, explicitly-unpickable file rows set
+`done = true`; `collect_result`'s "nothing selected -> pick cwd" fallback (added
+in the *first* pass to fix a different dead end) then handed back the current
+directory as a successful pick. Two fixes composing into a bug neither had
+alone - the exact failure mode a reviewer catches and an author does not.
+
+**The primary Linux path silently ignored the documented completion rule.** The
+portal has no `SetDefaultExtension` equivalent and a GTK-style backend does not
+append the active filter's extension, so `save_file("lead")` under
+`Presets (*.preset)` returned `.../lead` on a normal Linux desktop. win32,
+macOS and the *drawn browser* all completed correctly, which is precisely why it
+was invisible: every path I could reason about locally was right. Now applied in
+`platform_file_dialog` after a portal save.
+
+The rest, all real: **win32 reported every `Show()` failure as "user cancelled"**
+(0), so a bad owner HWND suppressed the client's fallback path entry that -1
+exists to trigger - now keyed on `ERROR_CANCELLED`. **win32 completed against
+the *default* filter rather than the active one**, so "All files" as default plus
+a user-switched "Presets" combo returned no extension - now reads
+`GetFileTypeIndex` after `Show`. **`default_filter` selected the wrong filter**
+whenever `parse_filters` dropped a malformed entry ahead of it (index 2 of
+{bad,B,C} picked B, not C) - `FileFilter` now carries `source_index` and
+`clamp_default_filter` matches on it. **The list's bottom ~18 px dead strip**
+mapped to a row `render` never drew, so a click there selected - or
+double-click-activated - an invisible entry. **Double-click state survived
+navigation**, so a single click after entering a directory could count as the
+second click of a double. **The overwrite overlay was mouse-only** - Enter and
+Esc both answered "Cancel" and nothing reached "Replace", so a keyboard-driven
+user could never overwrite a file; it now has a focus index (Tab / arrows,
+starting on the safe answer). And **`XLookupString` returns Latin-1, not UTF-8**,
+so typing any accented character put a bare 0xA0-0xFF byte into the name and
+returned a path that was not valid UTF-8 - the one thing `notify.h` promises
+about it; now transcoded.
+
+Also corrected: three comments that described behaviour the code does not have
+(the `.bashrc` completion rationale asserted the opposite of the shipped and
+tested result; the portal header claimed only "cancelled" stops the
+fall-through when `response == 2` does too - and the "the chooser was on screen"
+justification for that is an assumption the spec does not support, now stated as
+the judgement call it is; a macOS comment described an accommodation the caller
+forbids), the `NEUI_FD_NO_OVERWRITE_PROMPT` no-op list (the Linux *portal* also
+cannot honour it), the `0` return's meaning (it also covers a confirmed pick the
+host could not resolve to a path), and a likely GCC `-Wformat-truncation` in the
+new example code.
+
+**One coverage gap the reviewer was right about**: every open panel in the
+harness was *cancelled*, so `[panel URLs]` and the per-path callback fan-out had
+never executed on any platform - "drives real modal panels end to end" was true
+of save only. Now covered by a confirmed folder pick (the one open flavour whose
+result can be produced without clicking a real file row), negative-probed:
+disabling the URLs loop fails 2 checks. 38 harness checks, 434 Tier-1 cases.
+
+Two of the three uncompilable files changed here, so all three stub-header parse
+checks were re-run: clean under `-Wall -Wextra`. Worth noting what that exercise
+is and is not - it caught nothing this round, but it is the only thing standing
+between a typo and a broken Windows or Linux build, and it verifies every symbol
+referenced is one I accounted for (it flagged `XK_Tab` / `XK_space` /
+`GetFileTypeIndex` / `ERROR_CANCELLED` as unaccounted-for the moment I used
+them). It cannot verify real API signatures.
 
 - **4.3 — file dialog (his #10).** Append `open_file` / `save_file` to
   `NEUI_API_NOTIFY` alongside `message_box`: filter list, initial dir/name,

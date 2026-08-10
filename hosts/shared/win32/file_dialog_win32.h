@@ -26,8 +26,13 @@
 //     0 is rejected outright.
 //   - SetDefaultExtension covers the documented save completion rule; it
 //     appends only when the typed name has no extension, which is the same
-//     rule complete_extension implements. It is set from the DEFAULT filter
-//     only - the shell re-derives it when the user switches the type combo.
+//     rule complete_extension implements. It can only be set from the DEFAULT
+//     filter (it is a pre-Show call), and it is skipped entirely when that
+//     filter offers no single extension - a "*" default, say. So the save path
+//     ALSO reads GetFileTypeIndex after Show and runs complete_extension
+//     against whichever filter was actually active, which is what the rule is
+//     defined against. Without that, "All files" as the default plus a
+//     user-switched "Presets" combo returned a name with no extension.
 //   - FOS_OVERWRITEPROMPT is default-on for save (the API contract);
 //     NEUI_FD_NO_OVERWRITE_PROMPT clears it.
 //   - The shell has no per-dialog "show hidden files" switch (it is a
@@ -100,7 +105,7 @@ namespace neui_detail
     }
     dlg->SetFileTypes(static_cast<UINT>(specs.size()), specs.data());
     // ONE-based; see the header note.
-    size_t def = clamp_default_filter(desc, filters.size());
+    size_t def = clamp_default_filter(desc, filters);
     dlg->SetFileTypeIndex(static_cast<UINT>(def) + 1);
   }
 
@@ -170,9 +175,14 @@ namespace neui_detail
       file_dialog_apply_filters_win32(dlg, desc, filters, storage, specs);
 
     HRESULT hr = dlg->Show(owner);
-    if (FAILED(hr)) {   // HRESULT_FROM_WIN32(ERROR_CANCELLED) on cancel
+    if (FAILED(hr)) {
       dlg->Release();
-      return 0;
+      // Only ERROR_CANCELLED means the user said no. Any other failure (an
+      // invalid owner HWND, a shell out-of-memory) means no dialog was ever
+      // shown, and the public contract makes that -1: reporting it as 0 tells
+      // the client "the user declined", which per the docs suppresses its own
+      // fallback path entry.
+      return (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) ? 0 : -1;
     }
 
     IShellItemArray* items = nullptr;
@@ -225,7 +235,7 @@ namespace neui_detail
       dlg->SetFileName(n.c_str());
     }
     if (!filters.empty()) {
-      std::string ext = filters[clamp_default_filter(desc, filters.size())]
+      std::string ext = filters[clamp_default_filter(desc, filters)]
                           .default_extension();
       if (!ext.empty()) {
         std::wstring w = fd_to_wide(ext.c_str());
@@ -234,7 +244,11 @@ namespace neui_detail
     }
 
     HRESULT hr = dlg->Show(owner);
-    if (FAILED(hr)) { dlg->Release(); return 0; }
+    if (FAILED(hr)) {
+      dlg->Release();
+      // See the open path: cancel is 0, everything else is -1.
+      return (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) ? 0 : -1;
+    }
 
     IShellItem* item = nullptr;
     std::string path;
@@ -242,15 +256,23 @@ namespace neui_detail
       file_dialog_item_path_win32(item, path);
       item->Release();
     }
+    // Which filter was selected when the user confirmed - NOT the descriptor's
+    // default. The user can switch the type combo, and the completion rule is
+    // defined against the ACTIVE filter. GetFileTypeIndex is one-based, and
+    // returns 0 if the dialog never had a type list.
+    size_t active = clamp_default_filter(desc, filters);
+    UINT   type_index = 0;
+    if (SUCCEEDED(dlg->GetFileTypeIndex(&type_index)) &&
+        type_index >= 1 && (size_t)type_index <= filters.size())
+      active = (size_t)type_index - 1;
     dlg->Release();
     if (path.empty()) return 0;
 
     // Belt and braces behind SetDefaultExtension, for the case where the
     // filter offered no single extension to hand the shell.
     if (!filters.empty()) {
-      size_t fi = clamp_default_filter(desc, filters.size());
       std::string leaf      = path_leaf(path);
-      std::string completed = complete_extension(leaf, filters[fi]);
+      std::string completed = complete_extension(leaf, filters[active]);
       if (completed != leaf) path = path_join(path_parent(path), completed);
     }
 

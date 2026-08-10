@@ -19,10 +19,18 @@
 // sandbox-safe access), and it falls through to the neui-drawn browser in
 // platform_linux.cpp on ANY failure - no libdbus at build time, no session
 // bus at run time, no portal implementation installed, a malformed reply, or
-// a timeout. Only an explicit "the user cancelled" answer stops the
-// fall-through, which is why the return is a tri-state rather than a count:
-// re-opening a second dialog after someone pressed Cancel would be worse
-// than having no portal support at all.
+// a timeout. What stops the fall-through is an answer from the portal itself,
+// which is why the return is a tri-state rather than a count: re-opening a
+// second dialog after someone pressed Cancel would be worse than having no
+// portal support at all.
+//
+// "An answer" covers BOTH documented Response codes 1 (user cancelled) and 2
+// (the portal failed for its own reasons) - see the wait loop for why, and for
+// the case that trade-off gets wrong: a backend that answers 2 *before* ever
+// putting a chooser on screen yields zero dialogs and a "cancelled" the user
+// never performed. The alternative (falling through on 2) risks a second
+// dialog stacked on a dismissed first, which is the more visible failure, so
+// this is a judgement call rather than a clear win either way.
 //
 // The reply is asynchronous: the method call returns a Request object path
 // and the answer arrives later as a Response signal on it. To avoid the race
@@ -297,7 +305,7 @@ namespace neui_detail
       if (want_filters) {
         portal_dict_add_filters(&dict, filters);
         portal_dict_add_current_filter(
-            &dict, filters[clamp_default_filter(desc, filters.size())]);
+            &dict, filters[clamp_default_filter(desc, filters)]);
       }
       if (desc && desc->initial_dir && *desc->initial_dir)
         portal_dict_add_path_bytes(&dict, "current_folder", desc->initial_dir);
@@ -362,9 +370,13 @@ namespace neui_detail
         dbus_message_unref(m);
         if (!have) return PortalResult::unavailable;   // malformed reply
         // response 1 = user cancelled, 2 = the portal itself failed. Both
-        // report `cancelled` rather than `unavailable`: the portal DID put a
-        // dialog on screen, so falling through would show a second one on
-        // top of a dismissed first, which is worse than doing nothing.
+        // report `cancelled` rather than `unavailable`, on the assumption that
+        // a portal far enough along to answer had already shown its chooser -
+        // so falling through would stack a second dialog on a dismissed first.
+        // The spec does NOT guarantee that for code 2, so a backend that fails
+        // before display gives the user no dialog and the client a "cancelled"
+        // nobody performed. Chosen anyway: the failure mode is quiet, whereas
+        // two stacked dialogs is not. Recorded in docs/deferred-issues.md.
         if (response != 0) return PortalResult::cancelled;
         // A "success" that yielded no usable path (every URI a non-file
         // scheme) is indistinguishable from a cancel to the caller.

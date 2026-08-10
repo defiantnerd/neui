@@ -544,7 +544,10 @@ static neui_widget_client_t widget_client = {
 
         // The callback is invoked once per path, before the call returns. The
         // path is only valid for the duration of the call, so copy it.
-        struct Collected { char first[512]; int count; } got = { {0}, 0 };
+        // 400, not 512: GCC proves "Picked:\n%s" into a 512-byte msg can
+        // truncate if the source is also 512 (-Wformat-truncation), and this
+        // build treats its warning level as the lint.
+        struct Collected { char first[400]; int count; } got = { {0}, 0 };
         auto on_path = [](void* userdata, const char* path) {
           auto* c = static_cast<Collected*>(userdata);
           if (c->count++ == 0 && path) {
@@ -555,7 +558,7 @@ static neui_widget_client_t widget_client = {
         int r = -1;
         if (ud == (void*)2 && app->notify->open_file) {
           d.title  = "Open a file";
-          d.flags  = NEUI_FD_MULTISELECT;   // Ctrl-click / Shift-click to pick several
+          d.flags  = NEUI_FD_MULTISELECT;   // pick several (Ctrl-click at minimum)
           r = app->notify->open_file(sess, win, &d, on_path, &got);
         } else if (ud == (void*)3 && app->notify->save_file) {
           d.title        = "Save as";

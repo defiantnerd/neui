@@ -2218,7 +2218,7 @@ namespace
     bool       show_hidden  = (fdflags & NEUI_FD_SHOW_HIDDEN) != 0;
 
     std::vector<FileFilter> filters = parse_filters(desc);
-    size_t filter_index = clamp_default_filter(desc, filters.size());
+    size_t filter_index = clamp_default_filter(desc, filters);
     // A folder picker filters nothing.
     if (dir_mode) filters.clear();
 
@@ -2239,6 +2239,11 @@ namespace
       if (filters.empty()) return nullptr;
       return &filters[filter_index < filters.size() ? filter_index : 0];
     };
+    // Forward-declared so reload() can clear it: without that, entering a
+    // directory by double-click leaves the second click armed, and the NEXT
+    // single click on the same row index within the interval counts as a
+    // double-click - navigating again, or confirming a file outright.
+    int  last_click_row  = -1;
     auto reload = [&]() {
       std::vector<FileEntry> raw;
       fd_read_dir(cwd, raw);
@@ -2246,6 +2251,7 @@ namespace
       picked.assign(rows.size(), false);
       sel = rows.empty() ? -1 : 0;
       scroll = 0;
+      last_click_row = -1;
     };
     reload();
 
@@ -2391,6 +2397,11 @@ namespace
     const bool  want_overwrite_prompt = save && !(fdflags & NEUI_FD_NO_OVERWRITE_PROMPT);
     bool        confirming = false;      // overlay is up
     std::string confirm_path;            // the path it is asking about
+    // Which overlay button the keyboard is on: 0 = Cancel, 1 = Replace. Starts
+    // on Cancel so Enter answers non-destructively, but Tab / Left / Right can
+    // reach Replace - without a focus index the overlay was mouse-only, and a
+    // keyboard-driven user could never overwrite a file at all.
+    int         conf_focus = 0;
     const int   CONF_W = 360, CONF_H = 130;
     const int   conf_x = (WIN_W - CONF_W) / 2, conf_y = (WIN_H - CONF_H) / 2;
     const int   conf_btn_y = conf_y + CONF_H - 12 - BTN_H;
@@ -2425,8 +2436,15 @@ namespace
       if (save && ly >= fld_y && ly < fld_y + FLD_H) return H_FIELD;
       if (ly >= list_y && ly < list_y + list_h &&
           lx >= list_x && lx < list_x + list_w) {
-        int r = scroll + (ly - list_y) / ROW_H;
-        if (r >= 0 && r < (int)rows.size()) { if (row_out) *row_out = r; return H_LIST; }
+        // list_h is not an exact multiple of ROW_H, so the last ~18 px are a
+        // dead strip below the final DRAWN row. Bounding by visible_rows as
+        // well as by rows.size() keeps a click there from selecting - or
+        // double-click-activating - a row the user cannot see.
+        int slot = (ly - list_y) / ROW_H;
+        int r    = scroll + slot;
+        if (slot < visible_rows && r >= 0 && r < (int)rows.size()) {
+          if (row_out) *row_out = r;
+        }
         return H_LIST;
       }
       return H_NONE;
@@ -2436,8 +2454,8 @@ namespace
     Hit  hover     = H_NONE;
     Hit  pressed   = H_NONE;
     bool done = false, need_paint = true, focused = false, cancelled = false;
-    // Click-to-open needs a double click; track the previous press target.
-    int  last_click_row = -1;
+    // Click-to-open needs a double click; last_click_row is declared above so
+    // reload() can reset it on navigation.
     Time last_click_time = 0;
 
     int (*old_err)(Display*, XErrorEvent*) = XSetErrorHandler(drag_xerror);
@@ -2593,11 +2611,13 @@ namespace
                            (float)(CONF_W - 32), 20.0f,
                            "Replace it?", SZ,
                            C(neui_detail::ColorRole::text_primary));
-        // "No" is the default (Enter) and Esc also answers No: the destructive
-        // answer should never be the one a stray keypress picks.
-        draw_button(conf_yes_x, conf_btn_y, BTN_W, BTN_H, "Replace", false, true,
+        // Cancel starts focused, so a stray Enter never picks the destructive
+        // answer; the ring follows conf_focus once the user Tabs.
+        draw_button(conf_yes_x, conf_btn_y, BTN_W, BTN_H, "Replace",
+                    conf_focus == 1, true,
                     hover == H_CONF_YES, pressed == H_CONF_YES);
-        draw_button(conf_no_x, conf_btn_y, BTN_W, BTN_H, "Cancel", true, true,
+        draw_button(conf_no_x, conf_btn_y, BTN_W, BTN_H, "Cancel",
+                    conf_focus == 0, true,
                     hover == H_CONF_NO, pressed == H_CONF_NO);
       }
 
@@ -2613,6 +2633,7 @@ namespace
       if (want_overwrite_prompt && fd_path_exists(res[0])) {
         confirming   = true;
         confirm_path = res[0];
+        conf_focus   = 0;          // always re-arm on the safe answer
         pressed      = H_NONE;
         hover        = H_NONE;
         need_paint   = true;
@@ -2639,8 +2660,13 @@ namespace
         need_paint = true;
         return;
       }
-      // A file double-clicked in file mode confirms outright.
-      done = true;
+      // A file double-clicked in FILE mode confirms outright. In folder mode a
+      // file row is drawn greyed and unpickable, so activating it must do
+      // nothing at all - without this guard the gesture fell through to
+      // `done = true`, and collect_result's "nothing selected -> pick cwd"
+      // fallback then returned the current directory as if the user had chosen
+      // it, from a double-click on a row the UI says cannot be chosen.
+      if (!dir_mode) done = true;
     };
 
     XMapRaised(d, win);
@@ -2757,7 +2783,14 @@ namespace
           // into the name field behind it would be worse than useless, since
           // the overlay is asking about a path already computed from it.
           if (confirming) {
-            if (ks == XK_Escape || ks == XK_Return || ks == XK_KP_Enter) {
+            if (ks == XK_Escape) {              // always the safe answer
+              confirming = false;
+              need_paint = true;
+            } else if (ks == XK_Tab || ks == XK_Left || ks == XK_Right) {
+              conf_focus = conf_focus ? 0 : 1;
+              need_paint = true;
+            } else if (ks == XK_Return || ks == XK_KP_Enter || ks == XK_space) {
+              if (conf_focus == 1) done = true;   // Replace: accept the path
               confirming = false;
               need_paint = true;
             }
@@ -2827,9 +2860,28 @@ namespace
               te_move_end(name.text, name.cursor, name.sel_anchor, false, nullptr);
               need_paint = true;
             } else if (n > 0 && (unsigned char)buf[0] >= 0x20 && !ctrl) {
-              te_insert_utf8(name.text, name.cursor, name.sel_anchor, false,
-                             buf, n, nullptr);
-              need_paint = true;
+              // XLookupString returns LATIN-1, not UTF-8 (the frames' real text
+              // widgets go through XIM / Xutf8LookupString; this field does
+              // not). Feeding its bytes straight to te_insert_utf8 put a bare
+              // 0xA0-0xFF byte into the name for any ordinary European key -
+              // typing "e" with an acute accent produced a garbled field and a
+              // returned path that was not valid UTF-8, which the public API
+              // promises it is. Transcode the high bytes to two-byte UTF-8.
+              char utf8[64];
+              int  m = 0;
+              for (int i = 0; i < n && m + 2 < (int)sizeof utf8; ++i) {
+                unsigned char b = (unsigned char)buf[i];
+                if (b < 0x80) utf8[m++] = (char)b;
+                else {
+                  utf8[m++] = (char)(0xC0 | (b >> 6));
+                  utf8[m++] = (char)(0x80 | (b & 0x3F));
+                }
+              }
+              if (m > 0) {
+                te_insert_utf8(name.text, name.cursor, name.sel_anchor, false,
+                               utf8, m, nullptr);
+                need_paint = true;
+              }
             }
           }
           break;
@@ -3756,6 +3808,21 @@ namespace
       paths.clear();
       int n = run_file_browser(owner, save != 0, desc, paths);
       if (n <= 0) return n;
+    } else if (save) {
+      // Apply the documented completion rule to a portal SAVE result. The
+      // portal has no equivalent of SetDefaultExtension, and a GTK-style
+      // backend does not append the active filter's extension itself - so
+      // without this the primary Linux path was the one platform that quietly
+      // ignored the rule ("lead" + Presets(*.preset) came back as ".../lead").
+      // The drawn browser completes in collect_result and does not come here.
+      std::vector<neui_detail::FileFilter> filters = neui_detail::parse_filters(desc);
+      if (!paths.empty() && !filters.empty()) {
+        size_t fi = neui_detail::clamp_default_filter(desc, filters);
+        std::string leaf      = neui_detail::path_leaf(paths[0]);
+        std::string completed = neui_detail::complete_extension(leaf, filters[fi]);
+        if (completed != leaf)
+          paths[0] = neui_detail::path_join(neui_detail::path_parent(paths[0]), completed);
+      }
     }
 
     if (cb)

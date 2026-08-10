@@ -20,6 +20,11 @@
 //                   filter's extension (the documented completion rule). This
 //                   is a real end-to-end assertion: the path comes back out of
 //                   AppKit, not out of our own descriptor.
+//   D2. OPEN OK   - the open path's SUCCESS branch, which the save checks
+//                   above never touch: `[panel URLs]` collection and the
+//                   per-path callback fan-out. Driven as a folder pick, since
+//                   that is the one open flavour whose result can be produced
+//                   without a real click on a file row.
 //   E. DESCRIPTOR - a NULL descriptor is legal ("every default"), and an
 //                   out-of-range default_filter clamps instead of indexing off
 //                   the end of the filter array.
@@ -381,6 +386,36 @@ int main()
       if (g_paths.size() == 1)
         check_path(g_paths[0], kDir, "harness-bare",
                    "save_file: an all-files filter appends no extension");
+    }
+
+    // ---- D2. open_file's SUCCESS path ------------------------------------
+    //
+    // Everything above confirms only SAVE panels, which left the whole open
+    // success path - the `[panel URLs]` collection loop, the N-path callback
+    // fan-out - never executed on any platform. A folder picker is the way in:
+    // with canChooseDirectories the panel reports its current directory in
+    // URLs, so ending the session with OK yields a real non-empty result
+    // through the open code path rather than the save one.
+    {
+      neui_file_dialog_t d = {};
+      d.title       = "Harness folder pick";
+      d.initial_dir = kDir;
+      d.flags       = NEUI_FD_DIRECTORY;
+
+      reset_capture();
+      schedule_panel_action(/*ok=*/true);
+      int r = notify->open_file(sess, win, &d, collect_path, (void*)0x1234);
+      check_eq_int(r, 1, "open_file: a confirmed folder pick returns 1");
+      check_eq_int(g_cb_calls, 1, "open_file: the callback fires once per path");
+      if (g_paths.size() == 1) {
+        // Asserted via realpath, so /tmp vs /private/tmp does not matter.
+        check_path(g_paths[0] + "/x", kDir, "x",
+                   "open_file: the delivered path is the chosen directory");
+        // A folder pick must not have the save path's extension completion
+        // applied to it - filters are ignored in directory mode.
+        check(g_paths[0].find(".preset") == std::string::npos,
+              "open_file: no extension is appended to a directory");
+      }
     }
 
     // ---- E. descriptor edge cases ----------------------------------------

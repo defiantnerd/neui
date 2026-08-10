@@ -2638,9 +2638,11 @@ namespace xpl_host
                            neui_file_path_cb cb, void* userdata)
   {
     // runModal is app-modal on macOS, so an owner is not required to put the
-    // panel up - unlike win32, where the HWND is what makes it modal. Accept
-    // a null handle (an embedded frame whose view is not attached yet) rather
-    // than refusing a dialog the OS would happily show.
+    // panel up - unlike win32, where the HWND is what makes it modal. The
+    // handle is therefore tolerated as nil HERE, even though the only caller
+    // (widgets.cpp notify_run_file_dialog) rejects a frame with no
+    // native_handle first: nothing below needs the window, so there is no
+    // reason for this layer to add a second refusal.
     NSWindow* win = native_handle ? native_window(native_handle) : nil;
 
     std::vector<std::string> paths;

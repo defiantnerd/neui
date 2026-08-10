@@ -32,6 +32,11 @@ namespace neui_detail
   {
     std::string              label;
     std::vector<std::string> patterns;   // e.g. { "*.png", "*.PNG" }
+    // Index of this entry in the CLIENT's neui_file_dialog_t::filters array.
+    // Kept because parse_filters drops unusable entries, so a surviving
+    // filter's position in the parsed vector is not the index the client
+    // named in default_filter - see clamp_default_filter.
+    uint32_t                 source_index = 0;
 
     // True when this entry is the conventional "every file" escape hatch.
     // Native dialogs need to know: a "*" entry must NOT be turned into an
@@ -95,18 +100,29 @@ namespace neui_detail
       if (f.patterns.empty()) continue;
       f.label = desc->filters[i].label ? desc->filters[i].label : "";
       if (f.label.empty()) f.label = desc->filters[i].patterns;
+      f.source_index = i;
       out.push_back(std::move(f));
     }
     return out;
   }
 
-  // Clamp the client's default_filter to a usable index. Returns 0 for an
-  // out-of-range value (documented behaviour) and for an empty list.
+  // Resolve the client's default_filter to an index into the PARSED list.
+  //
+  // Not a plain clamp: parse_filters drops entries with no usable pattern, so
+  // a naive `default_filter < size()` check silently selects the wrong
+  // surviving filter. With filters {A(malformed), B, C} and default_filter=2
+  // (meaning C), the parsed list is {B, C} - and 2 >= 2 would clamp to 0,
+  // selecting B. Matching on source_index picks C.
+  //
+  // Falls back to 0 for a genuinely out-of-range value (documented behaviour),
+  // for an empty list, and for an index that named a dropped entry.
   inline size_t clamp_default_filter(const neui_file_dialog_t* desc,
-                                     size_t filter_count)
+                                     const std::vector<FileFilter>& filters)
   {
-    if (!desc || filter_count == 0) return 0;
-    return desc->default_filter < filter_count ? desc->default_filter : 0;
+    if (!desc || filters.empty()) return 0;
+    for (size_t i = 0; i < filters.size(); ++i)
+      if (filters[i].source_index == desc->default_filter) return i;
+    return 0;
   }
 
   // ---- Glob matching -------------------------------------------------------
@@ -219,9 +235,13 @@ namespace neui_detail
     return p.substr(slash + 1, end - slash - 1);
   }
 
-  // True when the leaf already carries an extension. A leading dot does
-  // NOT count (".bashrc" is a hidden file with no extension, and
-  // completing it to ".bashrc.preset" would be wrong).
+  // True when the leaf already carries an extension. A leading dot does NOT
+  // count: ".bashrc" is a hidden file whose whole name is the stem, not a file
+  // of type "bashrc". So a save dialog treats it as "no extension typed" and
+  // DOES complete it - ".bashrc" under a *.preset filter becomes
+  // ".bashrc.preset", which is the tested behaviour. (Reading the dot as an
+  // extension separator here would be the bug: it would leave the name alone
+  // AND classify every dotfile as pre-typed.)
   inline bool has_extension(const std::string& leaf)
   {
     size_t dot = leaf.rfind('.');
