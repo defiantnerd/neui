@@ -2051,8 +2051,11 @@ namespace xpl_host
   // plumbing per loop.
   static std::unordered_map<UINT_PTR, Session*>& w32_session_timers()
   {
-    static std::unordered_map<UINT_PTR, Session*> m;
-    return m;
+    // Immortal: ~Session (global `sessions` in host.cpp, destroyed last) calls
+    // platform_timer_stop during static teardown, after this TU's statics would
+    // already be gone.
+    static auto* m = new std::unordered_map<UINT_PTR, Session*>();
+    return *m;
   }
 
   static void CALLBACK w32_client_timer_proc(HWND, UINT, UINT_PTR id, DWORD)
@@ -2070,8 +2073,15 @@ namespace xpl_host
     if (!session || interval_ms == 0) return;
     platform_timer_stop(session);   // idempotent re-arm at the new interval
     // id 0 asks the system to allocate one; the return value is the real id.
+    // Note SetTimer clamps interval_ms up to USER_TIMER_MINIMUM (10 ms), so a
+    // 4..9 ms request ticks at ~10 ms here - within the API's documented
+    // "interval is a minimum" contract, and called out in <neui/d/timer.h>.
     UINT_PTR id = SetTimer(nullptr, 0, interval_ms, w32_client_timer_proc);
     if (id) w32_session_timers()[id] = session;
+    // On failure leave nothing registered; Session::sync_timer_tick's cached
+    // interval would otherwise claim "armed" and the timers would be silently
+    // dead. Clearing the cache makes the next add_timer retry the arm.
+    else if (session) session->notify_timer_arm_failed();
   }
 
   void platform_timer_stop(Session* session)

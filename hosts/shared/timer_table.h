@@ -109,6 +109,34 @@ namespace neui_detail
       }
     }
 
+    // The whole tick, including the dispatch walk - the part that used to live
+    // in Session::tick_client_timers and therefore could not be Tier-1 tested,
+    // which is exactly where a re-entrancy use-after-free hid. `fn(id,
+    // interval_ms)` dispatches one timer event.
+    //
+    // Owns three guarantees the caller must not have to re-implement:
+    //   - the due list is a LOCAL vector, so a nested tick cannot realloc the
+    //     container an outer walk is iterating;
+    //   - re-entrancy is suppressed rather than nested (every nested pump in the
+    //     tree services timers, so a handler opening a modal dialog would
+    //     otherwise re-deliver the same deadlines inside itself);
+    //   - a timer removed by an earlier handler in the same tick does not fire.
+    template <typename DispatchFn>
+    void tick_and_dispatch(uint64_t now_ms, DispatchFn&& fn)
+    {
+      if (_ticking) return;
+      _ticking = true;
+      std::vector<TimerEntry> due;
+      tick(now_ms, due);
+      for (const auto& e : due) {
+        if (!is_live(e.id)) continue;
+        fn(e.id, e.interval_ms);
+      }
+      _ticking = false;
+    }
+
+    bool is_ticking() const { return _ticking; }
+
     // True if `id` is live - used to skip an entry that a handler removed
     // earlier in the SAME tick, since `out` above is a snapshot.
     bool is_live(uint32_t id) const
@@ -136,6 +164,7 @@ namespace neui_detail
 
     std::vector<TimerEntry> _entries;
     uint32_t                _next_id = 1;
+    bool                    _ticking = false;
   };
 
 } // namespace neui_detail

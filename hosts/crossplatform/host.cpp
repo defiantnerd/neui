@@ -456,17 +456,17 @@ namespace xpl_host
 
   void Session::tick_client_timers()
   {
-    _timers.tick(platform_now_ms(), _timer_due_scratch);
-    for (const auto& e : _timer_due_scratch) {
-      // The due list is a snapshot: a handler earlier in this loop may have
-      // removed a later timer, and it must not then fire.
-      if (!_timers.is_live(e.id)) continue;
-      neui_event_t ev = {};
-      ev.type                  = NEUI_EVENT_TIMER;
-      ev.data.timer.timer_id    = e.id;
-      ev.data.timer.interval_ms = e.interval_ms;
-      dispatch_event(&ev);
-    }
+    // The walk itself (re-entrancy guard, local due list, liveness recheck)
+    // lives in the portable TimerTable so it is Tier-1 testable - a
+    // use-after-free hid in this loop when it was written out here.
+    _timers.tick_and_dispatch(platform_now_ms(),
+      [this](uint32_t id, uint32_t interval_ms) {
+        neui_event_t ev = {};
+        ev.type                   = NEUI_EVENT_TIMER;
+        ev.data.timer.timer_id    = id;
+        ev.data.timer.interval_ms = interval_ms;
+        dispatch_event(&ev);
+      });
     // A handler may have added or removed timers; re-arm if the shortest
     // interval moved.
     sync_timer_tick();

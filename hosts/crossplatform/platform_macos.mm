@@ -2115,8 +2115,15 @@ namespace xpl_host
   // makes timers work under NEUI_API_EMBED with no loop of our own.
   static std::unordered_map<Session*, NSTimer*>& mac_session_timers()
   {
-    static std::unordered_map<Session*, NSTimer*> m;
-    return m;
+    // Deliberately IMMORTAL (leaked), not a plain function-local static. The
+    // global `sessions` vector in host.cpp outlives this translation unit's
+    // statics: it is constructed first and so destroyed last, and ~Session
+    // calls platform_timer_stop(). A destructible map here is therefore read
+    // AFTER it has been destroyed during static teardown - a SEGV at exit for
+    // any client that uses a timer and never calls destroy(session), which is
+    // exactly what CLAUDE.md's own canonical usage does.
+    static auto* m = new std::unordered_map<Session*, NSTimer*>();
+    return *m;
   }
 
   void platform_timer_start(Session* session, uint32_t interval_ms)

@@ -47,15 +47,43 @@ extern "C" {
 // them, and on Linux embed->pump_and_tick() advances them. A client never needs
 // its own thread, and must not call run() from a plugin (see <neui/d/embed.h>).
 //
-// Firing from inside a NEUI_EVENT_TIMER handler is safe: add_timer /
-// remove_timer during dispatch take effect after the current tick completes,
-// so removing the timer you are handling does not invalidate the walk.
+// Mutating from inside a NEUI_EVENT_TIMER handler is safe. remove_timer takes
+// effect IMMEDIATELY: a timer removed by an earlier handler in the same tick
+// does not fire in that tick, and a timer may remove itself. add_timer's new
+// timer starts a full interval later, so it never fires in the tick that
+// created it.
+//
+// Two things are NOT safe from a handler, both of which would be a
+// use-after-free rather than a surprise:
+//   - destroying the session (neui->destroy). Nothing survives it, and the
+//     dispatch walk resumes on freed memory. Tear a session down from outside
+//     the pump.
+//   - relying on nested delivery: if a handler re-enters the pump (opens a
+//     modal dialog or message box, shows a popup menu, calls pump_once), timer
+//     ticks are SUPPRESSED for the duration of that nested pump rather than
+//     nesting inside your handler. An animation therefore pauses while a modal
+//     dialog your handler opened is up, and resumes when it closes.
+// Host support: exposed by the crossplatform host ("neui.host.crossplatform")
+// ONLY, like NEUI_API_EMBED. This matters on Windows and macOS, where
+// neui_get_api(NULL) returns the NATIVE host first: a client that takes the
+// default there gets NULL from get_interface and has no timers. Plugin builds
+// should already be selecting the xpl host explicitly (see <neui/d/embed.h> and
+// the README); a standalone app that wants timers has to do the same.
+// Feature-detect - never assume the pointer is non-null.
 #define NEUI_API_TIMER "com.defiantnerd.neui.extension.timer/0"
 
 // Floor on the requested interval. 1 ms would be a spin loop against a 60 Hz
 // compositor for no visible benefit; 4 ms still comfortably outpaces any
 // display refresh a client can observe.
 #define NEUI_TIMER_MIN_INTERVAL_MS 4
+
+// Per-platform floors above that value, worth knowing before tuning a rate:
+//   win32: SetTimer clamps to USER_TIMER_MINIMUM (10 ms), so 4..9 ms all tick
+//          at ~10 ms.
+//   linux, embedded: the tick rides the DAW's pump_and_tick cadence, so the
+//          effective rate is whatever the host calls it at (an 8 ms timer under
+//          a 30 Hz host idle fires at ~33 ms).
+//   null platform: accepts timers and never fires them (it has no event loop).
 
   typedef struct neui_timer_api
   {

@@ -302,20 +302,36 @@ namespace
   // period is the minimum of the two demands - a client asking for 8 ms must not
   // be slowed to the animation's 16 ms, and an animation must not be starved by
   // a client's 1000 ms timer.
-  std::unordered_map<Session*, uint32_t> g_client_timer_sessions;
+  // Immortal (leaked) rather than a destructible global: the `sessions` vector
+  // lives in host.cpp, so the relative static-destruction order across the two
+  // TUs is unspecified, and ~Session calls platform_timer_stop(). A leaked map
+  // at exit costs nothing; a destroyed one is a crash.
+  std::unordered_map<Session*, uint32_t>& client_timer_sessions()
+  {
+    static auto* m = new std::unordered_map<Session*, uint32_t>();
+    return *m;
+  }
 
   uint32_t client_timer_min_ms()
   {
     uint32_t best = 0;
-    for (auto& kv : g_client_timer_sessions)
+    for (auto& kv : client_timer_sessions())
       if (best == 0 || kv.second < best) best = kv.second;
     return best;
   }
 
-  // Arm the heartbeat at `period_ms`, or disarm when 0.
+  // The period the timerfd is currently armed at (0 = disarmed). Tracked so a
+  // re-arm can be skipped when the demand has not moved: timerfd_settime RESETS
+  // the phase, so calling it every tick would turn the period into
+  // `period + handler time` and drift the animation heartbeat as well.
+  uint32_t g_armed_period_ms = 0;
+
+  // Arm the heartbeat at `period_ms`, or disarm when 0. Idempotent.
   void arm_timer_ms(uint32_t period_ms)
   {
     if (g_timerfd < 0) return;
+    if (period_ms == g_armed_period_ms) return;   // already correct - don't re-phase
+    g_armed_period_ms = period_ms;
     struct itimerspec its; std::memset(&its, 0, sizeof its);
     if (period_ms > 0) {
       its.it_interval.tv_sec  = period_ms / 1000;
@@ -420,12 +436,12 @@ namespace
     }
     // Client timers ride the same heartbeat. Snapshot first: a handler may
     // add or remove a session's timers, which mutates the map we are walking.
-    if (!g_client_timer_sessions.empty()) {
+    if (!client_timer_sessions().empty()) {
       std::vector<Session*> due;
-      due.reserve(g_client_timer_sessions.size());
-      for (auto& kv : g_client_timer_sessions) due.push_back(kv.first);
+      due.reserve(client_timer_sessions().size());
+      for (auto& kv : client_timer_sessions()) due.push_back(kv.first);
       for (Session* s : due)
-        if (g_client_timer_sessions.count(s)) s->tick_client_timers();
+        if (client_timer_sessions().count(s)) s->tick_client_timers();
     }
     // Drop back to a blocking select() once NEITHER demand is live (no 60 Hz
     // wakeups). Catches the bounce-settled case; the client-timer paths call
@@ -2030,7 +2046,7 @@ namespace
     // window: their own deadlines already decide what is due, and a plugin
     // asking for 8 ms must not be halved. There is no timerfd in the picture
     // here - the DAW's cadence is the tick source.
-    if (lw->session && g_client_timer_sessions.count(lw->session))
+    if (lw->session && client_timer_sessions().count(lw->session))
       lw->session->tick_client_timers();
     if (lw->needs_paint) paint_window(lw);
     XFlush(lw->dpy);
@@ -2612,14 +2628,14 @@ namespace
   {
     if (!session || interval_ms == 0) return;
     ensure_timerfd();
-    g_client_timer_sessions[session] = interval_ms;
+    client_timer_sessions()[session] = interval_ms;
     refresh_timer_arm();
   }
 
   void platform_timer_stop(Session* session)
   {
     if (!session) return;
-    g_client_timer_sessions.erase(session);
+    client_timer_sessions().erase(session);
     refresh_timer_arm();
   }
 

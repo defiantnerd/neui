@@ -294,7 +294,27 @@ established convention for this repo's cross-machine flow.
 - **2.3 — embedded contract.** Documented and honoured: no thread, no `run()`
   from a plugin; the DAW's pump services win32/macOS and `pump_and_tick` drives
   Linux.
-- Verified: 17 Tier-1 cases over the table (clamping, deadlines, late-tick
+- **Review found three real bugs, two reproduced under ASan; all fixed.**
+  (1) The per-platform timer registries were function-local statics, so they
+  were destroyed *before* the global `sessions` vector whose `~Session` calls
+  `platform_timer_stop` — a **SEGV at exit for any client that uses a timer and
+  never calls `destroy(session)`, which is what CLAUDE.md's own canonical usage
+  does**. All four are now immortal (leaked) maps. (2) The due list was a
+  Session *member*, and every nested pump in the tree services timers, so a
+  handler opening a modal dialog re-entered the walk and reallocated the vector
+  the outer frame was iterating — a use-after-free. Fixed by moving the whole
+  walk into `TimerTable::tick_and_dispatch` with a local vector *and* a
+  re-entrancy guard (nested ticks are suppressed, not nested). (3)
+  Destroying the session from a handler is a use-after-free; documented as
+  illegal rather than papered over. Also fixed: a Linux phase-reset regression
+  (`timerfd_settime` every tick turned the period into `period + handler time`),
+  and a win32 path where a failed `SetTimer` still cached "armed" so timers went
+  silently dead.
+- The review's sharpest process point: the mutation-during-dispatch tests
+  *simulated* the caller's loop, so the suite passed **with the re-entrancy bug
+  shipped**. Moving the walk into the portable table made it Tier-1 testable;
+  8 new cases now exercise the real walk, including the nesting case.
+- Verified: 25 Tier-1 cases over the table (clamping, deadlines, late-tick
   coalescing, shortest-interval arming, self-removal, add-during-tick,
   tombstone reaping) plus an end-to-end run on macOS under a **hand-rolled
   `pump_once` loop** — the standalone case the review called out as impossible:

@@ -252,3 +252,127 @@ TEST_CASE("TimerTable: a removed timer is not reported live mid-snapshot")
   t.remove(a);
   CHECK_FALSE(t.is_live(a));
 }
+
+// ---------------------------------------------------------------------------
+// tick_and_dispatch - the REAL walk. These previously simulated the caller's
+// loop by hand, which is precisely why a re-entrancy use-after-free in it went
+// unnoticed: the suite passed with the bug shipped. Now the walk under test IS
+// the walk that runs.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("tick_and_dispatch: dispatches each due timer once with its interval")
+{
+  TimerTable t;
+  uint32_t a = t.add(10, 0);
+  uint32_t b = t.add(20, 0);
+  std::vector<uint32_t> fired;
+  std::vector<uint32_t> intervals;
+  t.tick_and_dispatch(20, [&](uint32_t id, uint32_t iv) {
+    fired.push_back(id); intervals.push_back(iv);
+  });
+  CHECK_EQ(fired.size(), (size_t)2);
+  CHECK_EQ(intervals[0], 10u);
+  CHECK_EQ(intervals[1], 20u);
+  CHECK(fired[0] == a || fired[1] == a);
+  CHECK(fired[0] == b || fired[1] == b);
+}
+
+TEST_CASE("tick_and_dispatch: a handler removing ANOTHER due timer stops it firing")
+{
+  TimerTable t;
+  uint32_t a = t.add(10, 0);
+  uint32_t b = t.add(10, 0);
+  std::vector<uint32_t> fired;
+  t.tick_and_dispatch(10, [&](uint32_t id, uint32_t) {
+    fired.push_back(id);
+    if (id == a) t.remove(b);     // b is later in the same snapshot
+  });
+  CHECK_EQ(fired.size(), (size_t)1);
+  CHECK_EQ(fired[0], a);
+  CHECK_FALSE(t.is_live(b));
+}
+
+TEST_CASE("tick_and_dispatch: a handler can remove itself")
+{
+  TimerTable t;
+  uint32_t id = t.add(10, 0);
+  int fires = 0;
+  t.tick_and_dispatch(10, [&](uint32_t got, uint32_t) {
+    ++fires; CHECK_EQ(got, id); t.remove(id);
+  });
+  CHECK_EQ(fires, 1);
+  t.tick_and_dispatch(1000, [&](uint32_t, uint32_t) { ++fires; });
+  CHECK_EQ(fires, 1);            // never again
+}
+
+TEST_CASE("tick_and_dispatch: a timer ADDED by a handler waits a full interval")
+{
+  TimerTable t;
+  t.add(10, 0);
+  uint32_t added = 0;
+  std::vector<uint32_t> fired;
+  t.tick_and_dispatch(10, [&](uint32_t id, uint32_t) {
+    fired.push_back(id);
+    if (!added) added = t.add(10, 10);
+  });
+  CHECK_EQ(fired.size(), (size_t)1);          // the new timer did NOT fire here
+  CHECK(added != 0);
+  fired.clear();
+  t.tick_and_dispatch(15, [&](uint32_t id, uint32_t) { fired.push_back(id); });
+  CHECK_EQ(fired.size(), (size_t)0);          // still waiting at 15
+  t.tick_and_dispatch(20, [&](uint32_t id, uint32_t) { fired.push_back(id); });
+  CHECK_EQ(fired.size(), (size_t)2);          // both due at 20
+}
+
+TEST_CASE("tick_and_dispatch: RE-ENTRANT ticks are suppressed, not nested")
+{
+  // The bug this pins: every nested pump in the tree (modal dialog, popup menu,
+  // client pump_once) services timers, so a handler that opens one re-enters
+  // the walk. Nesting re-delivered the same deadlines AND reallocated the
+  // container the outer frame was iterating - a use-after-free.
+  TimerTable t;
+  t.add(10, 0);
+  t.add(10, 0);
+  int outer = 0, nested = 0;
+  t.tick_and_dispatch(10, [&](uint32_t, uint32_t) {
+    ++outer;
+    CHECK(t.is_ticking());          // we are inside the walk
+    // Simulate the handler opening a modal dialog whose pump ticks timers,
+    // AND adding timers while nested (which used to realloc the due vector).
+    for (int i = 0; i < 8; ++i) t.add(10, 10);
+    t.tick_and_dispatch(10, [&](uint32_t, uint32_t) { ++nested; });
+  });
+  CHECK_EQ(outer, 2);               // both original timers still fired
+  CHECK_EQ(nested, 0);              // the nested tick delivered nothing
+  CHECK_FALSE(t.is_ticking());      // and the guard cleared afterwards
+}
+
+TEST_CASE("tick_and_dispatch: the guard clears even across many ticks")
+{
+  TimerTable t;
+  uint32_t id = t.add(10, 0);
+  CHECK(id != 0);
+  for (int i = 1; i <= 5; ++i) {
+    int fires = 0;
+    t.tick_and_dispatch((uint64_t)i * 10, [&](uint32_t, uint32_t) { ++fires; });
+    CHECK_EQ(fires, 1);
+    CHECK_FALSE(t.is_ticking());
+  }
+}
+
+TEST_CASE("tick_and_dispatch: a late tick dispatches once, not per missed period")
+{
+  TimerTable t;
+  t.add(10, 0);
+  int fires = 0;
+  t.tick_and_dispatch(1000, [&](uint32_t, uint32_t) { ++fires; });
+  CHECK_EQ(fires, 1);
+}
+
+TEST_CASE("tick_and_dispatch: no live timers dispatches nothing")
+{
+  TimerTable t;
+  int fires = 0;
+  t.tick_and_dispatch(1000, [&](uint32_t, uint32_t) { ++fires; });
+  CHECK_EQ(fires, 0);
+}

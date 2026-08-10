@@ -826,6 +826,9 @@ namespace xpl_host
     bool     timer_set_interval(uint32_t timer_id, uint32_t interval_ms);
     // Called by the platform layer on every native tick.
     void     tick_client_timers();
+    // Platform hook: the native tick could not be armed, so drop the cached
+    // "armed at" interval and let the next add/remove try again.
+    void     notify_timer_arm_failed() { _timer_native_interval = 0; }
   private:
     void     sync_timer_tick();
   public:
@@ -1042,7 +1045,8 @@ namespace xpl_host
     // currently armed at, so we only re-arm when the shortest interval moves.
     neui_detail::TimerTable            _timers;
     uint32_t                           _timer_native_interval = 0;
-    std::vector<neui_detail::TimerEntry> _timer_due_scratch;
+    // (The re-entrancy guard lives in TimerTable::tick_and_dispatch, so the
+    // dispatch walk and its guard stay together and stay testable.)
     bool     _os_focused     = true;  // frame currently has OS keyboard focus
     uint32_t _open_combo     = 0;   // tree index of the currently open ComboBoxWidget, or 0
 

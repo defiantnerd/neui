@@ -2416,8 +2416,10 @@ namespace xpl_host
   // (a scroll / drag in progress must not freeze a client animation).
   static std::unordered_map<Session*, NSTimer*>& ios_session_timers()
   {
-    static std::unordered_map<Session*, NSTimer*> m;
-    return m;
+    // Immortal for the same reason as the macOS registry: ~Session runs during
+    // static teardown AFTER this TU's statics would have been destroyed.
+    static auto* m = new std::unordered_map<Session*, NSTimer*>();
+    return *m;
   }
 
   void platform_timer_start(Session* session, uint32_t interval_ms)
