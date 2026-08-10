@@ -739,6 +739,70 @@ the outcome and pins no single mechanism.
   with his own suggestion that a type-in overlay drawn on the surface is the
   better answer.
 
+**4.3 STATUS: SHIPPED.** `open_file` / `save_file` appended to `neui_notify_api_t`
+(`include/neui/d/notify.h`) with `neui_file_filter_t` / `neui_file_dialog_t` /
+`neui_file_path_cb`. Blocking + modal like `message_box`; results delivered
+through a per-path callback rather than an out-parameter (no allocation
+ownership question, no size-query round trip - impossible for an interactive
+dialog - and multi-select falls out free). **`-1` and `0` are deliberately
+distinct**: `-1` = no dialog was shown (bad/unrealised/non-frame widget, or a
+host without the surface), `0` = the user cancelled. A client that falls back
+to its own path entry must do so only on `-1`.
+
+`hosts/shared/file_dialog_model.h` owns everything easy to get subtly wrong -
+`glob_match`, `parse_filters`, `clamp_default_filter`, `complete_extension`,
+`path_join`/`_parent`/`_leaf`, `list_directory_view` - and is used by **all
+three real platforms**, not just the drawn fallback: it feeds
+`COMDLG_FILTERSPEC`, `allowedContentTypes`, and the portal's `a(sa(us))`.
+25 Tier-1 cases (`tests/test_file_dialog_model.cpp`, 433 total / 2468 checks).
+Two invariants worth the tests: a type filter **never hides directories** (you
+must be able to navigate into a folder to reach its files - the obvious
+"filter everything" implementation gets this wrong), and the listing sort is a
+*total* order over case variants.
+
+Per host: win32 `IFileOpenDialog`/`IFileSaveDialog`
+(`hosts/shared/win32/file_dialog_win32.h`; note `SetFileTypeIndex` is
+**one-based**), macOS `NSOpenPanel`/`NSSavePanel` via `UTType`
+(`hosts/shared/macos/file_dialog_macos.h`), Linux XDG portal
+(`hosts/shared/linux/file_dialog_portal.h`) falling through to a neui-drawn
+browser (`run_file_browser` in `platform_linux.cpp`). Both macOS hosts and both
+win32 hosts are wired; iOS and null return `-1`.
+
+The Linux design de-risks its own untestable part on purpose: the portal is
+best-effort and **any** failure (no libdbus, no bus, no portal, malformed
+reply, timeout) falls through to the drawn browser, so a D-Bus marshalling bug
+degrades to a working dialog instead of breaking the feature. Only an explicit
+`cancelled` stops the fall-through - the chooser was already on screen, so a
+second dialog on top of a dismissed first is worse than no portal path at all.
+
+**Honest limitation: only macOS is verified at runtime.**
+`tests/file_dialog_smoke_macos.mm` (34 checks) drives real modal panels on
+*both* macOS hosts - including the native one, which is what
+`examples/main.cpp` actually uses there - resolving them from
+`[NSApp modalWindow]`. Cancel goes through the panel's own `-cancel:`; confirm
+cannot, because modern NSSavePanel runs out of process and `-ok:` raises "not
+implemented", so confirm ends the modal session with `NSModalResponseOK` and
+the helper reads `[panel URL]` as it would after a click. Negative-probed:
+disabling the completion pass fails 3 checks. The win32 and Linux paths are
+inspection only - no MSVC, and no X11/Cairo/D-Bus/pkg-config on this machine.
+
+Two things the harness itself caught, neither of which inspection would have:
+`/tmp` is a symlink to `/private/tmp` and AppKit canonicalises the panel's
+`directoryURL` at a moment of its own choosing, so the original literal
+path comparisons were passing by luck (now `realpath`-based, asserting *same
+directory, same leaf*); and the drawn browser had a **folder-picker dead end** -
+a directory with no subdirectories left no row selectable, so OK never
+enabled and Cancel was the only way out (folder mode with nothing selected now
+picks the folder currently open).
+
+Also implemented rather than documented away: the drawn browser **asks before
+overwriting**. The API promises the prompt is default-on, and shipping a path
+where it silently does not happen is a data-loss footgun. It is an in-window
+overlay (scrim + panel, non-destructive answer on both Enter and Esc, wheel
+absorbed) rather than a nested `run_message_box`, because that helper disables
+a `LinuxWindow*` owner and the browser's X window is not one - a nested box
+would leave the browser clickable underneath.
+
 - **4.3 — file dialog (his #10).** Append `open_file` / `save_file` to
   `NEUI_API_NOTIFY` alongside `message_box`: filter list, initial dir/name,
   multi-select flag, returns paths. `IFileDialog` on win32, `NSOpenPanel` /

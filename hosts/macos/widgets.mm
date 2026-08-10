@@ -24,6 +24,7 @@
 #define NEUI_TOAST_MACOS_IMPLEMENTATION
 #include "../shared/macos/toast_macos.h"
 #include "../shared/macos/message_box_macos.h"
+#include "../shared/macos/file_dialog_macos.h"
 
 #include <algorithm>
 #include <cstring>
@@ -802,10 +803,52 @@ namespace macos_host
     return neui_detail::message_box_macos(win, text, caption, flags);
   }
 
+  // open_file / save_file. NSOpenPanel / NSSavePanel runModal is app-modal,
+  // so the resolved NSWindow is validation only (it proves the handle names a
+  // realised frame) rather than a required sheet parent. -1 = no dialog ran,
+  // which the public contract keeps distinct from a 0 = cancelled.
+  static int notify_run_file_dialog(neui_session_t session,
+                                    neui_widget_t parent_window,
+                                    const neui_file_dialog_t* desc,
+                                    neui_file_path_cb cb, void* userdata,
+                                    bool save)
+  {
+    NSWindow* win = notify_frame_window(session, parent_window);
+    if (!win) return -1;
+    neui_file_dialog_t empty = {};
+    if (!desc) desc = &empty;
+
+    std::vector<std::string> paths;
+    int n = save ? neui_detail::file_dialog_save_macos(win, desc, paths)
+                 : neui_detail::file_dialog_open_macos(win, desc, paths);
+    if (n <= 0) return n;
+    if (cb)
+      for (const auto& p : paths) cb(userdata, p.c_str());
+    return (int)paths.size();
+  }
+
+  static int NEUI_ABI notify_open_file(neui_session_t session,
+                                        neui_widget_t parent_window,
+                                        const neui_file_dialog_t* desc,
+                                        neui_file_path_cb cb, void* userdata)
+  {
+    return notify_run_file_dialog(session, parent_window, desc, cb, userdata, false);
+  }
+
+  static int NEUI_ABI notify_save_file(neui_session_t session,
+                                        neui_widget_t parent_window,
+                                        const neui_file_dialog_t* desc,
+                                        neui_file_path_cb cb, void* userdata)
+  {
+    return notify_run_file_dialog(session, parent_window, desc, cb, userdata, true);
+  }
+
   neui_notify_api_t notify_api = {
     NEUI_VERSION,
     notify_toast,
     notify_message_box,
+    notify_open_file,
+    notify_save_file,
   };
 
   neui_widget_api_t widgets_api = {

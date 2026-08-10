@@ -18,7 +18,10 @@ if(WIN32)
   target_sources(neui-xplhost PRIVATE platform_win32.cpp)
   # windowsapp.lib supplies RoGetActivationFactory / RoOriginateLanguageException
   # required by the C++/WinRT projection used in theme_provider_win32.h.
-  target_link_libraries(neui-xplhost PRIVATE neui-backend-d2d windowsapp)
+  # ole32 / shell32: CoCreateInstance + SHCreateItemFromParsingName for the
+  # IFileDialog file dialogs (file_dialog_win32.h).
+  target_link_libraries(neui-xplhost PRIVATE neui-backend-d2d windowsapp
+                                             ole32 shell32)
 elseif(NEUI_IOS)
   # iOS uses the same shared CoreGraphics backend as macOS, but the UIKit
   # platform layer instead of the AppKit one. This branch MUST come before the
@@ -42,6 +45,9 @@ elseif(APPLE)
     "-framework AppKit"
     "-framework Foundation"
     "-framework CoreGraphics"
+    # UTType, for the NSOpenPanel / NSSavePanel type filters in
+    # hosts/shared/macos/file_dialog_macos.h (macOS 11+; guarded at runtime).
+    "-framework UniformTypeIdentifiers"
   )
 elseif(UNIX)
   # Linux (and other X11 Unixes): Cairo software backend + X11 platform layer.

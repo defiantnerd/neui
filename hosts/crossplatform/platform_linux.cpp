@@ -26,6 +26,9 @@
 #include "../shared/linux/clipboard_linux.h"
 #include "../shared/linux/dnd_linux.h"
 #include "../shared/linux/message_box_linux.h"
+#include "../shared/file_dialog_model.h"
+#include "../shared/linux/file_dialog_portal.h"
+#include "../shared/text_edit.h"           // name field in the drawn browser
 #include "../shared/theme_palette.h"
 #include "../shared/linux/theme_provider_linux.h"
 #include "../../backends/cairo/cairo_backend.h"
@@ -46,6 +49,9 @@
 
 #include <sys/select.h>
 #include <sys/timerfd.h>
+#include <sys/stat.h>
+#include <dirent.h>          // neui-drawn file browser directory listing
+#include <pwd.h>             // $HOME fallback for the browser's start folder
 #include <unistd.h>
 #include <time.h>
 
@@ -2127,6 +2133,738 @@ namespace
     return result;
   }
 
+  // ---- File dialog ---------------------------------------------------------
+  //
+  // Two paths, tried in order:
+  //
+  //   1. The XDG desktop portal (file_dialog_portal.h). The user's own file
+  //      chooser, with their bookmarks and recent files. Optional at build
+  //      time (NEUI_HAS_DBUS) and at run time (a portal implementation has to
+  //      be installed), so any failure falls through to (2). Only an explicit
+  //      "cancelled" stops the fall-through.
+  //
+  //   2. A neui-drawn browser over the Cairo backend, in the same shape as
+  //      run_message_box above: own X window, own nested modal loop, owner
+  //      input blocked, palette scoped to the owner's session. Deliberately
+  //      plain - a path bar, an Up button, a scrolling list, a name field for
+  //      save, a filter chip that cycles the type list, and OK / Cancel. It
+  //      is the no-desktop fallback, not a file manager.
+  //
+  // All the fiddly logic (glob matching, listing order, extension completion)
+  // lives in hosts/shared/file_dialog_model.h and is Tier-1 tested; what is
+  // left here is X11, Cairo, and readdir.
+
+  // Read one directory. Returns false when it cannot be opened at all, so the
+  // caller can refuse to navigate into it rather than showing an empty folder
+  // that looks like a folder with no files in it.
+  bool fd_read_dir(const std::string& dir, std::vector<neui_detail::FileEntry>& out)
+  {
+    DIR* d = opendir(dir.c_str());
+    if (!d) return false;
+    while (struct dirent* e = readdir(d)) {
+      neui_detail::FileEntry fe;
+      fe.name = e->d_name;
+      // d_type is not filled in on every filesystem (notably some network
+      // mounts report DT_UNKNOWN); stat() is the fallback so directories
+      // stay navigable there.
+      if (e->d_type == DT_DIR)          fe.is_dir = true;
+      else if (e->d_type == DT_UNKNOWN || e->d_type == DT_LNK) {
+        struct stat st;
+        std::string full = neui_detail::path_join(dir, fe.name);
+        fe.is_dir = (stat(full.c_str(), &st) == 0) && S_ISDIR(st.st_mode);
+      }
+      out.push_back(fe);
+    }
+    closedir(d);
+    return true;
+  }
+
+  bool fd_path_exists(const std::string& p)
+  {
+    struct stat st;
+    return stat(p.c_str(), &st) == 0;
+  }
+
+  // Where to start when the client named no directory: $HOME, then the passwd
+  // entry, then "/" - never the process CWD, which for a plugin is wherever
+  // the DAW happened to be launched from.
+  std::string fd_default_dir()
+  {
+    if (const char* h = getenv("HOME")) {
+      if (*h && fd_path_exists(h)) return h;
+    }
+    if (struct passwd* pw = getpwuid(getuid())) {
+      if (pw->pw_dir && *pw->pw_dir && fd_path_exists(pw->pw_dir)) return pw->pw_dir;
+    }
+    return "/";
+  }
+
+  // The neui-drawn browser. Appends the chosen path(s) to `out`; returns the
+  // count, 0 on cancel.
+  int run_file_browser(LinuxWindow* owner, bool save,
+                       const neui_file_dialog_t* desc,
+                       std::vector<std::string>& out)
+  {
+    if (!g_display) return -1;
+    Display* d = g_display;
+    auto* backend = platform_get_backend();
+    if (!backend) return -1;
+
+    using namespace neui_detail;
+
+    const uint32_t fdflags  = desc ? desc->flags : 0u;
+    const bool dir_mode     = !save && (fdflags & NEUI_FD_DIRECTORY) != 0;
+    const bool multi        = !save && (fdflags & NEUI_FD_MULTISELECT) != 0;
+    bool       show_hidden  = (fdflags & NEUI_FD_SHOW_HIDDEN) != 0;
+
+    std::vector<FileFilter> filters = parse_filters(desc);
+    size_t filter_index = clamp_default_filter(desc, filters.size());
+    // A folder picker filters nothing.
+    if (dir_mode) filters.clear();
+
+    std::string cwd = (desc && desc->initial_dir && *desc->initial_dir &&
+                       fd_path_exists(desc->initial_dir))
+                      ? desc->initial_dir : fd_default_dir();
+
+    TextEditState name;
+    if (save && desc && desc->initial_name) name.text = desc->initial_name;
+    name.cursor = name.sel_anchor = (int)name.text.size();
+
+    std::vector<FileEntry> rows;
+    std::vector<bool>      picked;      // multi-select marks, parallel to rows
+    int  sel = -1;                      // focused row, -1 = none
+    int  scroll = 0;                    // first visible row
+
+    auto active_filter = [&]() -> const FileFilter* {
+      if (filters.empty()) return nullptr;
+      return &filters[filter_index < filters.size() ? filter_index : 0];
+    };
+    auto reload = [&]() {
+      std::vector<FileEntry> raw;
+      fd_read_dir(cwd, raw);
+      rows = list_directory_view(raw, active_filter(), show_hidden);
+      picked.assign(rows.size(), false);
+      sel = rows.empty() ? -1 : 0;
+      scroll = 0;
+    };
+    reload();
+
+    uint32_t dpi  = owner ? owner->dpi : query_display_dpi(d);
+    float   scale = (float)dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+
+    neui_detail::ScopedPaletteOverride scope(
+      (owner && owner->session) ? owner->session->effective_palette_ptr() : nullptr);
+    auto C = [](neui_detail::ColorRole r) {
+      return neui_detail::current_palette().colors[(size_t)r];
+    };
+    using neui_detail::shade;
+
+    // Layout, logical px. Fixed size: a resizable browser would need a real
+    // layout pass, and the fallback does not earn one.
+    const int WIN_W = 560, WIN_H = 420;
+    const int PAD = 12, ROW_H = 20, BTN_H = 26, BTN_W = 92, BTN_GAP = 8;
+    const int BAR_H = 24, FLD_H = 24;
+    const int UP_W = 40;
+    const float SZ = 13.0f;
+
+    const int bar_y  = PAD;
+    const int list_y = bar_y + BAR_H + 8;
+    const int btn_y  = WIN_H - PAD - BTN_H;
+    const int fld_y  = btn_y - 8 - FLD_H;
+    // Open mode has no name field, so the list takes that row's space rather
+    // than leaving a blank strip above the buttons.
+    const int list_h = (save ? fld_y : btn_y) - 8 - list_y;
+    const int visible_rows = list_h / ROW_H;
+    const int list_x = PAD, list_w = WIN_W - PAD * 2;
+
+    const int ok_x     = WIN_W - PAD - BTN_W;
+    const int cancel_x = ok_x - BTN_GAP - BTN_W;
+    const int up_x     = WIN_W - PAD - UP_W;
+    const int chip_x   = PAD, chip_w = 200;
+
+    auto clamp_scroll = [&]() {
+      int max_scroll = (int)rows.size() - visible_rows;
+      if (max_scroll < 0) max_scroll = 0;
+      if (scroll > max_scroll) scroll = max_scroll;
+      if (scroll < 0) scroll = 0;
+    };
+    auto scroll_to_sel = [&]() {
+      if (sel < 0) return;
+      if (sel < scroll) scroll = sel;
+      else if (sel >= scroll + visible_rows) scroll = sel - visible_rows + 1;
+      clamp_scroll();
+    };
+
+    // The set of paths the OK button would return right now. Empty = OK is
+    // not actionable (nothing selected / nothing typed), which is also what
+    // greys the button out.
+    auto collect_result = [&](std::vector<std::string>& res) {
+      res.clear();
+      if (save) {
+        std::string leaf = name.text;
+        if (leaf.empty()) return;
+        if (!filters.empty()) leaf = complete_extension(leaf, filters[filter_index]);
+        res.push_back(path_join(cwd, leaf));
+        return;
+      }
+      if (multi) {
+        for (size_t i = 0; i < rows.size(); ++i)
+          if (picked[i] && rows[i].is_dir == dir_mode)
+            res.push_back(path_join(cwd, rows[i].name));
+        if (!res.empty()) return;
+      }
+      if (sel >= 0 && sel < (int)rows.size() &&
+          rows[(size_t)sel].is_dir == dir_mode) {
+        res.push_back(path_join(cwd, rows[(size_t)sel].name));
+        return;
+      }
+      // Folder mode with nothing selected picks the folder the browser is
+      // currently IN. Without this, a directory with no subdirectories is a
+      // dead end: no row can be selected, so OK would never enable and the
+      // only way out is Cancel.
+      if (dir_mode) res.push_back(cwd);
+    };
+
+    // Centre over the owner (or the screen) - same as the message box.
+    int scr = DefaultScreen(d);
+    Window root = RootWindow(d, scr);
+    Visual* vis = DefaultVisual(d, scr);
+    int depth = DefaultDepth(d, scr);
+    int ox = 0, oy = 0;
+    unsigned ow = (unsigned)DisplayWidth(d, scr), oh = (unsigned)DisplayHeight(d, scr);
+    if (owner) {
+      Window ch; XTranslateCoordinates(d, owner->win, root, 0, 0, &ox, &oy, &ch);
+      XWindowAttributes oa;
+      if (XGetWindowAttributes(d, owner->win, &oa)) {
+        ow = (unsigned)oa.width; oh = (unsigned)oa.height;
+      }
+    }
+    int wpx = (int)((float)WIN_W * scale + 0.5f), hpx = (int)((float)WIN_H * scale + 0.5f);
+    int wx = ox + ((int)ow - wpx) / 2, wy = oy + ((int)oh - hpx) / 2;
+    if (wx < 0) wx = 0;
+    if (wy < 0) wy = 0;
+
+    XSetWindowAttributes swa; std::memset(&swa, 0, sizeof swa);
+    swa.background_pixmap = None; swa.bit_gravity = NorthWestGravity;
+    swa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
+                     PointerMotionMask | KeyPressMask | StructureNotifyMask;
+    Window win = XCreateWindow(d, root, wx, wy, (unsigned)wpx, (unsigned)hpx, 0,
+                               depth, InputOutput, vis,
+                               CWBackPixmap | CWEventMask | CWBitGravity, &swa);
+    if (!win) return -1;
+
+    const char* title = (desc && desc->title && *desc->title)
+                        ? desc->title
+                        : (save ? "Save File" : (dir_mode ? "Choose Folder" : "Open File"));
+    set_window_title(d, win, title);
+    if (owner) XSetTransientForHint(d, win, owner->win);
+    if (g_wm_delete != None) XSetWMProtocols(d, win, &g_wm_delete, 1);
+    {
+      Atom st = XInternAtom(d, "_NET_WM_STATE", False);
+      Atom md = XInternAtom(d, "_NET_WM_STATE_MODAL", False);
+      if (st != None && md != None)
+        XChangeProperty(d, win, st, XA_ATOM, 32, PropModeReplace,
+                        reinterpret_cast<unsigned char*>(&md), 1);
+    }
+    if (XSizeHints* sh = XAllocSizeHints()) {
+      sh->flags = PMinSize | PMaxSize | USPosition;
+      sh->min_width = sh->max_width = wpx;
+      sh->min_height = sh->max_height = hpx;
+      sh->x = wx; sh->y = wy;
+      XSetWMNormalHints(d, win, sh); XFree(sh);
+    }
+
+    neui_cairo_backend::LinuxNativeSurface ns;
+    ns.dpy = d; ns.win = win; ns.visual = vis; ns.depth = depth;
+    neui_render_ctx_t ctx = backend->create_context(&ns, (uint32_t)wpx, (uint32_t)hpx);
+    if (!ctx) { XDestroyWindow(d, win); return -1; }
+    backend->update_dpi(ctx, dpi);
+
+    // Overwrite-confirmation overlay. The API documents the prompt as ON by
+    // default for save (NEUI_FD_NO_OVERWRITE_PROMPT turns it off), and this
+    // browser is the whole dialog on a portal-less box - so it has to ask
+    // rather than hand back a path the client will silently clobber. Drawn as
+    // an in-window overlay instead of nesting run_message_box: that helper
+    // takes a LinuxWindow* owner to disable, and the browser's X window is not
+    // one, so a nested box would leave the browser itself clickable
+    // underneath.
+    const bool  want_overwrite_prompt = save && !(fdflags & NEUI_FD_NO_OVERWRITE_PROMPT);
+    bool        confirming = false;      // overlay is up
+    std::string confirm_path;            // the path it is asking about
+    const int   CONF_W = 360, CONF_H = 130;
+    const int   conf_x = (WIN_W - CONF_W) / 2, conf_y = (WIN_H - CONF_H) / 2;
+    const int   conf_btn_y = conf_y + CONF_H - 12 - BTN_H;
+    const int   conf_no_x  = conf_x + CONF_W - 12 - BTN_W;
+    const int   conf_yes_x = conf_no_x - BTN_GAP - BTN_W;
+
+    // Hit regions. Kept as an enum + one hit() so paint and input cannot
+    // disagree about where a control is.
+    enum Hit { H_NONE, H_LIST, H_UP, H_OK, H_CANCEL, H_CHIP, H_FIELD,
+               H_CONF_YES, H_CONF_NO };
+    auto hit = [&](int lx, int ly, int* row_out) -> Hit {
+      if (row_out) *row_out = -1;
+      // While the overlay is up it swallows everything: the controls behind it
+      // must not react to a click aimed at Yes/No.
+      if (confirming) {
+        if (ly >= conf_btn_y && ly < conf_btn_y + BTN_H) {
+          if (lx >= conf_yes_x && lx < conf_yes_x + BTN_W) return H_CONF_YES;
+          if (lx >= conf_no_x  && lx < conf_no_x  + BTN_W) return H_CONF_NO;
+        }
+        return H_NONE;
+      }
+      if (ly >= btn_y && ly < btn_y + BTN_H) {
+        if (lx >= ok_x && lx < ok_x + BTN_W)         return H_OK;
+        if (lx >= cancel_x && lx < cancel_x + BTN_W) return H_CANCEL;
+        if (!filters.empty() && lx >= chip_x && lx < chip_x + chip_w) return H_CHIP;
+        return H_NONE;
+      }
+      if (ly >= bar_y && ly < bar_y + BAR_H) {
+        if (lx >= up_x && lx < up_x + UP_W) return H_UP;
+        return H_NONE;
+      }
+      if (save && ly >= fld_y && ly < fld_y + FLD_H) return H_FIELD;
+      if (ly >= list_y && ly < list_y + list_h &&
+          lx >= list_x && lx < list_x + list_w) {
+        int r = scroll + (ly - list_y) / ROW_H;
+        if (r >= 0 && r < (int)rows.size()) { if (row_out) *row_out = r; return H_LIST; }
+        return H_LIST;
+      }
+      return H_NONE;
+    };
+
+    int  hover_row = -1;
+    Hit  hover     = H_NONE;
+    Hit  pressed   = H_NONE;
+    bool done = false, need_paint = true, focused = false, cancelled = false;
+    // Click-to-open needs a double click; track the previous press target.
+    int  last_click_row = -1;
+    Time last_click_time = 0;
+
+    int (*old_err)(Display*, XErrorEvent*) = XSetErrorHandler(drag_xerror);
+
+    auto text_w = [&](const char* s, float sz) -> int {
+      if (!s || !*s) return 0;
+      return (int)backend->measure_text(ctx, s, -1, sz);
+    };
+    // Middle-elide a string to fit `maxw` ("/very/long/…/dir").
+    auto elide = [&](const std::string& s, int maxw) -> std::string {
+      if (text_w(s.c_str(), SZ) <= maxw) return s;
+      std::string tail = s;
+      while (!tail.empty() && text_w(("..." + tail).c_str(), SZ) > maxw)
+        tail.erase(0, 1);
+      return "..." + tail;
+    };
+
+    auto draw_button = [&](int bx, int by, int bw, int bh, const char* label,
+                           bool is_default, bool enabled, bool is_hover, bool is_pressed) {
+      uint32_t fill = C(neui_detail::ColorRole::control_bg);
+      if (!enabled)        fill = shade(fill, -6);
+      else if (is_pressed) fill = shade(fill, -18);
+      else if (is_hover)   fill = shade(fill, +14);
+      backend->fill_rect(ctx, (float)bx, (float)by, (float)bw, (float)bh, fill);
+      backend->draw_rect(ctx, (float)bx, (float)by, (float)bw, (float)bh,
+                         is_default ? 2.0f : 1.0f,
+                         is_default ? C(neui_detail::ColorRole::accent)
+                                    : C(neui_detail::ColorRole::border));
+      int lw = text_w(label, SZ);
+      backend->draw_text(ctx, (float)(bx + (bw - lw) / 2), (float)by,
+                         (float)(lw + 4), (float)bh, label, SZ,
+                         C(enabled ? neui_detail::ColorRole::text_primary
+                                   : neui_detail::ColorRole::text_disabled));
+    };
+
+    auto render = [&]() {
+      std::vector<std::string> preview;
+      collect_result(preview);
+      const bool ok_enabled = !preview.empty();
+
+      backend->begin_frame(ctx, C(neui_detail::ColorRole::frame_bg));
+
+      // Path bar + Up.
+      backend->fill_rect(ctx, (float)PAD, (float)bar_y,
+                         (float)(WIN_W - PAD * 2 - UP_W - 8), (float)BAR_H,
+                         shade(C(neui_detail::ColorRole::frame_bg), +18));
+      {
+        std::string shown = elide(cwd, WIN_W - PAD * 2 - UP_W - 8 - 12);
+        backend->draw_text(ctx, (float)(PAD + 6), (float)bar_y,
+                           (float)(WIN_W - PAD * 2 - UP_W - 20), (float)BAR_H,
+                           shown.c_str(), SZ,
+                           C(neui_detail::ColorRole::text_primary));
+      }
+      draw_button(up_x, bar_y, UP_W, BAR_H, "Up", false,
+                  cwd != path_parent(cwd), hover == H_UP, pressed == H_UP);
+
+      // List.
+      backend->fill_rect(ctx, (float)list_x, (float)list_y, (float)list_w, (float)list_h,
+                         shade(C(neui_detail::ColorRole::frame_bg), +10));
+      backend->draw_rect(ctx, (float)list_x, (float)list_y, (float)list_w, (float)list_h,
+                         1.0f, C(neui_detail::ColorRole::border));
+      for (int i = 0; i < visible_rows; ++i) {
+        int r = scroll + i;
+        if (r < 0 || r >= (int)rows.size()) break;
+        int ry = list_y + i * ROW_H;
+        bool is_sel  = (r == sel);
+        bool is_mark = multi && picked[(size_t)r];
+        if (is_sel || is_mark)
+          backend->fill_rect(ctx, (float)(list_x + 1), (float)ry,
+                             (float)(list_w - 2), (float)ROW_H,
+                             is_sel ? C(neui_detail::ColorRole::accent)
+                                    : shade(C(neui_detail::ColorRole::accent), -40));
+        else if (r == hover_row)
+          backend->fill_rect(ctx, (float)(list_x + 1), (float)ry,
+                             (float)(list_w - 2), (float)ROW_H,
+                             shade(C(neui_detail::ColorRole::frame_bg), +22));
+        // A trailing '/' is the whole folder affordance - no icon set here.
+        std::string label = rows[(size_t)r].is_dir ? rows[(size_t)r].name + "/"
+                                                   : rows[(size_t)r].name;
+        // A file that cannot be picked in this mode (any file in folder mode)
+        // is still listed, greyed, so the folder does not look empty.
+        bool pickable = (rows[(size_t)r].is_dir == dir_mode) || rows[(size_t)r].is_dir;
+        backend->draw_text(ctx, (float)(list_x + 8), (float)ry,
+                           (float)(list_w - 16), (float)ROW_H, label.c_str(), SZ,
+                           is_sel ? C(neui_detail::ColorRole::accent_text)
+                                  : C(pickable ? neui_detail::ColorRole::text_primary
+                                               : neui_detail::ColorRole::text_disabled));
+      }
+      if (rows.empty()) {
+        const char* empty = "(no matching files)";
+        backend->draw_text(ctx, (float)(list_x + 8), (float)(list_y + 6),
+                           (float)(list_w - 16), (float)ROW_H, empty, SZ,
+                           C(neui_detail::ColorRole::text_disabled));
+      }
+      // Scroll indicator: a plain proportional thumb, no dragging (the wheel
+      // and the arrow keys are the scroll affordances here).
+      if ((int)rows.size() > visible_rows) {
+        float frac_h = (float)visible_rows / (float)rows.size();
+        float frac_y = (float)scroll / (float)rows.size();
+        float tb_h = (float)list_h * frac_h; if (tb_h < 16.0f) tb_h = 16.0f;
+        backend->fill_rect(ctx, (float)(list_x + list_w - 6),
+                           (float)list_y + (float)list_h * frac_y,
+                           4.0f, tb_h, C(neui_detail::ColorRole::border));
+      }
+
+      // Name field (save only).
+      if (save) {
+        backend->fill_rect(ctx, (float)PAD, (float)fld_y, (float)(WIN_W - PAD * 2),
+                           (float)FLD_H, C(neui_detail::ColorRole::control_bg));
+        backend->draw_rect(ctx, (float)PAD, (float)fld_y, (float)(WIN_W - PAD * 2),
+                           (float)FLD_H, 1.0f, C(neui_detail::ColorRole::accent));
+        backend->draw_text(ctx, (float)(PAD + 6), (float)fld_y,
+                           (float)(WIN_W - PAD * 2 - 12), (float)FLD_H,
+                           name.text.c_str(), SZ,
+                           C(neui_detail::ColorRole::text_primary));
+        // Caret at the cursor byte offset (the field always has focus - there
+        // is nothing else here that takes typing).
+        std::string upto = name.text.substr(0, (size_t)name.cursor);
+        int cx = PAD + 6 + text_w(upto.c_str(), SZ);
+        backend->fill_rect(ctx, (float)cx, (float)(fld_y + 4), 1.0f,
+                           (float)(FLD_H - 8),
+                           C(neui_detail::ColorRole::text_primary));
+      }
+
+      // Filter chip (click cycles) + buttons.
+      if (!filters.empty()) {
+        const FileFilter& f = filters[filter_index];
+        std::string label = f.label;
+        if (filters.size() > 1) label += "  \xE2\x96\xBE";   // ▾
+        draw_button(chip_x, btn_y, chip_w, BTN_H,
+                    elide(label, chip_w - 12).c_str(), false,
+                    filters.size() > 1, hover == H_CHIP, pressed == H_CHIP);
+      }
+      draw_button(cancel_x, btn_y, BTN_W, BTN_H, "Cancel", false, true,
+                  hover == H_CANCEL, pressed == H_CANCEL);
+      draw_button(ok_x, btn_y, BTN_W, BTN_H, save ? "Save" : "Open", true,
+                  ok_enabled, hover == H_OK, pressed == H_OK);
+
+      // Overwrite confirmation, on top of everything and modal to the browser.
+      if (confirming) {
+        // Scrim first, so it reads as blocking rather than as a floating panel.
+        backend->fill_rect(ctx, 0.0f, 0.0f, (float)WIN_W, (float)WIN_H, 0x60000000u);
+        backend->fill_rect(ctx, (float)conf_x, (float)conf_y, (float)CONF_W, (float)CONF_H,
+                           C(neui_detail::ColorRole::frame_bg));
+        backend->draw_rect(ctx, (float)conf_x, (float)conf_y, (float)CONF_W, (float)CONF_H,
+                           1.0f, C(neui_detail::ColorRole::border));
+        std::string leaf = path_leaf(confirm_path);
+        backend->draw_text(ctx, (float)(conf_x + 16), (float)(conf_y + 16),
+                           (float)(CONF_W - 32), 20.0f,
+                           elide("\"" + leaf + "\" already exists.", CONF_W - 32).c_str(),
+                           SZ, C(neui_detail::ColorRole::text_primary));
+        backend->draw_text(ctx, (float)(conf_x + 16), (float)(conf_y + 40),
+                           (float)(CONF_W - 32), 20.0f,
+                           "Replace it?", SZ,
+                           C(neui_detail::ColorRole::text_primary));
+        // "No" is the default (Enter) and Esc also answers No: the destructive
+        // answer should never be the one a stray keypress picks.
+        draw_button(conf_yes_x, conf_btn_y, BTN_W, BTN_H, "Replace", false, true,
+                    hover == H_CONF_YES, pressed == H_CONF_YES);
+        draw_button(conf_no_x, conf_btn_y, BTN_W, BTN_H, "Cancel", true, true,
+                    hover == H_CONF_NO, pressed == H_CONF_NO);
+      }
+
+      backend->end_frame(ctx);
+    };
+
+    // The OK/Enter path for save: ask before handing back a path that already
+    // names an existing file. Returns true when the caller should finish.
+    auto try_accept = [&]() -> bool {
+      std::vector<std::string> res;
+      collect_result(res);
+      if (res.empty()) return false;
+      if (want_overwrite_prompt && fd_path_exists(res[0])) {
+        confirming   = true;
+        confirm_path = res[0];
+        pressed      = H_NONE;
+        hover        = H_NONE;
+        need_paint   = true;
+        return false;
+      }
+      return true;
+    };
+
+    // Enter the directory under `r`, or pick it in folder mode.
+    auto activate_row = [&](int r) {
+      if (r < 0 || r >= (int)rows.size()) return;
+      if (rows[(size_t)r].is_dir) {
+        std::string next = path_join(cwd, rows[(size_t)r].name);
+        std::vector<FileEntry> probe;
+        if (!fd_read_dir(next, probe)) return;   // unreadable: stay put
+        cwd = next;
+        reload();
+        need_paint = true;
+        return;
+      }
+      if (save) {
+        name.text = rows[(size_t)r].name;
+        name.cursor = name.sel_anchor = (int)name.text.size();
+        need_paint = true;
+        return;
+      }
+      // A file double-clicked in file mode confirms outright.
+      done = true;
+    };
+
+    XMapRaised(d, win);
+
+    bool prev_disabled = owner ? owner->input_disabled : false;
+    if (owner) owner->input_disabled = true;
+    Window prev_box = g_modal_box_win;
+    g_modal_box_win = win;
+
+    while (!done) {
+      if (need_paint) { render(); need_paint = false; }
+      flush_pending_paints();
+      XFlush(d);
+      XEvent e; XNextEvent(d, &e);
+      if (e.xany.window != win) { dispatch_x_event(e); continue; }
+      switch (e.type) {
+        case Expose:
+          if (e.xexpose.count == 0) {
+            need_paint = true;
+            if (!focused) { XSetInputFocus(d, win, RevertToParent, CurrentTime); focused = true; }
+          }
+          break;
+        case ConfigureNotify:
+          backend->resize(ctx, (uint32_t)e.xconfigure.width, (uint32_t)e.xconfigure.height);
+          need_paint = true;
+          break;
+        case MotionNotify: {
+          int r = -1;
+          Hit h = hit((int)((float)e.xmotion.x / scale), (int)((float)e.xmotion.y / scale), &r);
+          if (h != hover || r != hover_row) { hover = h; hover_row = r; need_paint = true; }
+          break;
+        }
+        case ButtonPress: {
+          int lx = (int)((float)e.xbutton.x / scale), ly = (int)((float)e.xbutton.y / scale);
+          if (e.xbutton.button == Button4 || e.xbutton.button == Button5) {
+            // Absorbed while the overwrite overlay is up - scrolling the list
+            // out from under a modal question is the same bug the popup-menu
+            // wheel gate fixes.
+            if (!confirming) {
+              scroll += (e.xbutton.button == Button4) ? -3 : 3;
+              clamp_scroll();
+              need_paint = true;
+            }
+            break;
+          }
+          if (e.xbutton.button != Button1) break;
+          int r = -1;
+          Hit h = hit(lx, ly, &r);
+          pressed = h;
+          if (h == H_LIST && r >= 0) {
+            // Ctrl-click toggles a mark in multi-select; a plain click moves
+            // the focus row and clears the marks.
+            if (multi && (e.xbutton.state & ControlMask)) {
+              picked[(size_t)r] = !picked[(size_t)r];
+              sel = r;
+            } else {
+              picked.assign(rows.size(), false);
+              sel = r;
+              if (save && !rows[(size_t)r].is_dir) {
+                name.text = rows[(size_t)r].name;
+                name.cursor = name.sel_anchor = (int)name.text.size();
+              }
+            }
+            // Double click within 400 ms on the same row activates it.
+            if (r == last_click_row && e.xbutton.time - last_click_time < 400)
+              activate_row(r);
+            last_click_row = r;
+            last_click_time = e.xbutton.time;
+          }
+          need_paint = true;
+          break;
+        }
+        case ButtonRelease: {
+          if (e.xbutton.button != Button1) break;
+          int lx = (int)((float)e.xbutton.x / scale), ly = (int)((float)e.xbutton.y / scale);
+          int r = -1;
+          Hit h = hit(lx, ly, &r);
+          if (h == pressed) {
+            switch (h) {
+              case H_CANCEL: cancelled = true; done = true; break;
+              case H_OK:
+                if (try_accept()) done = true;
+                break;
+              // "Replace" accepts the path that is already in the name field;
+              // "Cancel" only dismisses the overlay, leaving the browser up so
+              // the user can pick a different name.
+              case H_CONF_YES: confirming = false; done = true; break;
+              case H_CONF_NO:  confirming = false; break;
+              case H_UP: {
+                std::string up = path_parent(cwd);
+                if (up != cwd) { cwd = up; reload(); }
+                break;
+              }
+              case H_CHIP:
+                if (filters.size() > 1) {
+                  filter_index = (filter_index + 1) % filters.size();
+                  reload();
+                }
+                break;
+              default: break;
+            }
+          }
+          pressed = H_NONE;
+          need_paint = true;
+          break;
+        }
+        case KeyPress: {
+          KeySym ks = 0;
+          char   buf[32] = {0};
+          int    n = XLookupString(&e.xkey, buf, sizeof buf - 1, &ks, nullptr);
+          const bool ctrl = (e.xkey.state & ControlMask) != 0;
+          // The overwrite overlay owns the keyboard while it is up, and its
+          // default (Enter) is the NON-destructive answer - as is Esc. Typing
+          // into the name field behind it would be worse than useless, since
+          // the overlay is asking about a path already computed from it.
+          if (confirming) {
+            if (ks == XK_Escape || ks == XK_Return || ks == XK_KP_Enter) {
+              confirming = false;
+              need_paint = true;
+            }
+            break;
+          }
+          if (ks == XK_Escape) { cancelled = true; done = true; break; }
+          if (ks == XK_Return || ks == XK_KP_Enter) {
+            // On a focused directory, Enter navigates rather than confirming -
+            // otherwise a folder row would return a path the client cannot use.
+            if (!save && sel >= 0 && sel < (int)rows.size() &&
+                rows[(size_t)sel].is_dir && !dir_mode) {
+              activate_row(sel);
+            } else if (try_accept()) {
+              done = true;
+            }
+            break;
+          }
+          if (ks == XK_Up || ks == XK_Down) {
+            if (!rows.empty()) {
+              if (sel < 0) sel = 0;
+              else sel += (ks == XK_Up) ? -1 : 1;
+              if (sel < 0) sel = 0;
+              if (sel >= (int)rows.size()) sel = (int)rows.size() - 1;
+              scroll_to_sel();
+              need_paint = true;
+            }
+            break;
+          }
+          if (ks == XK_Page_Up || ks == XK_Page_Down) {
+            scroll += (ks == XK_Page_Up ? -visible_rows : visible_rows);
+            clamp_scroll();
+            need_paint = true;
+            break;
+          }
+          if (ks == XK_BackSpace && !save) {
+            // No name field to edit in open mode, so Backspace goes up a level
+            // (the shell convention).
+            std::string up = path_parent(cwd);
+            if (up != cwd) { cwd = up; reload(); need_paint = true; }
+            break;
+          }
+          if (ctrl && (ks == XK_h || ks == XK_H)) {
+            show_hidden = !show_hidden;
+            reload();
+            need_paint = true;
+            break;
+          }
+          if (save) {
+            // The name field is the only typing target in the browser, so it
+            // always has the keyboard - no focus ring to manage.
+            if (ks == XK_BackSpace) {
+              te_backspace(name.text, name.cursor, name.sel_anchor, ctrl, nullptr);
+              need_paint = true;
+            } else if (ks == XK_Delete) {
+              te_delete_forward(name.text, name.cursor, name.sel_anchor, ctrl, nullptr);
+              need_paint = true;
+            } else if (ks == XK_Left) {
+              te_move_left(name.text, name.cursor, name.sel_anchor, ctrl, false, nullptr);
+              need_paint = true;
+            } else if (ks == XK_Right) {
+              te_move_right(name.text, name.cursor, name.sel_anchor, ctrl, false, nullptr);
+              need_paint = true;
+            } else if (ks == XK_Home) {
+              te_move_home(name.text, name.cursor, name.sel_anchor, false, nullptr);
+              need_paint = true;
+            } else if (ks == XK_End) {
+              te_move_end(name.text, name.cursor, name.sel_anchor, false, nullptr);
+              need_paint = true;
+            } else if (n > 0 && (unsigned char)buf[0] >= 0x20 && !ctrl) {
+              te_insert_utf8(name.text, name.cursor, name.sel_anchor, false,
+                             buf, n, nullptr);
+              need_paint = true;
+            }
+          }
+          break;
+        }
+        case ClientMessage:
+          if (e.xclient.message_type == g_wm_protocols &&
+              (Atom)e.xclient.data.l[0] == g_wm_delete) {
+            cancelled = true; done = true;
+          }
+          break;
+        default: break;
+      }
+    }
+
+    if (owner) owner->input_disabled = prev_disabled;
+    g_modal_box_win = prev_box;
+    backend->destroy_context(ctx);
+    XDestroyWindow(d, win);
+    XSync(d, False);
+    XSetErrorHandler(old_err);
+
+    if (cancelled) return 0;
+    collect_result(out);
+    return (int)out.size();
+  }
+
+  // Keep the app's own windows alive while the portal dialog (another
+  // process) is up. Passed to file_dialog_portal as its pump callback.
+  void fd_portal_pump(void*)
+  {
+    drain_events();
+    flush_pending_paints();
+    if (g_display) XFlush(g_display);
+  }
+
 } // namespace
 
 // ===========================================================================
@@ -2977,6 +3715,52 @@ namespace
                            const char* caption, uint32_t flags)
   {
     return run_message_box(static_cast<LinuxWindow*>(native_handle), text, caption, flags);
+  }
+
+  // File dialog: XDG portal first, neui-drawn browser as the fallback.
+  //
+  // The fall-through condition is deliberately narrow. `unavailable` means no
+  // dialog reached the user (no libdbus, no bus, no portal, malformed reply,
+  // timeout) and the browser runs. `cancelled` means the portal DID show a
+  // chooser and the user said no - showing a second dialog on top of that
+  // would be worse than having no portal path at all.
+  int platform_file_dialog(void* native_handle, int save,
+                           const neui_file_dialog_t* desc,
+                           neui_file_path_cb cb, void* userdata)
+  {
+    auto* owner = static_cast<LinuxWindow*>(native_handle);
+
+    // The portal wants an "x11:<hex window id>" parent so it can set the
+    // dialog transient for our window. An unrealised frame just gets "",
+    // which the portal accepts as "no parent".
+    std::string parent;
+    if (owner && owner->win) {
+      char buf[64];
+      std::snprintf(buf, sizeof buf, "x11:%lx", (unsigned long)owner->win);
+      parent = buf;
+    }
+
+    std::vector<std::string> paths;
+    // Block the owner for the portal dialog too - it is modal from the user's
+    // point of view, and fd_portal_pump keeps our windows repainting, which
+    // would otherwise let them accept clicks behind the chooser.
+    bool prev_disabled = owner ? owner->input_disabled : false;
+    if (owner) owner->input_disabled = true;
+    neui_detail::PortalResult pr =
+      neui_detail::file_dialog_portal(save != 0, parent, desc, paths,
+                                      &fd_portal_pump, nullptr);
+    if (owner) owner->input_disabled = prev_disabled;
+
+    if (pr == neui_detail::PortalResult::cancelled) return 0;
+    if (pr == neui_detail::PortalResult::unavailable) {
+      paths.clear();
+      int n = run_file_browser(owner, save != 0, desc, paths);
+      if (n <= 0) return n;
+    }
+
+    if (cb)
+      for (const auto& p : paths) cb(userdata, p.c_str());
+    return (int)paths.size();
   }
 
 } // namespace xpl_host

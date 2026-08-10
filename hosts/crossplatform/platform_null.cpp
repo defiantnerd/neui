@@ -147,5 +147,11 @@ namespace xpl_host
   int platform_message_box(void* /*native_handle*/, const char* /*text*/,
                            const char* /*caption*/, uint32_t /*flags*/)       { return 0; }
 
+  // No file-dialog surface either. -1 (not 0) so the client can tell this
+  // apart from a cancel and fall back to its own path entry.
+  int platform_file_dialog(void* /*native_handle*/, int /*save*/,
+                           const neui_file_dialog_t* /*desc*/,
+                           neui_file_path_cb /*cb*/, void* /*userdata*/)      { return -1; }
+
 } // namespace xpl_host
 

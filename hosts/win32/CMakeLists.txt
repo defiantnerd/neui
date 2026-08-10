@@ -23,5 +23,7 @@ target_include_directories(neui-win32host
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# ole32 / shell32: CoCreateInstance + SHCreateItemFromParsingName for the
+# IFileDialog file dialogs (file_dialog_win32.h).
 target_link_libraries(neui-win32host PRIVATE neui neui-qrcodegen neui-backend-d2d
-                                            windowsapp dwmapi)
+                                            windowsapp dwmapi ole32 shell32)

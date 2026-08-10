@@ -2101,10 +2101,51 @@ namespace xpl_host
                                  caption, flags);
   }
 
+  // open_file / save_file share every validation step; `save` is the only
+  // difference, so both public slots funnel through here. -1 (rather than
+  // message_box's 0) is the "no dialog happened" answer - the API promises
+  // the client can tell that apart from a cancel.
+  static int notify_run_file_dialog(neui_session_t session,
+                                    neui_widget_t parent_window,
+                                    const neui_file_dialog_t* desc,
+                                    neui_file_path_cb cb, void* userdata,
+                                    int save)
+  {
+    auto* s = get_session_for_widget(session, parent_window);
+    if (!s) return -1;
+    uint32_t idx = WidgetToIndex(parent_window);
+    if (!s->_widgets.exists(idx)) return -1;
+    auto& wd = s->_widgets[idx];
+    if (!wd.is_frame() || !wd.native_handle) return -1;
+    // A NULL desc is legal: it means "every default", which is exactly what
+    // a zero-initialised descriptor produces.
+    neui_file_dialog_t empty = {};
+    return platform_file_dialog(wd.native_handle, save,
+                                desc ? desc : &empty, cb, userdata);
+  }
+
+  static int NEUI_ABI notify_open_file(neui_session_t session,
+                                        neui_widget_t parent_window,
+                                        const neui_file_dialog_t* desc,
+                                        neui_file_path_cb cb, void* userdata)
+  {
+    return notify_run_file_dialog(session, parent_window, desc, cb, userdata, 0);
+  }
+
+  static int NEUI_ABI notify_save_file(neui_session_t session,
+                                        neui_widget_t parent_window,
+                                        const neui_file_dialog_t* desc,
+                                        neui_file_path_cb cb, void* userdata)
+  {
+    return notify_run_file_dialog(session, parent_window, desc, cb, userdata, 1);
+  }
+
   neui_notify_api_t notify_api = {
     NEUI_VERSION,
     notify_toast,
     notify_message_box,
+    notify_open_file,
+    notify_save_file,
   };
 
   // ---------------------------------------------------------------------------

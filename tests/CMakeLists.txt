@@ -24,6 +24,7 @@ add_executable(neui_tests
   test_timer_table.cpp
   test_cursor_kind.cpp
   test_relative_pointer.cpp
+  test_file_dialog_model.cpp
   test_image_filter.cpp
   test_filter_graph.cpp
   test_backend_util.cpp
@@ -100,6 +101,19 @@ if(APPLE AND NOT NEUI_IOS)
     ${PROJECT_SOURCE_DIR}/include)
   target_compile_features(neui_popup_tree_smoke_macos PRIVATE cxx_std_17)
   target_link_libraries(neui_popup_tree_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
+  # File-dialog harness (NEUI_API_NOTIFY::open_file / save_file): asserts the
+  # appended slots are wired on BOTH macOS hosts, that -1 (no dialog) stays
+  # distinct from 0 (cancelled), that a cancelled panel delivers nothing, and
+  # that a confirmed save panel returns AppKit's own path with the filter
+  # extension completed. Runs real modal NSSavePanel / NSOpenPanel, so built
+  # but NOT ctest-registered.
+  add_executable(neui_file_dialog_smoke_macos file_dialog_smoke_macos.mm)
+  target_include_directories(neui_file_dialog_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_file_dialog_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_file_dialog_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
   # Relative-pointer harness (NEUI_API_POINTER): asserts the begin/end state

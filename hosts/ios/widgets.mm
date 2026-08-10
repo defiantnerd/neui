@@ -2202,9 +2202,35 @@ namespace ios_host
     return notify_message_box_ios(*wd, text, caption, flags);
   }
 
+  // File dialogs: UNSUPPORTED on iOS, reported honestly as -1 (which the
+  // public contract keeps distinct from 0 = the user cancelled).
+  //
+  // UIDocumentPickerViewController is presented, not run modally - the same
+  // asynchrony behind the message_box divergence, but with no useful
+  // sentinel available here: the return value IS the path list, so a client
+  // told "pending" could not proceed. Declining is better than showing a
+  // picker whose result is dropped on the floor. Same answer as the xpl
+  // host's platform_ios.mm; the async completion event that would fix both
+  // this and message_box is tracked in docs/deferred-issues.md.
+  static int NEUI_ABI notify_open_file(neui_session_t /*session*/,
+                                        neui_widget_t /*frame*/,
+                                        const neui_file_dialog_t* /*desc*/,
+                                        neui_file_path_cb /*cb*/, void* /*userdata*/)
+  {
+    return -1;
+  }
+  static int NEUI_ABI notify_save_file(neui_session_t /*session*/,
+                                        neui_widget_t /*frame*/,
+                                        const neui_file_dialog_t* /*desc*/,
+                                        neui_file_path_cb /*cb*/, void* /*userdata*/)
+  {
+    return -1;
+  }
+
   neui_notify_api_t notify_api = {
     NEUI_VERSION,
     notify_toast, notify_message_box,
+    notify_open_file, notify_save_file,
   };
 
   // -------------------------------------------------------------------------

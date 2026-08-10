@@ -2510,6 +2510,25 @@ namespace xpl_host
     return 0;
   }
 
+  // File dialogs: UNSUPPORTED on iOS, reported honestly as -1.
+  //
+  // UIDocumentPickerViewController is the iOS equivalent, but it is
+  // *presented*, not run modally - the same asynchrony that forced the
+  // message_box divergence above, except here there is no sentinel that
+  // would help: the whole point of the call is the path list, and a client
+  // that got "pending" back could not proceed. Rather than return a
+  // meaningless 0 paths for a picker that is about to appear (and whose
+  // result would be dropped), the platform declines. Wiring a real async
+  // completion - a NEUI_EVENT for the picked paths, which would also fix
+  // message_box on iOS - is the deferred follow-up; see
+  // docs/deferred-issues.md.
+  int platform_file_dialog(void* /*native_handle*/, int /*save*/,
+                           const neui_file_dialog_t* /*desc*/,
+                           neui_file_path_cb /*cb*/, void* /*userdata*/)
+  {
+    return -1;
+  }
+
 } // namespace xpl_host
 
 // ---------------------------------------------------------------------------

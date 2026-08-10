@@ -23,6 +23,7 @@
 #include "../shared/win32/dnd_source_win32.h"
 #include "../shared/win32/keys_win32.h"
 #include "../shared/win32/cursor_win32.h"
+#include "../shared/win32/file_dialog_win32.h"
 #include "../shared/relative_pointer.h"
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
@@ -2379,6 +2380,27 @@ namespace xpl_host
                          wtext.c_str(),
                          caption ? wcaption.c_str() : nullptr,
                          mb, MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL));
+  }
+
+  // -------------------------------------------------------------------------
+  // Modal file dialogs - IFileDialog via the shared helper.
+
+  int platform_file_dialog(void* native_handle, int save,
+                           const neui_file_dialog_t* desc,
+                           neui_file_path_cb cb, void* userdata)
+  {
+    // Unlike NSOpenPanel, IFileDialog::Show takes the owner HWND as what
+    // makes it modal, so a frame with no window yet cannot host one.
+    if (!native_handle) return -1;
+    HWND owner = static_cast<HWND>(native_handle);
+
+    std::vector<std::string> paths;
+    int n = save ? neui_detail::file_dialog_save_win32(owner, desc, paths)
+                 : neui_detail::file_dialog_open_win32(owner, desc, paths);
+    if (n <= 0) return n;   // 0 = cancelled, -1 = CoCreateInstance failed
+    if (cb)
+      for (const auto& p : paths) cb(userdata, p.c_str());
+    return static_cast<int>(paths.size());
   }
 
 } // namespace xpl_host

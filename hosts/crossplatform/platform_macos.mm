@@ -39,6 +39,7 @@
 #include "../shared/macos/menubar_macos.h"
 #include "../shared/macos/theme_provider_macos.h"
 #include "../shared/macos/message_box_macos.h"
+#include "../shared/macos/file_dialog_macos.h"
 
 // ---------------------------------------------------------------------------
 // Forward declarations (Objective-C classes).
@@ -2627,6 +2628,28 @@ namespace xpl_host
     NSWindow* win = native_window(native_handle);
     if (!win) return 0;
     return neui_detail::message_box_macos(win, text, caption, flags);
+  }
+
+  // -------------------------------------------------------------------------
+  // Modal file dialogs - shared NSOpenPanel / NSSavePanel mapping.
+
+  int platform_file_dialog(void* native_handle, int save,
+                           const neui_file_dialog_t* desc,
+                           neui_file_path_cb cb, void* userdata)
+  {
+    // runModal is app-modal on macOS, so an owner is not required to put the
+    // panel up - unlike win32, where the HWND is what makes it modal. Accept
+    // a null handle (an embedded frame whose view is not attached yet) rather
+    // than refusing a dialog the OS would happily show.
+    NSWindow* win = native_handle ? native_window(native_handle) : nil;
+
+    std::vector<std::string> paths;
+    int n = save ? neui_detail::file_dialog_save_macos(win, desc, paths)
+                 : neui_detail::file_dialog_open_macos(win, desc, paths);
+    if (n <= 0) return n;
+    if (cb)
+      for (const auto& p : paths) cb(userdata, p.c_str());
+    return static_cast<int>(paths.size());
   }
 
 } // namespace xpl_host

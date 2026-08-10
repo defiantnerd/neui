@@ -21,6 +21,7 @@
 #include "../shared/win32/keys_win32.h"
 #include "../shared/win32/cursor_win32.h"
 #include "../shared/win32/toast_win32.h"
+#include "../shared/win32/file_dialog_win32.h"
 #include "../shared/shortcut_format.h"
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_section.h"
@@ -4783,10 +4784,52 @@ namespace win32_host
                          mb, MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL));
   }
 
+  // open_file / save_file via IFileDialog (shared helper). The owner HWND is
+  // what makes the dialog modal, so an unrealised frame cannot host one; -1
+  // reports that as "no dialog", which the contract keeps distinct from 0 =
+  // cancelled.
+  static int notify_run_file_dialog(neui_session_t session,
+                                    neui_widget_t parent_window,
+                                    const neui_file_dialog_t* desc,
+                                    neui_file_path_cb cb, void* userdata,
+                                    bool save)
+  {
+    HWND hwnd = notify_frame_hwnd(session, parent_window);
+    if (!hwnd) return -1;
+    neui_file_dialog_t empty = {};
+    if (!desc) desc = &empty;
+
+    std::vector<std::string> paths;
+    int n = save ? neui_detail::file_dialog_save_win32(hwnd, desc, paths)
+                 : neui_detail::file_dialog_open_win32(hwnd, desc, paths);
+    if (n <= 0) return n;
+    if (cb)
+      for (const auto& p : paths) cb(userdata, p.c_str());
+    return static_cast<int>(paths.size());
+  }
+
+  static int NEUI_ABI notify_open_file(neui_session_t session,
+                                        neui_widget_t parent_window,
+                                        const neui_file_dialog_t* desc,
+                                        neui_file_path_cb cb, void* userdata)
+  {
+    return notify_run_file_dialog(session, parent_window, desc, cb, userdata, false);
+  }
+
+  static int NEUI_ABI notify_save_file(neui_session_t session,
+                                        neui_widget_t parent_window,
+                                        const neui_file_dialog_t* desc,
+                                        neui_file_path_cb cb, void* userdata)
+  {
+    return notify_run_file_dialog(session, parent_window, desc, cb, userdata, true);
+  }
+
   neui_notify_api_t notify_api = {
     NEUI_VERSION,
     notify_toast,
     notify_message_box,
+    notify_open_file,
+    notify_save_file,
   };
 
   neui_widget_api_t widgets_api = {

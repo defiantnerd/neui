@@ -528,6 +528,57 @@ static neui_widget_client_t widget_client = {
       }
       if (ud == (void*)20)              // Help > About -> open modal dialog
         open_about_dialog(app);
+      // File > Open / Save -> the real modal file dialogs. Feature-detected on
+      // the appended vtable slots being non-NULL (the vtable-append rule), so
+      // this same client keeps working against an older host that predates
+      // them. The result is echoed back as a toast.
+      if ((ud == (void*)2 || ud == (void*)3) && app->notify) {
+        neui_widget_t win = { app->win_id };
+        neui_file_filter_t filters[] = {
+          { "Text files", "*.txt;*.md" },
+          { "All files",  "*"          },
+        };
+        neui_file_dialog_t d = {};
+        d.filters      = filters;
+        d.filter_count = 2;
+
+        // The callback is invoked once per path, before the call returns. The
+        // path is only valid for the duration of the call, so copy it.
+        struct Collected { char first[512]; int count; } got = { {0}, 0 };
+        auto on_path = [](void* userdata, const char* path) {
+          auto* c = static_cast<Collected*>(userdata);
+          if (c->count++ == 0 && path) {
+            snprintf(c->first, sizeof c->first, "%s", path);
+          }
+        };
+
+        int r = -1;
+        if (ud == (void*)2 && app->notify->open_file) {
+          d.title  = "Open a file";
+          d.flags  = NEUI_FD_MULTISELECT;   // Ctrl-click / Shift-click to pick several
+          r = app->notify->open_file(sess, win, &d, on_path, &got);
+        } else if (ud == (void*)3 && app->notify->save_file) {
+          d.title        = "Save as";
+          d.initial_name = "untitled";      // no extension -> filter completes it
+          r = app->notify->save_file(sess, win, &d, on_path, &got);
+        }
+
+        char msg[512];
+        if (r < 0) {
+          // -1 is NOT a cancel: this host has no file dialog (the null
+          // platform, or iOS). A real app would fall back to its own path
+          // entry here rather than treating it as "the user said no".
+          snprintf(msg, sizeof msg, "No file dialog on this host.");
+        } else if (r == 0) {
+          snprintf(msg, sizeof msg, "Cancelled.");
+        } else if (r == 1) {
+          snprintf(msg, sizeof msg, "Picked:\n%s", got.first);
+        } else {
+          snprintf(msg, sizeof msg, "Picked %d files, first:\n%s",
+                   r, got.first);
+        }
+        app->notify->toast(sess, win, msg);
+      }
       return true;
     }
 

@@ -474,6 +474,24 @@ namespace xpl_host
   // platform_supports_ui_scale, and as begin_relative on iOS / null.)
   bool platform_supports_tree_popup();
 
+  // Modal file dialog owned by the given frame's native window, behind
+  // NEUI_API_NOTIFY::open_file / save_file. `save` selects the save flavour
+  // (one destination, extension completion, overwrite prompt) over the open
+  // one (existing file(s) or a folder). Blocks until the user confirms or
+  // cancels - the same contract as platform_message_box - and invokes `cb`
+  // once per chosen path before returning.
+  //
+  // Returns the number of paths delivered: 0 = cancelled, N>0 = that many
+  // callbacks fired, -1 = this platform has no file-dialog surface (null,
+  // iOS). Unlike platform_message_box, -1 and 0 are distinct: the public API
+  // promises a client can tell "no dialog" from "user said no".
+  //
+  // A NULL `cb` is legal and still runs the dialog (the count is the useful
+  // part); implementations must not dereference it.
+  int platform_file_dialog(void* native_handle, int save,
+                           const neui_file_dialog_t* desc,
+                           neui_file_path_cb cb, void* userdata);
+
   void platform_timer_start(Session* session, uint32_t interval_ms);
   void platform_timer_stop(Session* session);
 

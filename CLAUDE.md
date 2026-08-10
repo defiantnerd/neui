@@ -171,7 +171,7 @@ Deep per-subsystem detail lives in `docs/`. **Read the relevant file before doin
 - **Rendering backend, painter, surfaces, filters, fonts** -> `docs/rendering-and-assets.md`. `neui_render_backend_t`, `neui_painter_api_t`, `NEUI_API_ASSETS`, render-to-surface, SVG filter graphs, client font loading.
 - **Compound / behavior / component assets** -> `docs/compound-behavior-component.md`. Declarative drawables (layers, anchors, bindings, gradients, QR, groups), input handlers, the JSON component format.
 - **GRID widget** -> `docs/grid.md`. `NEUI_API_GRID`, focus modes, click ladder, multi-column sort, in-place cell editing, smooth scroll.
-- **Menus, routed commands, dialogs, notifications** -> `docs/menus-commands-dialogs.md`. Routed commands, popup menus, modal dialogs, toasts + message boxes, keyboard shortcuts / accelerators.
+- **Menus, routed commands, dialogs, notifications** -> `docs/menus-commands-dialogs.md`. Routed commands, popup menus, modal dialogs, toasts + message boxes, **file dialogs** (`NEUI_API_NOTIFY::open_file` / `save_file` - appended slots, so null-check them; `-1` = no dialog vs `0` = cancelled; portable model in `hosts/shared/file_dialog_model.h`), keyboard shortcuts / accelerators.
 - **Theme palette; frame resize / icon / focus** -> `docs/theming.md`.
 - **Per-widget internals & enabled/disabled** -> `docs/widget-internals.md`. MULTILINE perf, hover/pressed visuals, DBLCLK->CLICK parity, disabled state per host.
 - **Linux (X11 + Cairo) host internals** -> `docs/host-linux.md`. Selections + INCR clipboard, XDND, in-frame menubar, XI2 smooth scroll, D-Bus theme, embedding seams.

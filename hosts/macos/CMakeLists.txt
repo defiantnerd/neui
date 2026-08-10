@@ -33,4 +33,7 @@ target_link_libraries(neui-macoshost PRIVATE
   "-framework AppKit"
   "-framework Foundation"
   "-framework CoreGraphics"
+  # UTType, for the NSOpenPanel / NSSavePanel type filters in
+  # hosts/shared/macos/file_dialog_macos.h (macOS 11+; guarded at runtime).
+  "-framework UniformTypeIdentifiers"
 )
