@@ -73,9 +73,13 @@ extern "C" {
     // already active (it is NOT reference-counted - a second begin without an
     // end is a bug, not a nesting request).
     //
-    // Call from a MOUSE_BUTTON_DOWN handler. The virtual position is seeded from
-    // the current pointer position, so the first MOUSE_MOVE is continuous with
-    // the press.
+    // CALL IT FROM A MOUSE_BUTTON_DOWN HANDLER - that is not just a suggestion.
+    // The virtual position is seeded from the last mouse event the host
+    // dispatched, which inside a DOWN handler is that very press, so the first
+    // MOUSE_MOVE is continuous with it. Called from anywhere else the seed is
+    // whatever mouse event happened last (possibly on a different frame), or -
+    // if the session has dispatched none at all - the widget's CENTRE. The drag
+    // still works from there, but its first reported position will jump.
     bool (NEUI_ABI* begin_relative)(neui_session_t session, neui_widget_t widget);
 
     // Leave relative mode: the cursor is unhidden and warped back to where

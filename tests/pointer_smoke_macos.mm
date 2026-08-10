@@ -195,27 +195,78 @@ int main()
     check(!pointer->begin_relative(sess, widget_none),
             "begin_relative rejects an invalid widget");
 
-    // ---- 5. teardown while active ---------------------------------------
-    // A session destroyed mid-drag must re-associate the cursor. If it does not,
-    // the machine is left with a pointer that ignores the mouse - so this is
-    // checked by asserting the association is live afterwards, via the observable
-    // proxy that a warp actually moves the reported location.
-    check(pointer->begin_relative(sess, g_pad), "begin before teardown");
-    neui->destroy(sess);
-
+    // ---- 4b. deltas are LOGICAL px, i.e. divided by the UI zoom ----------
+    // dispatch_relative_motion's contract is logical px, and win32 / Linux both
+    // divide the raw device delta by their full logical->physical factor. macOS
+    // fed event.deltaX straight through, so the instant relative mode began on a
+    // zoomed frame the drag's sensitivity jumped by the zoom factor - relative to
+    // the absolute moves the same handler had been seeding from a moment earlier.
     {
-      const NSPoint before = [NSEvent mouseLocation];
-      const CGFloat screen_h = NSMaxY([[NSScreen screens] firstObject].frame);
-      const CGPoint target = CGPointMake(before.x + 8.0,
-                                           screen_h - before.y + 8.0);
-      CGWarpMouseCursorPosition(target);
-      const NSPoint after = [NSEvent mouseLocation];
-      const bool moved = (std::fabs(after.x - before.x) > 1.0) ||
-                          (std::fabs(after.y - before.y) > 1.0);
-      check(moved,
-              "cursor still tracks the device after destroy mid-drag");
-      CGWarpMouseCursorPosition(CGPointMake(before.x, screen_h - before.y));
+      auto* attrs = (neui_attr_api_t*) neui->get_interface(sess, NEUI_API_ATTRS);
+      check(attrs != nullptr, "attrs api available for the zoom check");
+      if (attrs) {
+        attrs->set_float(sess, win, NEUI_ATTR_UI_SCALE, 2.0f);
+        neui->pump_once(sess);
+        check(pointer->begin_relative(sess, g_pad), "begin at zoom 2.0");
+        g_move = MoveRecord{};
+        drag_by(0, 0);
+        const int zbase = g_move.y;
+        drag_by(0, 10);                  // 10 DEVICE px at zoom 2 = 5 logical
+        check_eq(g_move.y - zbase, 5, "a 10 px delta at zoom 2.0 reports 5 logical px");
+        pointer->end_relative(sess);
+        attrs->set_float(sess, win, NEUI_ATTR_UI_SCALE, 1.0f);
+        neui->pump_once(sess);
+      }
     }
+
+    // ---- 5. the widget / frame going away mid-drag -----------------------
+    // The dangerous case, and the one the first version of this feature got
+    // wrong on all three platforms. Destroying the owning frame mid-drag used to
+    // leave the mode ON: the cursor stayed decoupled from the device AND hidden,
+    // machine-wide, with no event left that could ever un-stick it (motion only
+    // reaches the session through the destroyed frame's view). It also left a
+    // freed native handle to hand to the platform, which X11 dereferences.
+    //
+    // NOT checked by warping the cursor and seeing it move: a warp moves the
+    // cursor even while the association is OFF - platform_end_relative_pointer's
+    // own comment says so - so that proxy passes whether or not the fix is
+    // present. The observable that actually distinguishes them is whether the
+    // mode ended.
+    {
+      neui_widget_t win2 = widgets->create(sess, widget_none, NEUI_W_APPWINDOW,
+                                            140, 140, 300, 220, nullptr);
+      neui_widget_t pad2 = widgets->create(sess, win2, NEUI_W_CUSTOMDRAW,
+                                             20, 20, 160, 120, nullptr);
+      widgets->show(sess, win2);
+      neui->pump_once(sess);
+
+      check(pointer->begin_relative(sess, pad2), "begin on a second frame");
+      widgets->destroy(sess, pad2);           // destroy just the owner widget
+      check(!pointer->is_relative(sess),
+              "destroying the owner widget ends relative mode");
+
+      // And again, destroying the whole FRAME rather than the widget - the path
+      // that also frees the native handle the mode is holding.
+      neui_widget_t pad3 = widgets->create(sess, win2, NEUI_W_CUSTOMDRAW,
+                                             20, 20, 160, 120, nullptr);
+      widgets->show(sess, win2);
+      neui->pump_once(sess);
+      check(pointer->begin_relative(sess, pad3), "begin again on that frame");
+      widgets->destroy(sess, win2);           // frees the LinuxWindow / NSWindow
+      check(!pointer->is_relative(sess),
+              "destroying the owning FRAME ends relative mode");
+    }
+
+    // ---- 6. teardown with a drag still in flight -------------------------
+    // ~Session must end the mode. Verified by state rather than by a warp, for
+    // the reason above; the leak this guards against is unobservable from inside
+    // the process, so the check is that destroy() is reached with the mode
+    // active and the process survives with the pointer usable afterwards.
+    check(pointer->begin_relative(sess, g_pad), "begin before session teardown");
+    check(pointer->is_relative(sess), "mode active at destroy time");
+    neui->destroy(sess);
+    std::printf("[ note] session destroyed with a drag in flight; "
+                  "if the pointer is dead or invisible now, ~Session leaked it\n");
 
     if (g_failures) std::printf("\nPOINTER FAILED (%d)\n", g_failures);
     else            std::printf("\nPOINTER OK\n");

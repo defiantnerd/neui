@@ -112,6 +112,11 @@ namespace neui_detail
       return ndx < _data.size() && _data[ndx].object != nullptr;
     }
 
+    // Number of SLOTS, live or freed - the exclusive upper bound for an index
+    // scan (`for (i = 0; i < slot_count(); ++i) if (exists(i)) ...`). Not a
+    // count of live nodes; slots are reused, so freed ones are still counted.
+    uint32_t slot_count() const { return static_cast<uint32_t>(_data.size()); }
+
     T& operator[](size_t index) { return *_data[index].object.get(); }
 
     // const overload, so a read-only walk (Session::resolve_cursor_for reading

@@ -545,6 +545,50 @@ to an integer (measured: 2.5 -> 2.0, 0.3 -> 0.0) - so it proves exact integer
 accumulation and the float path stays Tier-1 only. Recorded in
 `docs/deferred-issues.md` rather than left as an unstated gap.
 
+**4.1b review follow-up** (7 findings, all fixed):
+
+1. **The commit message's own claim was wrong.** It said `dispatch_relative_motion`
+   bails out if the owner is destroyed mid-drag — but that check only runs when a
+   motion event arrives, and once the owning frame's view is gone no motion ever
+   arrives again. Destroying a frame mid-drag left the mode ON: on macOS the cursor
+   stayed decoupled from the device **and hidden, machine-wide**, with nothing left
+   that could un-stick it; on Linux the stale `LinuxWindow*` was then dereferenced
+   by `end_relative_pointer` — a use-after-free reachable from the very
+   `end_relative` call the header tells clients to make unconditionally. Fixed with
+   `end_relative_pointer_if_within` before the subtree is freed, plus a liveness
+   re-check inside `end_relative_pointer` for teardown routes that skip widget
+   destroy.
+2. **macOS ignored `NEUI_ATTR_UI_SCALE`** on relative deltas while win32 and Linux
+   both divided — so a drag's sensitivity jumped by the zoom factor the instant
+   relative mode began, relative to the absolute moves the same handler had been
+   seeding from. Now divided by `frameZoom`.
+3. **Linux double-counted queued motion.** `XWarpPointer` is asynchronous, so
+   several `MotionNotify` can arrive before the warp lands — routine in a drag that
+   repaints per move. Anchor-relative deltas then report d1, then d1+d2, landing d1
+   twice and over-travelling in proportion to queue depth. Switched to
+   event-to-event deltas. Also switched the warp target from `DefaultRootWindow` to
+   the event's own root, which is what an embedded frame on the DAW's Display needs.
+4. **My teardown check was vacuous.** It warped the cursor and asserted it moved —
+   but a warp moves the cursor even while the association is off, as
+   `platform_end_relative_pointer`'s own comment states. It passed whether or not
+   the fix existed. Replaced with checks on the observable that actually
+   distinguishes them (does the mode end), covering owner-widget destroy, frame
+   destroy, and session teardown.
+5. **macOS restore ordering**: warp then re-associate, so the ~250 ms local-events
+   suppression interval doesn't leave the pointer dead after every drag.
+6. The header overstated seeding ("the current pointer position"): it is the last
+   mouse event the host dispatched — that press inside a DOWN handler, but possibly
+   another frame's event, or the widget centre if none. Documented precisely.
+
+Harness 17 → 22 checks. Negative-probed the three new ones (zoom division,
+`end_relative_pointer_if_within`, and the destroy paths): each removal fails the
+corresponding check, and removing the destroy hook cascades exactly as the real bug
+does — once the mode sticks on, every later `begin_relative` fails too.
+
+The review independently cleared what I was most worried about: win32 and Linux
+declaration order (no repeat of the 4.1 build break), the win32 echo filter, and the
+macOS Cocoa→Quartz anchor flip for multi-monitor / negative coordinates.
+
 **Deferred out of 4.1 into 4.1b**: the behavior asset's per-handler `cursor` prop is
 still a no-op. The infrastructure it was blocked on now exists, but wiring it needs a
 per-handler hit-region hover track plus a new `BehaviorDispatchCtx` callback across

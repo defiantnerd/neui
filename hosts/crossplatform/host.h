@@ -999,6 +999,19 @@ namespace xpl_host
     void end_relative_pointer();
     bool is_relative_pointer() const { return _relative.active; }
 
+    // End relative mode if the subtree rooted at `subtree_root` contains the
+    // widget that owns it. MUST be called BEFORE the subtree is destroyed, while
+    // the owning frame's native handle is still alive: end_relative_pointer
+    // hands that handle to the platform (X11 dereferences it to reach the
+    // Display), so ending afterwards is a use-after-free.
+    //
+    // Relying on dispatch_relative_motion's own liveness check is NOT enough -
+    // that only runs when a motion event arrives, and once the owning frame's
+    // view/window is gone no motion ever arrives again. The mode would stay on
+    // forever with the cursor decoupled from the device and hidden, which is a
+    // machine-wide condition rather than a UI glitch.
+    void end_relative_pointer_if_within(uint32_t subtree_root);
+
     // Feed a raw device delta (LOGICAL px) from the platform's motion handler
     // while relative mode is active. Advances the virtual position and
     // dispatches a MOUSE_MOVE carrying it, so an existing drag handler sees

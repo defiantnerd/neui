@@ -277,6 +277,15 @@ namespace xpl_host
             client->get_interface(token, NEUI_API_WIDGETS));
       }
     }
+    // BEFORE the subtree goes away: if a relative-pointer drag is running on a
+    // widget inside it (or on the frame whose native handle we hold), end the
+    // mode now, while that handle is still valid. end_relative_pointer passes it
+    // to the platform, and X11 dereferences it to reach the Display - ending
+    // afterwards would be a use-after-free. Leaving the mode ON instead is worse
+    // than a crash on macOS: the cursor stays decoupled from the device AND
+    // hidden, machine-wide, with no event left to un-stick it.
+    s->end_relative_pointer_if_within(idx);
+
     destroy_recursive(s, idx, client_api, token);
 
     // Destroying the widget under the pointer leaves _hovered_widget (and any

@@ -1076,10 +1076,52 @@ namespace xpl_host
   void Session::end_relative_pointer()
   {
     if (!_relative.active) return;   // safe to call unconditionally from an UP
+
+    // Only hand the platform a handle that is still LIVE. X11 dereferences it to
+    // reach the Display, so a frame destroyed between begin and end would be a
+    // use-after-free. end_relative_pointer_if_within closes that window for the
+    // paths we know about; this re-check covers any teardown route that doesn't
+    // go through widget destroy, and every platform tolerates nullptr.
     void* native = _relative_native;
+    if (native != nullptr) {
+      bool live = false;
+      for (uint32_t i = 0; i < _widgets.slot_count(); ++i) {
+        if (_widgets.exists(i) && _widgets[i].native_handle == native) {
+          live = true;
+          break;
+        }
+      }
+      if (!live) native = nullptr;
+    }
+
     _relative.end();
     _relative_native = nullptr;
     platform_end_relative_pointer(native, _relative_anchor_x, _relative_anchor_y);
+  }
+
+  void Session::end_relative_pointer_if_within(uint32_t subtree_root)
+  {
+    if (!_relative.active || subtree_root == 0) return;
+
+    // Walk up from the owner: if we reach subtree_root, the owner is inside the
+    // doomed subtree. Guarded like resolve_cursor_for against a malformed tree.
+    uint32_t idx = _relative.widget;
+    bool inside = false;
+    for (int guard = 0; idx != 0 && guard < 256; ++guard) {
+      if (idx == subtree_root) { inside = true; break; }
+      if (!_widgets.exists(idx)) break;
+      idx = _widgets.get_parent(idx);
+    }
+
+    // Also end it when the doomed subtree owns the FRAME whose native handle we
+    // are holding - destroying a frame frees that handle even when the owner
+    // widget itself is elsewhere in the tree.
+    if (!inside && _relative_native != nullptr &&
+        _widgets.exists(subtree_root) &&
+        _widgets[subtree_root].native_handle == _relative_native)
+      inside = true;
+
+    if (inside) end_relative_pointer();
   }
 
   void Session::dispatch_relative_motion(float dx, float dy, uint32_t buttonmap)

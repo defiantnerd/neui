@@ -358,7 +358,15 @@ void wake_app_event_pump()
   // Only MOVE is redirected: a button DOWN / UP still carries a meaningful
   // position (the anchor), and end_relative_pointer runs off the UP.
   if (type == NEUI_EVENT_MOUSE_MOVE && session->is_relative_pointer()) {
-    session->dispatch_relative_motion((float)event.deltaX, (float)event.deltaY,
+    // Divide by the frame zoom, exactly as localPointForEvent: does for absolute
+    // positions: dispatch_relative_motion's contract is LOGICAL px. Without this
+    // a drag's sensitivity jumped by the zoom factor the instant relative mode
+    // began, and macOS disagreed with win32 (logical_to_physical) and Linux
+    // (window_scale), both of which already divide the delta.
+    const float z = [self frameZoom];
+    const float s = (z > 0.0f) ? z : 1.0f;
+    session->dispatch_relative_motion((float)event.deltaX / s,
+                                        (float)event.deltaY / s,
                                         mac_buttonmap(NSEvent.pressedMouseButtons,
                                                        event.modifierFlags));
     return;
@@ -2468,11 +2476,16 @@ namespace xpl_host
                                       int anchor_x, int anchor_y)
   {
     (void)native_handle;
-    // Re-associate BEFORE warping: while the cursor is decoupled the warp still
-    // moves it, but leaving the association off would strand the device offset
-    // that accumulated during the drag, so the next physical move would jump.
-    CGAssociateMouseAndMouseCursorPosition(true);
+    // Warp FIRST, then re-associate. Both orders put the cursor back, because a
+    // warp moves it even while decoupled - but CGWarpMouseCursorPosition starts a
+    // local-events suppression interval (~250 ms by default) during which real
+    // mouse input is dropped. Re-associating after the warp is the standard way
+    // to avoid that: the association call ends the decoupled state and the
+    // suppression does not apply to the freshly re-associated device, so the
+    // pointer is live again immediately instead of feeling dead for a quarter
+    // second after every knob drag.
     CGWarpMouseCursorPosition(CGPointMake((CGFloat)anchor_x, (CGFloat)anchor_y));
+    CGAssociateMouseAndMouseCursorPosition(true);
     if (g_relative_hidden) { [NSCursor unhide]; g_relative_hidden = false; }
     // Re-apply the widget's own cursor: the hide above bypassed
     // platform_set_cursor, so g_cursor_kind is still whatever the widget asked

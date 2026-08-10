@@ -107,6 +107,11 @@ namespace
   LinuxWindow* g_relative_window   = nullptr;
   int          g_relative_anchor_x = 0;
   int          g_relative_anchor_y = 0;
+  // Previous pointer position in ROOT px, for event-to-event deltas. Anchor-
+  // relative deltas double-count whenever more than one MotionNotify is queued
+  // before the asynchronous warp lands - see dispatch_motion.
+  int          g_relative_last_x   = 0;
+  int          g_relative_last_y   = 0;
 
   // The X font-cursor glyph for a kind. X11 is the richest of the three
   // platforms here - the cursor font has a direct equivalent for every kind
@@ -807,16 +812,35 @@ namespace
     if (g_relative_active && lw == g_relative_window) {
       if (neui_detail::relative_is_warp_echo(me.x_root, me.y_root,
                                                g_relative_anchor_x,
-                                               g_relative_anchor_y))
-        return;                                        // our own warp-back
+                                               g_relative_anchor_y)) {
+        // Our own warp-back landed. Rebase so the next real event measures from
+        // the anchor rather than from wherever the pointer was before the warp.
+        g_relative_last_x = g_relative_anchor_x;
+        g_relative_last_y = g_relative_anchor_y;
+        return;
+      }
+
+      // Delta is measured EVENT-TO-EVENT, not from the anchor. XWarpPointer is
+      // asynchronous (no round-trip), so several MotionNotify can be queued
+      // before the warp takes effect - routine during a fast drag, and certain
+      // whenever the client lags a paint behind, since every relative move
+      // repaints the knob. Anchor-relative deltas then double-count: queued
+      // events at a+d1 and a+d1+d2 would report d1 and then d1+d2, so d1 lands
+      // twice and the control over-travels in proportion to queue depth.
       const float scale = window_scale(lw);
       if (Session* s = lw->session) {
         s->dispatch_relative_motion(
-          static_cast<float>(me.x_root - g_relative_anchor_x) / scale,
-          static_cast<float>(me.y_root - g_relative_anchor_y) / scale,
+          static_cast<float>(me.x_root - g_relative_last_x) / scale,
+          static_cast<float>(me.y_root - g_relative_last_y) / scale,
           neui_detail::x11_buttonmap(me.state));
       }
-      XWarpPointer(lw->dpy, None, DefaultRootWindow(lw->dpy), 0, 0, 0, 0,
+      g_relative_last_x = me.x_root;
+      g_relative_last_y = me.y_root;
+
+      // Warp back onto the anchor. Uses the EVENT's own root window, not
+      // DefaultRootWindow: an embedded frame runs on the DAW's Display, where
+      // the default screen's root may not be the one this pointer is on.
+      XWarpPointer(lw->dpy, None, me.root, 0, 0, 0, 0,
                     g_relative_anchor_x, g_relative_anchor_y);
       XFlush(lw->dpy);
       return;
@@ -2832,6 +2856,8 @@ namespace
     g_relative_window   = lw;
     g_relative_anchor_x = rx;
     g_relative_anchor_y = ry;
+    g_relative_last_x   = rx;   // first delta is measured from the press point
+    g_relative_last_y   = ry;
     if (out_anchor_x) *out_anchor_x = rx;
     if (out_anchor_y) *out_anchor_y = ry;
 
