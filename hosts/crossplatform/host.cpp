@@ -2375,10 +2375,17 @@ namespace xpl_host
     native_accel = nullptr;
 #endif
     if (hmenu) {
-      for (auto& kv : menu_items) {
-        if (kv.second.submenu)
-          platform_menubar_destroy(kv.second.submenu);
-      }
+      // Release ONLY the root. A submenu is owned by the menu it is attached to
+      // on both platforms: win32 DestroyMenu on the root destroys every attached
+      // submenu with it, and on macOS platform_menubar_add_popup hands back a
+      // NON-owning (__bridge void*) while the parent NSMenuItem holds the only
+      // strong reference. Releasing them individually first was therefore a
+      // double-free on win32, and on macOS an over-release that raised
+      // NSInternalInconsistencyException from -[NSMenu dealloc] ("A submenu is
+      // being released before being detached from its parent menu") - an
+      // UNCAUGHT ObjC exception, i.e. a hard abort when destroying any menubar
+      // that had a popup in it. Nothing leaks: t_remove detaches-and-destroys,
+      // so no orphan submenu is reachable from menu_items.
       platform_menubar_destroy(hmenu);
       hmenu = nullptr;
       s->_menubars.erase(

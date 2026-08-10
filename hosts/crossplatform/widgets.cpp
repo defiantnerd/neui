@@ -1286,10 +1286,14 @@ namespace xpl_host
 
     if (wd.is_menubar()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
-      for (auto& kv : mb.menu_items) {
-        if (kv.second.submenu)
-          platform_menubar_destroy(kv.second.submenu);
-      }
+      // Do NOT release the submenus individually - same defect, same reason, as
+      // MenubarWidget::on_destroy (see the comment there): a submenu is owned by
+      // the menu it is attached to, so this was a double-free on win32 and an
+      // over-release on macOS that aborted the process with
+      // NSInternalInconsistencyException from -[NSMenu dealloc]. Worse here than
+      // in on_destroy, because it also walked STALE submenu pointers left by
+      // t_remove (which erases only the removed item, not its descendants), so it
+      // was a use-after-free as well. Destroying the root below frees the tree.
       mb.menu_items.clear();
       mb.menu_cmd_map.clear();
       mb.menu_item_ids_ordered.clear();
