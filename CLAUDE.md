@@ -184,6 +184,11 @@ Deep per-subsystem detail lives in `docs/`. **Read the relevant file before doin
 Active plans (`plans/`) are open or deferred work only - completed plans were removed once shipped (full text in git history; distilled rationale in `docs/design-notes.md`):
 
 - `sst-neuigui-gap-response.md` - verified reply to an external gap analysis (building an sst-jucegui-style widget toolkit on neui) + the derived work plan: parity bugs, painter completeness (text metrics/alignment, rounded rect/ellipse/line), public timer, per-frame UI scale, cursor, rich popups, file dialog, xpl partial repaint, accessibility seam.
+- `accessibility.md` - **`NEUI_API_A11Y` implementation plan** (Wave 6 of the gap
+  response, worked out to implementation-ready). Client seam + role/state enums, a
+  portable Tier-1-testable `hosts/shared/a11y_tree.h` node model, per-platform
+  providers (NSAccessibility / UIA / AT-SPI), focus-parity prerequisites. Read this
+  rather than the gap-response §3 Wave 6 sketch, which it supersedes.
 - `win32-pointer-and-directmanipulation.md` - WM_POINTER pen/touch + DirectManipulation smooth-scroll on scrolling SECTION + GRID (deferred; binding spec for when it lands).
 - `winui3-host.md` - third host backend feasibility analysis (deferred indefinitely).
 - `wasm-host.md` - WebAssembly / Canvas-2D host feasibility analysis (deferred; phased path documented).

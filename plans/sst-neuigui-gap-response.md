@@ -992,6 +992,17 @@ Not in his list; it is the perf item that actually applies to him.
 
 The one real programme. Build it in the **xpl host**, once.
 
+> **The worked-out plan now lives in `plans/accessibility.md`** — read that, not
+> this section, before implementing. It is implementation-ready where the sketch
+> below is a scoping outline, and it **supersedes** it on seven points (its §9
+> lists them): the shared model takes POD input rather than walking
+> `Tree<WidgetData>`; nodes are `{widget, sub_kind, sub_index}` because LISTBOX /
+> TREEVIEW / GRID / MENUBAR sub-elements are model state, not widgets; macOS
+> lands before win32 for verifiability; a new 6.0 prerequisite phase fixes
+> paint-dependent `abs_x/abs_y` and cross-frame Tab; AT-SPI is proposed as its
+> own wave; `set_labelled_by` is added; and value formatting is specified
+> (`NEUI_PARAM_VALUE` is normalized and useless to a screen reader on its own).
+
 - **6.1 — client seam.** `NEUI_API_A11Y` (`include/neui/d/a11y.h`): per-widget
   `set_role` (button / slider / knob-as-slider / checkbox / text / list /
   group / static-decorative), `set_name`, `set_description`, plus value
