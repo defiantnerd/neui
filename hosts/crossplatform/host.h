@@ -792,24 +792,6 @@ namespace xpl_host
     void on_destroy(Session* s) override;
   };
 
-  // NEUI_W_POPUPMENU - the model for widgets->popup_tree_menu.
-  //
-  // Reuses MenubarWidget WHOLESALE: identical menu_items map, identical
-  // tree->add / set_shortcut / set_checked / set_menu_cmd handling, identical
-  // cascade layout and painting. The only reason it is a distinct type is that a
-  // MENUBAR child of a frame IS that frame's menu bar - it reserves an in-frame
-  // band on hosts that draw their own (Linux) and is picked up by
-  // frame_menubar_index. A popup must never be mistaken for that, and making the
-  // distinction a TYPE rather than a piece of state means no code has to infer it
-  // from context.
-  //
-  // Has no on-screen presence of its own: zero size, no events, never painted
-  // except while Session::_tree_popup_active names it.
-  class PopupMenuWidget : public MenubarWidget {
-  public:
-    PopupMenuWidget() { emit_events = false; }
-  };
-
   // -------------------------------------------------------------------------
 
   class Session
@@ -964,17 +946,6 @@ namespace xpl_host
     // there's no scrolling ancestor or the widget is already visible.
     // Called from set_focus and the public NEUI_API_SCROLL::ensure_visible.
     void ensure_widget_visible(uint32_t widget_idx);
-
-    // ---- Standalone tree popup (widgets->popup_tree_menu) ---------------
-    // Show `menu_idx` (a NEUI_W_POPUPMENU) anchored at `anchor_idx` + (x, y) in
-    // the anchor's local logical px. Returns false for a bad / non-POPUPMENU
-    // widget or an empty menu. Asynchronous: the pick arrives later as
-    // NEUI_EVENT_ITEM_SELECTED on the menu widget.
-    bool show_tree_popup(uint32_t anchor_idx, int x, int y, uint32_t menu_idx);
-    void close_tree_popup();
-    void paint_tree_popup(neui_render_ctx_t ctx, uint32_t frame_index);
-    bool handle_tree_popup_click(uint32_t frame_index, float lx, float ly);
-    bool handle_tree_popup_hover(uint32_t frame_index, float lx, float ly);
 
     // Update the hovered widget, firing mouse enter/leave events.
     void set_hovered(uint32_t new_idx);
@@ -1241,16 +1212,6 @@ namespace xpl_host
     // ...), so cascades nest arbitrarily; _menu_hover_item is the menu item id
     // currently under the cursor (0 = none) for row highlighting. Geometry is
     // recomputed on demand from these (no stored rects), like the popup overlay.
-    // Standalone tree popup (widgets->popup_tree_menu). Reuses _menu_path /
-    // _menu_hover_item for the open cascade, so exactly one menu cascade can be
-    // open at a time - which is also true of the OS menus this mirrors.
-    // _tree_popup_x/_y are the anchor in FRAME-local logical px.
-    bool                  _tree_popup_active = false;
-    uint32_t              _tree_popup_menu   = 0;   // POPUPMENU widget index
-    uint32_t              _tree_popup_frame  = 0;
-    int                   _tree_popup_x      = 0;
-    int                   _tree_popup_y      = 0;
-
     bool                  _menu_open        = false;
     uint32_t              _menu_bar         = 0;
     std::vector<uint32_t> _menu_path;

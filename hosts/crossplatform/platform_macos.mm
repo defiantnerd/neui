@@ -432,12 +432,6 @@ void wake_app_event_pump()
     session->handle_popup_click((float)p.x, (float)p.y);
     return;
   }
-  // Standalone tree popup (widgets->popup_tree_menu) does the same: it is modal
-  // over the frame while open, so it either picks / descends or dismisses.
-  if (session->_tree_popup_active) {
-    session->handle_tree_popup_click(widget_index, (float)p.x, (float)p.y);
-    return;
-  }
   // Toast overlay absorbs a click that lands on its rect, jumping it
   // to the fade-out phase.
   if (session->handle_toast_click(widget_index, (float)p.x, (float)p.y)) return;
@@ -459,10 +453,6 @@ void wake_app_event_pump()
   NSPoint p = [self localPointForEvent:event];
   if (session->_popup_active) {
     session->handle_popup_hover((float)p.x, (float)p.y);
-    return YES;
-  }
-  if (session->_tree_popup_active) {
-    session->handle_tree_popup_hover(widget_index, (float)p.x, (float)p.y);
     return YES;
   }
   if (session->handle_combo_scroll_drag((float)p.y)) return YES;
@@ -526,11 +516,6 @@ void wake_app_event_pump()
   if (session->_popup_active) {
     NSPoint p = [self localPointForEvent:event];
     session->handle_popup_click((float)p.x, (float)p.y);
-    return;
-  }
-  if (session->_tree_popup_active) {
-    NSPoint p = [self localPointForEvent:event];
-    session->handle_tree_popup_click(widget_index, (float)p.x, (float)p.y);
     return;
   }
   [self dispatchMouseEventForType:NEUI_EVENT_MOUSE_RBUTTON_DOWN event:event];

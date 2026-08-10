@@ -143,8 +143,6 @@ namespace xpl_host
       return std::make_unique<TreeviewWidget>();
     if (!strcmp(type, NEUI_W_MENUBAR))
       return std::make_unique<MenubarWidget>();
-    if (!strcmp(type, NEUI_W_POPUPMENU))
-      return std::make_unique<PopupMenuWidget>();
     if (!strcmp(type, NEUI_W_IMAGE))
       return std::make_unique<ImageWidget>();
     if (!strcmp(type, NEUI_W_SLIDER))
@@ -709,21 +707,6 @@ namespace xpl_host
     return s->open_popup_menu(aidx, x, y, v);
   }
 
-  // Tree-model context menu (NEUI_W_POPUPMENU + popup_tree_menu). Async by
-  // design - see <neui/d/widgets.h> for why, and Session::show_tree_popup for
-  // the machinery, which is the menubar's, reused.
-  static bool NEUI_ABI w_popup_tree_menu(neui_session_t session, neui_widget_t anchor,
-                                          int x, int y, neui_widget_t menu)
-  {
-    auto* s = get_session_for_widget(session, anchor);
-    if (!s) return false;
-    // The menu widget must belong to the same session as the anchor; a
-    // cross-session handle is dropped like everywhere else in the API.
-    auto* s2 = get_session_for_widget(session, menu);
-    if (s2 != s) return false;
-    return s->show_tree_popup(WidgetToIndex(anchor), x, y, WidgetToIndex(menu));
-  }
-
   static void NEUI_ABI w_invalidate(neui_session_t session, neui_widget_t widget)
   {
     auto* s = get_session_for_widget(session, widget);
@@ -764,7 +747,6 @@ namespace xpl_host
     w_get_enabled,
     w_get_client_rect,
     w_create_from_component,
-    w_popup_tree_menu,
   };
 
   // -------------------------------------------------------------------------
