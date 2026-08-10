@@ -522,40 +522,42 @@ namespace neui_detail
       // +/-1 per notch). Multiply by |delta| so one notch advances by
       // `step * lines_per_notch` rather than a single `step`, otherwise
       // wheel feels imperceptible at typical step values (~0.01..0.05).
-      // fine_modifier is still NOT applied on the wheel. The payload now
-      // carries the NEUI_MK_* bits (event->data.wheel.buttonmap), so the
-      // information is finally here - but wiring it up needs two design
-      // decisions first, and shipping it without them is worse than the no-op:
-      //
-      //  1. Shift is already spoken for. The win32 + macOS xpl platform layers
-      //     turn a Shift-held VERTICAL notch into a horizontal one and NEGATE
-      //     the delta (platform_win32.cpp WM_MOUSEWHEEL, platform_macos.mm
-      //     scrollWheel:) to match the WM_MOUSEHWHEEL "positive = scroll-left"
-      //     convention. Since this path derives direction from sign(delta) and
-      //     ignores is_horizontal, Shift ALREADY reverses a behavior wheel on
-      //     those two hosts - so simply scaling by fine_scale would ship a
-      //     default-configured (FineModifier::Shift) fine mode that also
-      //     inverts, and only on the two hosts a plugin uses. Recovering the
-      //     sign here by re-negating when (is_horizontal && MK_SHIFT) works but
-      //     mis-signs a genuine tilt-wheel notch with Shift held; the real fix
-      //     is deciding whether the Shift->horizontal fallback belongs in the
-      //     platform layer at all, or only for scrolling consumers.
-      //  2. Fine + steps starves. behavior_write_value_gesture snaps
-      //     round-to-nearest and the wheel keeps no unsnapped accumulator (the
-      //     DRAG path has rt.drag_continuous for exactly this). With
-      //     step * fine_scale * |delta| < quantum/2 every fine notch rounds
-      //     back to where it started and the wheel goes permanently dead -
-      //     e.g. steps=11, step=0.1, fine_scale=0.2, |delta|=1 -> 0.02 < 0.05.
-      //     It is platform-divergent too: win32 multiplies by
-      //     SPI_GETWHEELSCROLLLINES (default 3) so it moves there and not on
-      //     macOS / Linux. The native KNOB dodges this by advancing exactly one
-      //     step per notch in stepped mode regardless of fine; the fix here is
-      //     probably the same rule plus a fine accumulator.
-      int   delta   = event->data.wheel.delta;
+      int delta = event->data.wheel.delta;
       if (delta == 0) return true;
-      float sign    = (delta > 0) ? -1.0f : 1.0f;
-      int   mag     = (delta > 0) ? delta : -delta;
-      float change  = sign * H->step * static_cast<float>(mag);
+      const uint32_t bmap = event->data.wheel.buttonmap;
+
+      // Undo the platform layer's Shift->horizontal flip. The win32 + macOS xpl
+      // layers turn a Shift-held VERTICAL notch into a horizontal one and NEGATE
+      // the delta, to match the WM_MOUSEHWHEEL "positive = scroll-left"
+      // convention. That flip lives in the platform layer BY DESIGN, so a
+      // consumer with no horizontal axis - which a value handler is - has to
+      // recover the physical direction here, or Shift would silently reverse the
+      // control (it did, before this).
+      //
+      // Deliberately narrow: only a horizontal notch WITH Shift held is treated
+      // as a flipped vertical one. A genuine tilt-wheel / trackpad horizontal
+      // notch (is_horizontal, no Shift) keeps behaving exactly as it always has.
+      if (event->data.wheel.is_horizontal && (bmap & NEUI_MK_SHIFT))
+        delta = -delta;
+
+      float sign = (delta > 0) ? -1.0f : 1.0f;
+      int   mag  = (delta > 0) ? delta : -delta;
+
+      // Per-notch magnitude. With detents configured the detent IS the
+      // quantisation, so one notch advances exactly one of them and
+      // fine_modifier is meaningless - matching the native KNOB
+      // (hosts/macos/window.mm, hosts/win32/widgets.cpp, which both use
+      // 1/(steps-1) per tick and ignore fine when stepped). This is also what
+      // keeps fine from starving: behavior_write_value_gesture snaps
+      // round-to-nearest and the wheel keeps no unsnapped accumulator (unlike
+      // DRAG's rt.drag_continuous), so a fine-scaled sub-quantum change would
+      // round straight back and the wheel would go permanently dead.
+      // Continuous mode has no snapping to starve against, so fine applies there.
+      const int steps = behavior_read_steps(*H, ctx.bag);
+      const float magnitude =
+        (steps >= 2) ? ((H->max - H->min) / static_cast<float>(steps - 1))
+                     : (H->step * behavior_fine_mul(*H, bmap));
+      float change = sign * magnitude * static_cast<float>(mag);
       float current = behavior_read_value(*H, ctx.bag);
       behavior_write_value_gesture(*H, ctx, H->target, current + change);
       return true;

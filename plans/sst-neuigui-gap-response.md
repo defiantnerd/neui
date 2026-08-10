@@ -150,24 +150,19 @@ Small, mechanical, and two of them are on the plugin path.
   populated on win32 native + xpl, macOS native + xpl, and Linux xpl (core +
   XI2). iOS synthesises the wheel from touch pans and reports 0, which is
   accurate there.
-  - I initially also wired the thing this unblocked — `WHEEL`
-    `fine_modifier` — and **backed it out** after review. It cannot ship yet
-    for two independent reasons, both now documented on the WHEEL branch of
-    `hosts/shared/behavior_runtime.h` and in `docs/deferred-issues.md`:
-    **(1) Shift is already spoken for** — the win32 + macOS xpl layers turn a
-    Shift-held vertical notch horizontal *and negate the delta*, and this path
-    derives direction from `sign(delta)`, so Shift **already inverts** a
-    behavior wheel on those two hosts; multiplying by `fine_scale` would have
-    shipped a default-configured fine mode that also inverts, on exactly the
-    plugin hosts. **(2) fine + `steps` starves** — the wheel keeps no unsnapped
-    accumulator (DRAG has `drag_continuous`), so once
-    `step * fine_scale * |delta| < quantum/2` every fine notch rounds back and
-    the wheel goes permanently dead, divergently across platforms. The native
-    KNOB dodges (2) by advancing exactly one step per notch when stepped.
-    Tier-1 cases pin the current coarse contract *and* the Shift inversion, so
-    the eventual fix has to change a test deliberately.
+  - **Fine-on-wheel now ships too** (the thing this unblocked). It was wired,
+    backed out after review found it incoherent, then re-landed once you ruled
+    that **the Shift->horizontal flip belongs in the platform layer**. That
+    ruling makes the consumer responsible for undoing it: a value handler has no
+    horizontal axis, so `hosts/shared/behavior_runtime.h` un-negates an
+    `is_horizontal + NEUI_MK_SHIFT` notch to recover the physical direction
+    (a genuine tilt-wheel horizontal notch is untouched). The second blocker -
+    fine starving against `steps` snapping - is solved by the native KNOB's own
+    rule: with detents a notch advances exactly one detent and fine is ignored,
+    so there is no sub-quantum change to round away. 6 Tier-1 cases, including
+    the exact config that used to go dead.
 
-**Three additional fixes the wave surfaced** (all real, all beyond the four
+**Four additional fixes the wave surfaced** (all real, all beyond the four
 items — back them out if the waves should stay strictly scoped):
 
 - **A shared `hosts/shared/win32/keys_win32.h`**, completing the set alongside
@@ -196,6 +191,14 @@ items — back them out if the waves should stay strictly scoped):
   The two control-action CLICK paths (win32 `BN_CLICKED`, macOS `NSControl`
   action) deliberately stay `0` — the keyboard can raise them with no mouse
   involved — and now carry a comment saying so.
+- **The xpl KNOB and SLIDER were reading the wheel delta as a modifier mask.**
+  `host.cpp` tested `event->data.mouse.buttonmap & NEUI_MK_SHIFT` inside its
+  `MOUSE_WHEEL` branch, but `neui_event_mouse_t::buttonmap` and
+  `neui_event_wheel_t::delta` sit at the **same offset (12)** in the event union
+  — verified with `offsetof`. So "fine" was `(delta & 0x4)`: a negative delta
+  (wheel-down) sign-extends to `0xFFFFFFF...` and always read as fine, while
+  wheel-up never did. Undiagnosable before this wave because the wheel payload
+  had no `buttonmap` to read; now a one-word fix at both sites.
 
 Verified: `cmake --build` clean and warning-free on macOS (Xcode/Debug);
 `ctest` green — 317 cases, 1843 checks, 0 failures. The win32 and Linux edits

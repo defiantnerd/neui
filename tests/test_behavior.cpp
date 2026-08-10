@@ -917,104 +917,103 @@ TEST_CASE("gesture: WHEEL that cannot move the value emits nothing")
 }
 
 // ---------------------------------------------------------------------------
-// WHEEL + the new neui_event_wheel_t buttonmap.
+// WHEEL + neui_event_wheel_t::buttonmap -> fine_modifier.
 //
-// The payload now carries NEUI_MK_* bits, but fine_modifier is deliberately
-// still NOT applied on the wheel - see the long comment on the WHEEL branch in
-// behavior_runtime.h for the two design problems that block it (Shift is
-// already spent flipping the notch horizontal AND negating it on the win32 /
-// macOS xpl hosts; and fine + steps starves without an accumulator).
-//
-// These cases pin that contract down so the next person to wire fine-on-wheel
-// has to change a test on purpose rather than silently regress a knob.
+// Two rules, both documented on the WHEEL branch in behavior_runtime.h:
+//   - a horizontal notch WITH Shift is the platform layer's flipped vertical
+//     notch, so the negation is undone (the flip stays in the platform layer
+//     by design);
+//   - with `steps` detents a notch advances exactly one detent and fine is
+//     ignored (matching the native KNOB, and avoiding snap starvation).
 // ---------------------------------------------------------------------------
 
-TEST_CASE("WHEEL: a notch advances by the full step")
-{
-  BehaviorAsset ba;
-  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
-  behavior_get_handler(ba, slot)->step = 0.1f;
-
-  BehaviorRuntime rt;
-  AttrBag bag;
-  GestureLog log;
-  auto ctx = gesture_ctx(bag, log);
-
-  neui_widget_t wid = { 1 };
-  neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
-  wheel.data.wheel = { wid, 10, 10, -1, 0, 0 };
-  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10));
-  CHECK_APPROX(bag.get_float(NEUI_PARAM_VALUE, -1.0f), 0.1);
-}
-
-TEST_CASE("WHEEL: buttonmap does NOT scale the notch (fine-on-wheel is unwired)")
-{
-  BehaviorAsset ba;
-  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
-  behavior_get_handler(ba, slot)->step = 0.1f;   // fine_modifier defaults Shift
-
-  BehaviorRuntime rt;
-  AttrBag bag;
-  bag.set_float(NEUI_PARAM_VALUE, 0.5f);         // mid-range so a move is visible
-  GestureLog log;
-  auto ctx = gesture_ctx(bag, log);
-
-  // As the win32 / macOS xpl hosts actually emit a Shift-held vertical notch:
-  // is_horizontal set AND the delta negated.
-  neui_widget_t wid = { 1 };
-  neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
-  wheel.data.wheel = { wid, 10, 10, -1, 1, NEUI_MK_SHIFT };
-  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10));
-  // A FULL step, not step * fine_scale (which would be 0.02).
-  CHECK_APPROX(bag.get_float(NEUI_PARAM_VALUE, -1.0f), 0.6);
-}
-
-TEST_CASE("WHEEL: Shift already INVERTS direction on the win32 / macOS xpl hosts")
-{
-  // Pins the pre-existing conflict that blocks fine-on-wheel: those two
-  // platform layers negate the delta when Shift is held (to synthesise a
-  // horizontal notch), and this path derives direction from sign(delta), so
-  // one physical wheel-up moves the value OPPOSITE ways with and without
-  // Shift. Whoever wires fine_modifier here has to fix this first, and will
-  // have to change this test on purpose to do it.
-  auto notch_from_physical_wheel_up = [](bool shift_held) {
+namespace {
+  // One physical wheel-UP notch as the win32 / macOS xpl hosts actually emit
+  // it: Shift both sets MK_SHIFT and makes the layer flip+negate the notch.
+  float wheel_up_once(bool shift_held, float step, int steps_attr,
+                       float start = 0.5f)
+  {
     BehaviorAsset ba;
     uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
-    behavior_get_handler(ba, slot)->step = 0.1f;
+    behavior_get_handler(ba, slot)->step = step;
     BehaviorRuntime rt;
     AttrBag bag;
-    bag.set_float(NEUI_PARAM_VALUE, 0.5f);
+    bag.set_float(NEUI_PARAM_VALUE, start);
+    if (steps_attr > 0) bag.set_int(NEUI_ATTR_STEPS, steps_attr);
     GestureLog log;
     auto ctx = gesture_ctx(bag, log);
     neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
-    // Physical wheel-up is a positive raw delta; the hosts negate it (and set
-    // is_horizontal) only when Shift is down.
     wheel.data.wheel = { { 1 }, 10, 10,
                           shift_held ? -1 : 1,
                           shift_held ? 1 : 0,
                           shift_held ? (uint32_t)NEUI_MK_SHIFT : 0u };
     behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10);
     return bag.get_float(NEUI_PARAM_VALUE, -1.0f);
-  };
-
-  CHECK_APPROX(notch_from_physical_wheel_up(false), 0.4);   // down from 0.5
-  CHECK_APPROX(notch_from_physical_wheel_up(true),  0.6);   // UP from 0.5
+  }
 }
 
-TEST_CASE("behavior_fine_mul reads the wheel buttonmap bits correctly")
+TEST_CASE("WHEEL: a plain notch advances by the full step")
 {
-  // The mapping itself is sound and ready for whoever wires fine-on-wheel;
-  // only the WHEEL dispatch path declines to call it.
-  BehaviorHandler H;                                  // Shift, fine_scale 0.2
+  CHECK_APPROX(wheel_up_once(/*shift*/false, 0.1f, /*steps*/0), 0.4);
+}
+
+TEST_CASE("WHEEL: Shift scales by fine_scale and does NOT reverse direction")
+{
+  // Same direction as the unmodified notch (0.5 -> below), just smaller:
+  // 0.1 * 0.2 = 0.02. Before the flip was undone this moved UP to 0.6.
+  CHECK_APPROX(wheel_up_once(/*shift*/true, 0.1f, /*steps*/0), 0.48);
+}
+
+TEST_CASE("WHEEL: a genuine horizontal notch (no Shift) is unchanged")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
+  behavior_get_handler(ba, slot)->step = 0.1f;
+  BehaviorRuntime rt;
+  AttrBag bag;
+  bag.set_float(NEUI_PARAM_VALUE, 0.5f);
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+  // Tilt-wheel / trackpad: is_horizontal with no Shift -> no un-negation.
   neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
-  wheel.data.wheel = { { 1 }, 0, 0, -1, 0, NEUI_MK_SHIFT };
-  CHECK_APPROX(behavior_fine_mul(H, wheel.data.wheel.buttonmap), 0.2);
+  wheel.data.wheel = { { 1 }, 10, 10, 1, 1, 0 };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10));
+  CHECK_APPROX(bag.get_float(NEUI_PARAM_VALUE, -1.0f), 0.4);
+}
 
-  wheel.data.wheel.buttonmap = NEUI_MK_CONTROL;
-  CHECK_APPROX(behavior_fine_mul(H, wheel.data.wheel.buttonmap), 1.0);
+TEST_CASE("WHEEL: with steps, a notch moves exactly one detent and ignores fine")
+{
+  // steps=11 over [0,1] -> quantum 0.1. Coarse and fine both advance one
+  // detent; step (0.1) and fine_scale (0.2) are both irrelevant here.
+  CHECK_APPROX(wheel_up_once(/*shift*/false, 0.1f, /*steps*/11), 0.4);
+  CHECK_APPROX(wheel_up_once(/*shift*/true,  0.1f, /*steps*/11), 0.4);
+}
 
-  wheel.data.wheel.buttonmap = 0;
-  CHECK_APPROX(behavior_fine_mul(H, wheel.data.wheel.buttonmap), 1.0);
+TEST_CASE("WHEEL: stepped fine no longer starves (the regression that blocked this)")
+{
+  // The exact config that would round back to the start under a naive
+  // fine multiply: steps=11 (quantum 0.1), step 0.1, fine_scale 0.2 ->
+  // 0.02 < quantum/2, so the snap would return the value unchanged forever.
+  CHECK_APPROX(wheel_up_once(/*shift*/true, 0.1f, /*steps*/11, 0.5f), 0.4);
+  // ...and a step far smaller than the quantum still advances one detent.
+  CHECK_APPROX(wheel_up_once(/*shift*/true, 0.001f, /*steps*/11, 0.5f), 0.4);
+}
+
+TEST_CASE("WHEEL: multi-line notch multiplies (win32 SPI_GETWHEELSCROLLLINES)")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
+  behavior_get_handler(ba, slot)->step = 0.1f;
+  BehaviorRuntime rt;
+  AttrBag bag;
+  bag.set_float(NEUI_PARAM_VALUE, 0.9f);
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+  // Shift-flipped 3-line notch: un-negated to +3, fine 0.2 -> 3*0.1*0.2 = 0.06.
+  neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
+  wheel.data.wheel = { { 1 }, 10, 10, -3, 1, NEUI_MK_SHIFT };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10));
+  CHECK_APPROX(bag.get_float(NEUI_PARAM_VALUE, -1.0f), 0.84);
 }
 
 TEST_CASE("gesture: KEY_STEP pairs per keypress")

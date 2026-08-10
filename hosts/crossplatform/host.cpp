@@ -2756,7 +2756,13 @@ namespace xpl_host
 
     if (event->type == NEUI_EVENT_MOUSE_WHEEL) {
       int delta = event->data.wheel.delta;
-      bool fine = (event->data.mouse.buttonmap & NEUI_MK_SHIFT) != 0;
+      // data.WHEEL.buttonmap, not data.mouse: the two structs overlap in the
+      // event union and mouse.buttonmap sits at the SAME offset (12) as
+      // wheel.delta, so this used to test the scroll delta as a modifier mask -
+      // (delta & NEUI_MK_SHIFT). Wheel-down (negative -> 0xFFFFFFFF...) always
+      // read as "fine" and wheel-up never did. The wheel payload carries a real
+      // buttonmap now, so read that.
+      bool fine = (event->data.wheel.buttonmap & NEUI_MK_SHIFT) != 0;
       float step = nudge_delta(*this, 1, fine ? 0.01f : 0.05f) *
                    (delta > 0 ? 1.0f : -1.0f);
       widget_set_value_user_gesture(*this, widget_get_value(*this) + step);
@@ -3107,7 +3113,13 @@ namespace xpl_host
   {
     if (event->type == NEUI_EVENT_MOUSE_WHEEL) {
       int delta = event->data.wheel.delta;
-      bool fine = (event->data.mouse.buttonmap & NEUI_MK_SHIFT) != 0;
+      // data.WHEEL.buttonmap, not data.mouse: the two structs overlap in the
+      // event union and mouse.buttonmap sits at the SAME offset (12) as
+      // wheel.delta, so this used to test the scroll delta as a modifier mask -
+      // (delta & NEUI_MK_SHIFT). Wheel-down (negative -> 0xFFFFFFFF...) always
+      // read as "fine" and wheel-up never did. The wheel payload carries a real
+      // buttonmap now, so read that.
+      bool fine = (event->data.wheel.buttonmap & NEUI_MK_SHIFT) != 0;
       // Wheel up INCREASES knob value, wheel down DECREASES - matching the
       // SLIDER and the natural scroll direction (delta > 0 == scroll up on
       // every platform).
