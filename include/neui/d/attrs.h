@@ -320,10 +320,27 @@ extern "C" {
 // canonical set.
 //
 // Not every shape exists on every OS. A platform maps what it has and falls
-// back to the nearest neighbour rather than to the arrow: macOS has no public
-// diagonal-resize, wait, or help cursor (it attempts a guarded private
-// selector, else the closest public shape), and win32 has no separate
-// open/closed hand (both map to IDC_HAND). See docs/deferred-issues.md.
+// back to the nearest neighbour rather than to the arrow: on macOS the
+// diagonals are public only from macOS 15 (older systems use a guarded private
+// selector, else a same-axis double arrow), "move" / "help" have no public
+// equivalent at any version, and "wait" / "progress" cannot be honoured at all
+// (macOS has no app-settable busy cursor - the beachball belongs to the window
+// server - so draw progress instead of setting a cursor there). win32 has no
+// separate open/closed hand (both map to IDC_HAND). See docs/deferred-issues.md.
+//
+// Resolved by the CROSSPLATFORM host only. The native win32 / macOS hosts do
+// not read this attr - their widgets are real OS controls that manage their own
+// cursors - so a client that wants it selects "neui.host.crossplatform", the
+// same way it must for NEUI_API_TIMER and NEUI_API_EMBED.
+//
+// Applies to any widget THE POINTER CAN HOVER, which means a widget that takes
+// part in hit-testing: one with `emit_events` (BUTTON, INPUTBOX, CUSTOMDRAW,
+// GRID, a scrolling SECTION, ...). Setting it on a widget that never hit-tests
+// - a LABEL, an IMAGE, a non-scrolling SECTION's own background - has no
+// effect, because the pointer is logically interacting with whatever lies
+// beneath it, and that widget's cursor is the one that shows. Inheritance still
+// reaches through such a widget: a cursor on a plain SECTION applies over its
+// interactive children, just not over its bare background.
 #define NEUI_ATTR_CURSOR "neui.attr.cursor"
 
 // string: anchor end of the knob's active fill arc.

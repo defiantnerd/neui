@@ -232,6 +232,75 @@ int main()
     expect_cursor([NSCursor IBeamCursor],
                     "an unknown cursor name inherits rather than forcing arrow");
 
+    // remove() is the same operation as set_string(key, "") from a client's
+    // point of view, so it has to be live too. It was not: the shape stayed
+    // pinned until the next hover transition (review finding).
+    attrs->set_string(sess, inherit_btn, NEUI_ATTR_CURSOR, "crosshair");
+    expect_cursor([NSCursor crosshairCursor], "precondition: crosshair pinned");
+    attrs->remove(sess, inherit_btn, NEUI_ATTR_CURSOR);
+    expect_cursor([NSCursor IBeamCursor],
+                    "attrs->remove is live too, not just set_string(\"\")");
+
+    // ---- 5. canonical read-back ----------------------------------------
+    // <neui/d/attrs.h> promises get_string returns the CANONICAL name, not the
+    // alias written. It did not until the normalisation moved into a_set_string
+    // (review finding: the header documented a round-trip that did not happen).
+    {
+      attrs->set_string(sess, inherit_btn, NEUI_ATTR_CURSOR, "pointer");
+      const char* rb = attrs->get_string(sess, inherit_btn, NEUI_ATTR_CURSOR);
+      check(rb && std::strcmp(rb, "hand") == 0,
+              "get_string canonicalises an alias (\"pointer\" -> \"hand\")");
+      if (rb && std::strcmp(rb, "hand") != 0)
+        std::printf("        got: \"%s\"\n", rb);
+
+      attrs->set_string(sess, inherit_btn, NEUI_ATTR_CURSOR, "col_resize");
+      rb = attrs->get_string(sess, inherit_btn, NEUI_ATTR_CURSOR);
+      check(rb && std::strcmp(rb, "ew-resize") == 0,
+              "underscore alias canonicalises too (\"col_resize\" -> \"ew-resize\")");
+
+      // An unknown name reads back as "default", so a client can SEE that its
+      // value was not understood instead of getting its own typo echoed back.
+      attrs->set_string(sess, inherit_btn, NEUI_ATTR_CURSOR, "not-a-cursor");
+      rb = attrs->get_string(sess, inherit_btn, NEUI_ATTR_CURSOR);
+      check(rb && std::strcmp(rb, "default") == 0,
+              "an unknown name reads back as \"default\", not echoed");
+      attrs->remove(sess, inherit_btn, NEUI_ATTR_CURSOR);
+    }
+
+    // ---- 6. hide / unhide is balanced ----------------------------------
+    // [NSCursor hide]/unhide is a COUNTER, so an unbalanced hide is permanent
+    // for the whole process. NSCursor exposes no "is hidden" query, so this
+    // checks the observable proxy: after cursor="none" and back, a normal shape
+    // still resolves, and the hidden state does not stick to the next widget.
+    attrs->set_string(sess, inherit_btn, NEUI_ATTR_CURSOR, "none");
+    move_mouse_to(hand_cx, hand_cy);          // leave the hidden widget
+    expect_cursor([NSCursor pointingHandCursor],
+                    "leaving a cursor=\"none\" widget restores a real shape");
+    move_mouse_to(inherit_cx, inherit_cy);    // hide again
+    move_mouse_to(455, 110);                  // out to the background
+    expect_cursor([NSCursor arrowCursor],
+                    "cursor=\"none\" does not leak to the frame background");
+    attrs->remove(sess, inherit_btn, NEUI_ATTR_CURSOR);
+
+    // ---- 7. destroying the hovered widget releases the cursor ----------
+    // No pointer-leave event arrives when a widget is destroyed out from under a
+    // stationary pointer (the DAW-closes-the-editor case). Before
+    // forget_dead_hover, _hovered_widget kept pointing at a freed slot - and a
+    // cursor="none" widget left the pointer HIDDEN process-wide (review finding).
+    {
+      neui_widget_t doomed = widgets->create(sess, win, NEUI_W_BUTTON,
+                                               300, 60, 100, 24, nullptr);
+      attrs->set_string(sess, doomed, NEUI_ATTR_CURSOR, "not-allowed");
+      widgets->show(sess, doomed);
+      neui->pump_once(sess);
+      move_mouse_to(300 + 50, 60 + 12);
+      expect_cursor([NSCursor operationNotAllowedCursor],
+                      "precondition: the doomed widget owns the cursor");
+      widgets->destroy(sess, doomed);
+      expect_cursor([NSCursor arrowCursor],
+                      "destroying the hovered widget releases its cursor");
+    }
+
     // ---- 4. GRID positional override -----------------------------------
     // Over a data row: the grid's own "open-hand" shows, proving the divider
     // code path clears its override instead of pinning an arrow.

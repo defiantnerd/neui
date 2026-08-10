@@ -982,6 +982,19 @@ namespace xpl_host
     // for why a mid-drag owner is exempt.
     void drop_cursor_override_on_hover_change(uint32_t new_idx);
 
+    // Clear hover / override state that points at a destroyed widget slot, then
+    // re-resolve. Called after a widget subtree is destroyed, because no
+    // pointer-leave event arrives when a widget is destroyed out from under a
+    // stationary pointer - and a cursor="none" widget would otherwise leave the
+    // pointer hidden process-wide.
+    void forget_dead_hover();
+
+    // Restore the OS default cursor if this session had changed it. Called from
+    // ~Session: a hidden pointer (NEUI_CURSOR_NONE) survives the session that
+    // hid it, and on macOS [NSCursor hide]/unhide is a balanced counter, so an
+    // unbalanced hide is permanent for the whole host process.
+    void release_cursor();
+
     // Update the captured (pressed) widget. Mirrors set_hovered's role
     // for the press flag: clears the previous widget's `pressed`, sets
     // the new widget's `pressed`, and invalidates either side when it

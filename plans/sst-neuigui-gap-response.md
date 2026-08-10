@@ -463,6 +463,45 @@ What landed:
   `-mouseMoved:` events and reading `[NSCursor currentCursor]`. Negative-probed:
   removing the `-cursorUpdate:` body makes the stickiness check fail.
 
+**Review follow-up** (7 findings, all fixed):
+
+1. **The Windows build did not compile.** `s_cursor_kind` was read by the new
+   `WM_SETCURSOR` case at `platform_win32.cpp:713` but defined ~1400 lines later at
+   2130 — MSVC C2065. Exactly the class of error a macOS-only machine cannot catch;
+   the definition moved above `XplWndProc`.
+2. **A public contract was false**: `<neui/d/attrs.h>` promised `get_string` returns
+   the canonical name, and nothing canonicalised — `set_string("pointer")` read back
+   `"pointer"`. The unit test only round-tripped the *parser*, never the attr API, so
+   it passed with the claim false. Normalisation now happens on write.
+3. **"Applies to ANY widget" was false.** Resolution starts from the hovered widget
+   and `widget_at` only returns `emit_events && enabled && !input_transparent`
+   widgets, so the attr is inert on a LABEL, an IMAGE, or a non-scrolling SECTION's
+   bare background. Documented accurately instead of over-claimed — and it is the
+   *right* semantics: for a non-interactive widget the pointer is interacting with
+   whatever lies beneath, so that widget's cursor should win.
+4. **`attrs->remove` was not live**, though the header says clearing restores
+   inheritance — only `set_string(key, "")` re-resolved. Same operation to a client.
+5. **A hidden pointer could leak process-wide.** Nothing cleared hover when a widget
+   was destroyed under a stationary pointer (no leave event arrives), and
+   `[NSCursor hide]`/`unhide` is a balanced counter — so an embedded plugin editor
+   torn down while the pointer was over a `cursor="none"` widget left **the DAW with
+   no pointer** for the rest of its process life. Added `forget_dead_hover` on widget
+   destroy and `release_cursor` in `~Session`.
+6. **A "no public API" claim was stale**: macOS 15 added public
+   `+frameResizeCursorFromPosition:inDirections:`, now used for the diagonals with
+   the private selector as the pre-15 fallback. (The reviewer also confirmed all five
+   private selectors exist on current macOS and that the `respondsToSelector:` guard
+   is sound.) Noted that `+resizeLeftRightCursor`/`+resizeUpDownCursor` are
+   soft-deprecated in favour of `+columnResizeCursor`/`+rowResizeCursor`; not migrated
+   yet because it would change the existing GRID divider appearance.
+7. A markdown table row in `docs/attributes.md` was detached from its header.
+
+Harness grew 12 → 21 checks, one per fixed finding. Negative-probed three of them
+(`-cursorUpdate:`, `forget_dead_hover`, canonicalisation): each removal makes the
+corresponding check fail. The review also independently cleared X11 cursor lifetime,
+the GRID override ownership logic against the real capture code, and `set_hovered`
+re-entrancy.
+
 **Deferred out of 4.1 into 4.1b**: the behavior asset's per-handler `cursor` prop is
 still a no-op. The infrastructure it was blocked on now exists, but wiring it needs a
 per-handler hit-region hover track plus a new `BehaviorDispatchCtx` callback across

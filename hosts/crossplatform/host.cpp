@@ -277,6 +277,13 @@ namespace xpl_host
     _timer_native_interval = 0;
     platform_timer_stop(this);
 
+    // Hand the cursor back to the OS. A hidden pointer (NEUI_CURSOR_NONE)
+    // outlives the session that hid it, and on macOS hide/unhide is a balanced
+    // counter - so an embedded plugin editor torn down while the pointer was
+    // over a cursor="none" widget would leave the DAW with NO POINTER for the
+    // rest of the process's life.
+    release_cursor();
+
     if (_theme_listener_handle != 0) {
       neui_detail::unregister_theme_listener(_theme_listener_handle);
       _theme_listener_handle = 0;
@@ -940,7 +947,16 @@ namespace xpl_host
     // Nearest ancestor with an explicit cursor wins. A widget whose attr is
     // unset - or set to an unrecognised name, which parses to DEFAULT - is
     // transparent to the walk, which is what makes "inherit" work: a client
-    // sets "ibeam" once on a SECTION and every child inside it gets an I-beam.
+    // sets "ibeam" once on a SECTION and every interactive child inside it gets
+    // an I-beam.
+    //
+    // Note the START of the walk is the HOVERED widget, and widget_at only ever
+    // hands back widgets with emit_events && enabled && !input_transparent. So a
+    // cursor set on a non-hit-testing widget (LABEL, IMAGE, a non-scrolling
+    // SECTION's bare background) never becomes the starting point and is inert -
+    // correctly, since the pointer is logically interacting with whatever is
+    // beneath it. Such a widget is still walked THROUGH as an ancestor.
+    // Documented in <neui/d/attrs.h> and docs/attributes.md.
     //
     // The guard bounds a malformed tree (a parent cycle would otherwise spin
     // here on every mouse move). get_parent returns 0 at the root sentinel.
@@ -988,6 +1004,43 @@ namespace xpl_host
     _cursor_override       = kind;
     _cursor_override_owner = owner_idx;
     refresh_cursor();
+  }
+
+  void Session::forget_dead_hover()
+  {
+    bool changed = false;
+
+    if (_hovered_widget != 0 && !_widgets.exists(_hovered_widget)) {
+      // Deliberately NOT set_hovered(0): the old widget is already gone, so
+      // firing MOUSE_LEAVE at it would hand the client a dangling handle (and
+      // set_hovered's own exists() check would skip the notification anyway).
+      _hovered_widget = 0;
+      changed = true;
+    }
+    if (_pressed_widget != 0 && !_widgets.exists(_pressed_widget)) {
+      _pressed_widget = 0;
+      changed = true;
+    }
+    if (_cursor_override_owner != 0 && !_widgets.exists(_cursor_override_owner)) {
+      _cursor_override       = NEUI_CURSOR_DEFAULT;
+      _cursor_override_owner = 0;
+      changed = true;
+    }
+
+    if (changed) refresh_cursor();
+  }
+
+  void Session::release_cursor()
+  {
+    // Only touch the platform if this session actually changed the cursor.
+    // ~Session can run during static teardown, where reaching into AppKit / X11
+    // for no reason is worth avoiding.
+    if (_cursor_applied == -1 || _cursor_applied == NEUI_CURSOR_DEFAULT) return;
+    _cursor_override       = NEUI_CURSOR_DEFAULT;
+    _cursor_override_owner = 0;
+    _hovered_widget        = 0;
+    _cursor_applied        = NEUI_CURSOR_DEFAULT;
+    platform_set_cursor(NEUI_CURSOR_DEFAULT);
   }
 
   void Session::drop_cursor_override_on_hover_change(uint32_t new_idx)

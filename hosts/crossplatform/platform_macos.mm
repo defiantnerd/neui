@@ -2254,11 +2254,25 @@ namespace xpl_host
   // is tracked in g_cursor_kind and reapplied from NEUIView's -cursorUpdate:,
   // which is the documented hook for "this view decides its own cursor".
   //
-  // AppKit is also missing several shapes that win32 and X11 both have. The
-  // ones with no public NSCursor (diagonal resize, wait, progress, help, move)
-  // exist as private class methods that every serious Mac app uses; they are
-  // reached through +respondsToSelector: so a future macOS that drops one
-  // degrades to the public fallback instead of throwing. Listed in
+  // AppKit is also missing shapes that win32 and X11 both have, though less so
+  // than it used to be: macOS 15 added public +frameResizeCursorFromPosition:
+  // inDirections: (the diagonals) and +columnResizeCursor / +rowResizeCursor.
+  // Those are preferred where they apply (mac_public_cursor). What still has no
+  // public equivalent at all is move, wait, progress and help; each tries a
+  // private class method - reached via +respondsToSelector:, so a macOS that
+  // drops one degrades instead of throwing - and otherwise falls back to the
+  // closest public shape.
+  //
+  // Note wait/progress cannot be fixed by a better selector: macOS has no
+  // app-settable busy cursor by design. The beachball is the window server's
+  // response to an app that stops answering events, so a Mac client should draw
+  // progress rather than set a cursor. Listed in docs/deferred-issues.md.
+  //
+  // +resizeLeftRightCursor / +resizeUpDownCursor (used for EW / NS below) are
+  // marked API_TO_BE_DEPRECATED in the macOS 15 SDK in favour of
+  // +columnResizeCursor / +rowResizeCursor. They still work and still look
+  // right, so they stay for now - swapping them would change the existing GRID
+  // column-divider appearance - but that migration is queued in
   // docs/deferred-issues.md.
 
   int g_cursor_kind = NEUI_CURSOR_DEFAULT;
@@ -2268,6 +2282,40 @@ namespace xpl_host
   // leaves the pointer permanently visible in a relative-pointer drag. So the
   // transition is tracked explicitly and only ever toggled on a change.
   bool g_cursor_hidden = false;
+
+  // macOS 15 finally added PUBLIC cursors for shapes AppKit had never exposed:
+  // +frameResizeCursorFromPosition:inDirections: (the diagonals) plus
+  // +columnResizeCursor / +rowResizeCursor. Prefer those when both the SDK
+  // declares them and the running OS has them; older systems fall through to
+  // the guarded private selectors below.
+  //
+  // Returns nil when there is no public answer for `kind`, so the caller keeps
+  // its existing fallback chain.
+  static NSCursor* mac_public_cursor(int kind)
+  {
+  #if defined(MAC_OS_VERSION_15_0) && \
+      MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_VERSION_15_0
+    if (@available(macOS 15.0, *)) {
+      switch (kind) {
+        // NSCursorFrameResizeDirectionsAll = the double-headed arrow, which is what a resize
+        // affordance wants; Inward/Outward are the single-headed variants for a
+        // frame that can only grow or only shrink on that edge.
+        case NEUI_CURSOR_NESW_RESIZE:
+          return [NSCursor
+            frameResizeCursorFromPosition:NSCursorFrameResizePositionTopRight
+                             inDirections:NSCursorFrameResizeDirectionsAll];
+        case NEUI_CURSOR_NWSE_RESIZE:
+          return [NSCursor
+            frameResizeCursorFromPosition:NSCursorFrameResizePositionTopLeft
+                             inDirections:NSCursorFrameResizeDirectionsAll];
+        default: break;
+      }
+    }
+  #else
+    (void)kind;
+  #endif
+    return nil;
+  }
 
   // A private +[NSCursor foo] shape, or nil when this macOS doesn't have it.
   static NSCursor* mac_private_cursor(const char* selname)
@@ -2296,15 +2344,16 @@ namespace xpl_host
       case NEUI_CURSOR_EW_RESIZE:   return [NSCursor resizeLeftRightCursor];
       case NEUI_CURSOR_NS_RESIZE:   return [NSCursor resizeUpDownCursor];
 
-      // No public diagonal-resize cursor. Fall back to the matching AXIS
-      // rather than to an arrow: on a corner grip an EW/NS double-arrow still
+      // Diagonals: public since macOS 15, private selector before that, and a
+      // same-axis double-arrow as the last resort - on a corner grip that still
       // reads as "resize", where an arrow reads as "nothing here".
-      case NEUI_CURSOR_NESW_RESIZE: {
-        NSCursor* c = mac_private_cursor("_windowResizeNorthEastSouthWestCursor");
-        return c ? c : [NSCursor resizeUpDownCursor];
-      }
+      case NEUI_CURSOR_NESW_RESIZE:
       case NEUI_CURSOR_NWSE_RESIZE: {
-        NSCursor* c = mac_private_cursor("_windowResizeNorthWestSouthEastCursor");
+        if (NSCursor* pub = mac_public_cursor(kind)) return pub;
+        NSCursor* c = mac_private_cursor(
+          kind == NEUI_CURSOR_NESW_RESIZE
+            ? "_windowResizeNorthEastSouthWestCursor"
+            : "_windowResizeNorthWestSouthEastCursor");
         return c ? c : [NSCursor resizeUpDownCursor];
       }
 

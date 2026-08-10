@@ -381,6 +381,26 @@ namespace xpl_host
   }
 
   // -------------------------------------------------------------------------
+  // Mouse cursor state.
+  //
+  // Declared HERE, above XplWndProc, because the WM_SETCURSOR case reads it -
+  // and the rest of the cursor code lives ~1400 lines further down next to
+  // platform_set_cursor. A definition down there would not be in scope at the
+  // point of use, which is a hard compile error on MSVC (C2065) that this
+  // macOS-only build cannot catch.
+  //
+  // Win32 cursor management is per-message: WM_SETCURSOR fires every time the
+  // pointer moves over a window, and unless we answer it the OS reverts to
+  // whatever the window class registered (wc.hCursor, an arrow). So the active
+  // kind is tracked here and reapplied from the WM_SETCURSOR case;
+  // platform_set_cursor also applies it immediately, for the case where the
+  // pointer is already inside and no WM_SETCURSOR is due until it next moves.
+  //
+  // Process-wide rather than per-window: only one window can be under the
+  // pointer at a time, and Session::refresh_cursor is the single writer.
+  static int s_cursor_kind = NEUI_CURSOR_DEFAULT;
+
+  // -------------------------------------------------------------------------
   // Window procedure
 
   static LRESULT CALLBACK XplWndProc(HWND hwnd, UINT msg,
@@ -2117,18 +2137,6 @@ namespace xpl_host
   }
 
   // -------------------------------------------------------------------------
-  // Mouse cursor. Win32 cursor management is per-message: WM_SETCURSOR fires
-  // every time the pointer moves over a window, and unless we answer it the
-  // OS reverts to whatever the window class registered (wc.hCursor, an arrow).
-  // So the active kind is tracked here and reapplied from the WM_SETCURSOR
-  // case in XplWndProc; platform_set_cursor also applies it immediately, for
-  // the case where the pointer is already inside and no WM_SETCURSOR is due
-  // until it next moves.
-  //
-  // Process-wide rather than per-window: only one window can be under the
-  // pointer at a time, and Session::refresh_cursor is the single writer.
-  static int s_cursor_kind = NEUI_CURSOR_DEFAULT;
-
   // Client timers (NEUI_API_TIMER). A THREAD timer - SetTimer(NULL, ...) with a
   // TIMERPROC - rather than a window timer, because timers are session-scoped
   // and a session may own several frames (or, embedded, a frame whose lifetime

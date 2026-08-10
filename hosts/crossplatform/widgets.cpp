@@ -279,6 +279,15 @@ namespace xpl_host
     }
     destroy_recursive(s, idx, client_api, token);
 
+    // Destroying the widget under the pointer leaves _hovered_widget (and any
+    // cursor override owned by it) pointing at a freed slot. Nothing else
+    // notices: set_hovered(0) is only reached from a real pointer-leave
+    // (WM_MOUSELEAVE / LeaveNotify), which never arrives when a widget is
+    // destroyed out from under a stationary pointer - the DAW-closes-the-editor
+    // case. Left alone, a widget with cursor="none" would keep the pointer
+    // HIDDEN for the rest of the host process's life.
+    s->forget_dead_hover();
+
     // Re-clamp the selection + re-apply page visibility/geometry, then repaint
     // the strip so the now-correct tab count is reflected immediately (matching
     // the win32 / macOS hosts, which re-flow on every TABPAGE removal).
@@ -791,7 +800,21 @@ namespace xpl_host
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return 0;
     auto& wd = s->_widgets[idx];
-    neui_detail::ensure_attrs(wd.attrs).set_string(key, value);
+
+    // NEUI_ATTR_CURSOR is stored CANONICALISED, so get_string reads back one
+    // spelling no matter which accepted alias was written ("pointer" -> "hand",
+    // "col-resize" -> "ew-resize", "ew_resize" -> "ew-resize"), and an
+    // unrecognised name reads back as "default" - which is also what it MEANS,
+    // so a client can see that its value was not understood instead of getting
+    // its own typo echoed back. <neui/d/attrs.h> documents this round-trip; the
+    // claim was false until the normalisation moved here.
+    if (!strcmp(key, NEUI_ATTR_CURSOR)) {
+      const int kind = neui_detail::cursor_kind_from_name(value);
+      neui_detail::ensure_attrs(wd.attrs)
+        .set_string(key, neui_detail::cursor_kind_name(kind));
+    } else {
+      neui_detail::ensure_attrs(wd.attrs).set_string(key, value);
+    }
 
     // Live re-application for behavior-bearing keys. Each platform layer's
     // platform_set_window_icon does the right thing: Win32 manages the
@@ -854,6 +877,13 @@ namespace xpl_host
     auto& wd = s->_widgets[idx];
     if (!wd.attrs) return 0;
     if (!wd.attrs->remove(key)) return 0;
+
+    // <neui/d/attrs.h> documents that CLEARING NEUI_ATTR_CURSOR restores
+    // inheritance, and that the attr is live. Without this the shape stayed
+    // pinned until the next hover transition, so remove() disagreed with
+    // set_string(key, "") - which is the same operation to a client.
+    if (!strcmp(key, NEUI_ATTR_CURSOR)) s->refresh_cursor();
+
     // Removing a key can change what a self-painted widget draws (e.g.
     // clearing a bound {token} or a value on a compound widget), so
     // invalidate the owning frame - mirroring the a_set_* path above.
