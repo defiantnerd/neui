@@ -1942,6 +1942,60 @@ namespace xpl_host
   };
 
   // ---------------------------------------------------------------------------
+  // Embed API (NEUI_API_EMBED) - DAW embedding for PLUGWINDOW frames. Thin
+  // validation over the platform_set_embed_parent / platform_embed_* seams;
+  // the per-platform semantics live in platform.h.
+
+  static bool NEUI_ABI embed_set_parent(neui_session_t session,
+                                          neui_widget_t widget,
+                                          void* native_parent)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return false;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return false;
+    auto& wd = s->_widgets[idx];
+    if (!wd.type || strcmp(wd.type, NEUI_W_PLUGWINDOW) != 0) return false;
+    // The parent is consumed when the native frame is created at show();
+    // reparenting a realized frame is not supported.
+    if (wd.native_handle) return false;
+    platform_set_embed_parent(s, idx, native_parent);
+    return true;
+  }
+
+  static int NEUI_ABI embed_event_fd(neui_session_t session,
+                                       neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return -1;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return -1;
+    auto& wd = s->_widgets[idx];
+    if (!wd.native_handle) return -1;
+    return platform_embed_event_fd(wd.native_handle);
+  }
+
+  static bool NEUI_ABI embed_pump_and_tick(neui_session_t session,
+                                             neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return false;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return false;
+    auto& wd = s->_widgets[idx];
+    if (!wd.native_handle) return false;
+    platform_embed_pump_and_tick(wd.native_handle);
+    return true;
+  }
+
+  neui_embed_api_t embed_api = {
+    NEUI_VERSION,
+    embed_set_parent,
+    embed_event_fd,
+    embed_pump_and_tick,
+  };
+
+  // ---------------------------------------------------------------------------
   // Asset API (NEUI_API_ASSETS) - session-scoped media handles backed by
   // the AssetManager's handle table. Handles encode the session id in the
   // upper 16 bits like neui_widget_t; cross-session handles are dropped.

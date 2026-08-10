@@ -224,6 +224,12 @@ void wake_app_event_pump()
 - (void)mouseDown:(NSEvent*)event
 {
   if (!session) return;
+  // Pull keyboard focus on click. Standalone frames get this at install time
+  // (setInitialFirstResponder), but a DAW-embedded view shares the host's
+  // window with the DAW's own views, so the click must claim first-responder
+  // for keyboard input to route here. No-op when already first responder.
+  if (self.window && self.window.firstResponder != self)
+    [self.window makeFirstResponder:self];
   // clickCount == 2 -> DBLCLICK; clickCount >= 3 not modeled.
   if (event.clickCount == 2) {
     [self dispatchMouseEventForType:NEUI_EVENT_MOUSE_BUTTON_DBLCLICK event:event];
@@ -1264,9 +1270,32 @@ namespace {
 NSRect logical_window_rect(int x, int y, int w, int h)
 { return neui_detail::logical_window_rect_macos(x, y, w, h); }
 
+// A frame's native_handle is an NSWindow* for standalone frames and an
+// NEUIView* for a DAW-embedded PLUGWINDOW (see platform_set_embed_parent).
+// These three accessors are the only place that distinction lives: window-
+// level operations must check is_embedded_view (or take the nil window)
+// rather than assume the handle owns its NSWindow - for an embedded frame
+// native_window() returns the DAW's window, which neui must never retitle,
+// move, or close.
+bool is_embedded_view(void* nh)
+{
+  return nh && ![(__bridge id)nh isKindOfClass:[NSWindow class]];
+}
+
 NSWindow* native_window(void* nh)
 {
-  return (__bridge NSWindow*)nh;
+  if (!nh) return nil;
+  id obj = (__bridge id)nh;
+  if ([obj isKindOfClass:[NSWindow class]]) return (NSWindow*)obj;
+  return [(NSView*)obj window];   // the DAW's window; nil before attach
+}
+
+NSView* frame_content_view(void* nh)
+{
+  if (!nh) return nil;
+  id obj = (__bridge id)nh;
+  if ([obj isKindOfClass:[NSWindow class]]) return [(NSWindow*)obj contentView];
+  return (NSView*)obj;
 }
 
 NSWindowStyleMask styles_for_appwindow()
@@ -1395,6 +1424,41 @@ namespace xpl_host
   void platform_create_plugwindow(Session* session, uint32_t widget_index,
                                    WidgetData& wd)
   {
+    // wd.embed_parent (set via platform_set_embed_parent) selects the
+    // DAW-embedded path: the frame roots directly in an NEUIView added as a
+    // subview of the DAW-provided parent NSView - no NSWindow of our own.
+    // The DAW's main runloop then drives drawRect: / input / NSTimer
+    // animations for free; neui owns no loop in embedded mode. The view is
+    // created hidden and revealed by platform_show_window, matching the
+    // standalone create-then-show contract.
+    if (wd.embed_parent) {
+      NSView* parent = (__bridge NSView*)reinterpret_cast<void*>(wd.embed_parent);
+      NEUIView* view = [[NEUIView alloc]
+        initWithFrame:NSMakeRect(wd.x, wd.y, wd.width, wd.height)];
+      view->session      = session;
+      view->widget_index = widget_index;
+      view.hidden = YES;
+      [parent addSubview:view];
+
+      auto* backend = platform_get_backend();
+      if (backend) {
+        wd.render_ctx = backend->create_context((__bridge void*)view,
+                                                 (uint32_t)wd.width,
+                                                 (uint32_t)wd.height);
+      }
+
+      CGFloat scale = parent.window ? parent.window.backingScaleFactor
+                                    : NSScreen.mainScreen.backingScaleFactor;
+      if (scale <= 0) scale = 1.0;
+      wd.dpi = (uint32_t)(96.0 * scale + 0.5);
+
+      // +1 retain on the NEUIView as the native_handle; released via
+      // __bridge_transfer in platform_destroy_window (there is no window
+      // delegate on this path, so destroy also owns the render-ctx teardown).
+      wd.native_handle = (__bridge_retained void*)view;
+      return;
+    }
+
     NSRect frame_rect = logical_window_rect(wd.x, wd.y, wd.width, wd.height);
     NSWindow* window = [[NSWindow alloc] initWithContentRect:frame_rect
                                                     styleMask:NSWindowStyleMaskBorderless
@@ -1446,6 +1510,24 @@ namespace xpl_host
   void platform_destroy_window(WidgetData& wd)
   {
     if (!wd.native_handle) return;
+
+    // Embedded PLUGWINDOW: no NSWindow, no delegate - release the render ctx
+    // here (standalone frames do it in the delegate's windowWillClose:) and
+    // detach the view from the DAW's hierarchy.
+    if (is_embedded_view(wd.native_handle)) {
+      NSView* v = (__bridge_transfer NSView*)wd.native_handle;
+      wd.native_handle = nullptr;
+      auto* backend = platform_get_backend();
+      if (backend && wd.render_ctx) {
+        if (wd.session)
+          wd.session->_asset_manager.release_context(wd.render_ctx, backend);
+        backend->destroy_context(wd.render_ctx);
+        wd.render_ctx = nullptr;
+      }
+      [v removeFromSuperview];
+      return;
+    }
+
     // Release the +1 retain installed in install_view_and_context. ARC
     // releases the local NSWindow* when this scope ends; AppKit then
     // closes and frees it.
@@ -1468,6 +1550,10 @@ namespace xpl_host
   void platform_show_window(void* native_handle)
   {
     if (!native_handle) return;
+    if (is_embedded_view(native_handle)) {
+      [frame_content_view(native_handle) setHidden:NO];
+      return;
+    }
     NSWindow* w = native_window(native_handle);
     NEUIWindowDelegate* d = (NEUIWindowDelegate*)w.delegate;
     if (d && d->sheet_owner && !d->sheet_active) {
@@ -1482,6 +1568,10 @@ namespace xpl_host
   void platform_hide_window(void* native_handle)
   {
     if (!native_handle) return;
+    if (is_embedded_view(native_handle)) {
+      [frame_content_view(native_handle) setHidden:YES];
+      return;
+    }
     NSWindow* w = native_window(native_handle);
     [w orderOut:nil];
   }
@@ -1496,6 +1586,9 @@ namespace xpl_host
   void platform_activate_window(void* native_handle)
   {
     if (!native_handle) return;
+    // A DAW-embedded frame never activates the process or reorders the
+    // host's windows - focus ownership stays with the DAW.
+    if (is_embedded_view(native_handle)) return;
     NSWindow* w = native_window(native_handle);
     [NSApp activateIgnoringOtherApps:YES];
     [w makeKeyAndOrderFront:nil];
@@ -1504,6 +1597,8 @@ namespace xpl_host
   void platform_set_window_title(void* native_handle, const char* text)
   {
     if (!native_handle) return;
+    // Embedded: the enclosing NSWindow is the DAW's - never retitle it.
+    if (is_embedded_view(native_handle)) return;
     NSWindow* w = native_window(native_handle);
     [w setTitle:[NSString stringWithUTF8String:text ? text : ""]];
   }
@@ -1512,6 +1607,12 @@ namespace xpl_host
                                 int x, int y, int w, int h, uint32_t /*dpi*/)
   {
     if (!native_handle) return;
+    if (is_embedded_view(native_handle)) {
+      // (x, y) is parent-view-relative in the parent's coordinate system;
+      // drawRect: reads bounds each frame so the render follows the resize.
+      [frame_content_view(native_handle) setFrame:NSMakeRect(x, y, w, h)];
+      return;
+    }
     NSWindow* win = native_window(native_handle);
     [win setFrame:logical_window_rect(x, y, w, h) display:YES];
   }
@@ -1519,6 +1620,9 @@ namespace xpl_host
   void platform_post_close(void* native_handle)
   {
     if (!native_handle) return;
+    // Embedded: closing is the adapter's job (widget_destroy); performClose
+    // here would close the DAW's window.
+    if (is_embedded_view(native_handle)) return;
     NSWindow* w = native_window(native_handle);
     [w performClose:nil];
   }
@@ -1526,6 +1630,8 @@ namespace xpl_host
   float platform_get_scale_factor(void* native_handle)
   {
     if (!native_handle) return 1.0f;
+    // For an embedded view native_window() is the DAW's window - exactly the
+    // backing scale we want; falls back to 1.0 before attach.
     NSWindow* w = native_window(native_handle);
     CGFloat s = w.backingScaleFactor;
     return s > 0 ? (float)s : 1.0f;
@@ -1534,8 +1640,7 @@ namespace xpl_host
   void platform_invalidate(void* native_handle)
   {
     if (!native_handle) return;
-    NSWindow* w = native_window(native_handle);
-    [w.contentView setNeedsDisplay:YES];
+    [frame_content_view(native_handle) setNeedsDisplay:YES];
   }
 
   bool platform_run()
@@ -1555,6 +1660,25 @@ namespace xpl_host
     }
     return true;
   }
+
+  // ---- DAW-embedding seams. -------------------------------------------------
+  // On macOS an embedded PLUGWINDOW is an NEUIView subview inside the DAW's
+  // window, so the DAW's main runloop already drives drawRect: / input /
+  // NSTimer animations - there is no dedicated connection to poll and
+  // nothing to tick. The seams exist so a plugin adapter can drive one
+  // platform-uniform loop across Win32 / macOS / Linux.
+
+  void platform_set_embed_parent(Session* session, uint32_t widget_index,
+                                 void* native_parent)
+  {
+    if (!session) return;
+    auto* wd = session->get_widget(widget_index);
+    if (wd) wd->embed_parent = reinterpret_cast<uintptr_t>(native_parent);
+  }
+
+  int platform_embed_event_fd(void* /*native_handle*/) { return -1; }
+
+  void platform_embed_pump_and_tick(void* /*native_handle*/) {}
 
   bool platform_run_modal_until(bool* keep_running)
   {
@@ -1738,6 +1862,9 @@ namespace xpl_host
                                         int max_w, int max_h)
   {
     if (!native_handle) return;
+    // Embedded: the size is the DAW's to negotiate; never constrain the
+    // host's window.
+    if (is_embedded_view(native_handle)) return;
     NSWindow* w = native_window(native_handle);
     NSSize min_sz = NSMakeSize(min_w > 0 ? min_w : 0,
                                 min_h > 0 ? min_h : 0);
@@ -1809,8 +1936,7 @@ namespace xpl_host
                                      uint32_t /*frame_widget_id*/)
   {
     if (!native_handle) return false;
-    NSWindow* win = (__bridge NSWindow*)native_handle;
-    NSView* cv = [win contentView];
+    NSView* cv = frame_content_view(native_handle);
     if (![cv isKindOfClass:[NEUIView class]]) return false;
     [cv registerForDraggedTypes:@[
       NSPasteboardTypeString,
@@ -1823,8 +1949,7 @@ namespace xpl_host
   void platform_dnd_unregister_window(void* native_handle)
   {
     if (!native_handle) return;
-    NSWindow* win = (__bridge NSWindow*)native_handle;
-    NSView* cv = [win contentView];
+    NSView* cv = frame_content_view(native_handle);
     if ([cv isKindOfClass:[NEUIView class]])
       [cv unregisterDraggedTypes];
   }
@@ -1850,8 +1975,7 @@ namespace xpl_host
     // unconditionally). Pass nil if no preview.
     NSImage* preview = (__bridge_transfer NSImage*)preview_native;
     if (!native_handle || !item) return 0;
-    NSWindow* win = (__bridge NSWindow*)native_handle;
-    NSView* cv = [win contentView];
+    NSView* cv = frame_content_view(native_handle);
     if (!cv) return 0;
     return neui_detail::macos_run_drag_source(cv, *item, allowed_actions,
                                                 preview, hot_x, hot_y);
@@ -1877,8 +2001,7 @@ namespace xpl_host
   void platform_start_toast_animation(void* native_handle)
   {
     if (!native_handle) return;
-    NSWindow* win = (__bridge NSWindow*)native_handle;
-    NSView* cv = [win contentView];
+    NSView* cv = frame_content_view(native_handle);
     if ([cv isKindOfClass:[NEUIView class]]) {
       [(NEUIView*)cv toastStart];
     }
@@ -1887,8 +2010,7 @@ namespace xpl_host
   void platform_stop_toast_animation(void* native_handle)
   {
     if (!native_handle) return;
-    NSWindow* win = (__bridge NSWindow*)native_handle;
-    NSView* cv = [win contentView];
+    NSView* cv = frame_content_view(native_handle);
     if ([cv isKindOfClass:[NEUIView class]]) {
       [(NEUIView*)cv toastStop];
     }
@@ -1909,7 +2031,10 @@ namespace xpl_host
                            const char* caption, uint32_t flags)
   {
     if (!native_handle) return 0;
-    NSWindow* win = (__bridge NSWindow*)native_handle;
+    // For an embedded frame this resolves to the DAW's window - the right
+    // sheet parent; nil (view not yet attached) means nothing to anchor to.
+    NSWindow* win = native_window(native_handle);
+    if (!win) return 0;
     return neui_detail::message_box_macos(win, text, caption, flags);
   }
 

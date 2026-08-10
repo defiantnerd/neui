@@ -531,13 +531,44 @@ namespace win32_host
     }
   }
 
+  // NEUI_EVENT_GESTURE_BEGIN / _END for the built-in KNOB / SLIDER (their
+  // gesture always edits NEUI_PARAM_VALUE). Same gating as VALUE_CHANGED.
+  // Non-static so window.cpp's trackbar notification handler can bracket
+  // TB_THUMBTRACK..TB_ENDTRACK. Public within the win32_host namespace.
+  void widget_emit_gesture_w32(WidgetData& wd, bool begin)
+  {
+    if (!wd.session || !wd.emit_events) return;
+    neui_event_t ev{};
+    ev.type = begin ? NEUI_EVENT_GESTURE_BEGIN : NEUI_EVENT_GESTURE_END;
+    ev.data.gesture.widget.id = wd.widget_id;
+    ev.data.gesture.attr_key  = NEUI_PARAM_VALUE;
+    ev.data.gesture.value     = widget_get_value_w32(wd);
+    wd.session->dispatch_event(&ev);
+  }
+
+  // One-shot user change (wheel tick / key nudge / reset) wrapped in an
+  // implicit GESTURE_BEGIN / _END pair. The pair only fires when the snapped
+  // value actually moves - checked BEFORE the begin so the VALUE_CHANGED of
+  // the write lands between the two. Drags bracket the whole interaction via
+  // widget_emit_gesture_w32 at grab / release instead.
+  static void widget_set_value_user_gesture_w32(WidgetData& wd, float v)
+  {
+    float snapped = snap_to_steps_w32(clamp01_w32(v), widget_get_steps_w32(wd));
+    if (snapped == widget_get_value_w32(wd)) return;
+    widget_emit_gesture_w32(wd, true);
+    widget_set_value_user_w32(wd, v);
+    widget_emit_gesture_w32(wd, false);
+  }
+
   // Reset a value-bearing widget to NEUI_PARAM_DEFAULT (or 0 if unset).
   // Non-static so window.cpp's ChildSubclassProc can call it for slider
-  // double-click. Public within the win32_host namespace.
+  // double-click. Public within the win32_host namespace. Every caller is a
+  // one-shot user action (knob context menu, slider double-click), so the
+  // reset carries its own implicit gesture pair.
   void widget_reset_to_default_w32(WidgetData& wd)
   {
     float def = wd.attrs ? wd.attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f) : 0.0f;
-    widget_set_value_user_w32(wd, def);
+    widget_set_value_user_gesture_w32(wd, def);
   }
 
   // Paint hook used by the "neui.painted" class for KNOB widgets.
@@ -609,7 +640,7 @@ namespace win32_host
       // SLIDER and the natural scroll direction.
       float step = nudge_delta_w32(wd, 1, fine ? 0.01f : 0.05f) *
                    (delta > 0 ? 1.0f : -1.0f);
-      widget_set_value_user_w32(wd, widget_get_value_w32(wd) + step);
+      widget_set_value_user_gesture_w32(wd, widget_get_value_w32(wd) + step);
       return;
     }
 
@@ -631,7 +662,7 @@ namespace win32_host
         default:       handled = false; break;
       }
       if (handled)
-        widget_set_value_user_w32(wd, v);
+        widget_set_value_user_gesture_w32(wd, v);
       return;
     }
 
@@ -639,9 +670,14 @@ namespace win32_host
     if (dpi == 0) dpi = 96;
 
     if (msg == WM_LBUTTONDBLCLK) {
+      // CS_DBLCLKS delivered DOWN / UP for the first click, so the first
+      // click's drag gesture already closed; the reset is its own pair. If a
+      // drag is somehow still in flight, the reset lands inside it (the UP
+      // that follows closes it).
       float def = wd.attrs ? clamp01_w32(wd.attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f))
                             : 0.0f;
-      widget_set_value_user_w32(wd, def);
+      if (wd.paint_dragging) widget_set_value_user_w32(wd, def);
+      else                   widget_set_value_user_gesture_w32(wd, def);
       return;
     }
 
@@ -687,11 +723,18 @@ namespace win32_host
       // small per-frame deltas accumulate into step crossings rather than
       // being rounded back to the same snapped value each sample.
       wd.paint_drag_continuous = widget_get_value_w32(wd);
+      widget_emit_gesture_w32(wd, true);
       SetFocus(wd.hwnd);
       return;
     }
-    if (msg == WM_LBUTTONUP) {
-      wd.paint_dragging = false;
+    // WM_CAPTURECHANGED: PaintedWndProc's SetCapture was stolen mid-drag
+    // (Alt-Tab, modal popup). Treat it like a release so the gesture closes -
+    // a dangling begin wedges host automation.
+    if (msg == WM_LBUTTONUP || msg == WM_CAPTURECHANGED) {
+      if (wd.paint_dragging) {
+        wd.paint_dragging = false;
+        widget_emit_gesture_w32(wd, false);
+      }
       return;
     }
     if (msg == WM_MOUSEMOVE && wd.paint_dragging) {
@@ -874,6 +917,20 @@ namespace win32_host
     wd->session->dispatch_event(&ev);
   }
 
+  static void w32_behavior_emit_gesture(void* host_data,
+                                          const char* attr_key, float value,
+                                          bool begin)
+  {
+    auto* wd = static_cast<WidgetData*>(host_data);
+    if (!wd || !wd->session || !wd->emit_events) return;
+    neui_event_t ev{};
+    ev.type = begin ? NEUI_EVENT_GESTURE_BEGIN : NEUI_EVENT_GESTURE_END;
+    ev.data.gesture.widget.id = wd->widget_id;
+    ev.data.gesture.attr_key  = attr_key;
+    ev.data.gesture.value     = value;
+    wd->session->dispatch_event(&ev);
+  }
+
   static int w32_behavior_popup_menu(void* host_data, int local_x, int local_y,
                                        const char* const* items)
   {
@@ -916,6 +973,7 @@ namespace win32_host
     ctx.host_data         = &wd;
     ctx.invalidate        = &w32_behavior_invalidate;
     ctx.emit_attr_changed = &w32_behavior_emit_attr_changed;
+    ctx.emit_gesture      = &w32_behavior_emit_gesture;
     ctx.popup_menu        = &w32_behavior_popup_menu;
     ctx.begin_drag        = &w32_behavior_begin_drag;
     return ctx;
@@ -989,6 +1047,21 @@ namespace win32_host
     if (!wd.behavior_rt)
       wd.behavior_rt = std::make_unique<neui_detail::BehaviorRuntime>();
     auto ctx = make_behavior_ctx_w32(wd);
+
+    if (msg == WM_CAPTURECHANGED) {
+      // Capture stolen mid-drag: synthesize the release so an in-flight
+      // behavior drag ends (and closes its gesture) instead of dangling.
+      // Arrives synchronously from PaintedWndProc's own ReleaseCapture too;
+      // the rt.dragging guard makes that a no-op.
+      if (wd.behavior_rt->dragging) {
+        neui_event_t up{};
+        up.type                 = NEUI_EVENT_MOUSE_BUTTON_UP;
+        up.data.mouse.widget.id = wd.widget_id;
+        neui_detail::behavior_dispatch_mouse(*ba, *wd.behavior_rt, ctx,
+                                              &up, 0.0f, 0.0f);
+      }
+      return;
+    }
 
     if (msg == WM_KEYDOWN) {
       // Modifiers: read live (the WM_KEYDOWN message doesn't carry them).

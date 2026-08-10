@@ -35,37 +35,45 @@ namespace xpl_host
 
   // Create a borderless embeddable plugin window (PLUGWINDOW).
   // Sets wd.native_handle, wd.render_ctx, and wd.dpi on success.
-  // On Linux, if wd.embed_parent_xid != 0 (see platform_set_embed_parent) the
-  // window is created as a child of that foreign X11 Window over a dedicated
-  // Display connection, and the host owns no event loop for it - the DAW
-  // drives platform_embed_pump_and_tick (below).
+  // If wd.embed_parent != 0 (see platform_set_embed_parent) the frame is
+  // created inside that foreign native parent instead of as its own
+  // top-level: Win32 = WS_CHILD of the parent HWND, macOS = an NEUIView
+  // subview of the parent NSView (no NSWindow of its own), Linux = a child
+  // of the foreign X11 Window over a dedicated Display connection with no
+  // neui-owned event loop (the DAW drives platform_embed_pump_and_tick).
   void platform_create_plugwindow(Session* session, uint32_t widget_index,
                                    WidgetData& wd);
 
   // -------------------------------------------------------------------------
-  // Linux/X11 DAW-embedding seams. The neui side of a plugin adapter: a
-  // foreign-parent child window plus a host-driven pump (no neui-owned event
-  // loop in embedded mode). Implemented only on the Linux platform layer; the
-  // actual VST3/CLAP/LV2 SDK glue is a separate, out-of-scope effort that
-  // calls these. No-ops / absent on other platforms.
+  // DAW-embedding seams - the neui side of a plugin adapter: a
+  // foreign-parent child frame plus (where the platform needs one) a
+  // host-driven pump. Implemented on every platform layer (null host stubs);
+  // the actual VST3/CLAP/LV2 SDK glue is a separate, out-of-scope effort
+  // that calls these - normally through the public NEUI_API_EMBED interface
+  // (include/neui/d/embed.h), which forwards here.
 
-  // Set the reparent target for the next PLUGWINDOW created for this widget.
-  // parent_xid is the DAW-provided X11 Window (cast through unsigned long).
-  // parent_xid 0 = standalone top-level. Must be called before widget_show.
+  // Set the embed target for the next PLUGWINDOW created for this widget.
+  // native_parent is the DAW-provided parent: HWND on Win32, NSView* on
+  // macOS, the X11 Window id (cast through uintptr_t/void*) on Linux.
+  // nullptr = standalone top-level. Must be called before widget_show.
   void platform_set_embed_parent(Session* session, uint32_t widget_index,
-                                 unsigned long parent_xid);
+                                 void* native_parent);
 
-  // The X11 connection file descriptor for an embedded window's dedicated
-  // Display. The DAW registers this with its run loop (VST3 IRunLoop
-  // registerEventHandler / CLAP posix-fd) so it knows when to pump. Returns
-  // -1 for a non-embedded / null handle.
+  // A pollable event file descriptor for the embedded frame, or -1 when the
+  // platform doesn't need one. Linux: the dedicated Display's X11 connection
+  // fd - the DAW registers it with its run loop (VST3 IRunLoop
+  // registerEventHandler / CLAP posix-fd) so it knows when to pump. Win32 /
+  // macOS: -1 - the DAW's own message pump / main runloop already delivers
+  // paint, input, and timers to a child HWND / NSView subview.
   int platform_embed_event_fd(void* native_handle);
 
-  // Drain pending X events for an embedded window and, at most once per
-  // ~16 ms, advance one animation tick + repaint. The DAW calls this from its
-  // periodic timer (VST3 IRunLoop registerTimer / CLAP timer / LV2 idle) and
-  // whenever platform_embed_event_fd signals readable. This is the ONLY
-  // heartbeat in embedded mode - neui spins no loop of its own.
+  // Service the embedded frame from the DAW's periodic timer (VST3 IRunLoop
+  // registerTimer / CLAP timer / LV2 idle) and whenever
+  // platform_embed_event_fd signals readable. Linux: drains the dedicated
+  // Display, advances at most one animation tick per ~16 ms, repaints - the
+  // ONLY heartbeat in embedded mode. Win32 / macOS: a no-op kept for a
+  // platform-uniform adapter loop (WM_PAINT / WM_TIMER / NSTimer already
+  // arrive through the DAW's pump).
   void platform_embed_pump_and_tick(void* native_handle);
 
   // Create a dialog frame (DIALOG): titlebar + close button, no resize, no

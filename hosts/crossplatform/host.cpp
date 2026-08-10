@@ -117,6 +117,7 @@ namespace xpl_host
   extern neui_scroll_api_t    scroll_api;
   extern neui_tabs_api_t      tabs_api;
   extern neui_notify_api_t    notify_api;
+  extern neui_embed_api_t     embed_api;
 
   // Resolve a Session* from a 1-based session id (the upper 16 bits of a
   // widget id). Used by the iOS platform layer's NEUI_API_METRICS seam to walk
@@ -175,6 +176,7 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_TABS))      return &tabs_api;
     if (!strcmp(iface, NEUI_API_NOTIFY))    return &notify_api;
     if (!strcmp(iface, NEUI_API_METRICS))   return &neui_detail::k_metrics_api;
+    if (!strcmp(iface, NEUI_API_EMBED))     return &embed_api;
     return nullptr;
   }
 
@@ -2561,6 +2563,34 @@ namespace xpl_host
     }
   }
 
+  // NEUI_EVENT_GESTURE_BEGIN / _END for the built-in KNOB / SLIDER (their
+  // gesture always edits NEUI_PARAM_VALUE). Same gating as VALUE_CHANGED.
+  static void widget_emit_gesture(WidgetData& wd, bool begin)
+  {
+    if (!wd.session || !wd.emit_events) return;
+    neui_event_t ev{};
+    ev.type = begin ? NEUI_EVENT_GESTURE_BEGIN : NEUI_EVENT_GESTURE_END;
+    ev.data.gesture.widget.id = wd.widget_id;
+    ev.data.gesture.attr_key  = NEUI_PARAM_VALUE;
+    ev.data.gesture.value     = widget_get_value(wd);
+    wd.session->dispatch_event(&ev);
+  }
+
+  // One-shot user change (wheel tick / key nudge / reset) wrapped in an
+  // implicit GESTURE_BEGIN / _END pair. The pair only fires when the snapped
+  // value actually moves - checked BEFORE the begin so the VALUE_CHANGED of
+  // the write lands between the two. Drags call widget_emit_gesture at
+  // grab / release instead and route their samples through
+  // widget_set_value_user directly.
+  static void widget_set_value_user_gesture(WidgetData& wd, float new_v)
+  {
+    float snapped = snap_to_steps(clamp01(new_v), widget_get_steps(wd));
+    if (snapped == widget_get_value(wd)) return;
+    widget_emit_gesture(wd, true);
+    widget_set_value_user(wd, new_v);
+    widget_emit_gesture(wd, false);
+  }
+
   // ---- SliderWidget --------------------------------------------------------
 
   // Read NEUI_ATTR_ORIENTATION ("horizontal" / "vertical") into `is_vertical`.
@@ -2695,7 +2725,7 @@ namespace xpl_host
       default: handled = false; break;
     }
     if (handled) {
-      widget_set_value_user(*this, v);
+      widget_set_value_user_gesture(*this, v);
       repaint();
     }
     return handled;
@@ -2706,13 +2736,20 @@ namespace xpl_host
     slider_resolve_orientation(*this);
 
     if (event->type == NEUI_EVENT_MOUSE_BUTTON_DBLCLICK) {
-      // Reset to NEUI_PARAM_DEFAULT (or 0 if unset). The preceding
-      // MOUSE_BUTTON_DOWN already started a drag and snapped to the click
-      // position; cancel that drag and overwrite with the default.
+      // Reset to NEUI_PARAM_DEFAULT (or 0 if unset). When a drag is still in
+      // flight (the preceding MOUSE_BUTTON_DOWN opened a gesture and snapped
+      // to the click position) the reset lands inside that gesture and
+      // cancelling the drag closes it; otherwise (platforms that deliver
+      // DOWN/UP before the DBLCLICK) it is its own implicit pair.
       float def = 0.0f;
       if (attrs) def = clamp01(attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f));
-      widget_set_value_user(*this, def);
-      dragging = false;
+      if (dragging) {
+        widget_set_value_user(*this, def);
+        dragging = false;
+        widget_emit_gesture(*this, false);
+      } else {
+        widget_set_value_user_gesture(*this, def);
+      }
       repaint();
       return true;
     }
@@ -2722,7 +2759,7 @@ namespace xpl_host
       bool fine = (event->data.mouse.buttonmap & NEUI_MK_SHIFT) != 0;
       float step = nudge_delta(*this, 1, fine ? 0.01f : 0.05f) *
                    (delta > 0 ? 1.0f : -1.0f);
-      widget_set_value_user(*this, widget_get_value(*this) + step);
+      widget_set_value_user_gesture(*this, widget_get_value(*this) + step);
       repaint();
       return true;
     }
@@ -2732,6 +2769,7 @@ namespace xpl_host
           (event->type == NEUI_EVENT_MOUSE_MOVE &&
             !(event->data.mouse.buttonmap & NEUI_MK_LBUTTON))) {
         dragging = false;
+        widget_emit_gesture(*this, false);
         return true;
       }
       if (event->type == NEUI_EVENT_MOUSE_MOVE) {
@@ -2744,7 +2782,9 @@ namespace xpl_host
     }
 
     if (event->type == NEUI_EVENT_MOUSE_BUTTON_DOWN) {
-      // Always jump to clicked position, then start drag.
+      // Always jump to clicked position, then start drag. The gesture opens
+      // BEFORE the jump so its VALUE_CHANGED lands inside the pair.
+      widget_emit_gesture(*this, true);
       float v = slider_value_from_pos(*this, event->data.mouse.x, event->data.mouse.y);
       widget_set_value_user(*this, v);
       dragging       = true;
@@ -2925,6 +2965,20 @@ namespace xpl_host
     wd->session->dispatch_event(&ev);
   }
 
+  static void xpl_behavior_emit_gesture(void* host_data,
+                                          const char* attr_key, float value,
+                                          bool begin)
+  {
+    auto* wd = static_cast<CustomDrawWidget*>(host_data);
+    if (!wd || !wd->session || !wd->emit_events) return;
+    neui_event_t ev{};
+    ev.type = begin ? NEUI_EVENT_GESTURE_BEGIN : NEUI_EVENT_GESTURE_END;
+    ev.data.gesture.widget.id = wd->widget_id;
+    ev.data.gesture.attr_key  = attr_key;
+    ev.data.gesture.value     = value;
+    wd->session->dispatch_event(&ev);
+  }
+
   static int xpl_behavior_popup_menu(void* host_data, int local_x, int local_y,
                                        const char* const* items)
   {
@@ -2952,6 +3006,7 @@ namespace xpl_host
     ctx.host_data         = &wd;
     ctx.invalidate        = &xpl_behavior_invalidate;
     ctx.emit_attr_changed = &xpl_behavior_emit_attr_changed;
+    ctx.emit_gesture      = &xpl_behavior_emit_gesture;
     ctx.popup_menu        = &xpl_behavior_popup_menu;
     ctx.begin_drag        = &xpl_behavior_begin_drag;
     return ctx;
@@ -3022,7 +3077,7 @@ namespace xpl_host
       default: handled = false; break;
     }
     if (handled) {
-      widget_set_value_user(*this, v);
+      widget_set_value_user_gesture(*this, v);
       repaint();
     }
     return handled;
@@ -3058,7 +3113,7 @@ namespace xpl_host
       // every platform).
       float step = nudge_delta(*this, 1, fine ? 0.01f : 0.05f) *
                    (delta > 0 ? 1.0f : -1.0f);
-      widget_set_value_user(*this, widget_get_value(*this) + step);
+      widget_set_value_user_gesture(*this, widget_get_value(*this) + step);
       repaint();
       return true;
     }
@@ -3066,7 +3121,11 @@ namespace xpl_host
     if (event->type == NEUI_EVENT_MOUSE_BUTTON_DBLCLICK) {
       float def = 0.0f;
       if (attrs) def = clamp01(attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f));
-      widget_set_value_user(*this, def);
+      // Normally the platform delivered DOWN / UP first, so no drag gesture
+      // is open and the reset is its own implicit pair; if a drag IS still in
+      // flight the reset lands inside it (the UP that follows closes it).
+      if (dragging) widget_set_value_user(*this, def);
+      else          widget_set_value_user_gesture(*this, def);
       repaint();
       return true;
     }
@@ -3085,7 +3144,7 @@ namespace xpl_host
       if (picked == 1) {
         float def = 0.0f;
         if (attrs) def = clamp01(attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f));
-        widget_set_value_user(*this, def);
+        widget_set_value_user_gesture(*this, def);
         repaint();
       }
       return true;
@@ -3101,6 +3160,7 @@ namespace xpl_host
           (event->type == NEUI_EVENT_MOUSE_MOVE &&
             !(event->data.mouse.buttonmap & NEUI_MK_LBUTTON))) {
         dragging = false;
+        widget_emit_gesture(*this, false);
         return true;
       }
       if (event->type == NEUI_EVENT_MOUSE_MOVE) {
@@ -3169,6 +3229,7 @@ namespace xpl_host
       // Seed the continuous accumulator with the current snapped value so
       // the first delta moves us off it (rather than starting from 0).
       drag_continuous = widget_get_value(*this);
+      widget_emit_gesture(*this, true);
       return true;
     }
     return false;

@@ -62,6 +62,8 @@ extern "C" {
     NEUI_EVENT_ATTR_CHANGED             = DEF_WIDGET_EVENT(8),  // behavior wrote an attr (user-driven)
     NEUI_EVENT_SCROLL_CHANGED           = DEF_WIDGET_EVENT(9),  // scrolling SECTION's offset moved
     NEUI_EVENT_METRICS_CHANGED          = DEF_WIDGET_EVENT(0xA),// platform layout metrics changed (iOS Dynamic Type / rotation / safe-area)
+    NEUI_EVENT_GESTURE_BEGIN            = DEF_WIDGET_EVENT(0xB),// user grabbed a value control (see neui_event_gesture_t)
+    NEUI_EVENT_GESTURE_END              = DEF_WIDGET_EVENT(0xC),// user released it (always paired with a BEGIN)
 
     NEUI_EVENT_ITEM_SELECTED            = DEF_ITEM_EVENT(1),  // fired when selection changes in listbox/combobox
 
@@ -228,6 +230,31 @@ extern "C" {
     const char*   attr_key;
     float         value;    // value-as-float; INT attrs promoted via attr_as_float
   } neui_event_attr_t;
+
+  // Value-edit gesture lifecycle (NEUI_EVENT_GESTURE_BEGIN / _END). Brackets
+  // a run of user-driven value changes so a client can forward host-automation
+  // begin/end edits (VST3 beginEdit/endEdit, CLAP GESTURE_BEGIN/END):
+  //   * A pointer grab on a value control (KNOB / SLIDER drag, or a behavior
+  //     DRAG_* handler) fires BEGIN on the grab and END on release / cancel -
+  //     the pair fires even when the value never moves, and every
+  //     VALUE_CHANGED / ATTR_CHANGED of the drag lands between them.
+  //   * A one-shot change (wheel tick, arrow / Home / End / Page key,
+  //     double-click or context-menu reset, behavior CLICK_TOGGLE / _CYCLE /
+  //     _SELECT) fires an implicit BEGIN + change + END triple, and only
+  //     when the value actually changed.
+  //   * Programmatic attrs->set_* writes never fire gestures (mirrors
+  //     VALUE_CHANGED / ATTR_CHANGED).
+  // attr_key names the attribute the gesture edits (NEUI_PARAM_VALUE for the
+  // built-in KNOB / SLIDER; the handler's target attr for behaviors - a
+  // BIAXIAL drag fires one pair per target). Same lifetime rule as
+  // neui_event_attr_t: valid for the duration of the dispatch only. value is
+  // the attr's value at BEGIN, and its final value at END.
+  typedef struct neui_event_gesture
+  {
+    neui_widget_t widget;
+    const char*   attr_key;
+    float         value;
+  } neui_event_gesture_t;
 
   typedef struct neui_event_custom
   {
@@ -398,6 +425,7 @@ extern "C" {
       neui_event_preupdate_t preupdate;
       neui_event_value_t     value;
       neui_event_attr_t      attr;
+      neui_event_gesture_t   gesture;
       neui_event_paint_t     paint;
       neui_event_custom_t    custom;
       neui_event_grid_row_t           grid_row;

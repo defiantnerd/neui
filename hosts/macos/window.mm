@@ -219,6 +219,39 @@ namespace macos_host {
     wd->session->dispatch_event(&ev);
   }
 
+  static void macos_behavior_emit_gesture(void* host_data,
+                                            const char* attr_key, float value,
+                                            bool begin)
+  {
+    auto* wd = static_cast<WidgetData*>(host_data);
+    if (!wd || !wd->session || !wd->emit_events) return;
+    neui_event_t ev = {};
+    ev.type = begin ? NEUI_EVENT_GESTURE_BEGIN : NEUI_EVENT_GESTURE_END;
+    ev.data.gesture.widget.id = wd->widget_id;
+    ev.data.gesture.attr_key  = attr_key;
+    ev.data.gesture.value     = value;
+    wd->session->dispatch_event(&ev);
+  }
+
+  // NEUI_EVENT_GESTURE_BEGIN / _END for the built-in KNOB / SLIDER (their
+  // gesture always edits NEUI_PARAM_VALUE). Same gating as VALUE_CHANGED.
+  // Called from the painted knob's drag lifecycle and NEUINativeSlider's
+  // wrapped tracking loop.
+  void emit_value_gesture_macos(uint32_t widget_id, bool begin)
+  {
+    Session* sess = nullptr;
+    auto* wd = widget_for_id(widget_id, &sess);
+    if (!wd || !sess || !wd->emit_events) return;
+    float v = wd->attrs ? wd->attrs->get_float(NEUI_PARAM_VALUE, 0.0f) : 0.0f;
+    if (v < 0) v = 0; if (v > 1) v = 1;
+    neui_event_t ev = {};
+    ev.type = begin ? NEUI_EVENT_GESTURE_BEGIN : NEUI_EVENT_GESTURE_END;
+    ev.data.gesture.widget.id = wd->widget_id;
+    ev.data.gesture.attr_key  = NEUI_PARAM_VALUE;
+    ev.data.gesture.value     = v;
+    sess->dispatch_event(&ev);
+  }
+
   // Defined in widgets.mm where d_begin_drag_with_preview is in scope.
   // Forwarded here so DRAG_SOURCE handlers can fire begin_drag through
   // the same path the public dnd_api uses.
@@ -237,6 +270,7 @@ namespace macos_host {
     ctx.host_data         = &wd;
     ctx.invalidate        = &macos_behavior_invalidate;
     ctx.emit_attr_changed = &macos_behavior_emit_attr_changed;
+    ctx.emit_gesture      = &macos_behavior_emit_gesture;
     ctx.popup_menu        = &macos_behavior_popup_menu;
     ctx.begin_drag        = &macos_behavior_begin_drag;
     return ctx;
@@ -1762,6 +1796,20 @@ static float neui_snap_to_steps(float v, int steps)
   [self setNeedsDisplay:YES];
 }
 
+// One-shot user change (wheel tick / double-click / context-menu reset)
+// wrapped in an implicit GESTURE_BEGIN / _END pair. The pair only fires when
+// the snapped value actually moves - checked BEFORE the begin so the
+// VALUE_CHANGED of the write lands between the two. Drags bracket the whole
+// interaction via emit_value_gesture_macos at grab / release instead.
+- (void)setKnobValueFromUserGesture:(float)v
+{
+  v = neui_snap_to_steps(neui_clamp01(v), [self knobSteps]);
+  if (v == [self knobValue]) return;
+  macos_host::emit_value_gesture_macos(widget_id, true);
+  [self setKnobValueFromUser:v];
+  macos_host::emit_value_gesture_macos(widget_id, false);
+}
+
 - (NSPoint)knobCenter
 {
   NSSize sz = self.bounds.size;
@@ -1936,12 +1984,13 @@ static float neui_snap_to_steps(float v, int steps)
       auto* wd = macos_host::widget_for_id(widget_id);
       if (wd && !wd->enabled) return;
     }
-    // Double-click -> reset to NEUI_PARAM_DEFAULT.
+    // Double-click -> reset to NEUI_PARAM_DEFAULT. The first click's drag
+    // gesture already closed on its mouseUp, so this is its own implicit pair.
     if (event.clickCount >= 2) {
       auto* wd = macos_host::widget_for_id(widget_id);
       float def = 0.0f;
       if (wd && wd->attrs) def = neui_clamp01(wd->attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f));
-      [self setKnobValueFromUser:def];
+      [self setKnobValueFromUserGesture:def];
       return;
     }
     NSPoint p = [self localPointForKnobEvent:event];
@@ -1955,6 +2004,7 @@ static float neui_snap_to_steps(float v, int steps)
     // Seed the continuous accumulator with the snapped current value so the
     // first delta nudges off it (rather than starting from 0).
     drag_continuous = [self knobValue];
+    macos_host::emit_value_gesture_macos(widget_id, true);
     return;
   }
   if (auto* gwd = [self gridInputWidget]) {
@@ -2079,7 +2129,13 @@ static float neui_snap_to_steps(float v, int steps)
                                         0, 0, 0, 0, 0);
     return;
   }
-  if ([self isKnob]) { dragging = false; return; }
+  if ([self isKnob]) {
+    if (dragging) {
+      dragging = false;
+      macos_host::emit_value_gesture_macos(widget_id, false);
+    }
+    return;
+  }
   if ([self customDrawWantsInput]) {
     if (auto* wd = macos_host::widget_for_id(widget_id); wd && wd->pressed) {
       wd->pressed = false;
@@ -2102,7 +2158,7 @@ static float neui_snap_to_steps(float v, int steps)
     if (pick == 1) {
       float def = 0.0f;
       if (wd && wd->attrs) def = neui_clamp01(wd->attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f));
-      [self setKnobValueFromUser:def];
+      [self setKnobValueFromUserGesture:def];
     }
     return;
   }
@@ -2402,8 +2458,8 @@ static float neui_snap_to_steps(float v, int steps)
       : (fine ? 0.01f : 0.05f);
     float sign = (ticks > 0) ? 1.0f : -1.0f;
     int   mag_ticks = (ticks > 0) ? ticks : -ticks;
-    [self setKnobValueFromUser:[self knobValue]
-                                + sign * magnitude * (float)mag_ticks];
+    [self setKnobValueFromUserGesture:[self knobValue]
+                                       + sign * magnitude * (float)mag_ticks];
     return;
   }
 
@@ -2612,6 +2668,45 @@ static float neui_snap_to_steps(float v, int steps)
     sess->dispatch_event(&ev);
     return;
   }
+}
+
+@end
+
+// ---------------------------------------------------------------------------
+// NEUINativeSlider - NSSlider that brackets user edits in GESTURE_BEGIN /
+// GESTURE_END. NSControl runs the entire mouse-tracking session synchronously
+// inside mouseDown:, so wrapping the super call encloses every action tick of
+// the drag (each of which fires VALUE_CHANGED via neuiControlAction:).
+
+@interface NEUINativeSlider : NSSlider
+@end
+
+@implementation NEUINativeSlider
+
+- (void)mouseDown:(NSEvent*)event
+{
+  macos_host::emit_value_gesture_macos((uint32_t)self.tag, true);
+  [super mouseDown:event];
+  macos_host::emit_value_gesture_macos((uint32_t)self.tag, false);
+}
+
+- (void)keyDown:(NSEvent*)event
+{
+  // Value keys (arrows / Home / End / Page) adjust the slider inside super's
+  // keyDown:, firing the action mid-call - so the pair has to open before we
+  // know whether the value will move. An empty begin/end pair is harmless
+  // for automation consumers (the painted hosts pre-check and skip it; the
+  // native control gives us no cheap way to).
+  unichar c = event.charactersIgnoringModifiers.length > 0
+    ? [event.charactersIgnoringModifiers characterAtIndex:0] : 0;
+  bool value_key = (c == NSUpArrowFunctionKey   || c == NSDownArrowFunctionKey ||
+                    c == NSLeftArrowFunctionKey || c == NSRightArrowFunctionKey ||
+                    c == NSHomeFunctionKey      || c == NSEndFunctionKey ||
+                    c == NSPageUpFunctionKey    || c == NSPageDownFunctionKey);
+  if (!value_key) { [super keyDown:event]; return; }
+  macos_host::emit_value_gesture_macos((uint32_t)self.tag, true);
+  [super keyDown:event];
+  macos_host::emit_value_gesture_macos((uint32_t)self.tag, false);
 }
 
 @end
@@ -3902,7 +3997,7 @@ namespace macos_host
 
   static NSSlider* create_slider(WidgetData& w)
   {
-    NSSlider* sl = [[NSSlider alloc]
+    NSSlider* sl = [[NEUINativeSlider alloc]
       initWithFrame:NSMakeRect(w.x, w.y, w.width, w.height)];
     sl.minValue = 0.0;
     sl.maxValue = 1.0;

@@ -712,3 +712,301 @@ TEST_CASE("CLICK_SELECT: selected_attr default + prop setter")
   apply_behavior_set_string(*H, "selected_attr", "myapp.on");
   CHECK_EQ(H->selected_attr, std::string("myapp.on"));
 }
+
+// ---------------------------------------------------------------------------
+// Gesture lifecycle (NEUI_EVENT_GESTURE_BEGIN / _END plumbing): drags bracket
+// grab..release, one-shot changes pair only around an actual value move, and
+// a cancelled drag still closes its gesture from the runtime snapshot.
+// ---------------------------------------------------------------------------
+
+namespace {
+  // Ordered record of every gesture / attr-changed callback so the tests can
+  // assert sequencing, not just counts. kind: 'B' begin, 'E' end, 'A'
+  // attr_changed.
+  struct GestureLog {
+    struct Rec { char kind; std::string attr; float value; };
+    std::vector<Rec> recs;
+    int popup_pick = 1;   // what the fake context menu returns
+  };
+
+  void glog_gesture(void* host_data, const char* attr_key, float value,
+                    bool begin)
+  {
+    auto* g = static_cast<GestureLog*>(host_data);
+    g->recs.push_back({ begin ? 'B' : 'E', attr_key, value });
+  }
+
+  void glog_attr_changed(void* host_data, const char* attr_key, float value)
+  {
+    auto* g = static_cast<GestureLog*>(host_data);
+    g->recs.push_back({ 'A', attr_key, value });
+  }
+
+  int glog_popup_menu(void* host_data, int, int, const char* const*)
+  {
+    return static_cast<GestureLog*>(host_data)->popup_pick;
+  }
+
+  BehaviorDispatchCtx gesture_ctx(AttrBag& bag, GestureLog& log)
+  {
+    BehaviorDispatchCtx ctx;
+    ctx.bag = &bag;
+    ctx.widget_w = 100; ctx.widget_h = 100;
+    ctx.host_data         = &log;
+    ctx.emit_attr_changed = &glog_attr_changed;
+    ctx.emit_gesture      = &glog_gesture;
+    ctx.popup_menu        = &glog_popup_menu;
+    return ctx;
+  }
+}
+
+TEST_CASE("gesture: DRAG_VERTICAL brackets grab..release around the changes")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_VERTICAL);
+  behavior_get_handler(ba, slot)->sweep = 100.0f;
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 10, 50, NEUI_MK_LBUTTON };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 50));
+  CHECK_EQ(log.recs.size(), (size_t)1);
+  CHECK_EQ(log.recs[0].kind, 'B');
+  CHECK_EQ(log.recs[0].attr, std::string(NEUI_PARAM_VALUE));
+  CHECK_APPROX(log.recs[0].value, 0.0);   // value at grab
+
+  neui_event_t move = { NEUI_EVENT_MOUSE_MOVE };
+  move.data.mouse = { wid, 10, 40, NEUI_MK_LBUTTON };  // up 10px -> +0.1 (sweep 100)
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &move, 10, 40));
+  CHECK_EQ(log.recs.size(), (size_t)2);
+  CHECK_EQ(log.recs[1].kind, 'A');        // the change lands inside the pair
+
+  neui_event_t up = { NEUI_EVENT_MOUSE_BUTTON_UP };
+  up.data.mouse = { wid, 10, 40, 0 };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &up, 10, 40));
+  CHECK_EQ(log.recs.size(), (size_t)3);
+  CHECK_EQ(log.recs[2].kind, 'E');
+  CHECK_APPROX(log.recs[2].value, bag.get_float(NEUI_PARAM_VALUE, -1.0f));
+}
+
+TEST_CASE("gesture: a grab with no movement still pairs (begin + end)")
+{
+  BehaviorAsset ba;
+  behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_HORIZONTAL);
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 10, 10, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 10);
+  neui_event_t up = { NEUI_EVENT_MOUSE_BUTTON_UP };
+  up.data.mouse = { wid, 10, 10, 0 };
+  behavior_dispatch_mouse(ba, rt, ctx, &up, 10, 10);
+
+  CHECK_EQ(log.recs.size(), (size_t)2);
+  CHECK_EQ(log.recs[0].kind, 'B');
+  CHECK_EQ(log.recs[1].kind, 'E');
+}
+
+TEST_CASE("gesture: DRAG_BIAXIAL opens and closes one pair per target")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_BIAXIAL);
+  BehaviorHandler* H = behavior_get_handler(ba, slot);
+  H->target_y = "myapp.value_y";
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 10, 10, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 10);
+  CHECK_EQ(log.recs.size(), (size_t)2);
+  CHECK_EQ(log.recs[0].kind, 'B');
+  CHECK_EQ(log.recs[0].attr, std::string(NEUI_PARAM_VALUE));
+  CHECK_EQ(log.recs[1].kind, 'B');
+  CHECK_EQ(log.recs[1].attr, std::string("myapp.value_y"));
+
+  neui_event_t up = { NEUI_EVENT_MOUSE_BUTTON_UP };
+  up.data.mouse = { wid, 10, 10, 0 };
+  behavior_dispatch_mouse(ba, rt, ctx, &up, 10, 10);
+  CHECK_EQ(log.recs.size(), (size_t)4);
+  CHECK_EQ(log.recs[2].kind, 'E');
+  CHECK_EQ(log.recs[2].attr, std::string(NEUI_PARAM_VALUE));
+  CHECK_EQ(log.recs[3].kind, 'E');
+  CHECK_EQ(log.recs[3].attr, std::string("myapp.value_y"));
+}
+
+TEST_CASE("gesture: handler removed mid-drag still closes from the snapshot")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_VERTICAL);
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 10, 10, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 10);
+  CHECK_EQ(log.recs.size(), (size_t)1);
+
+  behavior_remove_handler(ba, slot);
+  neui_event_t move = { NEUI_EVENT_MOUSE_MOVE };
+  move.data.mouse = { wid, 10, 5, NEUI_MK_LBUTTON };
+  CHECK_FALSE(behavior_dispatch_mouse(ba, rt, ctx, &move, 10, 5));
+  CHECK_EQ(log.recs.size(), (size_t)2);
+  CHECK_EQ(log.recs[1].kind, 'E');
+  CHECK_EQ(log.recs[1].attr, std::string(NEUI_PARAM_VALUE));
+  CHECK_FALSE(rt.dragging);
+}
+
+TEST_CASE("gesture: WHEEL is an implicit pair around an actual change")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
+  behavior_get_handler(ba, slot)->step = 0.1f;
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  neui_widget_t wid = { 1 };
+  neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
+  wheel.data.wheel = { wid, 10, 10, -1 };   // wheel down = increase
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10));
+  CHECK_EQ(log.recs.size(), (size_t)3);
+  CHECK_EQ(log.recs[0].kind, 'B');
+  CHECK_APPROX(log.recs[0].value, 0.0);
+  CHECK_EQ(log.recs[1].kind, 'A');
+  CHECK_EQ(log.recs[2].kind, 'E');
+  CHECK_APPROX(log.recs[2].value, 0.1);
+}
+
+TEST_CASE("gesture: WHEEL that cannot move the value emits nothing")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
+  behavior_get_handler(ba, slot)->step = 0.1f;
+
+  BehaviorRuntime rt;
+  AttrBag bag;   // value at min (0) - wheel up would decrease below min
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  neui_widget_t wid = { 1 };
+  neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
+  wheel.data.wheel = { wid, 10, 10, 1 };    // wheel up = decrease, clamps to 0
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10));
+  CHECK_EQ(log.recs.size(), (size_t)0);
+}
+
+TEST_CASE("gesture: KEY_STEP pairs per keypress")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_KEY_STEP);
+  behavior_get_handler(ba, slot)->step = 0.25f;
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  CHECK(behavior_dispatch_key(ba, rt, ctx, NEUI_KEY_RIGHT, 0));
+  CHECK_EQ(log.recs.size(), (size_t)3);
+  CHECK_EQ(log.recs[0].kind, 'B');
+  CHECK_EQ(log.recs[1].kind, 'A');
+  CHECK_EQ(log.recs[2].kind, 'E');
+
+  // Home at 0.25 -> 0: another full pair.
+  CHECK(behavior_dispatch_key(ba, rt, ctx, NEUI_KEY_HOME, 0));
+  CHECK_EQ(log.recs.size(), (size_t)6);
+
+  // Home again at 0: no change, no pair.
+  CHECK(behavior_dispatch_key(ba, rt, ctx, NEUI_KEY_HOME, 0));
+  CHECK_EQ(log.recs.size(), (size_t)6);
+}
+
+TEST_CASE("gesture: CLICK_TOGGLE pairs around the flip")
+{
+  BehaviorAsset ba;
+  behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_CLICK_TOGGLE);
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 10, 10, NEUI_MK_LBUTTON };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 10));
+  CHECK_EQ(log.recs.size(), (size_t)3);
+  CHECK_EQ(log.recs[0].kind, 'B');
+  CHECK_EQ(log.recs[1].kind, 'A');
+  CHECK_EQ(log.recs[2].kind, 'E');
+  CHECK_APPROX(log.recs[2].value, 1.0);
+}
+
+TEST_CASE("gesture: CONTEXT_RESET pairs only when the reset moves the value")
+{
+  BehaviorAsset ba;
+  behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_CONTEXT_RESET);
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  bag.set_float(NEUI_PARAM_VALUE, 0.5f);
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  neui_widget_t wid = { 1 };
+  neui_event_t rdown = { NEUI_EVENT_MOUSE_RBUTTON_DOWN };
+  rdown.data.mouse = { wid, 10, 10, 0 };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &rdown, 10, 10));
+  CHECK_EQ(log.recs.size(), (size_t)3);   // 0.5 -> default (min = 0)
+  CHECK_EQ(log.recs[0].kind, 'B');
+  CHECK_APPROX(log.recs[0].value, 0.5);
+  CHECK_EQ(log.recs[1].kind, 'A');
+  CHECK_EQ(log.recs[2].kind, 'E');
+  CHECK_APPROX(log.recs[2].value, 0.0);
+
+  // Reset again at the default: no change, no pair.
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &rdown, 10, 10));
+  CHECK_EQ(log.recs.size(), (size_t)3);
+}
+
+TEST_CASE("gesture: DRAG_SOURCE never opens a value gesture")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_DRAG_SOURCE);
+  behavior_get_handler(ba, slot)->threshold_px = 5.0f;
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  neui_widget_t wid = { 1 };
+  neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
+  down.data.mouse = { wid, 10, 10, NEUI_MK_LBUTTON };
+  behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 10);
+  neui_event_t up = { NEUI_EVENT_MOUSE_BUTTON_UP };
+  up.data.mouse = { wid, 10, 10, 0 };
+  behavior_dispatch_mouse(ba, rt, ctx, &up, 10, 10);
+  CHECK_EQ(log.recs.size(), (size_t)0);
+}

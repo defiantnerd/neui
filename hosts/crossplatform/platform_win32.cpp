@@ -1497,6 +1497,19 @@ namespace xpl_host
   void platform_create_plugwindow(Session* session, uint32_t widget_index,
                                    WidgetData& wd)
   {
+    // wd.embed_parent (set via platform_set_embed_parent) selects the
+    // DAW-embedded path: a WS_CHILD of the foreign parent HWND. The DAW's
+    // own message pump then delivers WM_PAINT / input / WM_TIMER to the
+    // child - neui owns no loop in embedded mode. AdjustWindowRectExForDpi
+    // is an identity for WS_CHILD, so the client-area contract holds
+    // unchanged, and (x, y) is parent-client-relative.
+    if (wd.embed_parent) {
+      create_native_window(session, widget_index, wd,
+        WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+        0,
+        reinterpret_cast<HWND>(wd.embed_parent));
+      return;
+    }
     create_native_window(session, widget_index, wd,
       WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
       0);
@@ -1546,6 +1559,9 @@ namespace xpl_host
   {
     if (!native_handle) return;
     HWND h = static_cast<HWND>(native_handle);
+    // A DAW-embedded child never steals foreground from its host - focus
+    // ownership stays with the DAW's top-level.
+    if (GetWindowLongPtrW(h, GWL_STYLE) & WS_CHILD) return;
     SetForegroundWindow(h);
     SetActiveWindow(h);
   }
@@ -1613,6 +1629,25 @@ namespace xpl_host
   {
     PostMessageW(static_cast<HWND>(native_handle), WM_CLOSE, 0, 0);
   }
+
+  // ---- DAW-embedding seams. -------------------------------------------------
+  // On Win32 an embedded PLUGWINDOW is an ordinary WS_CHILD HWND, so the
+  // DAW's message pump already delivers WM_PAINT / input / WM_TIMER (bounce,
+  // toast) to it - there is no dedicated connection to poll and nothing to
+  // tick. The seams exist so a plugin adapter can drive one platform-uniform
+  // loop across Win32 / macOS / Linux.
+
+  void platform_set_embed_parent(Session* session, uint32_t widget_index,
+                                 void* native_parent)
+  {
+    if (!session) return;
+    auto* wd = session->get_widget(widget_index);
+    if (wd) wd->embed_parent = reinterpret_cast<uintptr_t>(native_parent);
+  }
+
+  int platform_embed_event_fd(void* /*native_handle*/) { return -1; }
+
+  void platform_embed_pump_and_tick(void* /*native_handle*/) {}
 
   void platform_invalidate(void* native_handle)
   {
