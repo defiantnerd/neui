@@ -633,13 +633,23 @@ namespace win32_host
 
     // Gesture bracketing: the trackbar's notification stream is exactly a
     // gesture - the first non-ENDTRACK code (thumb grab, channel page,
-    // arrow key) opens it, TB_ENDTRACK (thumb release / key up) closes it.
-    // The begin fires BEFORE the value write below so every VALUE_CHANGED
-    // of the interaction lands inside the pair.
+    // arrow key) opens it. The begin fires BEFORE the value write below so
+    // every VALUE_CHANGED of the interaction lands inside the pair.
     if (code != TB_ENDTRACK && !child->slider_gesture_active) {
       child->slider_gesture_active = true;
       widget_emit_gesture_w32(*child, true);
     }
+    // ...and it must close on this notification unless a mouse-driven drag
+    // can still continue the stream. comctl32 holds the capture for the
+    // whole of a thumb drag / channel click-hold, so capture == "more
+    // notifications are coming, keep the gesture open"; without capture
+    // (wheel, arrow keys) each notification is a self-contained edit.
+    // Closing eagerly matters because not every stream ends in TB_ENDTRACK -
+    // a wheel notch over a focused trackbar emits TB_THUMBPOSITION alone,
+    // which would otherwise dangle the begin until some later, unrelated
+    // TB_ENDTRACK closed it, handing the client mismatched brackets across
+    // two interactions (and wedging host automation on a dangling beginEdit).
+    bool close_gesture = (code == TB_ENDTRACK) || (GetCapture() != ctrl);
 
     LRESULT pos;
     if (code == TB_THUMBPOSITION || code == TB_THUMBTRACK)
@@ -686,7 +696,7 @@ namespace win32_host
       sess->dispatch_event(&ev);
     }
 
-    if (code == TB_ENDTRACK && child->slider_gesture_active) {
+    if (close_gesture && child->slider_gesture_active) {
       child->slider_gesture_active = false;
       widget_emit_gesture_w32(*child, false);
     }

@@ -394,8 +394,13 @@ namespace xpl_host
         if (wd && wd->type && !strcmp(wd->type, NEUI_W_APPWINDOW))
           ++g_appwindow_count;
       }
-      // Give this window Win32 keyboard focus so WM_KEYDOWN/WM_CHAR arrive here.
-      SetFocus(hwnd);
+      // Give this window Win32 keyboard focus so WM_KEYDOWN/WM_CHAR arrive
+      // here. NOT for a DAW-embedded frame (WS_CHILD): merely opening a
+      // plugin editor must not yank focus out of whatever the host had
+      // focused. An embedded frame takes focus on click instead
+      // (WM_LBUTTONDOWN below), matching the macOS embedded path.
+      if (!(static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)) & WS_CHILD))
+        SetFocus(hwnd);
       return 0;
     }
 
@@ -728,6 +733,15 @@ namespace xpl_host
       if (!wud) break;
       auto* fwd = wud->session->get_widget(wud->widget_index);
       if (!fwd) break;
+
+      // Click-to-focus for a DAW-embedded frame. Windows focuses a top-level
+      // window on click by itself, but never a WS_CHILD - so without this,
+      // once focus moves to the host's UI it never comes back and keyboard
+      // input to an embedded editor is dead. Mirrors the macOS embedded
+      // path's makeFirstResponder: in NEUIView mouseDown:.
+      if ((static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)) & WS_CHILD)
+          && GetFocus() != hwnd)
+        SetFocus(hwnd);
 
       float lx = phys_to_log(mouse_x(lParam), fwd->dpi);
       float ly = phys_to_log(mouse_y(lParam), fwd->dpi);

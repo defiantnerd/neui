@@ -15,6 +15,22 @@
 #include <cstdio>
 #include <cstring>
 
+// The "plugin slot" the fake DAW hands us. It paints its reference grey in
+// drawRect: rather than via a CALayer background, because the paint check
+// below renders the hierarchy with cacheDisplayInRect:, which composites
+// drawRect: output but NOT layer background colours - with a layer-backed
+// slot every sampled pixel reads as non-grey and the assertion is vacuous.
+@interface NEUIFakeSlotView : NSView
+@end
+
+@implementation NEUIFakeSlotView
+- (void)drawRect:(NSRect)dirtyRect
+{
+  [[NSColor colorWithSRGBRed:0.125 green:0.125 blue:0.125 alpha:1.0] set];
+  NSRectFill(dirtyRect);
+}
+@end
+
 static bool onevent(void*, neui_event_t*) { return false; }
 static neui_widget_client_t g_wc = { NEUI_VERSION, nullptr, onevent };
 static void* iface(void*, const char* n)
@@ -33,9 +49,7 @@ int main()
                   backing:NSBackingStoreBuffered
                     defer:NO];
     host.title = @"fake daw host";
-    NSView* slot = [[NSView alloc] initWithFrame:NSMakeRect(40, 30, 320, 200)];
-    slot.wantsLayer = YES;
-    slot.layer.backgroundColor = CGColorCreateGenericRGB(0.125, 0.125, 0.125, 1.0);
+    NSView* slot = [[NEUIFakeSlotView alloc] initWithFrame:NSMakeRect(40, 30, 320, 200)];
     [host.contentView addSubview:slot];
     [host makeKeyAndOrderFront:nil];
 
@@ -55,6 +69,44 @@ int main()
     w->set_text(sess, btn, "Embedded!");
 
     int fail = 0;
+
+    // Counts pixels in the slot that are NOT its reference grey - i.e. that
+    // can only have come from an embedded neui frame. Sampled every other
+    // pixel; the slot paints itself in drawRect: so cacheDisplayInRect:
+    // captures it (see NEUIFakeSlotView).
+    auto count_foreign_pixels = [&]() -> long {
+      long n = 0;
+      NSBitmapImageRep* rep =
+        [slot bitmapImageRepForCachingDisplayInRect:slot.bounds];
+      [slot cacheDisplayInRect:slot.bounds toBitmapImageRep:rep];
+      for (NSInteger y = 0; y < rep.pixelsHigh; y += 2) {
+        for (NSInteger x = 0; x < rep.pixelsWide; x += 2) {
+          NSColor* c = [rep colorAtX:x y:y];
+          if (!c) continue;
+          CGFloat r = 0, g = 0, b = 0, a = 0;
+          [[c colorUsingColorSpace:NSColorSpace.sRGBColorSpace]
+              getRed:&r green:&g blue:&b alpha:&a];
+          if (fabs(r - 0.125) > 0.06 || fabs(g - 0.125) > 0.06 ||
+              fabs(b - 0.125) > 0.06)
+            ++n;
+        }
+      }
+      return n;
+    };
+
+    // Negative control: with nothing embedded the slot must read as pure
+    // reference grey. Without this the paint assertion below can't fail -
+    // it would pass just as happily against a capture that never contained
+    // the frame at all.
+    [[NSRunLoop mainRunLoop] runUntilDate:
+        [NSDate dateWithTimeIntervalSinceNow:0.10]];
+    long baseline = count_foreign_pixels();
+    std::printf("baseline foreign pixels = %ld\n", baseline);
+    if (baseline > 100) {
+      std::printf("FAIL: slot is not a clean reference surface "
+                  "(paint check would be vacuous)\n");
+      ++fail;
+    }
 
     // The DAW-provided parent travels as a void* (NSView* on macOS).
     if (!embed->set_parent(sess, plug, (__bridge void*)slot)) {
@@ -94,27 +146,9 @@ int main()
     [[NSRunLoop mainRunLoop] runUntilDate:
         [NSDate dateWithTimeIntervalSinceNow:0.25]];
 
-    // Paint check: render the slot's hierarchy and count pixels that differ
-    // from the slot's own grey - those can only come from the neui frame.
-    long nonhost = 0;
-    {
-      NSBitmapImageRep* rep =
-        [slot bitmapImageRepForCachingDisplayInRect:slot.bounds];
-      [slot cacheDisplayInRect:slot.bounds toBitmapImageRep:rep];
-      for (NSInteger y = 0; y < rep.pixelsHigh; y += 2) {
-        for (NSInteger x = 0; x < rep.pixelsWide; x += 2) {
-          NSColor* c = [rep colorAtX:x y:y];
-          if (!c) continue;
-          CGFloat r = 0, g = 0, b = 0, a = 0;
-          [[c colorUsingColorSpace:NSColorSpace.sRGBColorSpace]
-              getRed:&r green:&g blue:&b alpha:&a];
-          if (fabs(r - 0.125) > 0.06 || fabs(g - 0.125) > 0.06 ||
-              fabs(b - 0.125) > 0.06)
-            ++nonhost;
-        }
-      }
-    }
-    std::printf("painted pixels = %ld\n", nonhost);
+    // Paint check: the embedded frame must now cover the slot's grey.
+    long nonhost = count_foreign_pixels();
+    std::printf("painted pixels = %ld (baseline %ld)\n", nonhost, baseline);
     if (nonhost < 500) { std::printf("FAIL: frame did not render\n"); ++fail; }
 
     // Destroy must detach the subview from the DAW's hierarchy.

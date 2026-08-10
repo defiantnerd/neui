@@ -131,6 +131,35 @@ void wake_app_event_pump()
 // twice - once to focus the window, again to register the click.
 - (BOOL)acceptsFirstMouse:(NSEvent*)event { (void)event; return YES; }
 
+// A DAW-embedded frame is inserted into the host's window, which neui never
+// created - so the two window-level facts install_view_and_context sets up
+// for standalone frames have to be (re)established whenever we land in a
+// window. Harmless for standalone frames (idempotent, same values).
+- (void)viewDidMoveToWindow
+{
+  [super viewDidMoveToWindow];
+  NSWindow* w = self.window;
+  if (!w) return;
+  // Without this, mouseMoved: only fires while a button is held, so hover
+  // states and cursor changes are dead inside a DAW. The NSTrackingArea
+  // gates by mouse-over; this flag is what makes the events flow at all.
+  [w setAcceptsMouseMovedEvents:YES];
+  // Re-read the backing scale: an embedded view is normally created BEFORE
+  // insertion, so the create-time read had no window to ask and fell back
+  // to the main screen. Getting this wrong strands the frame at the wrong
+  // scale for its lifetime on a mixed-DPI setup.
+  if (!session) return;
+  xpl_host::WidgetData* wd = session->get_widget(widget_index);
+  if (!wd) return;
+  CGFloat scale = w.backingScaleFactor;
+  if (scale <= 0) scale = 1.0;
+  uint32_t dpi = (uint32_t)(96.0 * scale + 0.5);
+  if (dpi != wd->dpi) {
+    wd->dpi = dpi;
+    [self setNeedsDisplay:YES];
+  }
+}
+
 - (void)drawRect:(NSRect)dirtyRect
 {
   (void)dirtyRect;
