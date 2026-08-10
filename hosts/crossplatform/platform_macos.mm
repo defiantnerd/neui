@@ -112,12 +112,28 @@ void wake_app_event_pump()
   // Toast animation heartbeat. 60 Hz tick that just invalidates the view;
   // paint_toast self-terminates when the toast lifetime expires.
   NSTimer*           _toast_timer;
+  // Last LOGICAL size reported through NEUI_EVENT_RESIZE. Seeded at view
+  // creation so the create-time sizing is not reported, and compared (rather
+  // than the view's previous frame) so a pure ZOOM change - which moves the
+  // native frame while the logical size is unchanged - fires no RESIZE, while a
+  // real resize at any zoom still does. Comparing against wd.width/height would
+  // NOT work: widget_set_size updates those BEFORE calling the platform layer,
+  // so every programmatic resize would suppress itself.
+  int                _reported_w;
+  int                _reported_h;
 }
 - (void)toastStart;
 - (void)toastStop;
+- (void)seedReportedSize:(int)w height:(int)h;
 @end
 
 @implementation NEUIView
+
+- (void)seedReportedSize:(int)w height:(int)h
+{
+  _reported_w = w;
+  _reported_h = h;
+}
 
 - (BOOL)isFlipped { return YES; }
 
@@ -180,9 +196,20 @@ void wake_app_event_pump()
   // session is nil until install_view_and_context / the embed path assigns it,
   // so the initWithFrame: sizing never reaches a client.
   if (!session) return;
-  const int w_log = (int)newSize.width;
-  const int h_log = (int)newSize.height;
-  if ((int)old.width == w_log && (int)old.height == h_log) return;
+
+  // Divide out the frame zoom. The view's frame is in ZOOMED points (that is
+  // what platform_set_window_pos sets it to), but wd.width/height and every
+  // client-facing size are LOGICAL px at 96 DPI by design - the zoom exists
+  // only in the paint transform and the platform conversions. Storing the
+  // zoomed value here would make get_client_rect report 800x480 at zoom 2.0
+  // for a 400x240 frame, and a reset to 1.0 would not restore the original.
+  const float z = [self frameZoom];
+  const int w_log = (int)((float)newSize.width  / (z > 0.0f ? z : 1.0f) + 0.5f);
+  const int h_log = (int)((float)newSize.height / (z > 0.0f ? z : 1.0f) + 0.5f);
+  if (w_log == _reported_w && h_log == _reported_h) return;
+  _reported_w = w_log;
+  _reported_h = h_log;
+  (void)old;
 
   xpl_host::WidgetData* wd = session->get_widget(widget_index);
   if (!wd) return;
@@ -242,11 +269,28 @@ void wake_app_event_pump()
   [self addTrackingArea:_tracking_area];
 }
 
+// The frame's user zoom (NEUI_ATTR_UI_SCALE), 1.0 when unset. AppKit points
+// already equal neui logical px, so the zoom is the ONLY conversion factor on
+// this platform - unlike win32/Linux there is no DPI ratio to fold in (the
+// backing scale is handled inside the CGContext's own CTM).
+- (float)frameZoom
+{
+  if (!session) return 1.0f;
+  xpl_host::WidgetData* wd = session->get_widget(widget_index);
+  return wd ? wd->ui_scale() : 1.0f;
+}
+
 // Convert an NSEvent's cursor location into top-left-origin view-local logical
-// pixels (matches the renderer.h coordinate convention).
+// pixels (matches the renderer.h coordinate convention). Divides out the frame
+// zoom so input arrives in the same logical space the widget tree, the cached
+// abs_x/abs_y and the paint walk use. Every mouse handler on this view funnels
+// through here, so this is the single conversion point.
 - (NSPoint)localPointForEvent:(NSEvent*)event
 {
-  return [self convertPoint:event.locationInWindow fromView:nil];
+  NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+  float z = [self frameZoom];
+  if (z != 1.0f && z > 0.0f) { p.x /= z; p.y /= z; }
+  return p;
 }
 
 - (void)dispatchMouseEventForType:(neui_event_type_t)type
@@ -1114,10 +1158,15 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
   // by the widget's frame-local absolute origin (abs_x / abs_y, computed by
   // the paint walk - the widget's stored x/y is parent-relative) to get
   // view-local coords (still top-left since the view is isFlipped=YES).
-  NSRect view_r = NSMakeRect((CGFloat)(cx + fwd.abs_x),
-                              (CGFloat)(cy + fwd.abs_y),
-                              1.0,
-                              (CGFloat)ch);
+  // Multiply back up by the zoom: the caret is painted through the zoom
+  // transform, so its logical position has to be re-scaled into the view's
+  // point space or the candidate window detaches from the text at any
+  // zoom != 100%. (Inverse of the divide in localPointForEvent:.)
+  const CGFloat z = (CGFloat)[self frameZoom];
+  NSRect view_r = NSMakeRect((CGFloat)(cx + fwd.abs_x) * z,
+                              (CGFloat)(cy + fwd.abs_y) * z,
+                              1.0 * z,
+                              (CGFloat)ch * z);
   // convertRect:toView:nil un-flips into window coords (NSWindow uses
   // bottom-left origin). convertRectToScreen: is again bottom-left, screen.
   NSRect win_r    = [self convertRect:view_r toView:nil];
@@ -1142,7 +1191,12 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
   NSPoint loc = [sender draggingLocation];
   // draggingLocation is in window coords (bottom-left origin); convert to
   // view-local. NEUIView is isFlipped=YES so the Y is already top-down.
-  return [self convertPoint:loc fromView:nil];
+  NSPoint p = [self convertPoint:loc fromView:nil];
+  // Same zoom divide as localPointForEvent: - drop hit-testing walks the same
+  // logical widget rects as mouse hit-testing, so it needs the same space.
+  float z = [self frameZoom];
+  if (z != 1.0f && z > 0.0f) { p.x /= z; p.y /= z; }
+  return p;
 }
 
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender
@@ -1399,9 +1453,15 @@ void install_view_and_context(xpl_host::Session* session,
   [window setAcceptsMouseMovedEvents:YES];
 
   // Content view (also the render target).
-  NEUIView* view = [[NEUIView alloc] initWithFrame:NSMakeRect(0, 0, wd.width, wd.height)];
+  // The content view fills the (already zoomed) window content rect; the zoom
+  // multiplies here because wd.width/height stay LOGICAL at every zoom.
+  const CGFloat vz = (CGFloat)wd.ui_scale();
+  NEUIView* view = [[NEUIView alloc]
+    initWithFrame:NSMakeRect(0, 0, wd.width * vz, wd.height * vz)];
   view->session      = session;
   view->widget_index = widget_index;
+  // Seed the RESIZE baseline so create-time sizing is not reported.
+  [view seedReportedSize:wd.width height:wd.height];
   [window setContentView:view];
 
   // Force the view to be the initial / current first responder. Without this
@@ -1428,8 +1488,8 @@ void install_view_and_context(xpl_host::Session* session,
   auto* backend = xpl_host::platform_get_backend();
   if (backend) {
     wd.render_ctx = backend->create_context((__bridge void*)view,
-                                             (uint32_t)wd.width,
-                                             (uint32_t)wd.height);
+                                             (uint32_t)(wd.width  * vz),
+                                             (uint32_t)(wd.height * vz));
   }
 
   // Read back the actual backing scale (DPI source on macOS).
@@ -1493,7 +1553,11 @@ namespace xpl_host
   void platform_create_appwindow(Session* session, uint32_t widget_index,
                                   WidgetData& wd)
   {
-    NSRect frame_rect = logical_window_rect(wd.x, wd.y, wd.width, wd.height);
+    // Zoom scales the window's content rect; wd.width/height stay logical.
+    const float wz = wd.ui_scale();
+    NSRect frame_rect = logical_window_rect(wd.x, wd.y,
+                                            (int)(wd.width  * wz + 0.5f),
+                                            (int)(wd.height * wz + 0.5f));
     NSWindow* window = [[NSWindow alloc] initWithContentRect:frame_rect
                                                     styleMask:styles_for_appwindow()
                                                       backing:NSBackingStoreBuffered
@@ -1513,18 +1577,23 @@ namespace xpl_host
     // standalone create-then-show contract.
     if (wd.embed_parent) {
       NSView* parent = (__bridge NSView*)reinterpret_cast<void*>(wd.embed_parent);
+      // Zoom scales the view's footprint inside the DAW's parent; a plugin
+      // adapter that also negotiates a new size with the host should set both.
+      const CGFloat ez = (CGFloat)wd.ui_scale();
       NEUIView* view = [[NEUIView alloc]
-        initWithFrame:NSMakeRect(wd.x, wd.y, wd.width, wd.height)];
+        initWithFrame:NSMakeRect(wd.x, wd.y, wd.width * ez, wd.height * ez)];
       view->session      = session;
       view->widget_index = widget_index;
+      // Seed the RESIZE baseline so create-time sizing is not reported.
+      [view seedReportedSize:wd.width height:wd.height];
       view.hidden = YES;
       [parent addSubview:view];
 
       auto* backend = platform_get_backend();
       if (backend) {
         wd.render_ctx = backend->create_context((__bridge void*)view,
-                                                 (uint32_t)wd.width,
-                                                 (uint32_t)wd.height);
+                                                 (uint32_t)(wd.width  * ez),
+                                                 (uint32_t)(wd.height * ez));
       }
 
       CGFloat scale = parent.window ? parent.window.backingScaleFactor
@@ -1539,7 +1608,11 @@ namespace xpl_host
       return;
     }
 
-    NSRect frame_rect = logical_window_rect(wd.x, wd.y, wd.width, wd.height);
+    // Zoom scales the window's content rect; wd.width/height stay logical.
+    const float wz = wd.ui_scale();
+    NSRect frame_rect = logical_window_rect(wd.x, wd.y,
+                                            (int)(wd.width  * wz + 0.5f),
+                                            (int)(wd.height * wz + 0.5f));
     NSWindow* window = [[NSWindow alloc] initWithContentRect:frame_rect
                                                     styleMask:NSWindowStyleMaskBorderless
                                                       backing:NSBackingStoreBuffered
@@ -1564,7 +1637,11 @@ namespace xpl_host
       if (wd.y < 0) wd.y = 0;
     }
 
-    NSRect frame_rect = logical_window_rect(wd.x, wd.y, wd.width, wd.height);
+    // Zoom scales the window's content rect; wd.width/height stay logical.
+    const float wz = wd.ui_scale();
+    NSRect frame_rect = logical_window_rect(wd.x, wd.y,
+                                            (int)(wd.width  * wz + 0.5f),
+                                            (int)(wd.height * wz + 0.5f));
     NSWindow* window = [[NSWindow alloc] initWithContentRect:frame_rect
                                                     styleMask:styles_for_dialog()
                                                       backing:NSBackingStoreBuffered
@@ -1687,21 +1764,37 @@ namespace xpl_host
                                 int x, int y, int w, int h, uint32_t /*dpi*/)
   {
     if (!native_handle) return;
+    // w/h are the logical CLIENT size; the frame's user zoom scales it (the
+    // client keeps thinking in logical units at any zoom).
+    float z = 1.0f;
+    if (NSView* cv = frame_content_view(native_handle)) {
+      if ([cv isKindOfClass:[NEUIView class]]) {
+        NEUIView* nv = (NEUIView*)cv;
+        if (nv->session) {
+          if (auto* wd = nv->session->get_widget(nv->widget_index))
+            z = wd->ui_scale();
+        }
+      }
+    }
+    const int zw = (int)((float)w * z + 0.5f);
+    const int zh = (int)((float)h * z + 0.5f);
+
     if (is_embedded_view(native_handle)) {
       // (x, y) is parent-view-relative in the parent's coordinate system;
       // drawRect: reads bounds each frame so the render follows the resize.
-      [frame_content_view(native_handle) setFrame:NSMakeRect(x, y, w, h)];
+      [frame_content_view(native_handle) setFrame:NSMakeRect(x, y, zw, zh)];
       return;
     }
     NSWindow* win = native_window(native_handle);
-    // (w, h) is the CLIENT area - the same contract create() uses (it passes
-    // this rect to initWithContentRect:) and the same one win32 maintains via
-    // AdjustWindowRectExForDpi. Sizing the OUTER frame to (w, h) instead let
-    // the title bar eat into the client, so a set_size(520, 300) produced a
-    // 520x268 client and every subsequent layout was short by the chrome.
-    // frameRectForContentRect: preserves the content rect's screen origin and
-    // grows the frame upward, so the position semantics match create() too.
-    NSRect content = logical_window_rect(x, y, w, h);
+    // (zw, zh) is the CLIENT area at the current zoom - the same contract
+    // create() uses (it passes this rect to initWithContentRect:) and the same
+    // one win32 maintains via AdjustWindowRectExForDpi. Sizing the OUTER frame
+    // to it instead let the title bar eat into the client, so a
+    // set_size(520, 300) produced a 520x268 client and every subsequent layout
+    // was short by the chrome. frameRectForContentRect: preserves the content
+    // rect's screen origin and grows the frame upward, so the position
+    // semantics match create() too.
+    NSRect content = logical_window_rect(x, y, zw, zh);
     [win setFrame:[win frameRectForContentRect:content] display:YES];
   }
 

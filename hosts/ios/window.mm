@@ -2402,6 +2402,10 @@ namespace ios_host
         ev.data.paint.width = w;
         ev.data.paint.height = h;
         ev.data.paint.focused = false;
+        // No user zoom on iOS (Dynamic Type scales default metrics instead),
+        // so the device scale is purely the screen's scale.
+        ev.data.paint.scale =
+          (backend && backend->get_scale_factor) ? backend->get_scale_factor(wd.render_ctx) : 1.0f;
         s->dispatch_event(&ev);
       }
       if (backend->pop_clip) backend->pop_clip(wd.render_ctx);

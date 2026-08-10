@@ -220,6 +220,12 @@ struct neui_painter {
   neui_render_ctx_t                ctx;
   void*                            host_token;       // session / asset mgr ptr (host-defined)
   neui_detail::draw_asset_thunk_t  draw_asset_thunk; // resolves neui_asset_t -> backend->draw_bitmap
+  // Extra CTM scale the host has already pushed that the backend cannot see -
+  // today the frame's user zoom (NEUI_ATTR_UI_SCALE). Multiplied into
+  // get_scale_factor so "physical pixels per unit I draw" stays truthful, which
+  // is what callers use it for: hairline alignment, choosing a bake resolution,
+  // and pixel-snapping (see the QR compound layer). 1.0 = nothing extra.
+  float                            extra_scale;
 };
 
 namespace neui_detail {
@@ -230,8 +236,14 @@ namespace neui_detail {
 
   inline float painter_get_scale_factor(neui_painter_t* p)
   {
-    return (p && p->backend && p->backend->get_scale_factor)
+    if (!p) return 1.0f;
+    float s = (p->backend && p->backend->get_scale_factor)
       ? p->backend->get_scale_factor(p->ctx) : 1.0f;
+    // extra_scale is the host-pushed zoom the backend has no way to know
+    // about; without it this would under-report by the zoom factor and every
+    // caller that bakes or snaps to the device grid would use the wrong one.
+    float extra = (p->extra_scale > 0.0f) ? p->extra_scale : 1.0f;
+    return s * extra;
   }
   inline float painter_measure_text(neui_painter_t* p,
                                      const char* utf8, int text_len,

@@ -79,10 +79,23 @@ namespace xpl_host
   static inline int mouse_x(LPARAM lp) { return static_cast<int>(static_cast<short>(LOWORD(lp))); }
   static inline int mouse_y(LPARAM lp) { return static_cast<int>(static_cast<short>(HIWORD(lp))); }
 
-  // Convert a physical pixel coordinate to logical (96 DPI baseline).
-  static inline float phys_to_log(int phys, uint32_t dpi)
+  // Convert a physical pixel coordinate to logical, for a FRAME - divides by
+  // the frame's full logical->physical factor,
+  // i.e. DPI ratio AND user zoom (NEUI_ATTR_UI_SCALE). Every mouse coordinate
+  // and the WM_SIZE client size go through this, which is what keeps input in
+  // the same logical space the widget tree and the paint walk use at any zoom.
+  static inline float phys_to_log(int phys, const WidgetData& frame)
   {
-    return static_cast<float>(phys) * 96.0f / static_cast<float>(dpi);
+    const float s = frame.logical_to_physical();
+    return (s > 0.0f) ? static_cast<float>(phys) / s : static_cast<float>(phys);
+  }
+
+  // Logical -> physical for a frame (the inverse). Used where we hand native
+  // APIs a pixel rect built from logical widget coords (IME caret, window
+  // sizing).
+  static inline int log_to_phys(float logical, const WidgetData& frame)
+  {
+    return static_cast<int>(logical * frame.logical_to_physical() + 0.5f);
   }
 
   static WindowUserData* get_wud(HWND hwnd)
@@ -326,10 +339,12 @@ namespace xpl_host
     // cached frame-local position (recomputed during the paint walk).
     float lx_in_frame = lx + static_cast<float>(wd->abs_x);
     float ly_in_frame = ly + static_cast<float>(wd->abs_y);
-    UINT  dpi          = frame_wd->dpi ? frame_wd->dpi : 96;
-    int   px_x         = MulDiv(static_cast<int>(lx_in_frame), static_cast<int>(dpi), 96);
-    int   px_y         = MulDiv(static_cast<int>(ly_in_frame), static_cast<int>(dpi), 96);
-    int   px_h         = MulDiv(static_cast<int>(lh),          static_cast<int>(dpi), 96);
+    // Via the frame's full factor (DPI ratio * zoom) - the caret is drawn
+    // through the zoom transform, so the IME window has to follow it or the
+    // candidate list detaches from the text at any zoom != 100%.
+    int   px_x         = log_to_phys(lx_in_frame, *frame_wd);
+    int   px_y         = log_to_phys(ly_in_frame, *frame_wd);
+    int   px_h         = log_to_phys(lh,          *frame_wd);
 
     HIMC himc = ImmGetContext(hwnd);
     if (!himc) return;
@@ -577,8 +592,8 @@ namespace xpl_host
 
         auto* fwd = wud->session->get_widget(wud->widget_index);
         if (fwd) {
-          int w_log = static_cast<int>(phys_to_log(static_cast<int>(w_phys), fwd->dpi));
-          int h_log = static_cast<int>(phys_to_log(static_cast<int>(h_phys), fwd->dpi));
+          int w_log = static_cast<int>(phys_to_log(static_cast<int>(w_phys), *fwd));
+          int h_log = static_cast<int>(phys_to_log(static_cast<int>(h_phys), *fwd));
           fwd->width  = w_log;
           fwd->height = h_log;
 
@@ -675,8 +690,8 @@ namespace xpl_host
         wud->tracking_mouse = true;
       }
 
-      float lx = phys_to_log(mouse_x(lParam), fwd->dpi);
-      float ly = phys_to_log(mouse_y(lParam), fwd->dpi);
+      float lx = phys_to_log(mouse_x(lParam), *fwd);
+      float ly = phys_to_log(mouse_y(lParam), *fwd);
 
       // Popup-menu overlay (right-click context menu) takes priority over
       // everything else. While active it absorbs all hover updates inside
@@ -746,8 +761,8 @@ namespace xpl_host
           && GetFocus() != hwnd)
         SetFocus(hwnd);
 
-      float lx = phys_to_log(mouse_x(lParam), fwd->dpi);
-      float ly = phys_to_log(mouse_y(lParam), fwd->dpi);
+      float lx = phys_to_log(mouse_x(lParam), *fwd);
+      float ly = phys_to_log(mouse_y(lParam), *fwd);
 
       // Popup menu overlay absorbs the click - picks an item or dismisses.
       // The nested message pump in open_popup_menu will see _popup_running
@@ -801,8 +816,8 @@ namespace xpl_host
       auto* fwd = wud->session->get_widget(wud->widget_index);
       if (!fwd) break;
 
-      float lx = phys_to_log(mouse_x(lParam), fwd->dpi);
-      float ly = phys_to_log(mouse_y(lParam), fwd->dpi);
+      float lx = phys_to_log(mouse_x(lParam), *fwd);
+      float ly = phys_to_log(mouse_y(lParam), *fwd);
 
       uint32_t hit = wud->session->widget_at(lx, ly, wud->widget_index);
 
@@ -846,8 +861,8 @@ namespace xpl_host
 
       ReleaseCapture();
 
-      float lx = phys_to_log(mouse_x(lParam), fwd->dpi);
-      float ly = phys_to_log(mouse_y(lParam), fwd->dpi);
+      float lx = phys_to_log(mouse_x(lParam), *fwd);
+      float ly = phys_to_log(mouse_y(lParam), *fwd);
 
       uint32_t hit     = wud->session->widget_at(lx, ly, wud->widget_index);
       uint32_t pressed = wud->session->_pressed_widget;
@@ -880,8 +895,8 @@ namespace xpl_host
       if (!wud) break;
       auto* fwd = wud->session->get_widget(wud->widget_index);
       if (!fwd) break;
-      float lx = phys_to_log(mouse_x(lParam), fwd->dpi);
-      float ly = phys_to_log(mouse_y(lParam), fwd->dpi);
+      float lx = phys_to_log(mouse_x(lParam), *fwd);
+      float ly = phys_to_log(mouse_y(lParam), *fwd);
       // If a popup is up, a right-click outside dismisses it.
       if (wud->session->_popup_active) {
         wud->session->handle_popup_click(lx, ly);
@@ -906,8 +921,8 @@ namespace xpl_host
       if (!wud) break;
       auto* fwd = wud->session->get_widget(wud->widget_index);
       if (!fwd) break;
-      float lx = phys_to_log(mouse_x(lParam), fwd->dpi);
-      float ly = phys_to_log(mouse_y(lParam), fwd->dpi);
+      float lx = phys_to_log(mouse_x(lParam), *fwd);
+      float ly = phys_to_log(mouse_y(lParam), *fwd);
       uint32_t hit = wud->session->widget_at(lx, ly, wud->widget_index);
       if (hit == 0) return 0;
       auto* hw = wud->session->get_widget(hit);
@@ -931,8 +946,8 @@ namespace xpl_host
       // WM_MOUSEWHEEL gives screen coordinates - convert to client.
       POINT pt = { mouse_x(lParam), mouse_y(lParam) };
       ScreenToClient(hwnd, &pt);
-      float lx = phys_to_log(pt.x, fwd->dpi);
-      float ly = phys_to_log(pt.y, fwd->dpi);
+      float lx = phys_to_log(pt.x, *fwd);
+      float ly = phys_to_log(pt.y, *fwd);
 
       // Scale raw wheel delta to lines using the system scroll preference.
       int raw_delta = GET_WHEEL_DELTA_WPARAM(wParam);
@@ -1029,8 +1044,8 @@ namespace xpl_host
 
       POINT pt = { mouse_x(lParam), mouse_y(lParam) };
       ScreenToClient(hwnd, &pt);
-      float lx = phys_to_log(pt.x, fwd->dpi);
-      float ly = phys_to_log(pt.y, fwd->dpi);
+      float lx = phys_to_log(pt.x, *fwd);
+      float ly = phys_to_log(pt.y, *fwd);
 
       int raw_delta = GET_WHEEL_DELTA_WPARAM(wParam);
       UINT scroll_chars = 3;
@@ -1418,10 +1433,15 @@ namespace xpl_host
       if (mb && mb->hmenu) { has_menu = true; break; }
     }
 
+    // The frame's user zoom scales the CLIENT area only - the non-client
+    // chrome (title bar, borders, menu row) is OS-drawn at the monitor's DPI
+    // and must not be zoomed, which is why the zoom multiplies before
+    // AdjustWindowRectExForDpi rather than after.
+    const float zoom = wd.ui_scale();
     auto outer_for_dpi = [&](UINT dpi) -> SIZE {
       RECT wr = { 0, 0,
-                  MulDiv(wd.width,  static_cast<int>(dpi), 96),
-                  MulDiv(wd.height, static_cast<int>(dpi), 96) };
+                  static_cast<int>(MulDiv(wd.width,  static_cast<int>(dpi), 96) * zoom + 0.5f),
+                  static_cast<int>(MulDiv(wd.height, static_cast<int>(dpi), 96) * zoom + 0.5f) };
       AdjustWindowRectExForDpi(&wr, style, has_menu ? TRUE : FALSE, ex_style, dpi);
       return SIZE{ wr.right - wr.left, wr.bottom - wr.top };
     };
@@ -1633,9 +1653,20 @@ namespace xpl_host
     // usable client by the title bar / border / menu chrome. Style, ex-style
     // and menu presence are read back from the live HWND. Position (x, y) is
     // kept as the outer top-left, matching the create path.
+    // The client area is additionally scaled by the frame's user zoom (the
+    // chrome is not - see create_native_window). The zoom is read off the
+    // frame widget via the HWND's user data, since this seam only gets a
+    // native handle.
+    float zoom = 1.0f;
+    if (auto* wud = get_wud(hwnd)) {
+      if (wud->session) {
+        if (auto* fwd = wud->session->get_widget(wud->widget_index))
+          zoom = fwd->ui_scale();
+      }
+    }
     RECT wr = { 0, 0,
-                MulDiv(w, static_cast<int>(dpi), 96),
-                MulDiv(h, static_cast<int>(dpi), 96) };
+                static_cast<int>(MulDiv(w, static_cast<int>(dpi), 96) * zoom + 0.5f),
+                static_cast<int>(MulDiv(h, static_cast<int>(dpi), 96) * zoom + 0.5f) };
     DWORD style    = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
     DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
     BOOL  has_menu = GetMenu(hwnd) != nullptr;

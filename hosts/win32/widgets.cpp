@@ -878,6 +878,10 @@ namespace win32_host
       ev.data.paint.width       = w;
       ev.data.paint.height      = h;
       ev.data.paint.focused     = focused;
+      // No user zoom on the native host (child widgets are real HWNDs sized by
+      // the OS), so the device scale is purely the monitor's DPI ratio.
+      ev.data.paint.scale       =
+        (backend && backend->get_scale_factor) ? backend->get_scale_factor(ctx) : 1.0f;
       wd.session->dispatch_event(&ev);
     }
 

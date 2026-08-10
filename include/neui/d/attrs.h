@@ -185,6 +185,49 @@ extern "C" {
 // initial paint, or any time after for a runtime change.
 #define NEUI_ATTR_ICON_PATH  "neui.attr.icon_path"
 
+// float: user UI zoom for a frame (APPWINDOW / PLUGWINDOW / DIALOG), on top
+// of the monitor's DPI scale. 1.0 / unset = no zoom; 1.5 = "150%". Clamped to
+// [NEUI_UI_SCALE_MIN, NEUI_UI_SCALE_MAX]. Live: setting it re-sizes the native
+// window so the frame's logical client area is preserved, repaints, and fires
+// NEUI_EVENT_METRICS_CHANGED carrying the new scale.
+//
+// The client's coordinate system does NOT change. Widget x/y/width/height,
+// get_client_rect, mouse coordinates and the painter all stay in logical
+// pixels at 96 DPI at every zoom level - the framework scales geometry, text
+// and images on the way to the screen and scales input back down. So a layout
+// written once is correct at every zoom, and a client that never touches this
+// attr is unaffected.
+//
+// A CUSTOMDRAW widget that needs to know the true device scale (to snap
+// hairlines, or to draw at native resolution) reads neui_event_paint_t::scale,
+// and can opt into device-pixel painting entirely with
+// NEUI_ATTR_PAINT_DEVICE_PIXELS below.
+//
+// Crossplatform host only; the native win32 / macOS hosts ignore it (their
+// child widgets are real HWND / NSView controls sized by the OS).
+#define NEUI_ATTR_UI_SCALE "neui.attr.ui_scale"
+
+// Bounds NEUI_ATTR_UI_SCALE is clamped to. Below ~0.5 hit-targets stop being
+// usable; above ~4 a frame stops fitting any real display.
+#define NEUI_UI_SCALE_MIN 0.25f
+#define NEUI_UI_SCALE_MAX 8.0f
+
+// int (bool): CUSTOMDRAW only. 0 / unset = the WIDGET_PAINT callback draws in
+// logical pixels and the framework scales the result (the default, and what
+// most clients want - one layout for every zoom / DPI). 1 = the callback is
+// handed DEVICE pixels instead: neui_event_paint_t width/height arrive
+// pre-multiplied by neui_event_paint_t::scale, the zoom / DPI transform is not
+// applied under the callback, and one unit really is one physical pixel. Use
+// it for content that must be pixel-exact at native resolution - meters,
+// spectrum analysers, waveform and scope views - where a scaled-up logical
+// render would look soft.
+//
+// The widget's position, size and clip in the surrounding layout are
+// unaffected (still logical); only the coordinate space inside the callback
+// changes. Mouse coordinates delivered to the widget stay LOGICAL either way -
+// multiply by `scale` if you need to hit-test against what you drew.
+#define NEUI_ATTR_PAINT_DEVICE_PIXELS "neui.attr.paint_device_pixels"
+
 // float (radians): rotation applied around the centre of the widget.
 // Currently honoured by IMAGE; can be extended to other painted widgets
 // via the renderer transform stack. Positive values rotate clockwise on

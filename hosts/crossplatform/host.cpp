@@ -2287,12 +2287,42 @@ namespace xpl_host
     // AttrBag is null on most frames so the branch is a single pointer
     // test).
     uint32_t clear = neui_detail::color(neui_detail::ColorRole::frame_bg);
-    if (parent_index < UINT32_MAX) {
-      WidgetData* fw = get_widget(parent_index);
-      if (fw && fw->attrs && fw->attrs->has(NEUI_ATTR_BACKGROUND))
-        clear = static_cast<uint32_t>(fw->attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
-    }
+    // Also the source of the frame's zoom below, so it is looked up once here
+    // rather than per-consumer.
+    WidgetData* fw = (parent_index < UINT32_MAX) ? get_widget(parent_index)
+                                                 : nullptr;
+    if (fw && fw->attrs && fw->attrs->has(NEUI_ATTR_BACKGROUND))
+      clear = static_cast<uint32_t>(fw->attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
     _backend->begin_frame(ctx, clear);
+
+    // User zoom (NEUI_ATTR_UI_SCALE). One CTM scale wrapping the entire frame
+    // paint - the widget walk AND every overlay below - so all of it scales
+    // together and nothing else in the host has to know about zoom. Held on
+    // the Session for the duration of the paint so the painters handed to
+    // client CUSTOMDRAW code can report the true device scale (and undo this
+    // transform for a device-pixel widget).
+    //
+    // This is the only rendering seam that works identically on all three
+    // backends: D2D and Cairo would also accept a dpi*Z lie, but a CG window
+    // context applies no CTM scale of its own at all (AppKit hands it a
+    // point-based context), so update_dpi would not zoom macOS.
+    //
+    // Deliberately a transform and not a change to any logical number:
+    // measure_text is transform-independent on every backend, so every rect
+    // derived from text (combo drop width, menubar columns, popup, toast)
+    // stays in the same logical space as the cached abs_x/abs_y and the
+    // logical mouse coordinates - which is what keeps paint and hit-test
+    // agreeing for free. Font caches key on (family, weight, size) with no
+    // DPI, so zoom needs no cache invalidation either.
+    const float zoom = (fw ? fw->ui_scale() : 1.0f);
+    _paint_zoom = zoom;
+    const bool zooming = (zoom != 1.0f) && _backend->push_transform
+                         && _backend->scale && _backend->pop_transform;
+    if (zooming) {
+      _backend->push_transform(ctx);
+      _backend->scale(ctx, zoom, zoom);
+    }
+
     // While the frame doesn't own OS keyboard focus, suppress focus
     // decorations (caret, focus outline) by reporting "no focused widget" to
     // the painters. The logical focus is preserved so input routing snaps
@@ -2333,6 +2363,9 @@ namespace xpl_host
     paint_popup_menu(ctx);
     // Toast overlay sits on top of every other overlay.
     paint_toast(ctx, parent_index);
+
+    if (zooming) _backend->pop_transform(ctx);
+    _paint_zoom = 1.0f;
     _backend->end_frame(ctx);
 
     // Restore the previous override so non-paint callers (event
@@ -2928,16 +2961,51 @@ namespace xpl_host
     const float fw = static_cast<float>(width);
     const float fh = static_cast<float>(height);
 
+    // Device scale actually in effect: the frame's zoom (already pushed as a
+    // CTM scale by paint_frame) times the monitor's DPI ratio (applied by the
+    // backend). This is what the client is told in neui_event_paint_t::scale.
+    const float zoom = session->paint_zoom();
+    float dev_scale = zoom;
+    if (backend->get_scale_factor) dev_scale *= backend->get_scale_factor(ctx);
+
+    // NEUI_ATTR_PAINT_DEVICE_PIXELS: hand the client DEVICE pixels instead of
+    // logical ones. We can only undo the part of the scale WE pushed (the
+    // zoom); the backend's own DPI scale isn't ours to unwind, so "device
+    // pixels" here means logical x zoom, and `scale` still reports the full
+    // factor so a client can reason about the rest.
+    const bool device_px =
+      !!neui_detail::attrs_readonly(attrs)
+      && neui_detail::attr_as_float(neui_detail::attrs_readonly(attrs),
+                                     NEUI_ATTR_PAINT_DEVICE_PIXELS, 0.0f) != 0.0f;
+    const bool unzoom = device_px && zoom != 1.0f
+                        && backend->scale && backend->push_transform;
+
     if (backend->push_transform) backend->push_transform(ctx);
     if (backend->translate)
       backend->translate(ctx, static_cast<float>(x), static_cast<float>(y));
+    // Clip BEFORE unzooming, so the clip rect stays in the widget's logical
+    // box however the callback's coordinate space is set up.
     if (backend->push_clip) backend->push_clip(ctx, 0.0f, 0.0f, fw, fh);
+
+    // Widget-local size in whatever space the callback will draw in.
+    float cb_w = fw, cb_h = fh;
+    if (unzoom) {
+      // Undo the frame zoom for the callback only: one unit under the
+      // callback is now one zoomed (device-side) pixel, and the widget covers
+      // fw*zoom x fh*zoom of them - the same physical area as before.
+      backend->scale(ctx, 1.0f / zoom, 1.0f / zoom);
+      cb_w = fw * zoom;
+      cb_h = fh * zoom;
+    }
 
     neui_painter painter{};
     painter.backend          = backend;
     painter.ctx              = ctx;
     painter.host_token       = session;
     painter.draw_asset_thunk = &xpl_painter_draw_asset_thunk;
+    // Under a device-pixel callback the zoom is no longer in the CTM, so the
+    // backend's own get_scale_factor is already the whole truth.
+    painter.extra_scale      = unzoom ? 1.0f : zoom;
 
     if (auto* ca = resolve_widget_compound(session, compound_asset)) {
       // Compound mode: paint z<0 layers here; z>=0 layers come from
@@ -2945,7 +3013,7 @@ namespace xpl_host
       bool selected = neui_detail::attr_as_float(
                         neui_detail::attrs_readonly(attrs), NEUI_ATTR_SELECTED, 0.0f) != 0.0f;
       uint32_t state_mask = neui_detail::compose_widget_state(enabled, hovered, pressed, selected);
-      neui_detail::paint_compound_below(&painter, *ca, fw, fh,
+      neui_detail::paint_compound_below(&painter, *ca, cb_w, cb_h,
                                           neui_detail::attrs_readonly(attrs),
                                           state_mask);
     } else {
@@ -2954,9 +3022,10 @@ namespace xpl_host
       ev.data.paint.widget.id  = widget_id;
       ev.data.paint.painter_api = &neui_detail::k_painter_api;
       ev.data.paint.p           = &painter;
-      ev.data.paint.width       = fw;
-      ev.data.paint.height      = fh;
+      ev.data.paint.width       = cb_w;
+      ev.data.paint.height      = cb_h;
       ev.data.paint.focused     = is_focused;
+      ev.data.paint.scale       = dev_scale;
       session->dispatch_event(&ev);
     }
 
@@ -2986,6 +3055,7 @@ namespace xpl_host
     painter.ctx              = ctx;
     painter.host_token       = session;
     painter.draw_asset_thunk = &xpl_painter_draw_asset_thunk;
+    painter.extra_scale      = session->paint_zoom();
 
     bool selected = neui_detail::attr_as_float(
                       neui_detail::attrs_readonly(attrs), NEUI_ATTR_SELECTED, 0.0f) != 0.0f;

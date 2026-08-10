@@ -62,6 +62,17 @@ if(APPLE AND NOT NEUI_IOS)
   target_compile_features(neui_embed_smoke_macos PRIVATE cxx_std_17)
   target_link_libraries(neui_embed_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
+
+  # UI-zoom harness (NEUI_ATTR_UI_SCALE): asserts native sizing grows by the
+  # zoom while the client's logical view doesn't, and that a CUSTOMDRAW gets
+  # logical vs device-pixel dimensions per NEUI_ATTR_PAINT_DEVICE_PIXELS.
+  # Realizes a real NSWindow, so built but NOT ctest-registered.
+  add_executable(neui_zoom_smoke_macos zoom_smoke_macos.mm)
+  target_include_directories(neui_zoom_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_zoom_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_zoom_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
 endif()
 
 # Linux-only: Cairo software backend offscreen smoke test. Unlike neui_tests

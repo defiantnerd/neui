@@ -322,31 +322,56 @@ established convention for this repo's cross-machine flow.
   exactly once, retiming took effect, and the tick went silent after the last
   removal.
 
-### Wave 3 — per-frame UI scale (his #9)
+### Wave 3 — per-frame UI scale (#9) — **DONE, by RECOVERING the lost commit**
 
-First: **resolve the history problem** — `7683adb`'s message claims this
-feature and its tree does not contain it. Either the PR content was lost in a
-re-merge or the title is wrong. Determine which, and if the work exists on a
-lost branch, recover it instead of rewriting.
+The "history problem" flagged in the TL;DR turned out to be recoverable, and the
+lost work was **better than the plan**. `20f2b04` was sitting dangling in the
+reflog — *"add user UI zoom (NEUI_ATTR_UI_SCALE) to the crossplatform host"*,
+874 insertions across 23 files, parented on `edf5f9c`. PR #19 merged the title
+and dropped the content. Cherry-picked rather than reimplemented.
 
-Then implement, **xpl host only** to start:
+Why it beat the plan: this document proposed feeding `real_dpi × ui_scale` into
+`backend->update_dpi`. That commit had already **rejected** that approach for a
+reason the plan missed — it works on D2D and Cairo but **not CoreGraphics**,
+where a window context applies no CTM scale of its own (AppKit hands `drawRect:`
+an already-point-based context), so macOS simply would not have zoomed. It uses
+one CTM scale in `Session::paint_frame` instead, needing **zero** backend
+changes, and goes beyond the plan with `scale` on `neui_event_paint_t` plus
+`NEUI_ATTR_PAINT_DEVICE_PIXELS` (real device pixels for meters / scopes) and
+`extra_scale` on the painter so `get_scale_factor` stops under-reporting — which
+would otherwise have made the QR compound layer bake at 1/Z resolution.
 
-- `NEUI_ATTR_UI_SCALE` (float, default 1.0) on a frame widget, plus a
-  `k_well_known_attrs` row (`hosts/shared/attrs.h`) per the house rule.
-- Effective scale = `real_dpi × ui_scale`, fed to `backend->update_dpi` and to
-  the platform layer's window-size and **input-coordinate** conversions. On
-  xpl these are a handful of sites, not 81.
-- Live: on change, resize the render context, recompute `abs_x/abs_y`, fire
-  `NEUI_EVENT_METRICS_CHANGED` (the payload already carries `ui_scale`,
-  `include/neui/d/events.h:348-354`), invalidate.
-- Explicitly **out of scope**: the win32/macOS native hosts. Native control
-  fonts (HFONT / NSFont) do not follow the multiplier and making them follow is
-  a separate job. Document the limitation; it does not bite a CUSTOMDRAW-only
-  client, which is exactly his case.
-- Keep `NEUI_API_METRICS::ui_scale` reporting the process-global painted-UI
-  scale unchanged, and document the relationship between the two clearly —
-  these are two multipliers on one axis and conflating them in docs will cost
-  someone a day.
+Cherry-pick resolution — two conflicts, both where earlier waves overlapped:
+- `platform_macos.mm`: both sides had independently fixed the **same**
+  `platform_set_window_pos` client-vs-outer-frame bug. Kept the zoom-aware
+  `(zw, zh)` geometry with the fuller explanation.
+- `platform_linux.cpp`: orthogonal — its `window_scale(lw)` (which folds zoom
+  into the DPI factor, replacing every open-coded `dpi/96`) plus Wave 0.4's XI2
+  modifier `buttonmap`. Kept both.
+
+**One real interaction bug this surfaced**, caught by the recovered commit's own
+smoke test rather than by reasoning: Wave 0.1's `-setFrameSize:` RESIZE hook
+stored the **native** size in `wd.width/height`, but the zoom design's core
+invariant is that those stay **logical** at every zoom. At zoom 2.0 a 400×240
+frame reported `get_client_rect` as 800×480, and resetting the zoom did not
+restore the original. The hook now divides out `frameZoom`. Its suppression test
+also had to change: comparing against `wd.width/height` is wrong because
+`widget_set_size` updates those *before* calling the platform layer (every
+programmatic resize would suppress itself), and comparing the view's previous
+frame is wrong because a pure zoom change moves the native frame while the
+logical size is unchanged. It now tracks the last **reported logical** size on
+the view, seeded at creation.
+
+Verified together: the recovered `neui_zoom_smoke_macos` passes (native content
+grows by the zoom, `get_client_rect` stays logical, CUSTOMDRAW gets logical size
+with a zoom-inclusive scale, device-pixel mode gets pre-multiplied dimensions,
+plus live change / METRICS_CHANGED / reset), both Wave 0.1 resize harnesses still
+pass (programmatic *and* the 21-event AppKit `performZoom` stream), and the suite
+is 385 cases / 2081 checks green.
+
+Its own documented gaps (kept in `docs/deferred-issues.md`): baked SURFACEs and
+`@Nx` assets are not re-baked on a zoom change (client's call, as for DPI), and
+DnD drop coordinates are not zoom-divided on win32 or Linux.
 
 ### Wave 4 — cursor, popups, file dialog
 

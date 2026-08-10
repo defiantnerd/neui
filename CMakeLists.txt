@@ -467,6 +467,31 @@ if(APPLE)
   target_link_libraries(neui_arc_example PRIVATE neui-macoshost)
 endif()
 
+# UI zoom example (NEUI_ATTR_UI_SCALE): 100/150/200 % switching, plus the two
+# CUSTOMDRAW painting modes (logical vs NEUI_ATTR_PAINT_DEVICE_PIXELS).
+# Crossplatform host only - it selects that host explicitly.
+if(WIN32 AND MSVC)
+  add_executable(neui_zoom_example WIN32
+    examples/zoom_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_zoom_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_zoom_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_zoom_example WIN32 examples/zoom_example.cpp)
+elseif(APPLE)
+  add_executable(neui_zoom_example MACOSX_BUNDLE examples/zoom_example.cpp)
+else()
+  add_executable(neui_zoom_example examples/zoom_example.cpp)
+endif()
+target_link_libraries(neui_zoom_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_zoom_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_zoom_example PRIVATE neui-macoshost)
+endif()
+
 # Filmstrip / stitchmap knob example. Generates a vertical frame strip into a
 # SURFACE, tags it via assets->set_frame_layout, and drives it with a compound
 # asset layer whose "frame" prop is bound to NEUI_PARAM_VALUE + a rotational

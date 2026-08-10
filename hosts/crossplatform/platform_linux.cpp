@@ -141,6 +141,24 @@ namespace
     return it == g_windows.end() ? nullptr : it->second;
   }
 
+  // Physical pixels per logical pixel for this window: the display's DPI ratio
+  // times the frame's user zoom (NEUI_ATTR_UI_SCALE). THE conversion constant
+  // for this platform layer - X gives us physical pixels, while the widget
+  // tree, the cached abs_x/abs_y and the paint walk are all logical, so every
+  // native->logical divide and logical->native multiply goes through here.
+  // Never returns <= 0.
+  float window_scale(const LinuxWindow* lw)
+  {
+    if (!lw) return 1.0f;
+    float s = static_cast<float>(lw->dpi) / 96.0f;
+    if (!(s > 0.0f)) s = 1.0f;
+    if (lw->session) {
+      if (auto* wd = lw->session->get_widget(lw->widget_index))
+        s *= wd->ui_scale();
+    }
+    return (s > 0.0f) ? s : 1.0f;
+  }
+
   // ---- XInput2 smooth scroll ------------------------------------------------
   // Modern X servers expose wheel + trackpad scrolling as XI2 "scroll-class"
   // valuators delivered inside XI_Motion events (pixel-precise, fractional),
@@ -544,7 +562,7 @@ namespace
   void dispatch_button_press(LinuxWindow* lw, XButtonEvent& be)
   {
     Session* s = lw->session;
-    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float scale = window_scale(lw);
     // Wheel (legacy core Button 4-7): the stepped fallback. Once XI2 scroll has
     // proven it delivers on this server, the same physical scroll also arrives
     // as XI2 valuators, so drop the legacy buttons to avoid double-counting.
@@ -623,7 +641,7 @@ namespace
   {
     if (be.button >= 4 && be.button <= 7) return;  // wheel: press carried it
     Session* s = lw->session;
-    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float scale = window_scale(lw);
     float lx = static_cast<float>(be.x) / scale, ly = static_cast<float>(be.y) / scale;
 
     if (be.button == 1) {
@@ -695,7 +713,7 @@ namespace
 
   void dispatch_motion(LinuxWindow* lw, XMotionEvent& me)
   {
-    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float scale = window_scale(lw);
     do_motion(lw, static_cast<float>(me.x) / scale, static_cast<float>(me.y) / scale, me.state);
   }
 
@@ -1339,7 +1357,10 @@ namespace
     if (dv == 0.0 && dh == 0.0) return;
     g_xi2_scroll_seen = true;   // XI2 scroll works here -> suppress core Button 4-7
 
-    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    // window_scale() folds the frame zoom into the DPI factor (the zoom work
+    // replaced every open-coded dpi/96 with it); mods.effective carries the
+    // NEUI_MK_* modifier bits for the wheel payload.
+    float scale = window_scale(lw);
     feed_scroll(lw, static_cast<float>(de->event_x) / scale, static_cast<float>(de->event_y) / scale, dv, dh,
                  static_cast<unsigned int>(de->mods.effective));
   }
@@ -1366,7 +1387,7 @@ namespace
           // then to avoid double-dispatching the move.
           if (lw->session->_pressed_widget == 0) {
             unsigned int state = static_cast<unsigned int>(de->mods.effective);
-            float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+            float scale = window_scale(lw);
             do_motion(lw, static_cast<float>(de->event_x) / scale, static_cast<float>(de->event_y) / scale, state);
           }
         }
@@ -1442,7 +1463,7 @@ namespace
         s->resize_render_ctx(lw->widget_index, wphys, hphys);
         auto* wd = s->get_widget(lw->widget_index);
         if (wd) {
-          float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+          float scale = window_scale(lw);
           int wlog = static_cast<int>(static_cast<float>(wphys) / scale + 0.5f);
           int hlog = static_cast<int>(static_cast<float>(hphys) / scale + 0.5f);
           if (wd->width != wlog || wd->height != hlog) {
@@ -1539,6 +1560,10 @@ namespace
 
     uint32_t dpi   = query_display_dpi(dpy);
     float    scale = static_cast<float>(dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    // Fold in the frame's zoom (the window doesn't exist yet, so window_scale
+    // isn't usable here - read the attr straight off the frame).
+    scale *= wd.ui_scale();
+    if (!(scale > 0.0f)) scale = 1.0f;
     int w_phys = static_cast<int>(static_cast<float>(wd.width)  * scale + 0.5f); if (w_phys < 1) w_phys = 1;
     int h_phys = static_cast<int>(static_cast<float>(wd.height) * scale + 0.5f); if (h_phys < 1) h_phys = 1;
     int x_phys = static_cast<int>(static_cast<float>(wd.x) * scale + 0.5f);
@@ -2140,7 +2165,15 @@ namespace
   {
     if (!native_handle) return;
     auto* lw = static_cast<LinuxWindow*>(native_handle);
-    float scale = static_cast<float>(dpi ? dpi : lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    // w/h are the logical client size; grow by DPI ratio AND the frame's zoom
+    // so a zoomed frame occupies proportionally more of the screen while the
+    // client keeps thinking in logical units. `dpi` is honoured as an override
+    // for the ratio part (callers pass wd.dpi); the zoom always comes from the
+    // frame's live attr via window_scale.
+    float scale = window_scale(lw);
+    if (dpi && lw->dpi && dpi != lw->dpi)
+      scale *= static_cast<float>(dpi) / static_cast<float>(lw->dpi);
+    if (!(scale > 0.0f)) scale = 1.0f;
     XMoveResizeWindow(lw->dpy, lw->win,
                       static_cast<int>(static_cast<float>(x) * scale + 0.5f),
                       static_cast<int>(static_cast<float>(y) * scale + 0.5f),
@@ -2325,7 +2358,7 @@ namespace
   {
     if (!native_handle) return;
     auto* lw = static_cast<LinuxWindow*>(native_handle);
-    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float scale = window_scale(lw);
     XSizeHints* sh = XAllocSizeHints();
     if (!sh) return;
     sh->flags = 0;

@@ -881,10 +881,32 @@ namespace xpl_host
       }
     }
     neui_detail::ensure_attrs(wd.attrs).set_float(key, stored);
+
+    // NEUI_ATTR_UI_SCALE on a frame: the only float attr with native side
+    // effects. The logical client size (wd.width/height) is unchanged by
+    // design - the zoom lives in the native window size and the paint
+    // transform - so re-apply the native geometry with the new factor, then
+    // repaint. Also tell the client, since a layout that wants to adapt to
+    // zoom (rather than just be scaled) needs a signal; METRICS_CHANGED
+    // already carries a ui_scale and is exactly this event on iOS.
+    if (wd.is_frame() && !strcmp(key, NEUI_ATTR_UI_SCALE)) {
+      if (wd.native_handle) {
+        platform_set_window_pos(wd.native_handle, wd.x, wd.y,
+                                 wd.width, wd.height, wd.dpi);
+        platform_invalidate(wd.native_handle);
+      }
+      neui_event_t ev{};
+      ev.type                   = NEUI_EVENT_METRICS_CHANGED;
+      ev.data.metrics.widget.id = wd.widget_id;
+      ev.data.metrics.ui_scale  = wd.ui_scale();
+      s->dispatch_event(&ev);
+      return 1;
+    }
+
     // Float attrs feed live paint state (NEUI_PARAM_VALUE on KNOB /
     // SLIDER, NEUI_ATTR_ROTATION on IMAGE, etc.). Invalidate the owning
-    // frame so the next paint pulls fresh values. Frames don't currently
-    // read any float attr in paint, but skip them for symmetry.
+    // frame so the next paint pulls fresh values. Other frame float attrs
+    // aren't read in paint, so skip them for symmetry.
     if (!wd.is_frame()) {
       if (void* frame = s->find_parent_native_handle(idx))
         platform_invalidate(frame);

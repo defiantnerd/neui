@@ -66,6 +66,8 @@ namespace neui_detail
     { NEUI_ATTR_MAX_WIDTH,            AttrKind::INT    },
     { NEUI_ATTR_MAX_HEIGHT,           AttrKind::INT    },
     { NEUI_ATTR_ICON_PATH,            AttrKind::STRING },
+    { NEUI_ATTR_UI_SCALE,             AttrKind::FLOAT  },
+    { NEUI_ATTR_PAINT_DEVICE_PIXELS,  AttrKind::INT    },
     { NEUI_ATTR_ROTATION,             AttrKind::FLOAT  },
     { NEUI_ATTR_BACKGROUND,           AttrKind::INT    },
     { NEUI_ATTR_THEME_MODE,           AttrKind::INT    },

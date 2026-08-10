@@ -88,6 +88,35 @@ namespace xpl_host
     neui_render_ctx_t render_ctx = nullptr;
     uint32_t dpi = 96;
 
+    // ---- Zoom (NEUI_ATTR_UI_SCALE) ------------------------------------------
+    // The user zoom for a FRAME, clamped, 1.0 when unset. Read live from the
+    // AttrBag rather than cached so a set_float takes effect immediately and
+    // there is no second copy to keep in sync.
+    //
+    // Coordinate contract: x/y/width/height and everything else on this
+    // struct stay LOGICAL px at 96 DPI at every zoom - the zoom only exists
+    // (a) as a renderer transform during paint and (b) as a multiply when
+    // converting to/from native/physical units in the platform layer. Keep it
+    // out of the logical numbers or the menubar inset, hit-test rects and
+    // client rect all fall out of sync.
+    float ui_scale() const
+    {
+      float z = attrs ? attrs->get_float(NEUI_ATTR_UI_SCALE, 1.0f) : 1.0f;
+      if (!(z > 0.0f)) return 1.0f;              // 0 / negative / NaN -> off
+      if (z < NEUI_UI_SCALE_MIN) return NEUI_UI_SCALE_MIN;
+      if (z > NEUI_UI_SCALE_MAX) return NEUI_UI_SCALE_MAX;
+      return z;
+    }
+
+    // Physical pixels per logical pixel for this frame: the monitor's DPI
+    // ratio times the user zoom. THE conversion constant for the platform
+    // layer - every logical->native multiply and native->logical divide
+    // should go through this rather than open-coding dpi/96.
+    float logical_to_physical() const
+    {
+      return (static_cast<float>(dpi) / 96.0f) * ui_scale();
+    }
+
     // For DIALOG frames: tree index of the owner frame (APPWINDOW or DIALOG).
     // Set via widgets->set_owner before show. 0 means no owner. While the
     // dialog is shown, the owner is input-blocked.
@@ -1049,6 +1078,13 @@ namespace xpl_host
     // dispatch walk and its guard stay together and stay testable.)
     bool     _os_focused     = true;  // frame currently has OS keyboard focus
     uint32_t _open_combo     = 0;   // tree index of the currently open ComboBoxWidget, or 0
+
+    // The zoom of the frame currently being painted (NEUI_ATTR_UI_SCALE), 1.0
+    // outside paint_frame. Set for the duration of a frame paint so the
+    // painters handed to widget paint code can report the true device scale
+    // and so a device-pixel CUSTOMDRAW can undo the zoom transform.
+    float    _paint_zoom     = 1.0f;
+    float    paint_zoom() const { return _paint_zoom; }
 
     // Popup-menu overlay state. _popup_active gates the nested message
     // loop in open_popup_menu; mouse + key hooks above check it before

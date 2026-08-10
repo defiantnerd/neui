@@ -1586,6 +1586,10 @@ static float neui_snap_to_steps(float v, int steps)
       ev.data.paint.width       = (float)sz.width;
       ev.data.paint.height      = (float)sz.height;
       ev.data.paint.focused     = focused;
+      // No user zoom on the native host (child widgets are real NSViews sized
+      // by AppKit), so the device scale is purely the backing-scale ratio.
+      ev.data.paint.scale       =
+        (backend && backend->get_scale_factor) ? backend->get_scale_factor(render_ctx) : 1.0f;
       sess->dispatch_event(&ev);
     }
 

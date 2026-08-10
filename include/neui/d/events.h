@@ -432,9 +432,22 @@ extern "C" {
     neui_widget_t              widget;
     struct neui_painter_api*   painter_api;  // curated drawing surface
     struct neui_painter*       p;             // opaque handle (paint-call scoped)
-    float                      width;         // widget size, logical pixels
+    float                      width;         // widget size (see `scale`)
     float                      height;
     bool                       focused;
+    // Physical pixels per unit drawn: the monitor's DPI ratio times the
+    // frame's NEUI_ATTR_UI_SCALE zoom. 1.0 on a 96-DPI display at 100 % zoom.
+    //
+    // width/height are LOGICAL pixels by default and the framework scales what
+    // you draw - so ignoring `scale` entirely is correct, and your rendering
+    // follows DPI and zoom for free. Read it when you need the device grid:
+    // to keep a hairline exactly one physical pixel (`1.0f / scale` units
+    // wide), to pick a bitmap or bake resolution, or to snap to whole pixels.
+    //
+    // With NEUI_ATTR_PAINT_DEVICE_PIXELS set on the widget, width/height
+    // instead arrive already multiplied by the zoom and one unit is one
+    // device-side pixel - see that attribute in <neui/d/attrs.h>.
+    float                      scale;
   } neui_event_paint_t;
 
   typedef struct neui_event {
