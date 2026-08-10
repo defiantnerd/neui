@@ -291,6 +291,28 @@ API_AVAILABLE(ios(13.0))
 - (void)gridLinkStop;
 @end
 
+namespace ios_host
+{
+  // NEUI_EVENT_GESTURE_BEGIN / _END for the built-in KNOB / SLIDER (their
+  // gesture always edits NEUI_PARAM_VALUE). Same gating as VALUE_CHANGED.
+  // Called from the KNOB reset menu and the UISlider touch-down / touch-up
+  // targets below.
+  static void emit_value_gesture_ios(uint32_t widget_id, bool begin)
+  {
+    Session* sess = nullptr;
+    WidgetData* wd = widget_for_id(widget_id, &sess);
+    if (!wd || !sess || !wd->emit_events) return;
+    float v = wd->attrs ? wd->attrs->get_float(NEUI_PARAM_VALUE, 0.0f) : 0.0f;
+    if (v < 0) v = 0; if (v > 1) v = 1;
+    neui_event_t ev = {};
+    ev.type = begin ? NEUI_EVENT_GESTURE_BEGIN : NEUI_EVENT_GESTURE_END;
+    ev.data.gesture.widget   = { wd->widget_id };
+    ev.data.gesture.attr_key = NEUI_PARAM_VALUE;
+    ev.data.gesture.value    = v;
+    sess->dispatch_event(&ev);
+  }
+}
+
 @implementation NEUINativeIOSPaintedView
 
 - (BOOL)isOpaque { return NO; }   // SECTION lets the frame bg show through
@@ -595,12 +617,19 @@ API_AVAILABLE(ios(13.0))
   if (!wd->type || strcmp(wd->type, NEUI_W_KNOB) != 0) return;
   float def = wd->attrs ? wd->attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f) : 0.0f;
   if (def < 0) def = 0; if (def > 1) def = 1;
+  // A one-shot reset carries an implicit GESTURE_BEGIN / _END pair, and only
+  // fires when the value actually moves (matches the desktop hosts' reset).
+  float cur = wd->attrs ? wd->attrs->get_float(NEUI_PARAM_VALUE, 0.0f) : 0.0f;
+  if (cur < 0) cur = 0; if (cur > 1) cur = 1;
+  if (def == cur) return;
+  ios_host::emit_value_gesture_ios(widget_id, true);
   neui_detail::ensure_attrs(wd->attrs).set_float(NEUI_PARAM_VALUE, def);
   neui_event_t ev = {};
   ev.type = NEUI_EVENT_VALUE_CHANGED;
   ev.data.value.widget = { wd->widget_id };
   ev.data.value.value  = def;
   sess->dispatch_event(&ev);
+  ios_host::emit_value_gesture_ios(widget_id, false);
   [self setNeedsDisplay];
 }
 
@@ -3437,6 +3466,8 @@ namespace ios_host
 - (void)checkboxTapped:(UIButton*)b;
 - (void)checkboxSwitchChanged:(UISwitch*)sw;
 - (void)sliderChanged:(UISlider*)sl;
+- (void)sliderGestureBegan:(UISlider*)sl;
+- (void)sliderGestureEnded:(UISlider*)sl;
 - (void)textChanged:(UITextField*)tf;
 @end
 
@@ -3513,6 +3544,16 @@ namespace ios_host
     ev.data.value.value = v;
     s->dispatch_event(&ev);
   }];
+}
+// UIControlEventTouchDown / TouchUp* bracket the UISlider's touch gesture so
+// every VALUE_CHANGED of the drag lands between GESTURE_BEGIN and _END.
+- (void)sliderGestureBegan:(UISlider*)sl
+{
+  ios_host::emit_value_gesture_ios((uint32_t)sl.tag, true);
+}
+- (void)sliderGestureEnded:(UISlider*)sl
+{
+  ios_host::emit_value_gesture_ios((uint32_t)sl.tag, false);
 }
 - (void)textChanged:(UITextField*)tf
 {
@@ -3978,6 +4019,12 @@ namespace ios_host
       sl.value = wd.attrs ? wd.attrs->get_float(NEUI_PARAM_VALUE, 0.0f) : 0.0f;
       sl.tag = tag;
       [sl addTarget:tgt action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+      [sl addTarget:tgt action:@selector(sliderGestureBegan:)
+             forControlEvents:UIControlEventTouchDown];
+      [sl addTarget:tgt action:@selector(sliderGestureEnded:)
+             forControlEvents:(UIControlEventTouchUpInside |
+                               UIControlEventTouchUpOutside |
+                               UIControlEventTouchCancel)];
       created = sl;
     }
     else if (!strcmp(wd.type, NEUI_W_COMBOBOX)) {

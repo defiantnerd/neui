@@ -52,6 +52,12 @@ namespace neui_detail
     float    drag_continuous = 0.0f;
     // BIAXIAL gets a second accumulator for the Y axis.
     float    drag_continuous_y = 0.0f;
+    // Attr keys the in-flight drag opened a GESTURE_BEGIN for (empty when
+    // none - e.g. DRAG_SOURCE, which is not a value gesture). Snapshotted at
+    // begin so the matching GESTURE_END still fires when the handler is
+    // removed mid-drag; a dangling begin-edit would wedge host automation.
+    std::string gesture_attr;
+    std::string gesture_attr_y;
   };
 
   // ---- Dispatch context (host callbacks) ---------------------------------
@@ -70,6 +76,11 @@ namespace neui_detail
     void (*invalidate)(void* host_data)                                = nullptr;
     void (*emit_attr_changed)(void* host_data,
                                 const char* attr_key, float value)     = nullptr;
+    // NEUI_EVENT_GESTURE_BEGIN / _END for the given target attr. Drags fire
+    // begin on grab / end on release; one-shot changes (wheel / key / click /
+    // reset) fire an implicit pair around an actual value change.
+    void (*emit_gesture)(void* host_data,
+                          const char* attr_key, float value, bool begin) = nullptr;
     int  (*popup_menu)(void* host_data, int local_x, int local_y,
                         const char* const* items)                       = nullptr;
     // DRAG_SOURCE seam. Blocks until the OS drag loop ends; returns the
@@ -188,6 +199,53 @@ namespace neui_detail
     if (ctx.emit_attr_changed)
       ctx.emit_attr_changed(ctx.host_data, attr_key.c_str(), new_value);
     return true;
+  }
+
+  inline void behavior_emit_gesture(const BehaviorDispatchCtx& ctx,
+                                     const std::string& attr_key,
+                                     float value, bool begin)
+  {
+    if (!ctx.emit_gesture || attr_key.empty()) return;
+    ctx.emit_gesture(ctx.host_data, attr_key.c_str(), value, begin);
+  }
+
+  // One-shot write wrapped in an implicit GESTURE_BEGIN / _END pair. The pair
+  // (and the write) only fires when the snapped value actually moves, so the
+  // change-detection must run BEFORE the begin - a bare behavior_write_value
+  // would emit ATTR_CHANGED ahead of the begin. Used by WHEEL / KEY_STEP /
+  // CLICK_* / CONTEXT_RESET; drags bracket the whole interaction instead.
+  inline bool behavior_write_value_gesture(const BehaviorHandler& H,
+                                            const BehaviorDispatchCtx& ctx,
+                                            const std::string& attr_key,
+                                            float new_value)
+  {
+    if (!ctx.bag || attr_key.empty()) return false;
+    int steps = behavior_read_steps(H, ctx.bag);
+    float snapped = behavior_snap_to_steps(
+        behavior_clamp(new_value, H.min, H.max), steps, H.min, H.max);
+    float old_value = attr_as_float(ctx.bag, attr_key, H.min);
+    if (snapped == old_value) return false;
+    behavior_emit_gesture(ctx, attr_key, old_value, true);
+    behavior_write_value(H, ctx, attr_key, new_value);
+    behavior_emit_gesture(ctx, attr_key, snapped, false);
+    return true;
+  }
+
+  // Close the drag gesture(s) recorded on the runtime. Reads the CURRENT attr
+  // values (the handler may already be gone) and clears the snapshots.
+  inline void behavior_end_drag_gesture(BehaviorRuntime& rt,
+                                         const BehaviorDispatchCtx& ctx)
+  {
+    if (!rt.gesture_attr.empty()) {
+      float v = ctx.bag ? attr_as_float(ctx.bag, rt.gesture_attr, 0.0f) : 0.0f;
+      behavior_emit_gesture(ctx, rt.gesture_attr, v, false);
+    }
+    if (!rt.gesture_attr_y.empty()) {
+      float v = ctx.bag ? attr_as_float(ctx.bag, rt.gesture_attr_y, 0.0f) : 0.0f;
+      behavior_emit_gesture(ctx, rt.gesture_attr_y, v, false);
+    }
+    rt.gesture_attr.clear();
+    rt.gesture_attr_y.clear();
   }
 
   // ---- Per-kind helpers --------------------------------------------------
@@ -363,6 +421,15 @@ namespace neui_detail
     if (H.kind == NEUI_BEHAVIOR_KIND_DRAG_BIAXIAL && !H.target_y.empty()) {
       rt.drag_continuous_y = behavior_read_value_y(H, ctx.bag);
     }
+    // The drag is armed: open the gesture(s). Snapshot the attr keys on the
+    // runtime so the matching end fires even if the handler is removed
+    // mid-drag (behavior_end_drag_gesture closes from the snapshot).
+    rt.gesture_attr = H.target;
+    behavior_emit_gesture(ctx, rt.gesture_attr, rt.drag_continuous, true);
+    if (H.kind == NEUI_BEHAVIOR_KIND_DRAG_BIAXIAL && !H.target_y.empty()) {
+      rt.gesture_attr_y = H.target_y;
+      behavior_emit_gesture(ctx, rt.gesture_attr_y, rt.drag_continuous_y, true);
+    }
   }
 
   // ---- Main mouse dispatch -----------------------------------------------
@@ -380,9 +447,11 @@ namespace neui_detail
     if (rt.dragging) {
       BehaviorHandler* H = behavior_get_handler(ba, rt.active_handler);
       if (!H) {
-        // Handler was removed mid-drag: cancel the drag.
+        // Handler was removed mid-drag: cancel the drag. Still close the
+        // gesture from the snapshot - a dangling begin wedges automation.
         rt.dragging = false;
         rt.active_handler = 0;
+        behavior_end_drag_gesture(rt, ctx);
         return false;
       }
       if (event->type == NEUI_EVENT_MOUSE_BUTTON_UP ||
@@ -390,6 +459,7 @@ namespace neui_detail
             !(event->data.mouse.buttonmap & NEUI_MK_LBUTTON))) {
         rt.dragging = false;
         rt.active_handler = 0;
+        behavior_end_drag_gesture(rt, ctx);
         return true;
       }
       if (event->type == NEUI_EVENT_MOUSE_MOVE) {
@@ -461,7 +531,7 @@ namespace neui_detail
       int   mag     = (delta > 0) ? delta : -delta;
       float change  = sign * H->step * static_cast<float>(mag);
       float current = behavior_read_value(*H, ctx.bag);
-      behavior_write_value(*H, ctx, H->target, current + change);
+      behavior_write_value_gesture(*H, ctx, H->target, current + change);
       return true;
     }
 
@@ -482,7 +552,7 @@ namespace neui_detail
         if (ctx.bag && !H->target_default.empty()) {
           def_v = attr_as_float(ctx.bag, H->target_default, H->min);
         }
-        behavior_write_value(*H, ctx, H->target, def_v);
+        behavior_write_value_gesture(*H, ctx, H->target, def_v);
       }
       return true;
     }
@@ -499,7 +569,7 @@ namespace neui_detail
         float current = behavior_read_value(*H, ctx.bag);
         float mid = 0.5f * (H->min + H->max);
         float new_v = (current >= mid) ? H->min : H->max;
-        behavior_write_value(*H, ctx, H->target, new_v);
+        behavior_write_value_gesture(*H, ctx, H->target, new_v);
         return true;
       }
       if (H->kind == NEUI_BEHAVIOR_KIND_CLICK_SELECT) {
@@ -512,7 +582,7 @@ namespace neui_detail
         float mid = 0.5f * (H->min + H->max);
         bool now_selected = !(current >= mid);
         float new_v = now_selected ? H->max : H->min;
-        behavior_write_value(*H, ctx, H->target, new_v);
+        behavior_write_value_gesture(*H, ctx, H->target, new_v);
         if (ctx.bag && !H->selected_attr.empty()) {
           int sv = now_selected ? 1 : 0;
           if (ctx.bag->get_int(H->selected_attr, -1) != sv) {
@@ -532,7 +602,7 @@ namespace neui_detail
           float current = behavior_read_value(*H, ctx.bag);
           float mid = 0.5f * (H->min + H->max);
           float new_v = (current >= mid) ? H->min : H->max;
-          behavior_write_value(*H, ctx, H->target, new_v);
+          behavior_write_value_gesture(*H, ctx, H->target, new_v);
           return true;
         }
         float current = behavior_read_value(*H, ctx.bag);
@@ -543,7 +613,7 @@ namespace neui_detail
         if (next >= steps) next = H->wrap ? 0 : steps - 1;
         float new_v = H->min + (H->max - H->min) *
                       (static_cast<float>(next) / static_cast<float>(steps - 1));
-        behavior_write_value(*H, ctx, H->target, new_v);
+        behavior_write_value_gesture(*H, ctx, H->target, new_v);
         return true;
       }
 
@@ -608,7 +678,7 @@ namespace neui_detail
       default:
         return false;
     }
-    behavior_write_value(*H, ctx, H->target, new_v);
+    behavior_write_value_gesture(*H, ctx, H->target, new_v);
     return true;
   }
 

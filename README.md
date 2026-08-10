@@ -19,7 +19,11 @@ This includes using fonts, colors and sizes that are defined from the target sys
 * linux (implemented, X11 + Cairo via the crossplatform host)
 * iOS / iPadOS (implemented, native UIKit host + crossplatform host)
 * crossplatform for all of the above
-* embedded (DAW plugin windows, X11 host run-loop integration on linux)
+* embedded (DAW plugin windows via `NEUI_API_EMBED` on windows / macOS / linux, incl. X11 host run-loop integration)
+
+## audio plugin UIs
+
+For audio plugin editors (VST3 / CLAP / AU adapters), **prefer the crossplatform host** - select it explicitly with `neui_get_api("neui.host.crossplatform")` instead of taking the default. It renders pixel-identically on every platform and is the only host that implements `NEUI_API_EMBED` (`<neui/d/embed.h>`), which parents a `NEUI_W_PLUGWINDOW` into the DAW-provided native parent (HWND on windows, NSView* on macOS, X11 Window on linux). In embedded mode neui owns no event loop - never call `run()` or `pump_once()` from a plugin; on windows/macOS the DAW's own pump services the embedded frame, on linux register `embed->event_fd()` with the host run loop and drive `embed->pump_and_tick()` from its timer. The native win32/macOS hosts are for standalone applications and do not support embedding.
 
 ## how to use
 

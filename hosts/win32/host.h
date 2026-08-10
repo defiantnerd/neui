@@ -224,6 +224,10 @@ namespace win32_host {
     float paint_drag_prev_angle = 0.0f;  // last cursor angle (rad) relative to centre (rotational mode)
     float paint_drag_continuous = 0.0f;  // continuous unsnapped value during drag
 
+    // SLIDER (native trackbar): a GESTURE_BEGIN has been emitted and its
+    // GESTURE_END is pending on the trackbar's TB_ENDTRACK notification.
+    bool  slider_gesture_active = false;
+
     // GRID (NEUI_W_GRID) state - column model, row data, scroll position,
     // selection, column-resize / scrollbar drag state. Lazy-allocated;
     // every other widget pays a single pointer.
