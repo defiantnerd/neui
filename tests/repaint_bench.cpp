@@ -37,9 +37,42 @@
 // Reported: mean ms per full-frame repaint, the implied ceiling in frames per
 // second, and what fraction of a 60 Hz budget (16.67 ms) one repaint eats.
 //
+// What the numbers do NOT establish - read before quoting them
+// ----------------------------------------------------------
+//   - PER BACKEND. The result is a property of the backend, not of neui. GPU-
+//     backed CG/D2D and software Cairo differ in kind: Cairo clears the whole
+//     surface and blits it through XShm every frame, so its cost scales with
+//     PIXELS as well as with widget count, and a large window at high DPI can
+//     dominate. Run it on each platform you care about; do not carry one
+//     platform's number to another.
+//   - NOT A VSYNC MEASUREMENT, and on some backends not even a free-running
+//     one. The loop deliberately has no frame pacing, so "fps ceiling" is CPU
+//     throughput into the backing store with compositing excluded. Worse, the
+//     D2D backend presents with a sync interval of 1, so on Windows this loop
+//     is expected to read ~16.7 ms/frame REGARDLESS of true repaint cost -
+//     that figure would be the vsync period, not a measurement. Treat the
+//     Windows numbers as invalid until the backend is given a no-vsync path.
+//   - TEXT COST IS A FLOOR. Every cell draws the same short string at the same
+//     size, which is the best case for the platform glyph cache. A real UI
+//     with varied, longer labels pays MORE, so the reported text share is a
+//     lower bound.
+//   - LARGE MESHES MAY BE UNDERSTATED. At high NEUI_BENCH_GRID the frame is
+//     bigger than the screen and the window manager clips it, so some fills
+//     never rasterise (text layout cost is clip-independent, fills are not).
+//   - ONE SAMPLE. Each figure is a single timed window with no variance
+//     reported; treat small differences (<20 %) as noise.
+//   - AN EMBEDDED PLUGIN SHARES THE DAW'S UI THREAD, so "% of a 60 Hz budget"
+//     is the share of a budget the host is also spending, and several plugin
+//     instances multiply it.
+//
 // Needs a GUI session (it realizes a real window), so it is built but NOT
 // ctest-registered; run ./tests/<config>/neui_repaint_bench manually.
 // Set NEUI_BENCH_GRID to override the mesh size (default 10 -> 100 widgets).
+//
+// Doubles as the only coverage for a bug it found: `widgets->invalidate()` on a
+// TOP-LEVEL FRAME used to be a silent no-op. The warm-up below invalidates the
+// frame and hard-fails if no WIDGET_PAINT arrives, so that regression cannot
+// come back unnoticed while this is run.
 
 #include <neui/neui.h>
 
@@ -107,12 +140,24 @@ using clock_t_ = std::chrono::steady_clock;
 
 struct Result
 {
-  double frames        = 0;   // full-frame repaints completed
+  long   iterations    = 0;   // invalidate -> pump_once round trips
+  long   paints        = 0;   // WIDGET_PAINT events in that time
   double seconds       = 0;
+
+  // Per INVALIDATE. This is the pair that answers "did narrowing happen?", so
+  // both are derived from `iterations` and never from `paints`.
+  double paints_per_invalidate = 0;   // N today; ~1 under perfect narrowing
+  double ms_per_invalidate     = 0;   // wall cost of one invalidate + pump
+
+  // Per full mesh pass, derived from the paint count instead. Robust to
+  // coalescing (the API promises at most one repaint per tick), which makes it
+  // the right headline for "what does a full repaint cost" - and comparing it
+  // against ms_per_invalidate in the full-frame case is a validity check: they
+  // agree only if each invalidate really did produce exactly one full pass.
+  double frames        = 0;
   double ms_per_frame  = 0;
   double fps_ceiling   = 0;
   double pct_of_60hz   = 0;
-  long   paints        = 0;
 };
 
 // Drive invalidate -> pump_once for `budget_s` seconds and report throughput.
@@ -134,12 +179,15 @@ Result measure(neui_api_t* neui, neui_session_t sess, neui_widget_t target,
   auto t1 = clock_t_::now();
 
   Result r;
+  r.iterations = iterations;
   r.paints  = g_paint_count - start_paints;
   r.seconds = std::chrono::duration<double>(t1 - t0).count();
-  // A "frame" is one full pass over the mesh. Derived from the paint count
-  // rather than from the iteration count on purpose: a pump_once that
-  // coalesced two invalidates into one repaint must not be counted twice, and
-  // this is also what will show wave 5 painting FEWER widgets per invalidate.
+
+  if (iterations > 0 && r.seconds > 0.0) {
+    r.paints_per_invalidate = (double)r.paints / (double)iterations;
+    r.ms_per_invalidate     = (r.seconds * 1000.0) / (double)iterations;
+  }
+  // A "frame" is one full pass over the mesh.
   r.frames = (widgets_per_frame > 0)
              ? (double)r.paints / (double)widgets_per_frame : 0.0;
   if (r.frames > 0.0 && r.seconds > 0.0) {
@@ -147,7 +195,6 @@ Result measure(neui_api_t* neui, neui_session_t sess, neui_widget_t target,
     r.fps_ceiling  = r.frames / r.seconds;
     r.pct_of_60hz  = (r.ms_per_frame / (1000.0 / 60.0)) * 100.0;
   }
-  (void)iterations;
   return r;
 }
 
@@ -160,13 +207,28 @@ void report(const char* label, const Result& r, int n_widgets)
   if (r.frames > 0.0)
     std::printf("  %-12s  %7.4f ms per widget paint\n", "",
                 r.ms_per_frame / (double)n_widgets);
+  std::printf("  %-12s  %7.3f ms per invalidate, %.1f widget paints per invalidate"
+              " (%ld invalidates)\n", "",
+              r.ms_per_invalidate, r.paints_per_invalidate, r.iterations);
+  (void)n_widgets;
 }
 
 } // namespace
 
 int main()
 {
-  if (const char* g = std::getenv("NEUI_BENCH_GRID")) {
+  // MSVC deprecates getenv in favour of getenv_s and the project defines no
+  // _CRT_SECURE_NO_WARNINGS; suppress locally rather than widening a global.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+  const char* grid_env = std::getenv("NEUI_BENCH_GRID");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+  if (grid_env) {
+    const char* g = grid_env;
     int v = std::atoi(g);
     if (v >= 1 && v <= 60) g_grid_n = v;
   }
@@ -214,7 +276,10 @@ int main()
   // which would otherwise land in the first measurement.
   measure(neui, sess, win, 0.4, n_widgets);
   if (!g_have_painter) {
-    std::printf("[FAIL] no WIDGET_PAINT reached the client - nothing measured\n");
+    // Also the regression guard for invalidate-on-a-frame being a no-op: that
+    // bug presented exactly here, as zero paints where 100 were expected.
+    std::printf("[FAIL] no WIDGET_PAINT reached the client - nothing measured "
+                "(is widgets->invalidate on a frame a no-op again?)\n");
     neui->destroy(sess);
     return 1;
   }
@@ -231,15 +296,30 @@ int main()
   std::printf("\nSINGLE widget invalidate (widgets->invalidate on one cell):\n");
   report("one-widget", one, n_widgets);
 
-  double widgets_painted_per_invalidate =
-    (one.paints > 0 && one.seconds > 0.0)
-      ? (double)one.paints / (one.fps_ceiling * one.seconds) : 0.0;
-  std::printf("\n  widgets repainted per single-widget invalidate: %.1f of %d\n",
-              widgets_painted_per_invalidate, n_widgets);
-  std::printf("  ratio one-widget / full cost: %.2fx  "
-              "(1.00x = no narrowing, %.2fx = perfect)\n",
-              (full.ms_per_frame > 0.0) ? one.ms_per_frame / full.ms_per_frame : 0.0,
+  // The wave-5 baseline. BOTH figures are per-INVALIDATE: a paint-count-
+  // normalised ratio is invariant to narrowing by construction (it divides the
+  // cost by the very paint count that narrowing reduces), so it would read
+  // "no change" even after a perfect fix. These read 1/N and ~1/N when
+  // narrowing lands.
+  std::printf("\n  widgets repainted per single-widget invalidate: %.1f of %d"
+              "   (perfect narrowing = 1.0)\n",
+              one.paints_per_invalidate, n_widgets);
+  std::printf("  cost of one single-widget invalidate vs one full-frame "
+              "invalidate: %.3fx  (1.000x = no narrowing, %.3fx = perfect)\n",
+              (full.ms_per_invalidate > 0.0)
+                ? one.ms_per_invalidate / full.ms_per_invalidate : 0.0,
               1.0 / (double)n_widgets);
+
+  // Validity check on the headline: the paint-derived and invalidate-derived
+  // costs must agree in the full-frame case, or some invalidates were coalesced
+  // and "ms per full repaint" is averaging over passes that did not happen.
+  if (full.ms_per_frame > 0.0) {
+    double skew = full.ms_per_invalidate / full.ms_per_frame;
+    if (skew < 0.95 || skew > 1.05)
+      std::printf("\n  NOTE: %.2f invalidates per full repaint - figures below are "
+                  "paint-normalised and remain valid, but the loop is not 1:1.\n",
+                  skew);
+  }
 
   // Same load minus the text draw. The delta is the platform text engine's
   // share of a repaint.

@@ -891,9 +891,22 @@ against a 60 Hz budget. Apple M-series, Release, macOS / CG backend:
 
 **A 100-widget CUSTOMDRAW frame repaints entirely in 5 % of a 60 Hz budget.**
 Cost is linear in widget count, and partial repaint only starts to matter
-somewhere past ~900 widgets - far above any realistic plugin UI. This is the
-Phase 0a measurement the plan wanted handed over, and it retires the
-granularity anxiety outright rather than arguing about it.
+somewhere past ~900 widgets - far above any realistic plugin UI.
+
+**Scope that honestly: this is one backend on one machine.** The result is a
+property of the *backend*, not of neui, and only macOS / CoreGraphics was
+measured. It answers the granularity question **for GPU-backed CG**; it does
+not answer it for software Cairo on Linux, where `begin_frame` clears the whole
+surface and `end_frame` blits it through XShm, so cost scales with **pixels** as
+well as with widget count and a large window at high DPI can dominate. The
+benchmark is now wired into the Linux test block (`tests/CMakeLists.txt`, the
+`UNIX AND NOT APPLE` branch) using the same source, so re-checking it there is
+a `cmake --build` away on any X desktop - that number is the one still missing,
+and it is the one that could change the recommendation. Windows is worse than
+missing: the D2D backend presents with a sync interval of 1, so this loop would
+report ~16.7 ms/frame regardless of true cost - the vsync period, not a
+measurement. The benchmark header says all of this so nobody quotes the macOS
+figure as a cross-platform fact.
 
 Two further findings that redirect the effort:
 
@@ -901,10 +914,20 @@ Two further findings that redirect the effort:
   and event dispatch are *not* the cost; the platform draw calls are. So a
   dirty-rect optimisation would remove platform calls, not framework overhead -
   there is no cheap C++ win hiding here.
-- **Text is 59 % of a repaint** (0.49 ms of 0.84 ms at 100 widgets; shapes are
-  the other 41 %). If anything deserves optimising first it is text, not the
+- **Text is ~58 % of a repaint** (0.49 ms of 0.83 ms at 100 widgets; shapes are
+  the other ~42 %). If anything deserves optimising first it is text, not the
   widget walk - a per-widget cached text layout would buy more than partial
-  repaint does at every widget count below ~900.
+  repaint does at every widget count below ~900. Note this is a **lower bound**:
+  every cell draws the same short string at the same size, which is the best
+  case for the platform glyph cache, so a real UI with varied labels pays more.
+
+Known biases, all disclosed in the benchmark header rather than left for a
+reader to discover: the text figure is a floor (glyph-cache best case); the
+900/1600-widget rows may be *understated* because the frame exceeds the screen
+and the WM clips some fills away (text layout cost is clip-independent, fills
+are not); each figure is a single timed window with no variance, so differences
+under ~20 % are noise; and "% of a 60 Hz budget" is generous for an embedded
+plugin, which shares that budget with the DAW and with other instances.
 
 **One real bug the benchmark found on its first run**, unrelated to perf:
 `widgets->invalidate()` on a **top-level frame was a silent no-op**.
@@ -916,7 +939,19 @@ that does not exist. Fixed in `w_invalidate` (own handle first, then
 ancestors') rather than in `find_parent_native_handle`, whose other callers
 genuinely mean the *containing* frame - a DIALOG asking that question means its
 owner, not itself. Worth noting the benchmark caught this because it measured
-zero paints where it expected 100; no test covered invalidating a frame.
+zero paints where it expected 100; no test covered invalidating a frame, and
+the benchmark's warm-up now hard-fails on it, which is the only guard there is.
+
+The **same blind spot sat in all four attribute setters** (`a_set_int` /
+`_float` / `_string` / `a_remove`), which shared an `if (!wd.is_frame())` gate
+over `find_parent_native_handle`. The reasoning in the comment - "frames handle
+their own side effects" - is true of the size constraints and the window icon
+but *not* of the frame's own paint-time attrs: `Session::paint_frame` reads
+`NEUI_ATTR_BACKGROUND` off the frame at clear time, so changing a window's
+background colour at runtime left it stale until some unrelated repaint. All
+four now route through one `invalidate_owning_frame()` helper that checks the
+widget's own handle first, which also removes four copies of the same block.
+(Found by the reviewer as an adjacent residual, not by the benchmark.)
 
 **Recommendation: bank the measurement and do NOT build the dirty-rect
 machinery yet.** Beyond the payoff being ~0 at realistic widget counts, the
@@ -928,10 +963,12 @@ retained in-memory image and blits, so it holds; CG's context lives only for
 the duration of `drawRect:` and AppKit's own clip already narrows it; D2D
 depends on the present model). It also needs the accumulated dirty rect
 reconciled with the platform's *own* damage region, or a genuine expose after
-occlusion paints only the dirty part and leaves stale pixels. ~30
-`platform_invalidate` call sites would each need classifying as rect or
-full. That is a real project with a real stale-pixel risk, in exchange for
-headroom that is already there.
+occlusion paints only the dirty part and leaves stale pixels. **50**
+`platform_invalidate` call sites (37 in `host.cpp`, 13 in `widgets.cpp`) would
+each need classifying as rect-or-full, plus the ~11 direct `setNeedsDisplay:`
+sites in `platform_macos.mm` and the `needs_paint` flags in
+`platform_linux.cpp` that bypass the seam entirely. That is a real project with
+a real stale-pixel risk, in exchange for headroom that is already there.
 
 The original plan text follows, unchanged, for when a case for it does appear
 (a very large grid, or a low-power target where 5 % becomes 25 %).

@@ -163,6 +163,20 @@ if(UNIX AND NOT APPLE)
   target_compile_features(neui_embed_smoke PRIVATE cxx_std_17)
   target_link_libraries(neui_embed_smoke PRIVATE neui neui-xplhost neui-backend-cairo)
 
+  # Repaint benchmark, Linux/Cairo. Same source as the macOS build above - the
+  # file is platform-neutral (it asks for neui.host.crossplatform and uses only
+  # the public API). This is the backend where the answer could differ: Cairo is
+  # a SOFTWARE renderer whose begin_frame clears the whole surface and whose
+  # end_frame blits it via XShm, so its cost scales with PIXELS as well as with
+  # widget count - unlike the GPU-backed CG path the macOS number came from.
+  # Needs a live X display, so built but not ctest-registered; run
+  # ./tests/neui_repaint_bench manually.
+  add_executable(neui_repaint_bench repaint_bench.cpp)
+  target_include_directories(neui_repaint_bench PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_repaint_bench PRIVATE cxx_std_17)
+  target_link_libraries(neui_repaint_bench PRIVATE neui neui-xplhost)
+
   # XDND drag-source harness (internal-drag path). Needs a live X display AND
   # warps the pointer, so it is built but not ctest-registered; run
   # ./tests/neui_dnd_source_smoke manually.

@@ -785,6 +785,28 @@ namespace xpl_host
     w_popup_tree_menu,
   };
 
+  // Repaint the frame that owns `idx` after an attribute change.
+  //
+  // Self-painted widgets read their attrs during paint (NEUI_ATTR_BACKGROUND,
+  // NEUI_ATTR_STEPS, NEUI_ATTR_VALUE_TEXT, NEUI_ATTR_ALIGN_TEXT, a bound
+  // {token} ...), so a runtime write has to invalidate or the widget shows
+  // stale pixels until some unrelated repaint.
+  //
+  // The widget's OWN native handle counts. The four attr setters previously
+  // shared a `if (!wd.is_frame())` gate over find_parent_native_handle, on the
+  // reasoning that "frames handle their own side effects" - true of the size
+  // constraints and the window icon, but NOT of the frame's own paint-time
+  // attrs: Session::paint_frame reads NEUI_ATTR_BACKGROUND off the frame at
+  // clear time, so setting it at runtime left the window stale. Same
+  // parents-only blind spot as w_invalidate had.
+  static void invalidate_owning_frame(Session* s, uint32_t idx)
+  {
+    if (!s || !s->_widgets.exists(idx)) return;
+    void* target = s->_widgets[idx].native_handle;
+    if (!target) target = s->find_parent_native_handle(idx);
+    if (target) platform_invalidate(target);
+  }
+
   // -------------------------------------------------------------------------
   // Attribute API
 
@@ -818,10 +840,7 @@ namespace xpl_host
     // NEUI_ATTR_TRISTATE, NEUI_ATTR_STEPS etc.), so a runtime change has
     // to invalidate the owning frame. Frames handle their own side
     // effects above (size constraints).
-    if (!wd.is_frame()) {
-      if (void* frame = s->find_parent_native_handle(idx))
-        platform_invalidate(frame);
-    }
+    invalidate_owning_frame(s, idx);
     return 1;
   }
 
@@ -882,10 +901,7 @@ namespace xpl_host
     // change has to invalidate the owning frame. Frames go through the
     // icon_path branch above for their one live-update key; everything
     // else just invalidates the parent frame.
-    if (!wd.is_frame()) {
-      if (void* frame = s->find_parent_native_handle(idx))
-        platform_invalidate(frame);
-    }
+    invalidate_owning_frame(s, idx);
     return 1;
   }
 
@@ -933,10 +949,7 @@ namespace xpl_host
     // clearing a bound {token} or a value on a compound widget), so
     // invalidate the owning frame - mirroring the a_set_* path above.
     // Without this the widget shows stale pixels until an unrelated repaint.
-    if (!wd.is_frame()) {
-      if (void* frame = s->find_parent_native_handle(idx))
-        platform_invalidate(frame);
-    }
+    invalidate_owning_frame(s, idx);
     return 1;
   }
 
@@ -1004,10 +1017,7 @@ namespace xpl_host
     // SLIDER, NEUI_ATTR_ROTATION on IMAGE, etc.). Invalidate the owning
     // frame so the next paint pulls fresh values. Other frame float attrs
     // aren't read in paint, so skip them for symmetry.
-    if (!wd.is_frame()) {
-      if (void* frame = s->find_parent_native_handle(idx))
-        platform_invalidate(frame);
-    }
+    invalidate_owning_frame(s, idx);
     return 1;
   }
 
