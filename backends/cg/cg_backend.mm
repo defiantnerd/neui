@@ -41,8 +41,9 @@ namespace neui_cg_backend
   // Empty family => system UI font (SF Pro); weight 0 => Regular (400).
   struct FontState
   {
-    std::string family;     // empty = system UI font
-    int         weight = 0; // CSS 100..900; 0 = Regular
+    std::string family;      // empty = system UI font
+    int         weight = 0;  // CSS 100..900; 0 = Regular
+    bool        italic = false;
   };
 
   // Per-window render context. The CGContextRef itself only lives for one
@@ -172,12 +173,14 @@ namespace neui_cg_backend
       ? &st->font_stack.back() : nullptr;
     const std::string family = fs ? fs->family : std::string();
     const int         weight = fs ? fs->weight : 0;
+    const bool        italic = fs ? fs->italic : false;
 
     std::string key = family;
     key += '|';
     key += std::to_string(weight);
     key += '|';
     key += std::to_string(neui_detail::font_size_q10(font_size));
+    key += italic ? "|i" : "|r";
 
     auto& cache = font_cache();
     auto it = cache.find(key);
@@ -203,6 +206,19 @@ namespace neui_cg_backend
         font = [UIFont systemFontOfSize:static_cast<CGFloat>(font_size)
                                  weight:ns_weight];
     }
+    if (italic && font) {
+      // Prefer a real italic face; synthesise nothing. A family with no italic
+      // member returns nil here and we keep the upright font rather than
+      // silently slanting it - matching the "push, not pull" font policy.
+      UIFontDescriptor* it_desc = [font.fontDescriptor
+        fontDescriptorWithSymbolicTraits:(font.fontDescriptor.symbolicTraits
+                                          | UIFontDescriptorTraitItalic)];
+      if (it_desc) {
+        UIFont* it_font = [UIFont fontWithDescriptor:it_desc
+                                                size:static_cast<CGFloat>(font_size)];
+        if (it_font) font = it_font;
+      }
+    }
 #else
     NSFont* font = nil;
     if (family.empty()) {
@@ -221,6 +237,15 @@ namespace neui_cg_backend
       if (!font)  // unknown family -> graceful fallback to the system font
         font = [NSFont systemFontOfSize:static_cast<CGFloat>(font_size)
                                   weight:ns_weight];
+    }
+    if (italic && font) {
+      // Prefer a real italic face; synthesise nothing. convertFont: returns the
+      // SAME font when the family has no italic member, so an upright-only
+      // family stays upright rather than being silently slanted - matching the
+      // "push, not pull" font policy.
+      NSFont* it_font = [[NSFontManager sharedFontManager]
+        convertFont:font toHaveTrait:NSItalicFontMask];
+      if (it_font) font = it_font;
     }
 #endif
     // NSFont / UIFont is toll-free bridged with CTFont; retain a +1 ref for the cache.
@@ -979,14 +1004,21 @@ namespace neui_cg_backend
   // per-call parameter and the stack resets on every begin_frame. Empty
   // family => system UI font; weight is CSS-style 100..900 (0 = Regular).
 
-  static void cg_push_font(neui_render_ctx_t raw, const char* family_utf8, int weight)
+  static void cg_push_font_styled(neui_render_ctx_t raw, const char* family_utf8,
+                                   int weight, bool italic)
   {
     auto* st = static_cast<CGContextState*>(raw);
     if (!st) return;
     FontState fs;
     if (family_utf8 && *family_utf8) fs.family = family_utf8;
     fs.weight = weight;
+    fs.italic = italic;
     st->font_stack.push_back(std::move(fs));
+  }
+
+  static void cg_push_font(neui_render_ctx_t raw, const char* family_utf8, int weight)
+  {
+    cg_push_font_styled(raw, family_utf8, weight, false);
   }
 
   static void cg_pop_font(neui_render_ctx_t raw)
@@ -1289,6 +1321,7 @@ namespace neui_cg_backend
     cg_stroke_path_styled,
     cg_stroke_path_gradient,
     cg_font_metrics,
+    cg_push_font_styled,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

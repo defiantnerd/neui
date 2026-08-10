@@ -205,7 +205,7 @@ Verified: `cmake --build` clean and warning-free on macOS (Xcode/Debug);
 are **compile-unverified locally** (authored on macOS), matching the
 established convention for this repo's cross-machine flow.
 
-### Wave 1 — painter completeness — **1.1 + 1.2 DONE**
+### Wave 1 — painter completeness — **DONE** (1.4 deferred)
 
 - **1.1 — text metrics + alignment.** **Done.** The design question was where the
   numbers live, and the answer shaped the API: ascent/descent/line-height are
@@ -235,8 +235,18 @@ established convention for this repo's cross-machine flow.
   entries share one implementation (a value ring and a `fill_ellipse` agree on
   their outline). 10 Tier-1 cases, including the radius clamp and the
   deliberately-open `draw_line` path.
-- **1.3 — italic.** Still open. Needs a style axis on `push_font`, which means
-  touching each backend's font cache key (currently family + weight).
+- **1.3 — italic.** **Done.** `push_font_styled(family, weight, italic)` on both
+  the backend interface and the painter; `push_font` is now exactly
+  `push_font_styled(..., false)` and pops the same way. Italic is **resolved,
+  never synthesised** — `DWRITE_FONT_STYLE_ITALIC`, `NSFontManager
+  convertFont:toHaveTrait:` / `UIFontDescriptorTraitItalic`, `FC_SLANT_ITALIC`
+  — and a family with no italic member stays upright rather than being sheared
+  (so no `_OBLIQUE`). The style is part of every backend's font-cache key, so
+  upright and italic at the same (family, weight, size) cannot collide. The
+  painter forwarder degrades to plain `push_font` on a backend predating the
+  append, which matters for stack balance: the client calls `pop_font`
+  regardless. Verified on the real CG backend (Times upright 184.86 vs italic
+  182.65 — genuinely different advances) plus 5 Tier-1 cases.
 - **1.4 — wrapped text at painter level** — deferred unless asked; the wrap
   algorithm exists in the MULTILINE widget and is liftable.
 

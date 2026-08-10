@@ -515,3 +515,100 @@ TEST_CASE("the appended shape vtable slots are populated")
   CHECK(k_painter_api.draw_ellipse    == painter_draw_ellipse);
   CHECK(k_painter_api.draw_line       == painter_draw_line);
 }
+
+// ---------------------------------------------------------------------------
+// Font style axis (1.3). The interesting part is the fallback: pop_font is
+// unconditional, so a backend predating push_font_styled must still get SOME
+// push or the client's balanced push/pop pair would underflow the stack.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+  struct FontPush {
+    std::string family;
+    int  weight = -1;
+    bool italic = false;
+    bool via_styled = false;
+    int  count = 0;
+  };
+  FontPush g_font;
+
+  void NEUI_ABI lg_push_font(neui_render_ctx_t, const char* fam, int weight)
+  {
+    g_font.family = fam ? fam : "";
+    g_font.weight = weight;
+    g_font.italic = false;
+    g_font.via_styled = false;
+    ++g_font.count;
+  }
+  void NEUI_ABI lg_push_font_styled(neui_render_ctx_t, const char* fam,
+                                     int weight, bool italic)
+  {
+    g_font.family = fam ? fam : "";
+    g_font.weight = weight;
+    g_font.italic = italic;
+    g_font.via_styled = true;
+    ++g_font.count;
+  }
+
+  struct FontFixture {
+    neui_render_backend_t backend{};
+    neui_painter          p{};
+    FontFixture()
+    {
+      backend.push_font        = lg_push_font;
+      backend.push_font_styled = lg_push_font_styled;
+      p.backend = &backend;
+      p.ctx     = k_ctx;
+      g_font = FontPush{};
+    }
+  };
+
+} // namespace
+
+TEST_CASE("push_font_styled forwards the italic flag")
+{
+  FontFixture f;
+  painter_push_font_styled(&f.p, "Inter", 600, true);
+  CHECK_EQ(g_font.count, 1);
+  CHECK(g_font.via_styled);
+  CHECK_EQ(g_font.family, std::string("Inter"));
+  CHECK_EQ(g_font.weight, 600);
+  CHECK(g_font.italic);
+}
+
+TEST_CASE("push_font_styled(..., false) is the upright request")
+{
+  FontFixture f;
+  painter_push_font_styled(&f.p, "Inter", 400, false);
+  CHECK(g_font.via_styled);
+  CHECK_FALSE(g_font.italic);
+}
+
+TEST_CASE("push_font_styled degrades to push_font on an older backend")
+{
+  // Critical for stack balance: the client will call pop_font regardless, so
+  // dropping the push entirely would underflow the backend's font stack.
+  FontFixture f;
+  f.backend.push_font_styled = nullptr;
+  painter_push_font_styled(&f.p, "Inter", 600, true);
+  CHECK_EQ(g_font.count, 1);
+  CHECK_FALSE(g_font.via_styled);        // took the plain path
+  CHECK_EQ(g_font.family, std::string("Inter"));
+  CHECK_EQ(g_font.weight, 600);          // family + weight still honoured
+}
+
+TEST_CASE("push_font_styled: NULL painter / backend without either entry is inert")
+{
+  FontFixture f;
+  f.backend.push_font_styled = nullptr;
+  f.backend.push_font        = nullptr;
+  painter_push_font_styled(&f.p, "Inter", 400, true);
+  painter_push_font_styled(nullptr, "Inter", 400, true);
+  CHECK_EQ(g_font.count, 0);
+}
+
+TEST_CASE("the appended font-style vtable slot is populated")
+{
+  CHECK(k_painter_api.push_font_styled == painter_push_font_styled);
+}

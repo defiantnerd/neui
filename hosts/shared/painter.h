@@ -619,6 +619,18 @@ namespace neui_detail {
     painter_stroke_path(p, stroke_width, argb);
   }
 
+  inline void NEUI_ABI painter_push_font_styled(neui_painter_t* p,
+                                                const char* family_utf8,
+                                                int weight, bool italic)
+  {
+    if (p && p->backend && p->backend->push_font_styled)
+      p->backend->push_font_styled(p->ctx, family_utf8, weight, italic);
+    else if (p && p->backend && p->backend->push_font)
+      // Backend predating the style axis: keep the stack balanced (pop_font
+      // must still have something to pop) by pushing the upright font.
+      p->backend->push_font(p->ctx, family_utf8, weight);
+  }
+
   inline void NEUI_ABI painter_draw_line(neui_painter_t* p,
                                           float x0, float y0,
                                           float x1, float y1,
@@ -678,6 +690,7 @@ namespace neui_detail {
     painter_fill_ellipse,
     painter_draw_ellipse,
     painter_draw_line,
+    painter_push_font_styled,
   };
 
 } // namespace neui_detail

@@ -48,6 +48,7 @@ namespace neui_cairo_backend
   {
     std::string family;     // empty = system default sans
     int         weight = 0; // CSS 100..900; 0 = Regular (400)
+    bool        italic = false;
   };
 
   // Per-context render state. One cairo_t owned for the ctx's lifetime.
@@ -195,13 +196,19 @@ namespace neui_cairo_backend
       ? &st->font_stack.back() : nullptr;
     const std::string family = fs ? fs->family : std::string();
     const int         weight = fs ? fs->weight : 0;
+    const bool        italic = fs ? fs->italic : false;
 
     // Client-registered fonts win over Fontconfig (and bypass face_cache).
-    if (cairo_font_face_t* app = find_app_face(family, weight)) return app;
+    // They carry no slant metadata, so an italic request falls through to
+    // Fontconfig, which can substitute a real italic face from the system.
+    if (!italic) {
+      if (cairo_font_face_t* app = find_app_face(family, weight)) return app;
+    }
 
     std::string key = family;
     key += '|';
     key += std::to_string(weight);
+    key += italic ? "|i" : "|r";
 
     auto& cache = face_cache();
     auto it = cache.find(key);
@@ -215,6 +222,11 @@ namespace neui_cairo_backend
       FcPatternAddString(pat, FC_FAMILY,
                          reinterpret_cast<const FcChar8*>(family.c_str()));
     FcPatternAddInteger(pat, FC_WEIGHT, css_weight_to_fc(weight));
+    // FC_SLANT_ITALIC asks for a real italic face; Fontconfig falls back to
+    // FC_SLANT_ROMAN by itself when the family has none, so an upright-only
+    // family stays upright rather than being sheared.
+    FcPatternAddInteger(pat, FC_SLANT,
+                        italic ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
     FcConfigSubstitute(nullptr, pat, FcMatchPattern);
     FcDefaultSubstitute(pat);
 
@@ -996,14 +1008,21 @@ namespace neui_cairo_backend
   // --------------------------------------------------------------------------
   // Font stack
 
-  static void cairo_push_font(neui_render_ctx_t raw, const char* family_utf8, int weight)
+  static void cairo_push_font_styled(neui_render_ctx_t raw,
+                                      const char* family_utf8,
+                                      int weight, bool italic)
   {
     auto* st = static_cast<CairoCtx*>(raw);
     if (!st) return;
     FontState fs;
     if (family_utf8 && *family_utf8) fs.family = family_utf8;
     fs.weight = weight;
+    fs.italic = italic;
     st->font_stack.push_back(std::move(fs));
+  }
+  static void cairo_push_font(neui_render_ctx_t raw, const char* family_utf8, int weight)
+  {
+    cairo_push_font_styled(raw, family_utf8, weight, false);
   }
   static void cairo_pop_font(neui_render_ctx_t raw)
   {
@@ -1231,6 +1250,7 @@ namespace neui_cairo_backend
     cairo_stroke_path_styled,
     cairo_stroke_path_gradient,
     cairo_font_metrics,
+    cairo_push_font_styled,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

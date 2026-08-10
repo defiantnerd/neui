@@ -275,6 +275,21 @@ extern "C" {
     void (NEUI_ABI *draw_line)(neui_painter_t* p,
                                 float x0, float y0, float x1, float y1,
                                 float stroke_width, uint32_t argb);
+
+    // ---- Font style --------------------------------------------------------
+    // (Vtable-appended; check the api version / pointer before calling.)
+    //
+    // push_font plus an italic axis; pop with the same pop_font.
+    // push_font(family, weight) == push_font_styled(family, weight, false).
+    //
+    // Italic is RESOLVED, never synthesised: the host asks the platform for a
+    // real italic face in the family and keeps the upright face if there is
+    // none, rather than shearing the glyphs. So a family shipped without an
+    // italic member renders upright - consistent with the font system's
+    // "push, not pull" policy (register the italic face you want to use).
+    void (NEUI_ABI *push_font_styled)(neui_painter_t* p,
+                                       const char* family_utf8,
+                                       int weight, bool italic);
   } neui_painter_api_t;
 
 #ifdef __cplusplus

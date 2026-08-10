@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>   // push_font_styled takes a bool
 #include "api.h"
 #include "gradient.h"
 #include "path_style.h"
@@ -355,6 +356,17 @@ typedef struct neui_render_backend {
   void (NEUI_ABI *font_metrics)(neui_render_ctx_t ctx, float font_size,
                                 float* ascent, float* descent,
                                 float* line_height);
+
+  // push_font plus an italic axis. push_font(family, weight) is exactly
+  // push_font_styled(family, weight, false), and both pop via pop_font.
+  //
+  // Italic is resolved, never synthesised: the backend asks the platform for a
+  // real italic face in the family and KEEPS THE UPRIGHT FONT if there is none,
+  // rather than shearing the glyphs. That matches the font system's
+  // "push, not pull" policy - a client that needs italic ships an italic face.
+  void (NEUI_ABI *push_font_styled)(neui_render_ctx_t ctx,
+                                    const char* family_utf8,
+                                    int weight, bool italic);
 
 } neui_render_backend_t;
 
