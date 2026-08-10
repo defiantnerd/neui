@@ -22,6 +22,7 @@
 #include "../shared/win32/dnd_target_win32.h"
 #include "../shared/win32/dnd_source_win32.h"
 #include "../shared/win32/keys_win32.h"
+#include "../shared/win32/cursor_win32.h"
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
 
@@ -693,6 +694,24 @@ namespace xpl_host
         InvalidateRect(hwnd, nullptr, FALSE);
       }
       return 0;
+    }
+
+    // -----------------------------------------------------------------
+    // Cursor. Win32 cursor state is per-message, not per-window: the window
+    // class registers an arrow in wc.hCursor and DefWindowProc reapplies it on
+    // EVERY WM_SETCURSOR, which the OS sends on every pointer move over the
+    // window. Without this handler a cursor set from platform_set_cursor is
+    // reverted before the next frame - the GRID's column-resize cursor only
+    // ever "worked" because WM_MOUSEMOVE re-set it immediately afterwards, so
+    // it flickered and it never stuck when the pointer stopped moving.
+    //
+    // Only the CLIENT area is ours. Handing back the non-client hit-test codes
+    // to DefWindowProc keeps the OS's own resize-border and title-bar cursors,
+    // which a client would otherwise lose the moment it set any cursor.
+    case WM_SETCURSOR: {
+      if (LOWORD(lParam) != HTCLIENT) break;   // -> DefWindowProc
+      neui_detail::win32_apply_cursor(s_cursor_kind);
+      return TRUE;                             // "I handled it, don't reset"
     }
 
     // -----------------------------------------------------------------
@@ -2098,14 +2117,16 @@ namespace xpl_host
   }
 
   // -------------------------------------------------------------------------
-  // Mouse cursor. Win32 cursor management is per-message: WM_SETCURSOR
-  // fires every time the cursor moves over a window, and unless we set
-  // the cursor ourselves the OS reverts to whatever the window class
-  // registered. We track the active kind in a thread-local and use a
-  // hook in WM_SETCURSOR to reapply it; for now we set immediately
-  // (good enough for the GRID's drag-resize feedback, which is active
-  // for the duration of the hover + drag).
-
+  // Mouse cursor. Win32 cursor management is per-message: WM_SETCURSOR fires
+  // every time the pointer moves over a window, and unless we answer it the
+  // OS reverts to whatever the window class registered (wc.hCursor, an arrow).
+  // So the active kind is tracked here and reapplied from the WM_SETCURSOR
+  // case in XplWndProc; platform_set_cursor also applies it immediately, for
+  // the case where the pointer is already inside and no WM_SETCURSOR is due
+  // until it next moves.
+  //
+  // Process-wide rather than per-window: only one window can be under the
+  // pointer at a time, and Session::refresh_cursor is the single writer.
   static int s_cursor_kind = NEUI_CURSOR_DEFAULT;
 
   // Client timers (NEUI_API_TIMER). A THREAD timer - SetTimer(NULL, ...) with a
@@ -2169,15 +2190,11 @@ namespace xpl_host
   void platform_set_cursor(int kind)
   {
     s_cursor_kind = kind;
-    HCURSOR cur = nullptr;
-    // IDC_* are LPCSTR resource ids; cast keeps them usable with the W
-    // LoadCursor variant. The resource-id form ignores the char width.
-    switch (kind) {
-      case NEUI_CURSOR_EW_RESIZE: cur = LoadCursorW(nullptr, (LPCWSTR)IDC_SIZEWE); break;
-      case NEUI_CURSOR_DEFAULT:
-      default:                    cur = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);  break;
-    }
-    if (cur) SetCursor(cur);
+    // Apply now for the common case (the pointer is already inside the client
+    // area, so no WM_SETCURSOR is coming until it moves again), and let the
+    // WM_SETCURSOR handler reapply it from then on. The kind->HCURSOR table is
+    // shared with the native win32 host: ../shared/win32/cursor_win32.h.
+    neui_detail::win32_apply_cursor(kind);
   }
 
   // -------------------------------------------------------------------------

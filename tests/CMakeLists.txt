@@ -22,6 +22,7 @@ add_executable(neui_tests
   test_asset_filmstrip.cpp
   test_painter_text.cpp
   test_timer_table.cpp
+  test_cursor_kind.cpp
   test_image_filter.cpp
   test_filter_graph.cpp
   test_backend_util.cpp
@@ -72,6 +73,17 @@ if(APPLE AND NOT NEUI_IOS)
     ${PROJECT_SOURCE_DIR}/include)
   target_compile_features(neui_zoom_smoke_macos PRIVATE cxx_std_17)
   target_link_libraries(neui_zoom_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
+  # Cursor harness (NEUI_ATTR_CURSOR): asserts inheritance up the widget tree,
+  # live attr writes under the pointer, that -cursorUpdate: defeats AppKit's
+  # cursor reset, and that the GRID's positional override neither breaks nor
+  # leaks. Realizes a real NSWindow, so built but NOT ctest-registered.
+  add_executable(neui_cursor_smoke_macos cursor_smoke_macos.mm)
+  target_include_directories(neui_cursor_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_cursor_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_cursor_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 endif()
 

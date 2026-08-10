@@ -19,6 +19,7 @@
 #include "../shared/win32/image_loader_win32.h"
 #include "../shared/win32/accel_table_win32.h"
 #include "../shared/win32/keys_win32.h"
+#include "../shared/win32/cursor_win32.h"
 #include "../shared/win32/toast_win32.h"
 #include "../shared/shortcut_format.h"
 #include "../shared/widget_paint_knob.h"
@@ -6194,18 +6195,13 @@ namespace win32_host
   // hosts/shared/widget_paint_grid.h; this file only carries the win32
   // glue (paint_fn, painted_msg_fn, the C API table).
 
-  // Cursor seam (private to the win32 host - the xpl host's
-  // platform_set_cursor lives in a different namespace). Mirrors
-  // xpl_host::CursorKind values.
-  enum { NEUI_CURSOR_DEFAULT = 0, NEUI_CURSOR_EW_RESIZE = 1 };
+  // Cursor seam. The shape set (enum neui_cursor_kind) and the kind->HCURSOR
+  // table are shared with the xpl host - see ../shared/win32/cursor_win32.h.
+  // This host previously kept a two-entry copy of the list; it did not survive
+  // the set being widened, which is exactly why the table moved to shared.
   static void platform_set_cursor_w32(int kind)
   {
-    HCURSOR cur = nullptr;
-    switch (kind) {
-      case NEUI_CURSOR_EW_RESIZE: cur = LoadCursorW(nullptr, (LPCWSTR)IDC_SIZEWE); break;
-      default:                    cur = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);  break;
-    }
-    if (cur) SetCursor(cur);
+    neui_detail::win32_apply_cursor(kind);
   }
 
   // Lazy-allocate the model so non-GRID widgets pay only a pointer.

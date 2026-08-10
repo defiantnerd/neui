@@ -2,6 +2,10 @@
 #include <cstdint>
 #include <neui/neui.h>
 
+// enum neui_cursor_kind - the cursor shape set, shared with the native win32
+// host and with the public NEUI_ATTR_CURSOR string attribute.
+#include "cursor_kind.h"
+
 // Forward-declarations for shared data-item types (defined in
 // hosts/shared/clipboard_item.h). Decoupled here to keep platform.h light;
 // implementation files include the full definition.
@@ -12,9 +16,14 @@ namespace neui_detail { class DataItem; }
 
 // Public NEUI_KEY_* / NEUI_KMOD_* constants come from <neui/neui.h>'s
 // d/keys.h header. Mouse-modifier bits (NEUI_MK_*) come from d/events.h
-// since they describe the public neui_event_mouse_t::buttonmap field;
-// numeric values match Win32 MK_* so the platform layer forwards wParam
-// directly.
+// since they describe the public neui_event_mouse_t::buttonmap field.
+//
+// The NEUI_MK_* values were CHOSEN to match Win32 MK_*, but a platform must
+// still MASK rather than forward a raw wParam: MK_XBUTTON1 is 0x0020, which is
+// the bit NEUI_MK_ALT reserves, so forwarding would report a phantom Alt on
+// any mouse with side buttons. Each OS has a translation helper for this -
+// hosts/shared/{win32/keys_win32.h,macos/keys_macos.h,linux/keys_linux.h}
+// (win32_buttonmap / mac_buttonmap / x11_buttonmap). Use them.
 
 namespace xpl_host
 {
@@ -379,19 +388,26 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // Mouse cursor.
   //
-  // Switching the cursor mid-widget (e.g. when hovering a column-resize
-  // divider in the GRID header band). One call per change; the platform
-  // is expected to track the active cursor and reapply on every
-  // WM_SETCURSOR / cursor-update message so the cursor stays sticky
-  // until set_cursor is called again.
+  // The shape set is `enum neui_cursor_kind` in hosts/shared/cursor_kind.h,
+  // shared with the native win32 host (which used to keep its own copy of the
+  // list) and with the public NEUI_ATTR_CURSOR string attribute.
   //
-  // Default kind reverts to the OS arrow.
-  enum CursorKind {
-    NEUI_CURSOR_DEFAULT   = 0,
-    NEUI_CURSOR_EW_RESIZE = 1,   // double-headed horizontal arrow (column resize)
-  };
-
-  void platform_set_cursor(int kind /* CursorKind */);
+  // Called on every hover change and on the internal transient overrides
+  // (the GRID header column-resize divider), so it must be cheap and
+  // idempotent - Session::refresh_cursor already suppresses no-op changes,
+  // but a platform that round-trips to a server should dedupe as well.
+  //
+  // STICKINESS IS THE PLATFORM'S JOB, and it is not automatic: on win32 the
+  // window class registers an arrow in wc.hCursor and DefWindowProc reapplies
+  // it on every WM_SETCURSOR, and on macOS AppKit resets the cursor from the
+  // view's cursor rects on every mouse-moved. A platform must therefore track
+  // the active kind and reapply it from its cursor-update message
+  // (WM_SETCURSOR / -cursorUpdate:), not merely set it once here.
+  //
+  // NEUI_CURSOR_DEFAULT reaches the platform already resolved to "no widget
+  // asked for anything", so it means the OS arrow. Inheritance up the widget
+  // tree is resolved in Session::resolve_cursor_for before this is called.
+  void platform_set_cursor(int kind /* neui_cursor_kind */);
 
   // -------------------------------------------------------------------------
   // Client timers (NEUI_API_TIMER, <neui/d/timer.h>).

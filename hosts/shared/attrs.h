@@ -73,6 +73,7 @@ namespace neui_detail
     { NEUI_ATTR_THEME_MODE,           AttrKind::INT    },
     { NEUI_ATTR_FOLLOW_SYSTEM_THEME,  AttrKind::INT    },
     { NEUI_ATTR_ORIENTATION,          AttrKind::STRING },
+    { NEUI_ATTR_CURSOR,               AttrKind::STRING },
     { NEUI_ATTR_POLARITY,             AttrKind::STRING },
     { NEUI_ATTR_STEPS,                AttrKind::INT    },
     { NEUI_ATTR_MODAL,                AttrKind::INT    },

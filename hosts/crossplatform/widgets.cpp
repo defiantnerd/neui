@@ -801,6 +801,14 @@ namespace xpl_host
     {
       platform_set_window_icon(wd, value);
     }
+    // NEUI_ATTR_CURSOR is live: if this widget (or a descendant of it, via
+    // inheritance) is the one under the pointer right now, the shape has to
+    // change without waiting for the next hover transition. refresh_cursor
+    // re-resolves and no-ops when the result is unchanged, so calling it
+    // unconditionally is cheaper than working out whether this widget is on the
+    // hovered widget's ancestor chain.
+    if (!strcmp(key, NEUI_ATTR_CURSOR)) s->refresh_cursor();
+
     // Self-painted widgets read string attrs (e.g. NEUI_ATTR_ALIGN_TEXT
     // on SECTION, NEUI_ATTR_VALUE_TEXT on KNOB) each paint, so a runtime
     // change has to invalidate the owning frame. Frames go through the

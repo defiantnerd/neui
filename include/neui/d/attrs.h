@@ -287,6 +287,45 @@ extern "C" {
 // widget_show; not live-updateable in v1 (would require recreation).
 #define NEUI_ATTR_ORIENTATION "neui.attr.orientation"
 
+// string: the mouse cursor shape shown while the pointer is over this widget.
+// Applies to ANY widget; live (takes effect on the next hover / pointer move,
+// and immediately if the pointer is already inside).
+//
+// Values (CSS `cursor` names are accepted as aliases where CSS has an
+// equivalent, and '_' works wherever '-' does, so "ew_resize" == "ew-resize"):
+//   "default" / "inherit"    - INHERIT from the nearest ancestor that sets one,
+//                              falling back to the OS arrow at the root. This
+//                              is the default for every widget; setting "" or
+//                              clearing the attr restores inheritance.
+//   "arrow"                  - explicit arrow: stop inheriting
+//   "ibeam"       / "text"
+//   "crosshair"   / "cross"
+//   "hand"        / "pointer"      - pointing hand (a link / clickable)
+//   "open-hand"   / "grab"         - draggable, not yet grabbed
+//   "closed-hand" / "grabbing"     - grabbed, dragging
+//   "ew-resize"   / "col-resize"   - horizontal double arrow
+//   "ns-resize"   / "row-resize"   - vertical double arrow
+//   "nesw-resize" / "nwse-resize"  - the two diagonals
+//   "move"        / "all-scroll"
+//   "wait"        / "busy"         - busy, input blocked
+//   "progress"                     - busy, input still accepted
+//   "help"
+//   "not-allowed" / "no-drop" / "forbidden"
+//   "none"        / "hidden"       - hide the pointer entirely
+//
+// An UNRECOGNISED value means "inherit", not "arrow": a typo then leaves the
+// cursor alone instead of silently overriding an ancestor's shape. get_string
+// reads back the CANONICAL name (the first spelling above), not the alias that
+// was written, so a client that stores the value round-trips through the
+// canonical set.
+//
+// Not every shape exists on every OS. A platform maps what it has and falls
+// back to the nearest neighbour rather than to the arrow: macOS has no public
+// diagonal-resize, wait, or help cursor (it attempts a guarded private
+// selector, else the closest public shape), and win32 has no separate
+// open/closed hand (both map to IDC_HAND). See docs/deferred-issues.md.
+#define NEUI_ATTR_CURSOR "neui.attr.cursor"
+
 // string: anchor end of the knob's active fill arc.
 //   "min"    - arc fills from sweep start (7 o'clock) toward the current value (default)
 //   "center" - arc fills from 12 o'clock toward the current value (bipolar params)

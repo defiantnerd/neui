@@ -114,6 +114,11 @@ namespace neui_detail
 
     T& operator[](size_t index) { return *_data[index].object.get(); }
 
+    // const overload, so a read-only walk (Session::resolve_cursor_for reading
+    // NEUI_ATTR_CURSOR up the ancestor chain) doesn't have to give up const.
+    // Same contract as above: caller checks exists() first.
+    const T& operator[](size_t index) const { return *_data[index].object.get(); }
+
     std::vector<uint32_t> release_order() const
     {
       std::vector<uint32_t> result;

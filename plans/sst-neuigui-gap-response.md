@@ -91,6 +91,7 @@ for embedded win32 frames, click-to-focus only). None block him.
 |---|---|---|
 | **xpl `invalidate` repaints the whole frame** | `w_invalidate` → `platform_invalidate(frame)` — no dirty rect. A 60 Hz VU meter repaints the entire editor every tick, at 2× DPI. This is the perf ceiling that actually applies to him, in place of #11. | `hosts/crossplatform/widgets.cpp:692-702` |
 | **`metrics->measure_text` is a desktop estimate** | Documented as "best-effort … a font-metric-based average advance … not pixel-exact" on desktop. He will size labels outside paint constantly. Worth making exact while we are in the text code for #5. | `include/neui/d/metrics.h:82-87` |
+| **No capability-query API** (`NEUI_API_CAPS`) | Interface-level feature detection works (`get_interface` → null), but there is no way to ask whether a host honours a given **attribute**. `NEUI_ATTR_UI_SCALE` is the case in hand: zoom is xpl-only *by design*, yet on a native host the client's `set_float` succeeds, `get_float` reads it back, and nothing zooms — silently. A client cannot grey out a zoom menu it cannot support. The host already knows internally (`platform_supports_ui_scale()`, `platform_menubar_in_frame()`, `NEUI_HAS_XI2`/`_DBUS`); none of it is reachable. Wanted: `bool supports(session, const char* feature_key)`. **Deferred to its own wave** — cross-cutting, and best designed once Waves 4–6 have added the features whose support actually varies. | `docs/deferred-issues.md` (No capability-query API) |
 | **No layout-on-resize** | Deferred by design; examples deliberately omit it. Plugin editors resize, so the client owns relayout. Not a gap to close — a thing to **document** alongside his §5.1 `place()` discipline. | `CLAUDE.md` (Writing client code) |
 
 ---
@@ -415,6 +416,60 @@ deltas are not zoom-divided, DnD drop coords are not zoom-divided on
 win32/Linux, and Linux scales window position while win32/macOS do not.
 
 ### Wave 4 — cursor, popups, file dialog
+
+**4.1 status: DONE**, with one deliberate deviation from what this plan specified.
+
+The plan called for `set_cursor(session, widget, kind)` on an interface. It shipped
+as a **string attribute, `NEUI_ATTR_CURSOR`**, instead. Reasons:
+
+- A per-widget sticky cursor is *state*, not an action, and every comparable
+  enum-ish knob in the framework is already a string attr (`NEUI_ATTR_ORIENTATION`,
+  `_POLARITY`, `_KNOB_MODE`, `_SCROLL_MODE`, `_ALIGN_TEXT`). An interface method
+  would have been the only stateful setter outside the attr bag.
+- It gets a `k_well_known_attrs` row, `docs/attributes.md` documentation, and
+  reachability from JSON components for free.
+- The behavior asset's `cursor` prop is *already a string*, so wiring it later is a
+  pass-through rather than a name->enum translation at the boundary.
+
+Pointer warping stays an interface (4.1b) — that genuinely is an action with
+begin/end bracketing.
+
+What landed:
+
+- `hosts/shared/cursor_kind.h` — the 17-shape `enum neui_cursor_kind` plus the
+  name<->kind parse, replacing **two** hand-kept copies of a two-value list
+  (`xpl_host::CursorKind` and an unnamed-namespace mirror in
+  `hosts/win32/widgets.cpp` commented "Mirrors xpl_host::CursorKind values"). CSS
+  aliases accepted; an unrecognised name means *inherit*, not arrow. Tier-1 tested
+  (`tests/test_cursor_kind.cpp`, 10 cases).
+- `hosts/shared/win32/cursor_win32.h` — one kind->HCURSOR table for both win32 hosts.
+- Inheritance resolved in portable host code (`Session::resolve_cursor_for` walks
+  ancestors; `refresh_cursor` dedupes before touching the platform, which matters on
+  X11 where each push is a round-trip per window).
+- All five platforms implement the full set; `platform_supports_ui_scale`-style
+  degradation is documented per shape in `docs/deferred-issues.md`.
+- **Two latent defects fixed on the way**, both of which meant there was no
+  stickiness to build an API on:
+  - win32 never handled `WM_SETCURSOR`, and the class registers `IDC_ARROW`, so
+    `DefWindowProc` reverted the cursor on every pointer move. The GRID resize
+    cursor only appeared because `WM_MOUSEMOVE` re-set it immediately afterwards.
+  - macOS never implemented `-cursorUpdate:` and its tracking area lacked
+    `NSTrackingCursorUpdate`, so AppKit reset the cursor from cursor rects on every
+    mouse-moved. Same "works by accident" mechanism.
+- The GRID's positional override now carries an owner widget, so it cannot leak
+  outside the GRID, survives a column-resize drag that leaves the widget, and
+  yields to (rather than stomps) a client's `NEUI_ATTR_CURSOR` off the divider.
+- `tests/cursor_smoke_macos.mm` — 12-check acceptance harness driving **real**
+  `-mouseMoved:` events and reading `[NSCursor currentCursor]`. Negative-probed:
+  removing the `-cursorUpdate:` body makes the stickiness check fail.
+
+**Deferred out of 4.1 into 4.1b**: the behavior asset's per-handler `cursor` prop is
+still a no-op. The infrastructure it was blocked on now exists, but wiring it needs a
+per-handler hit-region hover track plus a new `BehaviorDispatchCtx` callback across
+all five platforms. Its TODO in `docs/deferred-issues.md` is therefore **kept**, not
+deleted — deleting it while the prop is inert would be a false claim.
+
+Original plan text for 4.1 follows.
 
 - **4.1 — cursor (his #7).** Widen `xpl_host::CursorKind`
   (`platform.h:382`) to a real set (arrow, ibeam, crosshair, hand, EW/NS/NESW/NWSE

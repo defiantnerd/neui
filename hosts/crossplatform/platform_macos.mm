@@ -48,6 +48,13 @@
 
 namespace xpl_host { class Session; class WidgetData; }
 
+// Cursor state, defined with the rest of the cursor code far below but needed
+// up here by NEUIView's -cursorUpdate:.
+namespace xpl_host {
+  extern int  g_cursor_kind;
+  void        mac_apply_cursor(int kind);
+}
+
 // Key + modifier + button translation primitives now live in
 // hosts/shared/macos/keys_macos.h and are shared with the native macOS host.
 using neui_detail::mac_keycode_to_neui;
@@ -283,6 +290,12 @@ void wake_app_event_pump()
   NSTrackingAreaOptions opts =
       NSTrackingMouseEnteredAndExited
     | NSTrackingMouseMoved
+    // Makes AppKit send -cursorUpdate: to this view, which is what lets
+    // NEUI_ATTR_CURSOR stick: AppKit resets the cursor from cursor rects on
+    // every mouse-moved, so a cursor merely `set` from platform_set_cursor is
+    // reverted before it is seen. Without this option -cursorUpdate: is never
+    // called at all (it is opt-in per tracking area, not a free NSView hook).
+    | NSTrackingCursorUpdate
     | NSTrackingActiveInKeyWindow
     | NSTrackingInVisibleRect;
   _tracking_area = [[NSTrackingArea alloc] initWithRect:self.bounds
@@ -290,6 +303,18 @@ void wake_app_event_pump()
                                                    owner:self
                                                 userInfo:nil];
   [self addTrackingArea:_tracking_area];
+}
+
+// AppKit's "you own the cursor here" hook, paired with NSTrackingCursorUpdate
+// above. Reapplies whatever Session::refresh_cursor last resolved rather than
+// letting AppKit fall back to the arrow.
+//
+// Deliberately does NOT call super: NSView's implementation applies the view's
+// cursor rects, which is precisely the reset being overridden.
+- (void)cursorUpdate:(NSEvent*)event
+{
+  (void)event;
+  xpl_host::mac_apply_cursor(xpl_host::g_cursor_kind);
 }
 
 // The frame's user zoom (NEUI_ATTR_UI_SCALE), 1.0 when unset. AppKit points
@@ -2223,14 +2248,113 @@ namespace xpl_host
 
   // -------------------------------------------------------------------------
   // Mouse cursor.
+  //
+  // AppKit owns the cursor: it resets it from the view's cursor rects on every
+  // mouse-moved, so a bare `[cursor set]` here does not stick. The active kind
+  // is tracked in g_cursor_kind and reapplied from NEUIView's -cursorUpdate:,
+  // which is the documented hook for "this view decides its own cursor".
+  //
+  // AppKit is also missing several shapes that win32 and X11 both have. The
+  // ones with no public NSCursor (diagonal resize, wait, progress, help, move)
+  // exist as private class methods that every serious Mac app uses; they are
+  // reached through +respondsToSelector: so a future macOS that drops one
+  // degrades to the public fallback instead of throwing. Listed in
+  // docs/deferred-issues.md.
+
+  int g_cursor_kind = NEUI_CURSOR_DEFAULT;
+
+  // True while we hold a -hide. [NSCursor hide]/unhide is a BALANCED COUNTER,
+  // not a flag: hiding twice needs unhiding twice, and one stray extra unhide
+  // leaves the pointer permanently visible in a relative-pointer drag. So the
+  // transition is tracked explicitly and only ever toggled on a change.
+  bool g_cursor_hidden = false;
+
+  // A private +[NSCursor foo] shape, or nil when this macOS doesn't have it.
+  static NSCursor* mac_private_cursor(const char* selname)
+  {
+    SEL sel = NSSelectorFromString([NSString stringWithUTF8String:selname]);
+    if (!sel || ![NSCursor respondsToSelector:sel]) return nil;
+    // -performSelector: on a class object returning an id: the cursor is
+    // autoreleased and owned by AppKit, exactly like the public accessors.
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    id c = [NSCursor performSelector:sel];
+    #pragma clang diagnostic pop
+    return [c isKindOfClass:[NSCursor class]] ? (NSCursor*)c : nil;
+  }
+
+  // The NSCursor for a kind, or nil for NEUI_CURSOR_NONE (hide is a mode, not
+  // a shape - see cursor_win32.h for the same split).
+  NSCursor* mac_cursor_for_kind(int kind)
+  {
+    switch (kind) {
+      case NEUI_CURSOR_IBEAM:       return [NSCursor IBeamCursor];
+      case NEUI_CURSOR_CROSSHAIR:   return [NSCursor crosshairCursor];
+      case NEUI_CURSOR_HAND:        return [NSCursor pointingHandCursor];
+      case NEUI_CURSOR_OPEN_HAND:   return [NSCursor openHandCursor];
+      case NEUI_CURSOR_CLOSED_HAND: return [NSCursor closedHandCursor];
+      case NEUI_CURSOR_EW_RESIZE:   return [NSCursor resizeLeftRightCursor];
+      case NEUI_CURSOR_NS_RESIZE:   return [NSCursor resizeUpDownCursor];
+
+      // No public diagonal-resize cursor. Fall back to the matching AXIS
+      // rather than to an arrow: on a corner grip an EW/NS double-arrow still
+      // reads as "resize", where an arrow reads as "nothing here".
+      case NEUI_CURSOR_NESW_RESIZE: {
+        NSCursor* c = mac_private_cursor("_windowResizeNorthEastSouthWestCursor");
+        return c ? c : [NSCursor resizeUpDownCursor];
+      }
+      case NEUI_CURSOR_NWSE_RESIZE: {
+        NSCursor* c = mac_private_cursor("_windowResizeNorthWestSouthEastCursor");
+        return c ? c : [NSCursor resizeUpDownCursor];
+      }
+
+      // No public move cursor; the open hand is the idiomatic Mac stand-in
+      // (Preview / Finder use it for exactly this).
+      case NEUI_CURSOR_MOVE: {
+        NSCursor* c = mac_private_cursor("_moveCursor");
+        return c ? c : [NSCursor openHandCursor];
+      }
+
+      // macOS has no app-controlled busy cursor at all: the spinning beachball
+      // is the WINDOW SERVER's response to an app that stops answering events,
+      // and an app cannot ask for it. So WAIT / PROGRESS degrade to the arrow
+      // unless the private shape exists. A client that wants visible progress
+      // on the Mac should draw it, not set a cursor.
+      case NEUI_CURSOR_WAIT:
+      case NEUI_CURSOR_PROGRESS: {
+        NSCursor* c = mac_private_cursor("busyButClickableCursor");
+        return c ? c : [NSCursor arrowCursor];
+      }
+      case NEUI_CURSOR_HELP: {
+        NSCursor* c = mac_private_cursor("_helpCursor");
+        return c ? c : [NSCursor arrowCursor];
+      }
+
+      case NEUI_CURSOR_NOT_ALLOWED: return [NSCursor operationNotAllowedCursor];
+      case NEUI_CURSOR_NONE:        return nil;   // hide
+      case NEUI_CURSOR_ARROW:
+      case NEUI_CURSOR_DEFAULT:
+      default:                      return [NSCursor arrowCursor];
+    }
+  }
+
+  // Apply the tracked kind. Called from platform_set_cursor and again from
+  // -cursorUpdate: every time AppKit would otherwise reset us.
+  void mac_apply_cursor(int kind)
+  {
+    const bool want_hidden = neui_detail::cursor_kind_is_hidden(kind);
+    if (want_hidden != g_cursor_hidden) {
+      if (want_hidden) [NSCursor hide]; else [NSCursor unhide];
+      g_cursor_hidden = want_hidden;
+    }
+    if (want_hidden) return;   // nothing to shape while hidden
+    if (NSCursor* c = mac_cursor_for_kind(kind)) [c set];
+  }
 
   void platform_set_cursor(int kind)
   {
-    switch (kind) {
-      case NEUI_CURSOR_EW_RESIZE: [[NSCursor resizeLeftRightCursor] set]; break;
-      case NEUI_CURSOR_DEFAULT:
-      default:                    [[NSCursor arrowCursor] set];          break;
-    }
+    g_cursor_kind = kind;
+    mac_apply_cursor(kind);
   }
 
   // -------------------------------------------------------------------------

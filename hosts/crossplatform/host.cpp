@@ -916,6 +916,13 @@ namespace xpl_host
       }
     }
 
+    // The hovered widget decides the cursor (NEUI_ATTR_CURSOR), so resolve it
+    // on every hover transition. Must run AFTER _hovered_widget is updated, and
+    // the stale-override drop must run BEFORE the resolve or the old override
+    // would win one more time.
+    drop_cursor_override_on_hover_change(new_idx);
+    refresh_cursor();
+
     // Repaint the frame so widgets whose paint reacts to .hovered (BUTTON, ...)
     // swap visuals. Hover transitions happen at human pointer speed - cheap.
     uint32_t ref = (new_idx != 0) ? new_idx : old_idx;
@@ -923,6 +930,77 @@ namespace xpl_host
       if (void* frame = find_parent_native_handle(ref))
         platform_invalidate(frame);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mouse cursor (NEUI_ATTR_CURSOR).
+
+  int Session::resolve_cursor_for(uint32_t widget_idx) const
+  {
+    // Nearest ancestor with an explicit cursor wins. A widget whose attr is
+    // unset - or set to an unrecognised name, which parses to DEFAULT - is
+    // transparent to the walk, which is what makes "inherit" work: a client
+    // sets "ibeam" once on a SECTION and every child inside it gets an I-beam.
+    //
+    // The guard bounds a malformed tree (a parent cycle would otherwise spin
+    // here on every mouse move). get_parent returns 0 at the root sentinel.
+    for (int guard = 0; widget_idx != 0 && guard < 256; ++guard) {
+      if (!_widgets.exists(widget_idx)) break;
+      const auto& wd = _widgets[widget_idx];
+      if (wd.attrs) {
+        if (const char* name = wd.attrs->get_string(NEUI_ATTR_CURSOR)) {
+          int kind = neui_detail::cursor_kind_from_name(name);
+          if (kind != NEUI_CURSOR_DEFAULT) return kind;
+        }
+      }
+      widget_idx = _widgets.get_parent(widget_idx);
+    }
+    return NEUI_CURSOR_DEFAULT;
+  }
+
+  void Session::refresh_cursor()
+  {
+    // An internal override (GRID column-resize band) outranks the widget attr:
+    // it is positional feedback about what a drag right here would do, which is
+    // more specific than "this widget generally shows a hand".
+    int kind = (_cursor_override != NEUI_CURSOR_DEFAULT)
+                 ? _cursor_override
+                 : resolve_cursor_for(_hovered_widget);
+
+    if (kind == _cursor_applied) return;
+    _cursor_applied = kind;
+    platform_set_cursor(kind);
+  }
+
+  void Session::set_cursor_override(uint32_t owner_idx, int kind)
+  {
+    // Clearing: forget the owner too, so a later hover change has nothing to
+    // compare against and cannot resurrect a stale override.
+    if (kind == NEUI_CURSOR_DEFAULT) {
+      if (_cursor_override == NEUI_CURSOR_DEFAULT) return;
+      _cursor_override       = NEUI_CURSOR_DEFAULT;
+      _cursor_override_owner = 0;
+      refresh_cursor();
+      return;
+    }
+
+    if (kind == _cursor_override && owner_idx == _cursor_override_owner) return;
+    _cursor_override       = kind;
+    _cursor_override_owner = owner_idx;
+    refresh_cursor();
+  }
+
+  void Session::drop_cursor_override_on_hover_change(uint32_t new_idx)
+  {
+    if (_cursor_override == NEUI_CURSOR_DEFAULT) return;
+    if (_cursor_override_owner == new_idx)       return;   // still inside it
+    // A drag owns the pointer: a column-resize drag continues past the GRID's
+    // edge and must keep its EW cursor until the button comes up. _pressed_widget
+    // is the capture holder, so this is exactly "the owner is mid-drag".
+    if (_cursor_override_owner != 0 &&
+        _cursor_override_owner == _pressed_widget) return;
+    _cursor_override       = NEUI_CURSOR_DEFAULT;
+    _cursor_override_owner = 0;
   }
 
   void Session::set_pressed(uint32_t new_idx)
@@ -7276,7 +7354,7 @@ namespace xpl_host
         if (new_w > 5000) new_w = 5000;
         model.columns[(size_t)model.column_resize_col].width = new_w;
         grid_clamp_scroll(model, vp, cfg.row_h);
-        platform_set_cursor(NEUI_CURSOR_EW_RESIZE);
+        session->set_cursor_override(widget_id & 0xffff, NEUI_CURSOR_EW_RESIZE);
         repaint();
         return true;
       }
@@ -7287,7 +7365,7 @@ namespace xpl_host
         model.column_resize_col     = -1;
         model.column_resize_start_x = 0;
         model.column_resize_start_w = 0;
-        platform_set_cursor(NEUI_CURSOR_DEFAULT);
+        session->set_cursor_override(widget_id & 0xffff, NEUI_CURSOR_DEFAULT);
         if (new_w != old_w) xpl_grid_fire_column_resized(*this, col, old_w, new_w);
         repaint();
         return true;
@@ -7346,9 +7424,13 @@ namespace xpl_host
     if (event->type == NEUI_EVENT_MOUSE_MOVE) {
       GridHit hit = grid_hit_test(model, vp, cfg.row_h,
                                     width, height, lx, ly);
-      platform_set_cursor(hit.region == GridHitRegion::HeaderDivider
-                            ? NEUI_CURSOR_EW_RESIZE
-                            : NEUI_CURSOR_DEFAULT);
+      // DEFAULT here clears the override rather than forcing an arrow, so a
+      // client's NEUI_ATTR_CURSOR on the GRID (or an ancestor) shows through
+      // everywhere except the resize band.
+      session->set_cursor_override(widget_id & 0xffff,
+                                     hit.region == GridHitRegion::HeaderDivider
+                                       ? NEUI_CURSOR_EW_RESIZE
+                                       : NEUI_CURSOR_DEFAULT);
       return false;
     }
 
@@ -7381,7 +7463,7 @@ namespace xpl_host
           model.column_resize_start_x = event->data.mouse.x;
           model.column_resize_start_w = model.columns[(size_t)hit.col].width;
           model.column_resize_old_w   = model.column_resize_start_w;
-          platform_set_cursor(NEUI_CURSOR_EW_RESIZE);
+          session->set_cursor_override(widget_id & 0xffff, NEUI_CURSOR_EW_RESIZE);
           return true;
         }
         return true;

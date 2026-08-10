@@ -1,6 +1,7 @@
 #pragma once
 
 #include <neui/neui.h>
+#include "../shared/cursor_kind.h"
 #include "../shared/tree.h"
 #include "../shared/attrs.h"
 #include "../shared/clipboard_item.h"
@@ -948,6 +949,39 @@ namespace xpl_host
     // Update the hovered widget, firing mouse enter/leave events.
     void set_hovered(uint32_t new_idx);
 
+    // ---- Mouse cursor (NEUI_ATTR_CURSOR) --------------------------------
+    // The effective cursor kind for `widget_idx`: the nearest ancestor with an
+    // explicit NEUI_ATTR_CURSOR wins, and NEUI_CURSOR_DEFAULT when nobody sets
+    // one. Inheritance is resolved HERE rather than in the platform layer, so
+    // each platform only ever sees a concrete shape.
+    int  resolve_cursor_for(uint32_t widget_idx) const;
+
+    // Resolve the cursor for the currently hovered widget (honouring any
+    // active override) and push it to the platform if it changed. Cheap and
+    // idempotent - safe to call from hover changes, attr writes, and paint.
+    void refresh_cursor();
+
+    // Transient internal override, for cursor feedback that is a function of
+    // POSITION rather than of which widget is hovered - the GRID's header
+    // column-resize divider, which is one shape over a 6 px band inside a
+    // single widget. NEUI_CURSOR_DEFAULT clears the override and falls back to
+    // the hovered widget's own NEUI_ATTR_CURSOR, which is why an internal
+    // caller can no longer just set DEFAULT to mean "arrow": that would stomp
+    // a client's cursor.
+    //
+    // `owner_idx` is the widget the override belongs to. It exists so the
+    // override cannot leak: an override is positional WITHIN one widget, so
+    // set_hovered drops it as soon as the pointer moves to a different widget.
+    // The exception is a drag - while the owner holds the press, the pointer
+    // may legitimately be outside it (a column-resize drag continues past the
+    // GRID's edge) and the override must survive.
+    void set_cursor_override(uint32_t owner_idx, int kind);
+
+    // Drop an override whose owner the pointer has left. Called from
+    // set_hovered before the cursor is re-resolved; see set_cursor_override
+    // for why a mid-drag owner is exempt.
+    void drop_cursor_override_on_hover_change(uint32_t new_idx);
+
     // Update the captured (pressed) widget. Mirrors set_hovered's role
     // for the press flag: clears the previous widget's `pressed`, sets
     // the new widget's `pressed`, and invalidates either side when it
@@ -1078,6 +1112,15 @@ namespace xpl_host
     uint32_t _hovered_widget = 0;
     uint32_t _pressed_widget = 0;
     uint32_t _focused_widget = 0;
+
+    // Cursor state - see resolve_cursor_for / refresh_cursor /
+    // set_cursor_override above. _cursor_applied is the last kind actually
+    // pushed to the platform (-1 = never), so a hover walk that resolves to
+    // the same shape costs nothing; on Linux each push is a server round-trip
+    // per window, so the dedupe is load-bearing, not just tidy.
+    int      _cursor_override       = NEUI_CURSOR_DEFAULT;
+    int      _cursor_applied        = -1;
+    uint32_t _cursor_override_owner = 0;
 
     // Client timers. _timer_native_interval caches what the platform tick is
     // currently armed at, so we only re-arm when the shortest interval moves.

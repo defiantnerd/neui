@@ -85,11 +85,70 @@ namespace
   // CLIPBOARD-selection owner/requestor (X11 selections, hosts/shared/linux).
   neui_detail::ClipboardX11 g_clipboard;
 
-  // Active cursor shape (CursorKind) + per-Display EW-resize cursor cache.
+  // Active cursor shape (enum neui_cursor_kind) + the per-Display cursor cache.
   // Cursors are a per-connection resource, so embedded windows on their own
-  // Display get their own entry.
+  // Display get their own entry; the inner map is keyed by kind because
+  // XCreateFontCursor is a server round-trip we only want to pay once per
+  // shape per connection.
   int g_cursor_kind = NEUI_CURSOR_DEFAULT;
-  std::unordered_map<Display*, Cursor> g_ew_cursors;
+  std::unordered_map<Display*, std::unordered_map<int, Cursor>> g_cursors;
+
+  // The X font-cursor glyph for a kind. X11 is the richest of the three
+  // platforms here - the cursor font has a direct equivalent for every kind
+  // except "none", which is a mode (an empty pixmap, built separately).
+  unsigned int x11_cursor_glyph(int kind)
+  {
+    switch (kind) {
+      case NEUI_CURSOR_IBEAM:       return XC_xterm;
+      case NEUI_CURSOR_CROSSHAIR:   return XC_crosshair;
+      case NEUI_CURSOR_HAND:        return XC_hand2;
+      case NEUI_CURSOR_OPEN_HAND:   return XC_hand1;
+      // The cursor font has no closed/grabbing hand; the four-way move glyph
+      // is what GTK and Qt both fall back to for an in-progress grab.
+      case NEUI_CURSOR_CLOSED_HAND: return XC_fleur;
+      case NEUI_CURSOR_EW_RESIZE:   return XC_sb_h_double_arrow;
+      case NEUI_CURSOR_NS_RESIZE:   return XC_sb_v_double_arrow;
+      // The cursor font has corner glyphs, not diagonal double-arrows. A
+      // bottom-left corner reads as the NESW axis and vice versa.
+      case NEUI_CURSOR_NESW_RESIZE: return XC_bottom_left_corner;
+      case NEUI_CURSOR_NWSE_RESIZE: return XC_bottom_right_corner;
+      case NEUI_CURSOR_MOVE:        return XC_fleur;
+      case NEUI_CURSOR_WAIT:        return XC_watch;
+      case NEUI_CURSOR_PROGRESS:    return XC_watch;   // no separate glyph
+      case NEUI_CURSOR_HELP:        return XC_question_arrow;
+      case NEUI_CURSOR_NOT_ALLOWED: return XC_X_cursor;
+      case NEUI_CURSOR_ARROW:
+      default:                      return XC_left_ptr;
+    }
+  }
+
+  // A fully transparent 1x1 cursor - X11's only way to hide the pointer over a
+  // window. Cached like the others: creating one per motion event would leak a
+  // server resource per call.
+  Cursor x11_make_empty_cursor(Display* dpy, Window win)
+  {
+    char zero[8] = {0};   // 1x1 needs 1 byte, but 8 keeps XCreateBitmapFromData happy
+    Pixmap bm = XCreateBitmapFromData(dpy, win, zero, 1, 1);
+    if (!bm) return None;
+    XColor black = {};
+    Cursor c = XCreatePixmapCursor(dpy, bm, bm, &black, &black, 0, 0);
+    XFreePixmap(dpy, bm);
+    return c;
+  }
+
+  // The cached Cursor for (Display, kind), creating it on first use.
+  Cursor x11_cursor_for(Display* dpy, Window win, int kind)
+  {
+    auto& per_dpy = g_cursors[dpy];
+    auto  it      = per_dpy.find(kind);
+    if (it != per_dpy.end()) return it->second;
+
+    Cursor c = neui_detail::cursor_kind_is_hidden(kind)
+                 ? x11_make_empty_cursor(dpy, win)
+                 : XCreateFontCursor(dpy, x11_cursor_glyph(kind));
+    per_dpy[kind] = c;
+    return c;
+  }
 
   // Per-frame window record, stashed on WidgetData::native_handle.
   struct LinuxWindow
@@ -491,7 +550,7 @@ namespace
     // Drop any cached cursor for it first (XCloseDisplay frees the resource,
     // but a stale Display* key could collide with a later XOpenDisplay reuse).
     if (lw->owns_display && lw->dpy) {
-      g_ew_cursors.erase(lw->dpy);
+      g_cursors.erase(lw->dpy);
       XCloseDisplay(lw->dpy);
       lw->dpy = nullptr;
     }
@@ -2706,21 +2765,26 @@ namespace
 
   void platform_set_cursor(int kind)
   {
-    // Called from the GRID header-divider hover on every motion event; an
-    // XDefineCursor is a round-trip, so no-op when the shape hasn't changed.
+    // Called from the hover walk on every motion event; XDefineCursor is a
+    // server round-trip, so no-op when the shape hasn't changed. (Session
+    // already dedupes, but this is the seam an internal caller could reach
+    // directly and the round-trip is worth guarding twice.)
     if (kind == g_cursor_kind) return;
     g_cursor_kind = kind;
-    // X cursors are sticky per window until changed, so set it on every one of
-    // our windows (small count) rather than tracking which is under the pointer.
+    // Unlike win32/macOS, X cursors are sticky per WINDOW until changed - there
+    // is no per-message reset to fight. So set it on every one of our windows
+    // (small count) rather than tracking which one is under the pointer.
     for (auto& kv : g_windows) {
       LinuxWindow* lw = kv.second;
       if (!lw->dpy || !lw->win) continue;
-      if (kind == NEUI_CURSOR_EW_RESIZE) {
-        Cursor& c = g_ew_cursors[lw->dpy];
-        if (!c) c = XCreateFontCursor(lw->dpy, XC_sb_h_double_arrow);
+      if (kind == NEUI_CURSOR_DEFAULT || kind == NEUI_CURSOR_ARROW) {
+        // Inherit from the parent / root rather than pinning our own arrow;
+        // this is what restores the WM's cursor at the frame edges.
+        XUndefineCursor(lw->dpy, lw->win);
+      } else if (Cursor c = x11_cursor_for(lw->dpy, lw->win, kind)) {
         XDefineCursor(lw->dpy, lw->win, c);
       } else {
-        XUndefineCursor(lw->dpy, lw->win);   // revert to the inherited arrow
+        XUndefineCursor(lw->dpy, lw->win);   // creation failed: don't pin junk
       }
       XFlush(lw->dpy);
     }
