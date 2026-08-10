@@ -983,10 +983,11 @@ namespace xpl_host
       bool shift_held = (wParam & MK_SHIFT) != 0;
       ev.data.wheel.delta         = shift_held ? -delta : delta;
       ev.data.wheel.is_horizontal = shift_held ? 1 : 0;
-      // NEUI_MK_* values match Win32 MK_*, so the low word of wParam (which
-      // carries the virtual-key / button state for both wheel messages)
-      // forwards unmodified - same contract as the mouse-message path.
-      ev.data.wheel.buttonmap     = static_cast<uint32_t>(GET_KEYSTATE_WPARAM(wParam));
+      // The wheel messages pack the key/button state in the LOW word (the
+      // HIGH word is the delta), so unlike the mouse messages this needs
+      // GET_KEYSTATE_WPARAM first. Masking matters: the low word can carry
+      // MK_XBUTTON1 = 0x0020, which collides with NEUI_MK_ALT.
+      ev.data.wheel.buttonmap     = neui_detail::win32_buttonmap(GET_KEYSTATE_WPARAM(wParam));
 
       // Scrolling SECTION (the hit itself or its nearest ancestor): widgets
       // below the section get first refusal via a bounded bubble; when
@@ -1048,7 +1049,7 @@ namespace xpl_host
       ev.data.wheel.y             = static_cast<int>(ly);
       ev.data.wheel.delta         = delta;
       ev.data.wheel.is_horizontal = 1;
-      ev.data.wheel.buttonmap     = static_cast<uint32_t>(GET_KEYSTATE_WPARAM(wParam));
+      ev.data.wheel.buttonmap     = neui_detail::win32_buttonmap(GET_KEYSTATE_WPARAM(wParam));
 
       // Scrolling SECTION: bounded bubble below, kinetics on the section -
       // same shape as the WM_MOUSEWHEEL branch above.

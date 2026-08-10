@@ -107,13 +107,16 @@ extern "C" {
     NEUI_CHECK_INDETERMINATE = 2,
   } neui_check_state_t;
 
-  // Bit values for neui_event_mouse_t::buttonmap. Numeric values match the
-  // Win32 MK_* constants so the win32 platform layer forwards wParam
-  // unmodified; other hosts populate the same bits explicitly.
-  // Note: NEUI_MK_ALT is not produced by the Win32 / current macOS layers
-  // today (Win32 MK_* has no ALT bit; the macOS host doesn't populate
-  // modifier bits at all). It is reserved so behavior handlers can opt
-  // into ALT-fine semantics when hosts later plumb it through.
+  // Bit values for neui_event_mouse_t::buttonmap and
+  // neui_event_wheel_t::buttonmap. Numeric values match the Win32 MK_*
+  // constants, but a host must still MASK rather than forward a raw wParam:
+  // Win32's MK_XBUTTON1 is 0x0020, which collides with NEUI_MK_ALT, and
+  // MK_XBUTTON2 (0x0040) is not in this enum at all. The per-OS translations
+  // in hosts/shared/{win32,macos,linux}/keys_*.h do the masking - use them.
+  // Note: NEUI_MK_ALT is not produced by any host layer today (Win32 MK_* has
+  // no ALT bit and the macOS / Linux layers do not populate it). It is
+  // reserved so behavior handlers can opt into ALT-fine semantics when hosts
+  // later plumb it through.
   enum {
     NEUI_MK_LBUTTON = 0x0001,
     NEUI_MK_RBUTTON = 0x0002,

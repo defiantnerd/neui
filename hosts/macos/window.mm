@@ -1889,7 +1889,8 @@ static float neui_snap_to_steps(float v, int steps)
     wd->hovered = true;
     macos_host::macos_invalidate_if_state_filtered_compound(wd);
   }
-  [self dispatchMouse:NEUI_EVENT_MOUSE_ENTER at:[self localPoint:event] buttonmap:0];
+  [self dispatchMouse:NEUI_EVENT_MOUSE_ENTER at:[self localPoint:event]
+                  buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
 }
 - (void)mouseExited:(NSEvent*)event
 {
@@ -1898,7 +1899,8 @@ static float neui_snap_to_steps(float v, int steps)
     wd->hovered = false;
     macos_host::macos_invalidate_if_state_filtered_compound(wd);
   }
-  [self dispatchMouse:NEUI_EVENT_MOUSE_LEAVE at:[self localPoint:event] buttonmap:0];
+  [self dispatchMouse:NEUI_EVENT_MOUSE_LEAVE at:[self localPoint:event]
+                  buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
 }
 - (void)mouseMoved:(NSEvent*)event
 {
@@ -1909,7 +1911,8 @@ static float neui_snap_to_steps(float v, int steps)
     return;
   }
   if (![self customDrawWantsInput]) { [super mouseMoved:event]; return; }
-  [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event] buttonmap:0];
+  [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event]
+                  buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
 }
 
 // Resolve the SECTION + state pointer for the painted view if this widget
@@ -2034,7 +2037,7 @@ static float neui_snap_to_steps(float v, int steps)
     }
     neui_event_type_t t = (event.clickCount >= 2)
       ? NEUI_EVENT_MOUSE_BUTTON_DBLCLICK : NEUI_EVENT_MOUSE_BUTTON_DOWN;
-    [self dispatchMouse:t at:[self localPoint:event] buttonmap:1];
+    [self dispatchMouse:t at:[self localPoint:event] buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
     return;
   }
   [super mouseDown:event];
@@ -2107,7 +2110,8 @@ static float neui_snap_to_steps(float v, int steps)
     // the difference between an in-flight drag and a release-then-move.
     // Clients that don't use behaviors still receive the MOVE event as
     // before and can ignore the buttonmap field.
-    [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event] buttonmap:NEUI_MK_LBUTTON];
+    [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event]
+                  buttonmap:(NEUI_MK_LBUTTON | neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags))];
     return;
   }
   [super mouseDragged:event];
@@ -2141,7 +2145,8 @@ static float neui_snap_to_steps(float v, int steps)
       wd->pressed = false;
       macos_host::macos_invalidate_if_state_filtered_compound(wd);
     }
-    [self dispatchMouse:NEUI_EVENT_MOUSE_BUTTON_UP at:[self localPoint:event] buttonmap:0];
+    [self dispatchMouse:NEUI_EVENT_MOUSE_BUTTON_UP at:[self localPoint:event]
+                  buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
     return;
   }
   [super mouseUp:event];
@@ -2163,7 +2168,8 @@ static float neui_snap_to_steps(float v, int steps)
     return;
   }
   if ([self customDrawWantsInput]) {
-    [self dispatchMouse:NEUI_EVENT_MOUSE_RBUTTON_DOWN at:[self localPoint:event] buttonmap:0];
+    [self dispatchMouse:NEUI_EVENT_MOUSE_RBUTTON_DOWN at:[self localPoint:event]
+                  buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
     return;
   }
   [super rightMouseDown:event];
@@ -2171,7 +2177,8 @@ static float neui_snap_to_steps(float v, int steps)
 - (void)rightMouseUp:(NSEvent*)event
 {
   if ([self customDrawWantsInput]) {
-    [self dispatchMouse:NEUI_EVENT_MOUSE_RBUTTON_UP at:[self localPoint:event] buttonmap:0];
+    [self dispatchMouse:NEUI_EVENT_MOUSE_RBUTTON_UP at:[self localPoint:event]
+                  buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
     return;
   }
   [super rightMouseUp:event];
@@ -2617,6 +2624,10 @@ static float neui_snap_to_steps(float v, int steps)
     neui_event_t ev = {};
     ev.type                 = NEUI_EVENT_MOUSE_BUTTON_CLICK;
     ev.data.mouse.widget    = { wd.widget_id };
+    // Deliberately 0: this is an NSControl ACTION, which the keyboard can
+    // trigger (Space on a focused button) with no mouse involved. Don't
+    // "fix" this to read the live button state - it would report a phantom
+    // press. The real mouse events carry the bits.
     ev.data.mouse.buttonmap = 0;
     sess->dispatch_event(&ev);
     return;

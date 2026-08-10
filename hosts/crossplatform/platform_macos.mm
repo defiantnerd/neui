@@ -371,7 +371,12 @@ void wake_app_event_pump()
   ev.data.mouse.widget    = { hw->widget_id };
   ev.data.mouse.x         = (int)lx;
   ev.data.mouse.y         = (int)ly;
-  ev.data.mouse.buttonmap = 0;
+  // Report the modifier bits (the buttons are already released by the time an
+  // UP arrives, which is exactly what pressedMouseButtons reflects). win32 xpl
+  // populates the same events; leaving these at 0 made Shift/Ctrl invisible to
+  // a client deciding what a click meant.
+  ev.data.mouse.buttonmap = mac_buttonmap(NSEvent.pressedMouseButtons,
+                                           event.modifierFlags);
 
   ev.type = NEUI_EVENT_MOUSE_BUTTON_UP;
   session->dispatch_mouse_event(hit, &ev);
@@ -410,7 +415,8 @@ void wake_app_event_pump()
   ev.data.mouse.widget    = { hw->widget_id };
   ev.data.mouse.x         = (int)lx;
   ev.data.mouse.y         = (int)ly;
-  ev.data.mouse.buttonmap = 0;
+  ev.data.mouse.buttonmap = mac_buttonmap(NSEvent.pressedMouseButtons,
+                                           event.modifierFlags);
   session->dispatch_mouse_event(hit, &ev);
 }
 

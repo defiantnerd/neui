@@ -149,12 +149,25 @@ Small, mechanical, and two of them are on the plugin path.
 - **0.4 — wheel modifiers.** **Done.** `neui_event_wheel_t` grew a `buttonmap`,
   populated on win32 native + xpl, macOS native + xpl, and Linux xpl (core +
   XI2). iOS synthesises the wheel from touch pans and reports 0, which is
-  accurate there. **Also implemented** the thing this unblocked: a `WHEEL`
-  behavior handler's `fine_modifier` now scales the notch by `fine_scale`
-  (`hosts/shared/behavior_runtime.h`), retiring that TODO — 4 new Tier-1 cases
-  in `tests/test_behavior.cpp`.
+  accurate there.
+  - I initially also wired the thing this unblocked — `WHEEL`
+    `fine_modifier` — and **backed it out** after review. It cannot ship yet
+    for two independent reasons, both now documented on the WHEEL branch of
+    `hosts/shared/behavior_runtime.h` and in `docs/deferred-issues.md`:
+    **(1) Shift is already spoken for** — the win32 + macOS xpl layers turn a
+    Shift-held vertical notch horizontal *and negate the delta*, and this path
+    derives direction from `sign(delta)`, so Shift **already inverts** a
+    behavior wheel on those two hosts; multiplying by `fine_scale` would have
+    shipped a default-configured fine mode that also inverts, on exactly the
+    plugin hosts. **(2) fine + `steps` starves** — the wheel keeps no unsnapped
+    accumulator (DRAG has `drag_continuous`), so once
+    `step * fine_scale * |delta| < quantum/2` every fine notch rounds back and
+    the wheel goes permanently dead, divergently across platforms. The native
+    KNOB dodges (2) by advancing exactly one step per notch when stepped.
+    Tier-1 cases pin the current coarse contract *and* the Shift inversion, so
+    the eventual fix has to change a test deliberately.
 
-**Two additional fixes the wave surfaced** (both real, both beyond the four
+**Three additional fixes the wave surfaced** (all real, all beyond the four
 items — back them out if the waves should stay strictly scoped):
 
 - **A shared `hosts/shared/win32/keys_win32.h`**, completing the set alongside
@@ -173,6 +186,16 @@ items — back them out if the waves should stay strictly scoped):
   produced a **520x268** client. Now converted through
   `frameRectForContentRect:`, which also preserves create()'s position
   semantics. Found only because 0.1 made the reported size honest.
+- **The macOS hosts never reported `NEUI_MK_SHIFT` / `_CONTROL` on mouse events
+  at all** — the same defect class as item 1 (which was about win32), on the
+  plugin path. macOS native hardcoded `buttonmap` to `0` / `1` /
+  `NEUI_MK_LBUTTON` across ENTER / LEAVE / MOVE / DOWN / UP / RBUTTON
+  (`hosts/macos/window.mm`), so behavior DRAG Shift-fine was dead there; macOS
+  xpl left `BUTTON_UP` / `CLICK` / `RBUTTON_UP` at `0` while win32 xpl populated
+  the same events. All now route through the existing `mac_buttonmap` helper.
+  The two control-action CLICK paths (win32 `BN_CLICKED`, macOS `NSControl`
+  action) deliberately stay `0` — the keyboard can raise them with no mouse
+  involved — and now carry a comment saying so.
 
 Verified: `cmake --build` clean and warning-free on macOS (Xcode/Debug);
 `ctest` green — 317 cases, 1843 checks, 0 failures. The win32 and Linux edits

@@ -18,6 +18,7 @@
 #include "../shared/win32/icon_win32.h"
 #include "../shared/win32/image_loader_win32.h"
 #include "../shared/win32/accel_table_win32.h"
+#include "../shared/win32/keys_win32.h"
 #include "../shared/win32/toast_win32.h"
 #include "../shared/shortcut_format.h"
 #include "../shared/widget_paint_knob.h"
@@ -996,23 +997,23 @@ namespace win32_host
     switch (msg) {
       case WM_LBUTTONDOWN:
         out_ev = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
-        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        out_ev.data.mouse = { wid, lx, ly, neui_detail::win32_buttonmap(wParam) };
         return true;
       case WM_LBUTTONUP:
         out_ev = { NEUI_EVENT_MOUSE_BUTTON_UP };
-        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        out_ev.data.mouse = { wid, lx, ly, neui_detail::win32_buttonmap(wParam) };
         return true;
       case WM_MOUSEMOVE:
         out_ev = { NEUI_EVENT_MOUSE_MOVE };
-        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        out_ev.data.mouse = { wid, lx, ly, neui_detail::win32_buttonmap(wParam) };
         return true;
       case WM_RBUTTONDOWN:
         out_ev = { NEUI_EVENT_MOUSE_RBUTTON_DOWN };
-        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        out_ev.data.mouse = { wid, lx, ly, neui_detail::win32_buttonmap(wParam) };
         return true;
       case WM_RBUTTONUP:
         out_ev = { NEUI_EVENT_MOUSE_RBUTTON_UP };
-        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        out_ev.data.mouse = { wid, lx, ly, neui_detail::win32_buttonmap(wParam) };
         return true;
       case WM_MOUSEWHEEL: {
         short delta = static_cast<short>(HIWORD(wParam));
@@ -1025,7 +1026,7 @@ namespace win32_host
         // the key/button state in the LOW word, so unlike the mouse cases
         // above it needs GET_KEYSTATE_WPARAM rather than the whole wParam.
         out_ev.data.wheel.buttonmap =
-          static_cast<uint32_t>(GET_KEYSTATE_WPARAM(wParam));
+          neui_detail::win32_buttonmap(GET_KEYSTATE_WPARAM(wParam));
         return true;
       }
       default:
@@ -1070,10 +1071,7 @@ namespace win32_host
 
     if (msg == WM_KEYDOWN) {
       // Modifiers: read live (the WM_KEYDOWN message doesn't carry them).
-      uint32_t mods = 0;
-      if (GetKeyState(VK_SHIFT)   & 0x8000) mods |= NEUI_KMOD_SHIFT;
-      if (GetKeyState(VK_CONTROL) & 0x8000) mods |= NEUI_KMOD_CTRL;
-      if (GetKeyState(VK_MENU)    & 0x8000) mods |= NEUI_KMOD_ALT;
+      uint32_t mods = neui_detail::win32_kmod_from_state();
       neui_detail::behavior_dispatch_key(*ba, *wd.behavior_rt, ctx,
                                           static_cast<uint32_t>(wParam), mods);
       return;

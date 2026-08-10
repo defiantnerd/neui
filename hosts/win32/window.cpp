@@ -591,6 +591,10 @@ namespace win32_host
           sess->dispatch_event(&event);
         } else {
           neui_event_t event = { NEUI_EVENT_MOUSE_BUTTON_CLICK };
+          // buttonmap deliberately 0: BN_CLICKED is a control notification the
+          // keyboard can raise (Space / Enter on a focused button) with no
+          // mouse involved, so reading the live button state here would report
+          // a phantom press. The real WM_?BUTTON* messages carry the bits.
           event.data.mouse = { wid, 0, 0, 0 };
           sess->dispatch_event(&event);
         }

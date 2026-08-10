@@ -522,21 +522,40 @@ namespace neui_detail
       // +/-1 per notch). Multiply by |delta| so one notch advances by
       // `step * lines_per_notch` rather than a single `step`, otherwise
       // wheel feels imperceptible at typical step values (~0.01..0.05).
-      // fine_modifier applies on the wheel too: neui_event_wheel_t carries the
-      // same NEUI_MK_* buttonmap as the mouse events, so a Shift / Ctrl / Alt
-      // notch scales by fine_scale exactly as a fine DRAG does.
+      // fine_modifier is still NOT applied on the wheel. The payload now
+      // carries the NEUI_MK_* bits (event->data.wheel.buttonmap), so the
+      // information is finally here - but wiring it up needs two design
+      // decisions first, and shipping it without them is worse than the no-op:
       //
-      // Caveat worth knowing: a host may already have spent Shift turning a
-      // vertical notch into a horizontal one (is_horizontal = 1 with
-      // NEUI_MK_SHIFT set). A handler configured for Shift-fine therefore also
-      // reads a Shift-flipped horizontal notch as fine, which is the intended
-      // reading for a value handler - it has no horizontal axis to scroll.
+      //  1. Shift is already spoken for. The win32 + macOS xpl platform layers
+      //     turn a Shift-held VERTICAL notch into a horizontal one and NEGATE
+      //     the delta (platform_win32.cpp WM_MOUSEWHEEL, platform_macos.mm
+      //     scrollWheel:) to match the WM_MOUSEHWHEEL "positive = scroll-left"
+      //     convention. Since this path derives direction from sign(delta) and
+      //     ignores is_horizontal, Shift ALREADY reverses a behavior wheel on
+      //     those two hosts - so simply scaling by fine_scale would ship a
+      //     default-configured (FineModifier::Shift) fine mode that also
+      //     inverts, and only on the two hosts a plugin uses. Recovering the
+      //     sign here by re-negating when (is_horizontal && MK_SHIFT) works but
+      //     mis-signs a genuine tilt-wheel notch with Shift held; the real fix
+      //     is deciding whether the Shift->horizontal fallback belongs in the
+      //     platform layer at all, or only for scrolling consumers.
+      //  2. Fine + steps starves. behavior_write_value_gesture snaps
+      //     round-to-nearest and the wheel keeps no unsnapped accumulator (the
+      //     DRAG path has rt.drag_continuous for exactly this). With
+      //     step * fine_scale * |delta| < quantum/2 every fine notch rounds
+      //     back to where it started and the wheel goes permanently dead -
+      //     e.g. steps=11, step=0.1, fine_scale=0.2, |delta|=1 -> 0.02 < 0.05.
+      //     It is platform-divergent too: win32 multiplies by
+      //     SPI_GETWHEELSCROLLLINES (default 3) so it moves there and not on
+      //     macOS / Linux. The native KNOB dodges this by advancing exactly one
+      //     step per notch in stepped mode regardless of fine; the fix here is
+      //     probably the same rule plus a fine accumulator.
       int   delta   = event->data.wheel.delta;
       if (delta == 0) return true;
       float sign    = (delta > 0) ? -1.0f : 1.0f;
       int   mag     = (delta > 0) ? delta : -delta;
-      float fine    = behavior_fine_mul(*H, event->data.wheel.buttonmap);
-      float change  = sign * H->step * fine * static_cast<float>(mag);
+      float change  = sign * H->step * static_cast<float>(mag);
       float current = behavior_read_value(*H, ctx.bag);
       behavior_write_value_gesture(*H, ctx, H->target, current + change);
       return true;
