@@ -937,6 +937,17 @@ namespace xpl_host
   void Session::set_focus(uint32_t new_idx)
   {
     if (new_idx == _focused_widget) return;
+    // A nonexistent target is always a caller bug (a stale handle, or a slot
+    // freed since). Assigning it anyway is how focus ends up naming a freed slot
+    // that a later create silently inherits - the defect 6.6 fixed on the
+    // destroy path, reachable in one call from here.
+    if (new_idx != 0 && !_widgets.exists(new_idx)) return;
+
+    // The frame that is LOSING the focus ring, captured before _focused_widget
+    // is overwritten. Without this the clear path (new_idx == 0) invalidated
+    // nothing: it read _focused_widget after the assignment, which is 0 by then.
+    void* old_frame = (_focused_widget != 0)
+                        ? find_parent_native_handle(_focused_widget) : nullptr;
 
     // If the open combo is losing focus, close its overlay.
     if (_open_combo != 0 && _open_combo == _focused_widget && new_idx != _focused_widget)
@@ -971,9 +982,11 @@ namespace xpl_host
       ensure_widget_visible(new_idx);
     }
 
-    uint32_t ref = (new_idx != 0) ? new_idx : _focused_widget;
-    void* frame = find_parent_native_handle(ref);
+    void* frame = (new_idx != 0) ? find_parent_native_handle(new_idx) : nullptr;
     if (frame) platform_invalidate(frame);
+    // Repaint the old frame too when it is a different one (or the only one, on
+    // a clear): it has a focus ring to erase.
+    if (old_frame && old_frame != frame) platform_invalidate(old_frame);
 
     // Tell an attached AT where focus went. Bump first: the provider resolves
     // the widget against a freshly built tree, and the FOCUSED bit it needs to
@@ -1681,6 +1694,7 @@ namespace xpl_host
                       attrs->get_int(NEUI_ATTR_TAB_BORDER_COLOR, 0) != 0;
     float bw = attrs ? static_cast<float>(attrs->get_int(NEUI_ATTR_TAB_BORDER_WIDTH, 0)) : 0.0f;
     int it = 0, il = 0, ib = 0, ir = 0;
+    uint32_t deselected_with_focus = 0;
     neui_detail::tabview_page_insets(edge_used, has_border, bw, it, il, ib, ir);
     int pw_w = body_w - il - ir; if (pw_w < 0) pw_w = 0;
     int pw_h = body_h - it - ib; if (pw_h < 0) pw_h = 0;
@@ -1693,12 +1707,28 @@ namespace xpl_host
       pw.height = pw_h;
       const bool was_visible = pw.visible;
       pw.visible = (i == selected);
-      // A page going off screen must not keep the focus. Before this, switching
-      // tabs left the caret on a control the user could no longer see, and every
-      // subsequent keystroke went to it.
-      if (was_visible && !pw.visible && session)
-        session->focus_leave_subtree(pages[i], true);
+      // Note the page that is taking the focus off screen, but do NOT move focus
+      // here - see after the loop.
+      if (was_visible && !pw.visible && session &&
+          session->is_in_subtree(session->_focused_widget, pages[i]))
+        deselected_with_focus = pages[i];
     }
+
+    // A page going off screen must not keep the focus: switching tabs used to
+    // leave the caret on a control the user could no longer see, and every
+    // subsequent keystroke went to it.
+    //
+    // AFTER the loop, for two reasons. (a) Every page's `visible` is final, so
+    // focus_next sees the real picture - doing it mid-loop made the outcome
+    // depend on switch DIRECTION, since pages update in index order: going
+    // backwards the new page was already visible and focus landed on it, going
+    // forwards it was not and focus left the tabview entirely (or was cleared,
+    // when the frame's only tab stops live inside the pages). (b) It dispatches
+    // client focus events, and this loop holds a WidgetData reference across the
+    // iteration - a client that mutated the tabview from a focus handler would
+    // have left the loop reading a freed slot.
+    if (deselected_with_focus != 0 && session)
+      session->focus_leave_subtree(deselected_with_focus, true);
   }
 
   void TabViewWidget::select_tab(int ni)
@@ -2889,6 +2919,26 @@ namespace xpl_host
     return false;
   }
 
+  void Session::end_modal(uint32_t frame_index)
+  {
+    if (frame_index == 0 || !_widgets.exists(frame_index)) return;
+    auto* fw = dynamic_cast<FrameWidget*>(&_widgets[frame_index]);
+    if (!fw) return;
+    fw->modal_pump_active = false;
+
+    // Take the saved focus and clear it in one go, so a later widget_destroy on
+    // the same dialog cannot restore a second time.
+    const uint32_t slot = fw->prev_focus;
+    const uint32_t gen  = fw->prev_focus_gen;
+    fw->prev_focus     = 0;
+    fw->prev_focus_gen = 0;
+    if (slot == 0 || !_widgets.exists(slot)) return;
+    // A recycled slot is NOT the widget that held focus. Refusing beats handing
+    // focus to something the user never touched.
+    if (a11y_generation(slot) != gen) return;
+    set_focus(slot);
+  }
+
   void Session::focus_leave_subtree(uint32_t root_index, bool try_next)
   {
     if (_focused_widget == 0) return;
@@ -2900,10 +2950,18 @@ namespace xpl_host
       // widget we are moving away from is the only reliable route to it.
       const uint32_t frame = frame_of(root_index);
       focus_next(true, frame);
-      // focus_next cannot land back inside an invisible subtree (collect_tab_stops
-      // does not descend into one), but it CAN come back to the same widget when
-      // the frame has no other tab stop - in which case clearing is the honest
-      // answer rather than leaving focus where it was.
+      // CALLERS MUST MAKE THE SUBTREE INVISIBLE FIRST. collect_tab_stops does not
+      // descend into an invisible container, so that is what keeps focus_next
+      // from handing focus straight back to a sibling inside the subtree we are
+      // leaving - which would fire a focus-GAINED event for a control that is
+      // about to disappear (and auto-scroll to it) before we cleared it again.
+      // The re-check below is the backstop, not the mechanism.
+      //
+      // Note this lands on the frame's FIRST tab stop, not the "next" one, when
+      // the leaving widget is already out of the stop list (focus_next finds no
+      // current index). That is fine - there is no meaningful "next" once the
+      // widget is gone from the traversal order - but it is not what "next"
+      // suggests, hence this note.
       if (_focused_widget != 0 && !is_in_subtree(_focused_widget, root_index))
         return;
     }

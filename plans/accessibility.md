@@ -1064,7 +1064,8 @@ names as focused — is now asserted end to end in the provider harness (5b), an
 verified by mutation against the tempting simplification of pruning offscreen
 rows.
 
-**Verification.** `tests/focus_smoke_macos.mm` 15 → 35 checks, and the new ones
+**Verification.** `tests/focus_smoke_macos.mm` 15 → 51 checks (35 in the first
+cut, the rest from the review pass below), and the new ones
 are behavioural rather than bookkeeping: check 6 **types a character** to prove a
 recycled slot did not inherit focus (asserting the absence of a focus *event*
 proves nothing — no event fires either way), and check 9 **types into the dialog**
@@ -1081,6 +1082,69 @@ no-op and the check passed with nothing happening.
 Retires `docs/deferred-issues.md`'s "Tier B focus parity" item, as planned, and
 records what is deliberately left: a destroy clears rather than moves focus, and
 `focus_next` still ignores `enabled` on containers.
+
+#### 6.6 post-review fixes
+
+A review of the first cut confirmed all six diagnoses but found that **four of the
+fixes shipped new hazards**, plus three gaps in the audit itself. All verified
+against source before changing anything, all fixed, all mutation-covered.
+
+1. **A use-after-free I introduced.** `focus_leave_subtree` dispatches
+   `WIDGET_FOCUS` synchronously, and `w_destroy` called it and then went on
+   dereferencing the slot it was tearing down — so a client handler that destroys
+   the widget's PARENT ("this field lost focus, tear down the panel") freed the
+   slot re-entrantly and the next line read a null `unique_ptr`. Now re-validated
+   after every dispatch. The harness check reproduces it as a **SIGSEGV** when the
+   guard is removed; the first version of that check destroyed a *sibling*, which
+   is harmless, and survived the mutation.
+2. **A dialog with no tab stop was not fixed at all.** `focus_next` returns early
+   when a frame has no stops, so a message-style dialog of plain LABELs left focus
+   on the blocked owner and typing at the dialog still edited the blocked window —
+   the entire defect, surviving in the commonest dialog shape. Falls back to
+   clearing now.
+3. **Hiding a CONTAINER handed focus to a sibling inside it first.**
+   `focus_leave_subtree` ran *before* `visible = false`, so `collect_tab_stops`
+   still saw the subtree: focus moved to a sibling about to vanish — a real
+   focus-gained event plus an auto-scroll — and was then cleared. The end state
+   contradicted both the comment and the commit message. Visibility now changes
+   first, which is what makes the tab-stop gate do the work.
+4. **The tab-switch focus move was direction-dependent.** Pages update visibility
+   in index order, and moving focus mid-loop meant the incoming page was already
+   visible going backwards but not going forwards — so a forward switch pushed
+   focus out of the tabview, or **cleared it entirely** when the frame's only stops
+   were inside the pages. It also dispatched client events from inside a loop
+   holding a `WidgetData` reference. Moved to after the loop.
+5. **My `prev_focus` was a new stale-slot holder.** Destroy the previously focused
+   widget while the dialog is up, let a new widget take its slot, and the restore
+   handed focus to a control the user never touched. Now stamped with the widget's
+   instance id and checked on restore — the same counter the accessibility node ids
+   use.
+6. **A user-closed dialog restored nothing.** Closing the window unwinds the pump
+   with no `widget_destroy` running at all, so focus stayed on a control inside a
+   *closed* window. Both routes now go through one new `Session::end_modal`, which
+   all three platform teardown paths call — so win32 and Linux get the restore too,
+   not just macOS.
+7. **`set_focus` accepted a nonexistent index**, which re-armed the recycled-slot
+   bug from the API side in one call. Rejected now. Also fixed: `set_focus(0)`'s
+   repaint was dead code (it read `_focused_widget` *after* overwriting it, so the
+   frame losing the focus ring was never invalidated).
+
+**Confirmed macOS-only, by checking the other two:** win32's pump clears its flag
+inside a dispatched `WM_DESTROY`, which always completes before `GetMessageW`
+re-tests; Linux's `select` has a 16 ms timeout and re-tests every iteration. Only
+AppKit can fire a timer *inside* `nextEventMatchingMask:` without producing an
+event, which is why only macOS hung.
+
+**Two of the review's findings were mine to disagree with, and I checked rather
+than assumed:** a TABVIEW is itself a tab stop, so focus landing on the strip after
+a tab switch is correct, not a bug — my first 8c expectation was wrong, and the
+strip also *masked* the mid-loop defect until the harness took it out of the
+traversal. And a stale handle whose slot has been recycled still resolves, because
+that is the framework-wide staleness limitation `CLAUDE.md` documents; only the
+empty-slot case can be rejected.
+
+Harness: **35 → 51 checks**, 7 mutations for this pass (14 for the phase), all
+caught.
 
 Original text follows.
 

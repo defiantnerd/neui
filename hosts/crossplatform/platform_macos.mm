@@ -1465,8 +1465,13 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
       // any programmatic destroy) left the pump waiting forever and hung the
       // app. A user-driven close happens to be followed by more input, which is
       // why this was invisible.
-      if (auto* fw = dynamic_cast<xpl_host::FrameWidget*>(wd)) {
-        fw->modal_pump_active = false;
+      // end_modal drops the flag AND restores the focus the dialog took from its
+      // owner. Both matter here rather than only in widget_destroy: the USER
+      // closing the window unwinds the pump without any destroy running, so
+      // without this focus stays on a control inside a closed window - a dead
+      // keyboard until the client happens to destroy the dialog.
+      if (dynamic_cast<xpl_host::FrameWidget*>(wd)) {
+        session->end_modal(widget_index);
         wake_app_event_pump();
       }
     }

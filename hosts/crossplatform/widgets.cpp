@@ -275,11 +275,17 @@ namespace xpl_host
     // silently inherit focus with no focus event ever fired. Also before the
     // teardown, for the same reason mark_layout_dirty is.
     s->focus_leave_subtree(idx, false);
-    // A modal DIALOG closing gives focus back to whatever held it when the dialog
-    // opened - otherwise dismissing a dialog leaves focus nowhere.
-    uint32_t restore_focus = 0;
-    if (auto* dfw = dynamic_cast<FrameWidget*>(&s->_widgets[idx]))
-      restore_focus = dfw->prev_focus;
+    // set_focus dispatched a WIDGET_FOCUS callback, so client code has run and
+    // the tree may have changed under us - a "field lost focus -> tear down the
+    // panel" handler is a perfectly ordinary thing to write. Everything below
+    // dereferences this slot, so re-validate before touching it again.
+    if (!s->_widgets.exists(idx)) return;
+
+    // A modal DIALOG being destroyed ends its blocking show and gives focus back
+    // to whatever held it. Same call the user-driven close path makes, so both
+    // routes out of a modal dialog behave identically.
+    if (s->_widgets[idx].is_frame()) s->end_modal(idx);
+    if (!s->_widgets.exists(idx)) return;   // end_modal dispatched focus events
 
     // A destroyed TABPAGE drops a tab: capture the parent TABVIEW so we can
     // re-flow its strip + page geometry after the slot is freed (the selected
@@ -345,9 +351,6 @@ namespace xpl_host
       }
     }
 
-    // Restore a closed modal dialog's saved focus, if that widget is still there.
-    if (restore_focus != 0 && s->_widgets.exists(restore_focus))
-      s->set_focus(restore_focus);
   }
 
   static void NEUI_ABI w_show(neui_session_t session, neui_widget_t widget)
@@ -419,8 +422,19 @@ namespace xpl_host
             // key arrived at - so leaving focus in the owner meant typing into
             // the dialog edited a field in the window the dialog had just
             // blocked. Remember where focus was so closing can give it back.
-            fw->prev_focus = s->_focused_widget;
+            // Do not overwrite on a re-entrant show: the saved value would
+            // become the focus INSIDE the dialog and the owner's would be lost.
+            if (!fw->modal_pump_active) {
+              fw->prev_focus     = s->_focused_widget;
+              fw->prev_focus_gen = s->a11y_generation(s->_focused_widget);
+            }
             s->focus_next(true, idx);
+            // focus_next does nothing when the frame has NO tab stops - a
+            // message-style dialog of plain LABELs, say. Focus would then still
+            // be on the blocked owner, and typing at the dialog would edit the
+            // window it just blocked, which is the whole defect. Clearing is the
+            // honest fallback: no control here can take it.
+            if (!s->is_in_subtree(s->_focused_widget, idx)) s->set_focus(0);
             fw->modal_pump_active = true;
             platform_run_modal_until(&fw->modal_pump_active);
           }
@@ -435,21 +449,28 @@ namespace xpl_host
   {
     auto* s = get_session_for_widget(session, widget);
     if (!s) return;
-    // Hiding the focused widget (or an ancestor of it) must move focus on. The
-    // widget still exists, so the next tab stop in the same frame is the right
-    // destination and the keyboard stays usable.
-    {
-      uint32_t hidx = WidgetToIndex(widget);
-      if (s->_widgets.exists(hidx)) s->focus_leave_subtree(hidx, true);
-    }
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
-    auto& wd = s->_widgets[idx];
+    const bool hiding_frame = s->_widgets[idx].is_frame();
+    {
+      auto& wd = s->_widgets[idx];
+      if (hiding_frame && wd.native_handle)
+        platform_hide_window(wd.native_handle);
+      else
+        wd.visible = false;
+    }
 
-    if (wd.is_frame() && wd.native_handle)
-      platform_hide_window(wd.native_handle);
-    else
-      wd.visible = false;
+    // Focus moves AFTER the widget is invisible, not before. collect_tab_stops
+    // skips an invisible subtree, so this is what stops focus_next from handing
+    // focus to a SIBLING INSIDE the container being hidden - which fired a
+    // focus-gained event (and an auto-scroll) for a control about to vanish,
+    // then cleared it again.
+    //
+    // A hidden FRAME keeps visible = true by design (the flag distinguishes
+    // client intent, not mapped-ness), so its subtree still looks traversable and
+    // try_next would just walk inside it. Clear outright there.
+    s->focus_leave_subtree(idx, !hiding_frame);
+    if (!s->_widgets.exists(idx)) return;   // focus events ran client code
     s->mark_layout_dirty(idx);
   }
 

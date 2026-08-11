@@ -3060,8 +3060,11 @@ namespace
     // owner_index + the FrameWidget are still valid.
     if (s && wd.is_dialog() && wd.owner_index != 0 &&
         s->_widgets.exists(wd.owner_index)) {
-      if (auto* fw = dynamic_cast<FrameWidget*>(&wd))
-        fw->modal_pump_active = false;
+      // Session::end_modal, not a bare flag clear: it also restores the focus the
+      // dialog took from its owner, so a user-driven close and a client destroy
+      // end the same way on all three platforms.
+      if (dynamic_cast<FrameWidget*>(&wd))
+        s->end_modal(wd.index);
       auto& owner = s->_widgets[wd.owner_index];
       if (owner.native_handle) {
         platform_set_window_enabled(owner.native_handle, true);

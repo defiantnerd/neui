@@ -352,6 +352,12 @@ namespace xpl_host
     // the window the dialog just blocked. Restoring on close is the other half:
     // without it the user is left with focus nowhere after dismissing a dialog.
     uint32_t prev_focus = 0;
+    // The instance id `prev_focus`'s slot had when it was saved. Tree slots are
+    // recycled, so a bare slot is not enough: the widget that held focus can be
+    // destroyed while the dialog is up and a new one created into its slot, and
+    // restoring by slot alone would hand focus to a widget the user never
+    // touched. Same guard, same counter as the accessibility node ids.
+    uint32_t prev_focus_gen = 0;
     // Active toast overlay (at most one per frame; replace-on-second-call).
     ToastState toast;
   };
@@ -1044,6 +1050,18 @@ namespace xpl_host
 
     // True when `widget_index` is `root_index` or one of its descendants.
     bool is_in_subtree(uint32_t widget_index, uint32_t root_index) const;
+
+    // End a modal DIALOG's blocking show: drop the pump flag so widget_show
+    // unwinds, and give focus back to whatever held it when the dialog opened.
+    //
+    // Called from every platform's dialog-teardown path, because BOTH ways a
+    // modal dialog can end have to do the same two things: the client destroying
+    // it, and the USER closing the window (which unwinds the pump without any
+    // widget_destroy running at all - focus would otherwise be left on a control
+    // inside a closed window, i.e. a dead keyboard). The restore is validated
+    // against the saved instance id, so a recycled slot is not mistaken for the
+    // widget that held focus.
+    void end_modal(uint32_t frame_index);
 
     // Tree slot of the FRAME (root child) owning `widget_index`, or 0 if there
     // is none. `widget_index` may itself be a frame.

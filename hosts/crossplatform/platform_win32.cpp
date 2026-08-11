@@ -542,9 +542,12 @@ namespace xpl_host
               EnableWindow(static_cast<HWND>(owner_native), TRUE);
               SetForegroundWindow(static_cast<HWND>(owner_native));
             }
-            // Drop the modal pump so widget_show unwinds and returns.
-            if (auto* fw = dynamic_cast<FrameWidget*>(wd))
-              fw->modal_pump_active = false;
+            // Drop the modal pump so widget_show unwinds and returns, and give
+            // back the focus the dialog took from its owner. Shared with the
+            // macOS / Linux teardown paths (Session::end_modal), so a user-driven
+            // close and a client destroy behave the same way.
+            if (dynamic_cast<FrameWidget*>(wd))
+              wud->session->end_modal(wd->index);
           }
           wd->native_handle = nullptr;
         }
