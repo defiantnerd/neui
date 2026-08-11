@@ -30,8 +30,10 @@
 #include <oleauto.h>
 #include <UIAutomation.h>
 
+#include <cstdio>
 #include <cstring>
 #include <memory>
+#include <utility>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -105,6 +107,11 @@ static_assert(static_cast<int32_t>(uia::kExpanded)            == ExpandCollapseS
 static_assert(static_cast<int32_t>(uia::kPartiallyExpanded)   == ExpandCollapseState_PartiallyExpanded, "UIA id drift");
 static_assert(static_cast<int32_t>(uia::kLeafNode)            == ExpandCollapseState_LeafNode, "UIA id drift");
 
+// a11y_uia_map.h mirrors one A11ySubKind value so it can stay dependency-free.
+static_assert(uia::A11ySubKindTreeItem ==
+              static_cast<int>(neui_detail::A11ySubKind::tree_item),
+              "A11ySubKind::tree_item drifted from the mirrored value");
+
 namespace xpl_host
 {
 namespace
@@ -159,6 +166,13 @@ public:
   // hands back the SAME object across rebuilds - UIA caches element references
   // and compares them.
   UiaElement* element_for(const A11yNodeId& id);
+  // Element lookup WITHOUT a rebuild, for the notification path. A notification
+  // only says "re-ask about this element", so it merely has to exist - and
+  // Session::dispatch_event bumps the revision immediately before every notify,
+  // so going through element_for would rebuild the whole tree on EVERY value /
+  // selection / scroll event once a client is attached: a full adapter walk (and
+  // possibly a forced repaint) per mouse-move of a knob drag.
+  UiaElement* element_cached(const A11yNodeId& id);
   UiaElement* root_element();
 
   // Physical screen rect for a node, in UIA's coordinate space.
@@ -174,6 +188,13 @@ public:
 
   const std::vector<A11yNode>& nodes() const { return _nodes; }
   A11yNodeId frame_node_id();
+  // The ROOT's ordered children. Not simply the frame node's `children` vector:
+  // build_a11y_tree leaves a survivor whose parent it could not resolve with a
+  // NULL parent and adds it to nobody's child list, so such a node would say its
+  // parent is the root while the root never listed it - a parent/children
+  // disagreement, which UIA clients read as a broken tree, and content reachable
+  // only by hit-test. macOS includes them for exactly this reason.
+  std::vector<A11yNodeId> root_children();
 
   // Actions, all routed through the same paths a user has. See the macOS
   // provider's -sendKey:to: for why the CLIENT gets first refusal.
@@ -272,6 +293,28 @@ public:
 
   const A11yNodeId& node_id() const { return _id; }
 
+  // WHICH property a value/state change should be raised on. UIA
+  // property-changed events are per-property, unlike macOS's single
+  // value-changed notification: a slider with a declared range advertises
+  // RangeValue and NOT Value, so raising ValueValue there names a property the
+  // element does not support while the one clients track stays silent. A
+  // checkbox's state is its ToggleState for the same reason.
+  PROPERTYID changed_property_id()
+  {
+    UiaProvider* p = prov();
+    const A11yNode* nd = p ? p->node_for(_id) : nullptr;
+    if (!nd) return UIA_ValueValuePropertyId;
+    const uia::ActionInputs in = inputs_for(*nd, p);
+    if (uia::action_allowed(in, uia::kRangeValuePattern))
+      return UIA_RangeValueValuePropertyId;
+    if (uia::action_allowed(in, uia::kTogglePattern))
+      return UIA_ToggleToggleStatePropertyId;
+    return UIA_ValueValuePropertyId;
+  }
+
+
+
+
   // ---- IRawElementProviderSimple -----------------------------------------
   IFACEMETHODIMP get_ProviderOptions(ProviderOptions* opts) override
   {
@@ -292,7 +335,7 @@ public:
     UiaProvider* p = prov();
     const A11yNode* nd = p ? p->node_for(_id) : nullptr;
     if (!nd) return S_OK;
-    if (!uia::supports_pattern(pattern_set(*nd, p), static_cast<int32_t>(pattern)))
+    if (!uia::action_allowed(inputs_for(*nd, p), static_cast<int32_t>(pattern)))
       return S_OK;                     // "not supported" is a null return, not an error
     *ret = static_cast<IRawElementProviderSimple*>(this);
     AddRef();
@@ -393,17 +436,25 @@ public:
                                                                    : nd->parent);
     } else if (dir == NavigateDirection_FirstChild ||
                dir == NavigateDirection_LastChild) {
-      const std::vector<A11yNodeId>* kids = &nd->children;
-      if (kids->empty()) return S_OK;
+      // The root's children come from root_children(), which also picks up
+      // nodes build_a11y_tree could not parent; everyone else's from the node.
+      const std::vector<A11yNodeId> kids =
+        _is_root ? p->root_children() : nd->children;
+      if (kids.empty()) return S_OK;
       target = p->element_for(dir == NavigateDirection_FirstChild
-                                ? kids->front() : kids->back());
+                                ? kids.front() : kids.back());
     } else {
-      // Siblings: find this node in the parent's ordered child list.
-      const A11yNodeId parent_id =
-        neui_detail::a11y_id_null(nd->parent) ? frame_id : nd->parent;
-      const A11yNode* pn = p->node_for(parent_id);
-      if (!pn) return S_OK;
-      const std::vector<A11yNodeId>& kids = pn->children;
+      // Siblings: find this node in its container's ordered child list.
+      const bool parent_is_root = neui_detail::a11y_id_null(nd->parent) ||
+                                  a11y_id_equal(nd->parent, frame_id);
+      std::vector<A11yNodeId> kids;
+      if (parent_is_root) {
+        kids = p->root_children();
+      } else {
+        const A11yNode* pn = p->node_for(nd->parent);
+        if (!pn) return S_OK;
+        kids = pn->children;
+      }
       size_t i = 0;
       bool found = false;
       for (; i < kids.size(); ++i)
@@ -515,6 +566,7 @@ public:
   // ---- IInvokeProvider ---------------------------------------------------
   IFACEMETHODIMP Invoke() override
   {
+    if (!allows(uia::kInvokePattern)) return UIA_E_INVALIDOPERATION;
     UiaProvider* p = prov();
     if (!p) return UIA_E_ELEMENTNOTAVAILABLE;
     return p->press(_id) ? S_OK : UIA_E_INVALIDOPERATION;
@@ -533,6 +585,7 @@ public:
   }
   IFACEMETHODIMP Toggle() override
   {
+    if (!allows(uia::kTogglePattern)) return UIA_E_INVALIDOPERATION;
     UiaProvider* p = prov();
     if (!p) return UIA_E_ELEMENTNOTAVAILABLE;
     return p->press(_id) ? S_OK : UIA_E_INVALIDOPERATION;
@@ -552,15 +605,26 @@ public:
     *ret = bstr_from_utf8(nd->value_text.c_str());
     return S_OK;
   }
+  // ONE override serves BOTH IValueProvider::get_IsReadOnly and
+  // IRangeValueProvider::get_IsReadOnly - the signatures are identical, so there
+  // is no way to tell which pattern is asking. It therefore has to be right for
+  // whichever pattern this element actually advertises, and the two want
+  // opposite answers: no text editing is implemented (Value -> read-only), while
+  // a built-in knob or slider CAN be written (RangeValue -> writable). Hardwiring
+  // TRUE made every slider and knob read-only to Narrator, which never then calls
+  // SetValue - so the whole AT-write path was dead code.
   IFACEMETHODIMP get_IsReadOnly(BOOL* ret) override
   {
     if (!ret) return E_INVALIDARG;
-    // ALWAYS read-only: this provider implements no text editing (SetValue below
-    // refuses), so reporting a writable value would be an offer it cannot keep.
-    // Not derived from NEUI_A11Y_STATE_READONLY, because that bit describes the
-    // WIDGET while this describes what UIA can do to it - they only happen to
-    // agree today.
     *ret = TRUE;
+    UiaProvider* p = prov();
+    const A11yNode* nd = p ? p->node_for(_id) : nullptr;
+    if (!nd) return S_OK;
+    const uia::ActionInputs in = inputs_for(*nd, p);
+    // Only when RangeValue is the advertised pattern does "writable" mean
+    // anything; for a Value element this provider is genuinely read-only.
+    if (uia::action_allowed(in, uia::kRangeValuePattern))
+      *ret = uia::range_value_is_read_only(in, nd->state) ? TRUE : FALSE;
     return S_OK;
   }
   IFACEMETHODIMP SetValue(LPCWSTR /*val*/) override
@@ -619,6 +683,15 @@ public:
   {
     UiaProvider* p = prov();
     if (!p) return UIA_E_ELEMENTNOTAVAILABLE;
+    const A11yNode* nd = p->node_for(_id);
+    if (!nd) return UIA_E_ELEMENTNOTAVAILABLE;
+    const uia::ActionInputs in = inputs_for(*nd, p);
+    // Refuse exactly what get_IsReadOnly says is not writable, so the two cannot
+    // disagree - a client that trusted IsReadOnly=FALSE and then got a refusal
+    // has been told the control works when it does not.
+    if (!uia::action_allowed(in, uia::kRangeValuePattern) ||
+        uia::range_value_is_read_only(in, nd->state))
+      return UIA_E_INVALIDOPERATION;
     float vmin = 0.0f, vmax = 1.0f;
     if (!declared_range(&vmin, &vmax)) return UIA_E_INVALIDOPERATION;
     const float n = uia::normalized_from_real(val, vmin, vmax);
@@ -648,8 +721,15 @@ public:
   }
   IFACEMETHODIMP Select() override
   {
+    if (!allows(uia::kSelectionItemPattern)) return UIA_E_INVALIDOPERATION;
     UiaProvider* p = prov();
     if (!p) return UIA_E_ELEMENTNOTAVAILABLE;
+    // A sub-row selects by a synthesised click; a WIDGET row (a client-declared
+    // radio button or tab) selects the same way it would be pressed, which is
+    // what macOS does for the same case. Advertising the pattern and then
+    // refusing every widget row - as the first cut did - is the offered-but-inert
+    // failure this file's own rule forbids.
+    if (_id.sub_index < 0) return p->press(_id) ? S_OK : UIA_E_INVALIDOPERATION;
     return p->select_item(_id) ? S_OK : UIA_E_INVALIDOPERATION;
   }
   // Multi-select is not a thing in any neui container, so these two refuse
@@ -668,28 +748,52 @@ public:
     *ret = static_cast<::ExpandCollapseState>(uia::expand_collapse_state(nd->state));
     return S_OK;
   }
-  IFACEMETHODIMP Expand() override
-  {
-    UiaProvider* p = prov();
-    if (!p) return UIA_E_ELEMENTNOTAVAILABLE;
-    return p->set_expanded(_id, true) ? S_OK : UIA_E_INVALIDOPERATION;
-  }
-  IFACEMETHODIMP Collapse() override
-  {
-    UiaProvider* p = prov();
-    if (!p) return UIA_E_ELEMENTNOTAVAILABLE;
-    return p->set_expanded(_id, false) ? S_OK : UIA_E_INVALIDOPERATION;
-  }
+  // Both are no-ops when the element is ALREADY in the requested state, which UIA
+  // expects - and which matters here far more than tidiness: the keys these route
+  // through mean something else in the other state. SPACE on an ALREADY-OPEN
+  // combobox commits the highlighted row and closes it (ComboBoxWidget::
+  // on_keydown), so a redundant Expand() would change the user's selection; LEFT
+  // on an already-collapsed tree item jumps the selection to the parent.
+  IFACEMETHODIMP Expand() override   { return set_expanded_checked(true); }
+  IFACEMETHODIMP Collapse() override { return set_expanded_checked(false); }
 
   // ---- IScrollItemProvider ---------------------------------------------
   IFACEMETHODIMP ScrollIntoView() override
   {
+    if (!allows(uia::kScrollItemPattern)) return UIA_E_INVALIDOPERATION;
     UiaProvider* p = prov();
     if (!p) return UIA_E_ELEMENTNOTAVAILABLE;
     return p->scroll_into_view(_id) ? S_OK : UIA_E_INVALIDOPERATION;
   }
 
 private:
+  // The single gate every action goes through. GetPatternProvider already refuses
+  // to hand out an unimplemented pattern, but QueryInterface deliberately
+  // succeeds for every interface this class implements, so a client that QIs
+  // directly would otherwise reach an action the element never advertised.
+  bool allows(int32_t pattern_id)
+  {
+    UiaProvider* p = prov();
+    const A11yNode* nd = p ? p->node_for(_id) : nullptr;
+    if (!nd) return false;
+    return uia::action_allowed(inputs_for(*nd, p), pattern_id);
+  }
+
+  HRESULT set_expanded_checked(bool expand)
+  {
+    UiaProvider* p = prov();
+    if (!p) return UIA_E_ELEMENTNOTAVAILABLE;
+    const A11yNode* nd = p->node_for(_id);
+    if (!nd) return UIA_E_ELEMENTNOTAVAILABLE;
+    const int32_t st = uia::expand_collapse_state(nd->state);
+    if (st == uia::kLeafNode) return UIA_E_INVALIDOPERATION;
+    if (expand  && st == uia::kExpanded)  return S_OK;    // already there
+    if (!expand && st == uia::kCollapsed) return S_OK;
+    if (!uia::action_allowed(inputs_for(*nd, p), uia::kExpandCollapsePattern))
+      return UIA_E_INVALIDOPERATION;
+    return p->set_expanded(_id, expand) ? S_OK : UIA_E_INVALIDOPERATION;
+  }
+
   UiaProvider* prov()
   {
     if (!_link) return nullptr;
@@ -731,38 +835,51 @@ private:
     return true;
   }
 
-  // The pattern set for a node. `has_range` has to come from the widget rather
-  // than the node, because the model folds the range into the formatted value
-  // text and does not carry the bounds through.
-  uia::PatternSet pattern_set(const A11yNode& nd, UiaProvider* p)
+  // Everything action_allowed / patterns_for needs, gathered from the node AND
+  // the widget behind it. ONE builder, used by GetPatternProvider and by every
+  // action method, so what is advertised and what is accepted cannot diverge -
+  // review found four patterns advertised that the actions always refused.
+  uia::ActionInputs inputs_for(const A11yNode& nd, UiaProvider* p)
   {
-    bool has_range = false;
-    bool in_scrollable = false;
-    if (p) {
-      Session* s = p->session();
-      const uint32_t slot = a11y_slot_of_node_id(*s, _id);
-      if (slot != 0) {
-        WidgetData* wd = s->get_widget(slot);
-        if (wd && wd->attrs)
-          has_range = wd->attrs->has(NEUI_ATTR_A11Y_RANGE_MIN) &&
-                      wd->attrs->has(NEUI_ATTR_A11Y_RANGE_MAX);
-        // "Can an AT ask to bring me into view" - true when any ancestor scrolls.
-        for (uint32_t a = slot; a != 0; a = s->_widgets.get_parent(a)) {
-          if (!s->_widgets.exists(a)) break;
-          if (a != slot && s->_widgets[a].scroll_state_ptr() != nullptr)
-          { in_scrollable = true; break; }
-        }
-      }
+    uia::ActionInputs in;
+    in.role          = nd.role;
+    in.sub_kind      = static_cast<int>(_id.sub_kind);
+    in.is_widget_row = (_id.sub_index < 0);
+    in.has_value_text = !nd.value_text.empty();
+    in.expandable    = (nd.state & (NEUI_A11Y_STATE_EXPANDED |
+                                    NEUI_A11Y_STATE_COLLAPSED)) != 0;
+    const A11ySubKind kind = static_cast<A11ySubKind>(_id.sub_kind);
+    in.selectable_row = (kind == A11ySubKind::list_row ||
+                         kind == A11ySubKind::tree_item ||
+                         kind == A11ySubKind::grid_row ||
+                         kind == A11ySubKind::tab_chip);
+    if (!p) return in;
+    Session* s = p->session();
+    if (!s) return in;
+    const uint32_t slot = a11y_slot_of_node_id(*s, _id);
+    if (slot == 0) return in;
+    WidgetData* wd = s->get_widget(slot);
+    if (wd && wd->attrs)
+      in.has_range = wd->attrs->has(NEUI_ATTR_A11Y_RANGE_MIN) &&
+                     wd->attrs->has(NEUI_ATTR_A11Y_RANGE_MAX);
+    // Only a built-in KNOB / SLIDER has a value the HOST owns and may write; a
+    // CUSTOMDRAW's value lives in the client's state, so RangeValue must report
+    // itself read-only there rather than accept a write it cannot honour.
+    if (wd && wd->type)
+      in.host_owns_value = (strcmp(wd->type, NEUI_W_KNOB) == 0 ||
+                            strcmp(wd->type, NEUI_W_SLIDER) == 0);
+    // Frame-level activation: a menu item, or a drop row of the COMBOBOX that is
+    // currently open. Neither can be clicked into the owning widget.
+    if (kind == A11ySubKind::menu_item) in.activation_is_frame_level = true;
+    if (!in.is_widget_row && s->_open_combo == slot)
+      in.activation_is_frame_level = true;
+    // ScrollItem: true when some ANCESTOR scrolls.
+    for (uint32_t a = s->_widgets.get_parent(slot); a != 0;
+         a = s->_widgets.get_parent(a)) {
+      if (!s->_widgets.exists(a)) break;
+      if (s->_widgets[a].scroll_state_ptr() != nullptr) { in.in_scrollable = true; break; }
     }
-    const bool selectable = (nd.state & NEUI_A11Y_STATE_SELECTED) != 0 ||
-                            nd.id.sub_kind == static_cast<int32_t>(A11ySubKind::list_row) ||
-                            nd.id.sub_kind == static_cast<int32_t>(A11ySubKind::tree_item) ||
-                            nd.id.sub_kind == static_cast<int32_t>(A11ySubKind::grid_row) ||
-                            nd.id.sub_kind == static_cast<int32_t>(A11ySubKind::tab_chip);
-    const bool expandable = (nd.state & (NEUI_A11Y_STATE_EXPANDED |
-                                         NEUI_A11Y_STATE_COLLAPSED)) != 0;
-    return uia::patterns_for(nd.role, has_range, !nd.value_text.empty(),
-                             selectable, expandable, in_scrollable);
+    return in;
   }
 
   std::shared_ptr<ProviderLink> _link;
@@ -852,6 +969,19 @@ A11yNodeId UiaProvider::frame_node_id()
   return a11y_widget_node_id(*_session, _frame_index);
 }
 
+std::vector<A11yNodeId> UiaProvider::root_children()
+{
+  refresh();
+  std::vector<A11yNodeId> out;
+  const A11yNodeId frame_id = frame_node_id();
+  for (const A11yNode& nd : _nodes) {
+    if (a11y_id_equal(nd.id, frame_id)) continue;
+    if (a11y_id_equal(nd.parent, frame_id) || neui_detail::a11y_id_null(nd.parent))
+      out.push_back(nd.id);
+  }
+  return out;
+}
+
 const A11yNode* UiaProvider::node_for(const A11yNodeId& id)
 {
   refresh();
@@ -863,6 +993,11 @@ const A11yNode* UiaProvider::node_for(const A11yNodeId& id)
 UiaElement* UiaProvider::element_for(const A11yNodeId& id)
 {
   refresh();
+  return element_cached(id);
+}
+
+UiaElement* UiaProvider::element_cached(const A11yNodeId& id)
+{
   auto it = _elements.find(key_of(id));
   if (it == _elements.end() || !it->second) return nullptr;
   it->second->AddRef();
@@ -1127,8 +1262,13 @@ void a11y_win32_notify(void* hwnd_v, uint32_t widget_id, int change)
   UiaProvider* p = it->second;
   if (!p->alive()) return;
 
+  Session* s = p->session();
+  if (!s) return;
+
   if (change == a11y_notify_structure) {
-    UiaElement* root = p->root_element();
+    // Cached, not rebuilt - see element_cached. Nothing to announce if no tree
+    // has been published yet.
+    UiaElement* root = p->element_cached(p->frame_node_id());
     if (!root) return;
     UiaRaiseStructureChangedEvent(static_cast<IRawElementProviderSimple*>(root),
                                   StructureChangeType_ChildrenBulkAdded, nullptr, 0);
@@ -1136,12 +1276,7 @@ void a11y_win32_notify(void* hwnd_v, uint32_t widget_id, int change)
     return;
   }
 
-  Session* s = p->session();
-  if (!s) return;
-  // No rebuild here: a notification only says "re-ask about this element", so it
-  // just has to exist. Rebuilding would put a full tree build (and possibly a
-  // forced paint) on every knob-drag event once a client is attached.
-  UiaElement* el = p->element_for(a11y_widget_node_id(*s, widget_id & 0xffff));
+  UiaElement* el = p->element_cached(a11y_widget_node_id(*s, widget_id & 0xffff));
   if (!el) return;
   auto* simple = static_cast<IRawElementProviderSimple*>(el);
 
@@ -1150,7 +1285,14 @@ void a11y_win32_notify(void* hwnd_v, uint32_t widget_id, int change)
       UiaRaiseAutomationEvent(simple, UIA_AutomationFocusChangedEventId);
       break;
     case a11y_notify_selection:
-      UiaRaiseAutomationEvent(simple, UIA_SelectionItem_ElementSelectedEventId);
+      // Selection_Invalidated on the CONTAINER, not ElementSelected. The seam
+      // carries a widget id, so the element in hand is the LISTBOX / TREE / GRID,
+      // and ElementSelected's source is defined to be the item that became
+      // selected - raising it here would have a client announce the container's
+      // name instead of the row. Invalidated says "selection in me changed, go
+      // look", which is exactly what is true. (Addressing the item would need the
+      // notify seam to carry the sub-index; recorded as deferred.)
+      UiaRaiseAutomationEvent(simple, UIA_Selection_InvalidatedEventId);
       break;
     case a11y_notify_name: {
       // The property-changed event wants old and new values. We do not keep the
@@ -1166,9 +1308,7 @@ void a11y_win32_notify(void* hwnd_v, uint32_t widget_id, int change)
     default: {
       VARIANT old_v; VariantInit(&old_v);
       VARIANT new_v; VariantInit(&new_v);
-      // State rides on the value property, as it does on macOS: for the roles
-      // where state matters (checkbox, toggle, tab) the state IS the value.
-      UiaRaiseAutomationPropertyChangedEvent(simple, UIA_ValueValuePropertyId,
+      UiaRaiseAutomationPropertyChangedEvent(simple, el->changed_property_id(),
                                              old_v, new_v);
       break;
     }
@@ -1184,18 +1324,33 @@ void a11y_win32_announce(void* hwnd_v, const char* utf8, bool assertive)
   auto& m = providers();
   auto it = m.find(hwnd);
   if (it == m.end() || !it->second || !it->second->alive()) return;
-  UiaElement* root = it->second->root_element();
+  UiaElement* root = it->second->element_cached(it->second->frame_node_id());
   if (!root) return;
 #if defined(NTDDI_VERSION) && defined(NTDDI_WIN10_RS3) && \
     (NTDDI_VERSION >= NTDDI_WIN10_RS3)
-  // UiaRaiseNotificationEvent needs Windows 10 1709 / the matching SDK. Guarded
-  // rather than assumed: this file cannot be compiled here, so an SDK-version
-  // build break would be discovered by whoever builds it, not by me.
+  // UiaRaiseNotificationEvent needs Windows 10 1709. The SDK guard alone is not
+  // enough: linking it statically puts a load-time import in the binary, so an
+  // app BUILT with a 1709+ SDK would fail to START on anything older - a much
+  // worse outcome than a missing announcement. Resolved at run time instead, so
+  // the feature simply goes quiet on an older OS.
+  using RaiseNotificationFn = HRESULT (WINAPI*)(IRawElementProviderSimple*,
+                                                NotificationKind,
+                                                NotificationProcessing,
+                                                BSTR, BSTR);
+  static RaiseNotificationFn raise_notification = [] {
+    HMODULE m = GetModuleHandleW(L"uiautomationcore.dll");
+    if (!m) m = LoadLibraryW(L"uiautomationcore.dll");
+    return m ? reinterpret_cast<RaiseNotificationFn>(
+                 GetProcAddress(m, "UiaRaiseNotificationEvent"))
+             : nullptr;
+  }();
+  if (!raise_notification) { root->Release(); return; }
+
   BSTR text     = bstr_from_utf8(utf8);
   BSTR activity = SysAllocString(L"neui");
   // NotificationProcessing_ImportantAll interrupts; _All queues behind whatever
   // is being spoken. Same distinction `assertive` carries on macOS.
-  UiaRaiseNotificationEvent(
+  raise_notification(
     static_cast<IRawElementProviderSimple*>(root),
     NotificationKind_Other,
     assertive ? NotificationProcessing_ImportantAll : NotificationProcessing_All,

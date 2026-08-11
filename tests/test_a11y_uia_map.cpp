@@ -69,71 +69,196 @@ TEST_CASE("uia: no role maps to control type 0")
     CHECK(control_type_for_role(r) != 0);
 }
 
-TEST_CASE("uia: patterns follow the role, and only ones we implement")
+// A helper so each case reads as "this kind of element", not as a wall of bools.
+static ActionInputs widget_row(int role)
 {
-  PatternSet b = patterns_for(NEUI_A11Y_ROLE_BUTTON, false, false, false, false, false);
+  ActionInputs in;
+  in.role = role;
+  in.is_widget_row = true;
+  return in;
+}
+static ActionInputs sub_row(int role, int sub_kind)
+{
+  ActionInputs in;
+  in.role = role;
+  in.sub_kind = sub_kind;
+  in.is_widget_row = false;
+  return in;
+}
+
+TEST_CASE("uia: patterns follow the role")
+{
+  PatternSet b = patterns_for(widget_row(NEUI_A11Y_ROLE_BUTTON));
   CHECK(b.invoke);
   CHECK(!b.toggle);
   CHECK(!b.value);
   CHECK(!b.range_value);
 
-  PatternSet c = patterns_for(NEUI_A11Y_ROLE_CHECKBOX, false, false, false, false, false);
+  PatternSet c = patterns_for(widget_row(NEUI_A11Y_ROLE_CHECKBOX));
   CHECK(c.toggle);
-  CHECK(!c.invoke);          // a checkbox is toggled, not invoked
+  CHECK(!c.invoke);            // a checkbox is toggled, not invoked
 
-  PatternSet tb = patterns_for(NEUI_A11Y_ROLE_TOGGLE_BUTTON, false, false, false, false, false);
-  CHECK(tb.toggle);
+  CHECK(patterns_for(widget_row(NEUI_A11Y_ROLE_TOGGLE_BUTTON)).toggle);
+  CHECK(patterns_for(widget_row(NEUI_A11Y_ROLE_TEXT_FIELD)).value);
+  CHECK(!patterns_for(widget_row(NEUI_A11Y_ROLE_TEXT_FIELD)).range_value);
 
-  PatternSet li = patterns_for(NEUI_A11Y_ROLE_LIST_ITEM, false, false, false, false, false);
-  CHECK(li.selection_item);
-
-  PatternSet e = patterns_for(NEUI_A11Y_ROLE_TEXT_FIELD, false, false, false, false, false);
-  CHECK(e.value);
-  CHECK(!e.range_value);
-
-  PatternSet g = patterns_for(NEUI_A11Y_ROLE_GROUP, false, false, false, false, false);
+  PatternSet g = patterns_for(widget_row(NEUI_A11Y_ROLE_GROUP));
   CHECK(!g.invoke && !g.toggle && !g.value && !g.range_value &&
         !g.selection_item && !g.expand_collapse && !g.scroll_item);
 }
 
+TEST_CASE("uia: EVERY advertised pattern is one the provider will perform")
+{
+  // THE CHECK THAT WAS MISSING. The first cut had a patterns_for() table and the
+  // refusals scattered through the provider's action methods, and four patterns
+  // were advertised that the actions always refused - menu-item Invoke,
+  // SelectionItem on a widget row, ScrollItem on a sub-row, ExpandCollapse on a
+  // submenu item. The tests could not see it because they compared the table with
+  // the table. Now patterns_for is DERIVED from action_allowed and the provider
+  // gates on action_allowed, so this sweep is a real cross-check of the two.
+  const int32_t pats[] = { kInvokePattern, kTogglePattern, kValuePattern,
+                           kRangeValuePattern, kSelectionItemPattern,
+                           kExpandCollapsePattern, kScrollItemPattern };
+  const int sub_kinds[] = { 0 /*widget*/, 1 /*list_row*/, 2 /*tree_item*/,
+                            3 /*grid_header*/, 4 /*grid_row*/, 5 /*grid_cell*/,
+                            6 /*tab_chip*/, 7 /*menu_item*/ };
+
+  for (int role = NEUI_A11Y_ROLE_DEFAULT; role <= NEUI_A11Y_ROLE_SCROLL_AREA; ++role)
+    for (int sk : sub_kinds)
+      for (int widget_row_flag = 0; widget_row_flag < 2; ++widget_row_flag)
+        for (int flags = 0; flags < 64; ++flags) {
+          ActionInputs in;
+          in.role = role;
+          in.sub_kind = sk;
+          in.is_widget_row = (widget_row_flag != 0);
+          in.host_owns_value = (flags & 1) != 0;
+          in.has_range       = (flags & 2) != 0;
+          in.has_value_text  = (flags & 4) != 0;
+          in.selectable_row  = (flags & 8) != 0;
+          in.expandable      = (flags & 16) != 0;
+          in.in_scrollable   = (flags & 32) != 0;
+          const PatternSet p = patterns_for(in);
+          for (int32_t pat : pats) {
+            if (supports_pattern(p, pat) != action_allowed(in, pat)) {
+              CHECK(false);   // advertised != performable
+              return;
+            }
+          }
+        }
+  CHECK(true);
+}
+
+TEST_CASE("uia: frame-level activation offers NO action at all")
+{
+  // A menu item and an open COMBOBOX's drop rows are hit-tested at frame level by
+  // the platform layer, so a synthesised click into the owning widget lands
+  // nowhere. They must not be offered anything - the first cut advertised Invoke
+  // on every menu item and then refused it, which is exactly the
+  // offered-but-inert failure the header forbids.
+  ActionInputs mi = sub_row(NEUI_A11Y_ROLE_MENU_ITEM, 7 /*menu_item*/);
+  mi.activation_is_frame_level = true;
+  mi.expandable = true;                      // a submenu parent
+  PatternSet p = patterns_for(mi);
+  CHECK(!p.invoke);
+  CHECK(!p.selection_item);
+  CHECK(!p.expand_collapse);
+  CHECK(!p.scroll_item);
+
+  // ...whereas a menu item NOT behind the frame-level path would be invokable,
+  // so the flag is what is doing the work rather than the role.
+  ActionInputs plain = sub_row(NEUI_A11Y_ROLE_MENU_ITEM, 7);
+  CHECK(!patterns_for(plain).invoke);        // still no: a sub-row selects
+}
+
+TEST_CASE("uia: SelectionItem covers both a sub-row and a declared radio / tab")
+{
+  ActionInputs row = sub_row(NEUI_A11Y_ROLE_LIST_ITEM, 1 /*list_row*/);
+  row.selectable_row = true;
+  CHECK(patterns_for(row).selection_item);
+
+  // A client-declared radio or tab CUSTOMDRAW is a WIDGET row: it selects the
+  // same way it is pressed. The first cut advertised the pattern here and then
+  // refused every widget row.
+  CHECK(patterns_for(widget_row(NEUI_A11Y_ROLE_RADIO_BUTTON)).selection_item);
+  CHECK(patterns_for(widget_row(NEUI_A11Y_ROLE_TAB)).selection_item);
+  CHECK(!patterns_for(widget_row(NEUI_A11Y_ROLE_BUTTON)).selection_item);
+}
+
+TEST_CASE("uia: ExpandCollapse only where a widget can really open and close")
+{
+  ActionInputs combo = widget_row(NEUI_A11Y_ROLE_COMBOBOX);
+  combo.expandable = true;
+  CHECK(patterns_for(combo).expand_collapse);
+
+  ActionInputs item = sub_row(NEUI_A11Y_ROLE_TREE_ITEM, 2 /*tree_item*/);
+  item.expandable = true;
+  CHECK(patterns_for(item).expand_collapse);
+
+  // Expandable in the MODEL but not operable: a submenu item's cascade is driven
+  // at frame level, and a grid row is never expandable in the first place.
+  ActionInputs grid_row = sub_row(NEUI_A11Y_ROLE_ROW, 4 /*grid_row*/);
+  grid_row.expandable = true;
+  CHECK(!patterns_for(grid_row).expand_collapse);
+  // And nothing gets the pattern when the model says it is a leaf.
+  ActionInputs leaf = widget_row(NEUI_A11Y_ROLE_COMBOBOX);
+  CHECK(!patterns_for(leaf).expand_collapse);
+}
+
+TEST_CASE("uia: ScrollItem only for widgets, and only inside something scrolling")
+{
+  ActionInputs w = widget_row(NEUI_A11Y_ROLE_BUTTON);
+  w.in_scrollable = true;
+  CHECK(patterns_for(w).scroll_item);
+  w.in_scrollable = false;
+  CHECK(!patterns_for(w).scroll_item);
+
+  // A windowed sub-row would need the container to scroll to an INDEX, which is
+  // not wired - ensure_widget_visible works on widgets.
+  ActionInputs r = sub_row(NEUI_A11Y_ROLE_LIST_ITEM, 1);
+  r.in_scrollable = true;
+  CHECK(!patterns_for(r).scroll_item);
+}
+
 TEST_CASE("uia: a slider gets RangeValue only when a real range was declared")
 {
-  // With a range: real-world numbers, so RangeValue is meaningful.
-  PatternSet with = patterns_for(NEUI_A11Y_ROLE_SLIDER, true, false, false, false, false);
-  CHECK(with.range_value);
-  CHECK(!with.value);
-  // Without: the value is a bare normalized number. Advertising RangeValue would
-  // force the provider to invent bounds; the formatted string is honest instead.
-  PatternSet without = patterns_for(NEUI_A11Y_ROLE_SLIDER, false, false, false, false, false);
-  CHECK(!without.range_value);
-  CHECK(without.value);
+  ActionInputs with = widget_row(NEUI_A11Y_ROLE_SLIDER);
+  with.has_range = true;
+  CHECK(patterns_for(with).range_value);
+  CHECK(!patterns_for(with).value);
+  // Without a range the value is a bare normalized number: advertising
+  // RangeValue would force the provider to invent bounds, so the formatted
+  // string goes out through Value instead.
+  ActionInputs without = widget_row(NEUI_A11Y_ROLE_SLIDER);
+  CHECK(!patterns_for(without).range_value);
+  CHECK(patterns_for(without).value);
 }
 
-TEST_CASE("uia: expandable / selectable / scrollable add patterns to any role")
+TEST_CASE("uia: RangeValue is writable ONLY when the host owns the value")
 {
-  PatternSet p = patterns_for(NEUI_A11Y_ROLE_GROUP, false, false,
-                              /*selectable*/true, /*expandable*/true,
-                              /*in_scrollable*/true);
-  CHECK(p.selection_item);
-  CHECK(p.expand_collapse);
-  CHECK(p.scroll_item);
-  // ...and they do not turn into an Invoke claim.
-  CHECK(!p.invoke);
+  // This is the one that made every knob and slider read-only to Narrator. UIA
+  // clients read IsReadOnly before offering adjustment, so a stray TRUE means the
+  // AT never calls SetValue at all and the whole write path is dead.
+  ActionInputs knob = widget_row(NEUI_A11Y_ROLE_SLIDER);
+  knob.has_range = true;
+  knob.host_owns_value = true;                       // a built-in KNOB / SLIDER
+  CHECK(!range_value_is_read_only(knob, 0));
+
+  // A CUSTOMDRAW with a declared role and range: the CLIENT owns the value, so
+  // the provider cannot write it and must say so rather than accept and drop it.
+  ActionInputs custom = widget_row(NEUI_A11Y_ROLE_SLIDER);
+  custom.has_range = true;
+  custom.host_owns_value = false;
+  CHECK(range_value_is_read_only(custom, 0));
+
+  // Disabled or widget-read-only also means no.
+  CHECK(range_value_is_read_only(knob, NEUI_A11Y_STATE_DISABLED));
+  CHECK(range_value_is_read_only(knob, NEUI_A11Y_STATE_READONLY));
 }
 
-TEST_CASE("uia: supports_pattern agrees with the set, and rejects the rest")
+TEST_CASE("uia: supports_pattern rejects ids it does not know")
 {
-  PatternSet p = patterns_for(NEUI_A11Y_ROLE_BUTTON, false, false, false, false, false);
+  PatternSet p = patterns_for(widget_row(NEUI_A11Y_ROLE_BUTTON));
   CHECK(supports_pattern(p, kInvokePattern));
-  CHECK(!supports_pattern(p, kTogglePattern));
-  CHECK(!supports_pattern(p, kValuePattern));
-  CHECK(!supports_pattern(p, kRangeValuePattern));
-  CHECK(!supports_pattern(p, kSelectionItemPattern));
-  CHECK(!supports_pattern(p, kExpandCollapsePattern));
-  CHECK(!supports_pattern(p, kScrollItemPattern));
-  // An unknown pattern id must be refused, not fall through to true - a client
-  // that gets a non-null provider for a pattern we do not implement is worse off
-  // than one told the pattern is absent.
   CHECK(!supports_pattern(p, 10099));
   CHECK(!supports_pattern(p, 0));
 }

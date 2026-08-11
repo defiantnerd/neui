@@ -22,9 +22,13 @@ It was written on a machine that cannot compile it, let alone run Narrator or
 Inspect.exe against it. Nobody should rely on Windows accessibility working until
 someone has actually looked. What stands in for execution:
 
-- The **node tree, the adapter, the cache-invalidation scheme and the notify
-  seam are shared with macOS**, where they are verified against VoiceOver — and
-  where review found nine defects that the win32 provider therefore never had.
+- The **node tree, the adapter and the cache-invalidation scheme are shared with
+  macOS**, where they are verified against VoiceOver. Be precise about what that
+  buys: the shared *model* is verified, but each provider re-implements the same
+  decisions in its own glue, and a review of the first cut found **two of the nine
+  macOS defects re-broken in the win32 glue** (the notify path rebuilding the tree
+  on every event; the root omitting unparented children). Sharing a design is not
+  inheriting the fixes.
 - The **role / pattern / state mapping tables are portable and Tier-1 tested**
   (`hosts/shared/a11y_uia_map.h`, `tests/test_a11y_uia_map.cpp`) on every
   platform. That is where a provider is most likely to be wrong, so it is the
@@ -35,9 +39,13 @@ someone has actually looked. What stands in for execution:
   check that matters most, and it only fires on the first Windows build.
 - A **parse check** (`tests/parse_check/run.sh`) compiles the file against
   hand-written stubs under `-Wall -Wextra`. Every COM method carries `override`,
-  so all ~40 signatures are checked — against stubs written from the documented
-  definitions, not extracted from the SDK, so this proves internal consistency
-  and nothing about the real API.
+  so all ~40 signatures are checked — but only against **my own transcription** of
+  the UIA headers, not against the SDK. It has already caught real mistakes
+  (undeclared symbols, a duplicated member) and it is blind to whole classes of
+  bug: the worst defect in the first cut (`get_IsReadOnly` serving two patterns
+  with one answer) is perfectly-formed C++. The stubs are also demonstrably not an
+  oracle — the first version of them had `ProviderOptions_ServerSideProvider` set
+  to the wrong value. Treat it as a typo-and-signature net, nothing more.
 
 None of that is a substitute for running it. **Expect real bugs on first run**,
 and treat "run Inspect.exe against a neui window" as the first task of the next
@@ -82,6 +90,19 @@ Recorded in full in `docs/deferred-issues.md`; the headlines:
   input is hit-tested at frame level by the platform layer rather than by the
   owning widget, so a synthesised click would land nowhere. Both stay fully
   keyboard-operable, and declining beats offering an action that does nothing.
+  (On win32 the first cut *advertised* those actions and then refused them; the
+  pattern set and the action gate now come from one predicate so they cannot
+  disagree.)
+- **A UIA client cannot write a CUSTOMDRAW's value.** For a built-in KNOB / SLIDER
+  the host owns `NEUI_PARAM_VALUE` and `RangeValue::SetValue` writes it (raising
+  the same gesture triple a drag does). For a client-declared CUSTOMDRAW the value
+  lives in the client's own state, so RangeValue reports itself **read-only** there
+  rather than accepting a write it cannot honour — and unlike macOS there is no
+  arrow-key step fallback on win32, because UIA drives sliders through SetValue.
+- **Selection changes are reported on the container, not the item.** The notify
+  seam carries a widget id, so a row's own element is not addressable from it;
+  win32 raises `Selection_Invalidated` on the list / tree / grid ("selection in me
+  changed, go look") rather than `ElementSelected` naming the wrong element.
 - Editing text raises no change notification (the value read afterwards is
   correct, but nothing prompts an AT to re-read).
 
@@ -90,10 +111,14 @@ Recorded in full in `docs/deferred-issues.md`; the headlines:
 The short version, in priority order:
 
 1. If your UI is built from `CUSTOMDRAW` widgets — as most plugin UIs are —
-   **declare their roles**. Nothing else here comes close in value. Note that a
-   declared role also makes the AT offer that role's *actions*, which arrive as
-   ordinary key events on your widget (`NEUI_KEY_SPACE` for a press, arrows for a
-   step), so handle those keys or the action is offered and does nothing.
+   **declare their roles**. Nothing else here comes close in value. A declared
+   role also makes the AT offer that role's *actions*, and how they reach you
+   differs by platform: on **macOS** a press arrives as `NEUI_KEY_SPACE` and a
+   step as an arrow key on your widget, so handle those keys or the action is
+   offered and does nothing; on **win32** a press arrives the same way, but a
+   value *write* comes through UIA's `RangeValue::SetValue`, which the provider
+   only honours for built-in KNOB / SLIDER — a declared CUSTOMDRAW slider is
+   reported read-only rather than being offered an adjustment it cannot apply.
 2. Call `set_value_range` on anything with a normalized value. "Minus six
    decibels" is useful; "zero point four two" is not.
 3. Pair your labels with `set_labelled_by`. The framework cannot see that a

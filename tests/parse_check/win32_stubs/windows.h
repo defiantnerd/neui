@@ -45,6 +45,11 @@ int  MultiByteToWideChar(UINT, DWORD, LPCSTR, int, LPWSTR, int);
 BOOL ClientToScreen(HWND, POINT*);
 BOOL ScreenToClient(HWND, POINT*);
 LRESULT DefWindowProcW(HWND, UINT, WPARAM, LPARAM);
+typedef struct HINSTANCE__* HMODULE;
+typedef INT_PTR (*FARPROC)();
+HMODULE GetModuleHandleW(LPCWSTR);
+HMODULE LoadLibraryW(LPCWSTR);
+FARPROC GetProcAddress(HMODULE, LPCSTR);
 // COM basics
 // Named _GUID because clang's __uuidof builtin yields `const _GUID&` - with any
 // other name the QueryInterface comparisons below fail to type-check, which is a

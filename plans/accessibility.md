@@ -1045,6 +1045,83 @@ keep UIA off the widget tree from its own threads; the
 `UiaRaiseNotificationEvent` SDK-version guard; and whether returning `nullptr`
 from `ElementProviderFromPoint` for the frame itself is the behaviour UIA wants.
 
+#### 6.4 post-review fixes
+
+A review found **eight defects plus three overclaims**, and the most useful thing
+it established is that safeguard #2 above was **wrong**. "The structural half is
+shared with macOS, so this provider never had those nine defects" conflates two
+different things: the shared *model* is verified, but each provider re-implements
+the same decisions in its own glue — and **two of the nine were re-broken in the
+win32 glue.** That sentence has been corrected in the header, in
+`docs/accessibility.md`, and here. It is the exact kind of claim I asked to be
+checked, and it was load-bearing: it is why I did not look harder at the glue.
+
+Ranked as the review ranked them:
+
+1. **Every knob and slider was read-only to Narrator.**
+   `IValueProvider::get_IsReadOnly` and `IRangeValueProvider::get_IsReadOnly` have
+   *identical signatures*, so one C++ override serves both vtable slots — I wrote
+   it thinking only of Value and hardwired TRUE. UIA clients read IsReadOnly
+   before offering adjustment, so they would never have called `SetValue`, making
+   the whole AT-write path (and `Session::a11y_set_value_user`, and the "same
+   gesture triple a drag raises" feature) dead code. It now answers per advertised
+   pattern, and `SetValue` refuses exactly what IsReadOnly calls unwritable.
+   **The parse check cannot see this: it is perfectly-formed C++.**
+2. **The notify path rebuilt the whole tree on every event.** `element_for` calls
+   `refresh()`, and `dispatch_event` bumps the revision immediately *before* every
+   notify — so with a client attached, every `VALUE_CHANGED` (one per mouse-move of
+   a knob drag) did a full adapter walk plus possibly a forced repaint,
+   synchronously inside dispatch. The in-code comment claimed the opposite of what
+   the code did. New `element_cached` (no rebuild) for that path — which is what
+   macOS does and what the comment was describing.
+3. **`Expand()` on an already-open COMBOBOX committed a selection.** It sent SPACE
+   unconditionally, and SPACE *while open* means "commit the highlighted row and
+   close". A redundant Expand — which UIA expects to be a no-op — changed the
+   user's selection; `Collapse()` on a collapsed tree item likewise jumped the
+   selection to the parent. Both now return S_OK without dispatching when already
+   in the requested state.
+4. **Four patterns advertised that the actions always refused** — menu-item
+   Invoke, SelectionItem on a widget row, ScrollItem on a sub-row, ExpandCollapse
+   on a submenu item. Fixed structurally: `patterns_for` is now *derived* from a
+   single `action_allowed` predicate that the provider also gates every action on,
+   so the two cannot diverge. (SelectionItem on a widget row is now genuinely
+   implemented, routing through the press path as macOS does.)
+5. **Value-change events were raised on the wrong property.** UIA property-changed
+   events are per-property, unlike macOS's single value-changed notification: a
+   ranged slider advertises RangeValue and *not* Value, so raising `ValueValue`
+   named a property the element does not support while the one clients track stayed
+   silent. Now selected from the element's own pattern set.
+6. **The root's child list omitted unparented nodes**, so such a node claimed the
+   root as its parent while the root never listed it — parent and children walks
+   disagreeing, which is the exact defect class the macOS review fixed once
+   already. New `root_children()`.
+7. **ElementSelected was raised on the container.** The seam carries a widget id,
+   so the row's element is not addressable; `Selection_Invalidated` on the
+   container is what is actually true.
+8. **`UiaRaiseNotificationEvent` was a load-time import.** The SDK-version guard
+   only covered compiling: an app built with a 1709+ SDK would have failed to
+   *start* on an older Windows. Now resolved with `GetProcAddress`, so the feature
+   goes quiet instead of bricking the binary.
+
+Also fixed: `<cstdio>` / `<utility>` were only reaching the file transitively; the
+stub's `ProviderOptions_ServerSideProvider` had the wrong value (harmless, since
+the code uses the name — but a standing reminder that the stubs are not an
+oracle); and the parse check now documents that it verifies my transcription
+rather than the SDK.
+
+**The third overclaim was in the tests.** They were said to catch "a pattern
+advertised that the provider does not implement" and could not — they compared
+`patterns_for` with expectations derived from `patterns_for`. That is the third
+vacuous-check of this shape in Wave 6. The fix is structural rather than more
+assertions: one predicate, both sides derived from it, plus a sweep over ~5000
+role / sub-kind / flag combinations asserting *advertised == performable*. Both
+new mutations (advertise-what-you-refuse, and read-only-regardless-of-owner) fail
+that suite.
+
+Tier-1: **11 → 16 cases, 118 → 128 checks.** The parse check earned its keep this
+round: it caught three symbols I had never declared and a duplicated class member
+while these fixes were being made.
+
 Original text follows.
 
 ### 6.4 — win32 provider (`hosts/crossplatform/platform_win32.cpp`) — as originally planned

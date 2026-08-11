@@ -5,10 +5,14 @@
 // SHIPS UNVERIFIED. This file cannot be compiled or run on the machine it was
 // written on (see plans/accessibility.md 6.4 and docs/accessibility.md). What it
 // has instead of execution:
-//   * the node tree, the adapter, the cache-invalidation scheme and the notify
-//     seam are all shared with the macOS provider, which IS verified against
-//     VoiceOver by tests/a11y_provider_smoke_macos.mm - including nine defects
-//     that review found there and that are fixed here by construction;
+//   * the node tree, the adapter and the cache-invalidation SCHEME are shared
+//     with the macOS provider, which IS verified against VoiceOver by
+//     tests/a11y_provider_smoke_macos.mm. Note carefully what that does and does
+//     not carry over: the shared MODEL is verified, but the per-platform GLUE
+//     re-implements the same decisions, and review found two of the nine macOS
+//     defects re-broken here in exactly that glue (the notify path rebuilt the
+//     whole tree per event; the root's child list omitted unparented nodes).
+//     "Shares the design" is not "inherits the fixes";
 //   * the role / pattern / state mapping tables live in
 //     hosts/shared/a11y_uia_map.h and are Tier-1 tested on every platform;
 //   * every UIA constant is static_asserted against the real SDK headers in the

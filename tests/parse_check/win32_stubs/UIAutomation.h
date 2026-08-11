@@ -33,15 +33,21 @@ enum {
   UIA_IsEnabledPropertyId = 30010, UIA_HelpTextPropertyId = 30013,
   UIA_IsControlElementPropertyId = 30016, UIA_IsContentElementPropertyId = 30017,
   UIA_IsPasswordPropertyId = 30019, UIA_IsOffscreenPropertyId = 30022,
-  UIA_ValueValuePropertyId = 30045
+  UIA_ValueValuePropertyId = 30045, UIA_RangeValueValuePropertyId = 30047,
+  UIA_ToggleToggleStatePropertyId = 30086
 };
 enum { UIA_AutomationFocusChangedEventId = 20005,
-       UIA_SelectionItem_ElementSelectedEventId = 20012 };
+       UIA_SelectionItem_ElementSelectedEventId = 20012,
+       UIA_Selection_InvalidatedEventId = 20013 };
 #define UiaRootObjectId (-25)
 #define UiaAppendRuntimeId 3
 
 enum ProviderOptions {
-  ProviderOptions_ServerSideProvider = 0x1,
+  // Real SDK values. The first cut of this stub had ServerSideProvider = 0x1,
+  // which is ClientSideProvider - harmless because the code uses the NAME, but a
+  // standing reminder that these stubs are not an oracle.
+  ProviderOptions_ClientSideProvider = 0x1,
+  ProviderOptions_ServerSideProvider = 0x2,
   ProviderOptions_UseComThreading    = 0x20
 };
 enum NavigateDirection {

@@ -20,6 +20,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 ${CXX:-clang++} -std=c++17 -fsyntax-only -Wall -Wextra -Wno-unused-parameter \
   -fms-extensions -fdeclspec \
+  `# clang-only: it dislikes the canonical GetProcAddress cast, which MSVC (/W4)` \
+  `# accepts silently. The complaint is about the STUB's FARPROC shape, not the code.` \
+  -Wno-cast-function-type-mismatch \
   -DNTDDI_VERSION=0x0A000004 -DNTDDI_WIN10_RS3=0x0A000004 \
   -I"$here/win32_stubs" \
   -I"$root/include" -I"$root/hosts/crossplatform" -I"$root/hosts/shared" \
