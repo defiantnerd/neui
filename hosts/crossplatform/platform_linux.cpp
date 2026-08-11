@@ -3679,6 +3679,8 @@ namespace
                             uint32_t /*widget_id*/, int /*change*/) {}
   void platform_a11y_announce(void* /*frame_native_handle*/,
                               const char* /*utf8*/, bool /*assertive*/) {}
+  // No AT-SPI provider, so nothing can be listening to us.
+  bool platform_a11y_is_listening() { return false; }
 
   // -------------------------------------------------------------------------
   // Relative (unbounded) pointer mode. Warp-back model, same as win32; see

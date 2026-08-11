@@ -2556,11 +2556,12 @@ namespace xpl_host
   {
     auto* s = get_session(session);
     if (!s) return false;
-    // "Has an accessibility provider ever been asked about this session" - the
-    // only honest answer on a platform with no attach signal, which the public
-    // header spells out along with the warning not to gate correctness on it.
+    // Two sources, because the platforms differ in what they can honestly say.
+    // "Has anything ever queried us" is all macOS can offer (accessibility there
+    // is lazy and has no attach signal); win32's UiaClientsAreListening knows
+    // BEFORE the first query. Either being true means an AT may be watching.
     // False on a platform with no provider at all, since nothing can query.
-    return s->a11y_queried();
+    return s->a11y_queried() || platform_a11y_is_listening();
   }
 
   neui_a11y_api_t a11y_api = {

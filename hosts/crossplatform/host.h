@@ -1481,6 +1481,13 @@ namespace xpl_host
     // GESTURE_BEGIN / VALUE_CHANGED / GESTURE_END triple a keypress does.
     bool a11y_step_value(uint32_t slot, bool up);
 
+    // Write a normalized [0..1] value on behalf of an AT (UIA's
+    // RangeValue::SetValue). Raises the same GESTURE_BEGIN / VALUE_CHANGED /
+    // GESTURE_END triple a drag or a keypress does, which is what a DAW needs to
+    // record the edit as one automation gesture. False when the widget cannot
+    // take a value.
+    bool a11y_set_value_user(uint32_t slot, float normalized);
+
   public:
     neui_detail::Tree<WidgetData>  _widgets;
     neui_detail::AssetManager      _asset_manager;

@@ -144,6 +144,7 @@ namespace xpl_host
   // attribute bag) and simply go unread.
   void platform_a11y_notify(void*, uint32_t, int)                              {}
   void platform_a11y_announce(void*, const char*, bool)                        {}
+  bool platform_a11y_is_listening()                                { return false; }
 
   // Toast animation - no platform timer on the null host; toasts will
   // still paint a single frame if the client invalidates manually.

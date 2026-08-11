@@ -2685,6 +2685,11 @@ namespace xpl_host
     mac_a11y_notify(v, widget_id, change);
   }
 
+  // macOS offers no "an AT attached" signal at all: accessibility here is lazy
+  // by design, so the honest answer is the one Session tracks (has anything
+  // queried us) and this adds nothing to it.
+  bool platform_a11y_is_listening() { return false; }
+
   void platform_a11y_announce(void* frame_native_handle, const char* utf8,
                               bool assertive)
   {

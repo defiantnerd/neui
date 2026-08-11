@@ -16,13 +16,19 @@ target_include_directories(neui-xplhost
 target_link_libraries(neui-xplhost PRIVATE neui neui-qrcodegen)
 
 if(WIN32)
-  target_sources(neui-xplhost PRIVATE platform_win32.cpp)
+  # a11y_win32.cpp is the UI Automation provider (NEUI_API_A11Y); its own TU so
+  # the COM machinery stays out of the platform layer, mirroring a11y_macos.mm.
+  target_sources(neui-xplhost PRIVATE platform_win32.cpp a11y_win32.cpp)
   # windowsapp.lib supplies RoGetActivationFactory / RoOriginateLanguageException
   # required by the C++/WinRT projection used in theme_provider_win32.h.
   # ole32 / shell32: CoCreateInstance + SHCreateItemFromParsingName for the
   # IFileDialog file dialogs (file_dialog_win32.h).
+  # uiautomationcore: UiaReturnRawElementProvider / UiaRaise*Event /
+  # UiaHostProviderFromHwnd for the accessibility provider. oleaut32: SysAllocString
+  # + the SAFEARRAY helpers a UIA provider has to hand back.
   target_link_libraries(neui-xplhost PRIVATE neui-backend-d2d windowsapp
-                                             ole32 shell32)
+                                             ole32 shell32
+                                             uiautomationcore oleaut32)
 elseif(NEUI_IOS)
   # iOS uses the same shared CoreGraphics backend as macOS, but the UIKit
   # platform layer instead of the AppKit one. This branch MUST come before the

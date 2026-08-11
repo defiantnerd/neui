@@ -1,6 +1,7 @@
 # Accessibility (`NEUI_API_A11Y`) — implementation plan
 
-Status: **6.0 + 6.1 + 6.2 + 6.2b + 6.3 + 6.6 shipped** (see those sections); 6.4 + 6.7 remain. All five open decisions were resolved
+Status: **6.0 + 6.1 + 6.2 + 6.2b + 6.3 + 6.6 + 6.4 shipped** (see those sections); 6.7 remains.
+**6.4 ships UNVERIFIED** - see its section and `docs/accessibility.md`. All five open decisions were resolved
 on 2026-08-11 (§7), so implementation is unblocked; build order at the end of §8.
 This is Wave 6 of
 `plans/sst-neuigui-gap-response.md` (its §3 sketch, lines 991-1027), worked out
@@ -972,7 +973,81 @@ Original text follows.
   write paths; `announce` → `NSAccessibilityAnnouncementRequestedNotification`.
 - Modern `NSAccessibilityProtocol` style, not the deprecated attribute bag.
 
-### 6.4 — win32 provider (`hosts/crossplatform/platform_win32.cpp`)
+### 6.4 — win32 provider — **SHIPPED 2026-08-11, UNVERIFIED**
+
+Landed as `hosts/crossplatform/a11y_win32.{h,cpp}` (its own TU, mirroring
+`a11y_macos.mm`) plus a `WM_GETOBJECT` case, a `WM_NCDESTROY` teardown, and the
+three platform seams in `platform_win32.cpp`. It has **never been compiled and
+never been run.** Everything below is about what was done to reduce the odds of
+that being a disaster, and none of it replaces Inspect.exe.
+
+**The design decision that matters: shrink the unverifiable surface.**
+
+The mapping tables — role → control type, role → pattern set, state → property
+values, normalized value ↔ real-world range — are the part of a provider most
+likely to be *wrong*, and none of it needs Windows to run. So they moved into
+`hosts/shared/a11y_uia_map.h`, with **11 Tier-1 cases / 118 checks**
+(`tests/test_a11y_uia_map.cpp`) executing them on macOS. What is left
+unverifiable is COM plumbing, which is at least the part a compiler checks.
+
+**Four safeguards, in descending order of how much they are worth:**
+
+1. **`static_assert` every UIA constant against the real SDK.** The portable table
+   duplicates ~40 ids; a test can only confirm the number I wrote down, not that
+   it is the number Windows uses. The asserts do exactly that, and they fail the
+   BUILD rather than letting a screen reader announce the wrong control type.
+   This is the highest-value check in the phase and it fires the first time
+   anyone builds on Windows.
+2. **The structural half is shared with macOS, where it is verified.** The tree,
+   the revision cache, the dead-frame/dead-session revalidation, the client-first
+   action dispatch, the declared-step handling, "notify does not rebuild" — all of
+   it exists because review found each one as a defect in 6.3. The win32 provider
+   never had them because it inherited the fixes.
+3. **A parse check, now in-tree** (`tests/parse_check/`): the file compiled
+   against hand-written stubs under `-Wall -Wextra`, clean. Every COM method
+   carries `override`, so all ~40 signatures are checked against the stub
+   interfaces. The previous incarnation of this mechanism lived in a scratch
+   directory and was **lost**, which is why it is checked in now — with the stub
+   headers deliberately off every CMake include path, since a reachable fake
+   `windows.h` would be a disaster of its own.
+4. `docs/accessibility.md` states the unverified status **in prose, in a table, at
+   the top** — obligation 1 of the §7 decision, discharged. `CLAUDE.md` points at
+   it and repeats the warning.
+
+**What it implements:** `IRawElementProviderSimple` / `Fragment` /
+`FragmentRoot`, `IInvokeProvider`, `IToggleProvider`, `IValueProvider` (read-only),
+`IRangeValueProvider` (including `SetValue`, routed through a new
+`Session::a11y_set_value_user` so an AT write raises the same
+`GESTURE_BEGIN`/`VALUE_CHANGED`/`GESTURE_END` triple a drag does),
+`ISelectionItemProvider`, `IExpandCollapseProvider` (state, plus Expand/Collapse
+routed through the keys the widgets actually handle — SPACE/ESCAPE for a combobox,
+RIGHT/LEFT on a selected tree item), `IScrollItemProvider`, runtime ids stamped
+with the instance generation, `UiaRaiseAutomationEvent` /
+`...PropertyChangedEvent` / `...StructureChangedEvent` /
+`UiaRaiseNotificationEvent`, and `UiaClientsAreListening` behind a new
+`platform_a11y_is_listening()` seam so `is_active` can answer *before* the first
+query on the one platform that knows.
+
+**Deliberate divergences from macOS, each because the platform differs:**
+COMBOBOX → `ComboBox` control type (UIA's does not imply an editable field, so
+unlike `AXComboBox` it needs no substitute); a grid header → `HeaderItem` (a real
+UIA type, where macOS had to settle for a button with a role description); no
+Y-flip (UIA is top-left origin like us, so the conversion is one multiply plus
+`ClientToScreen`); and the frame node **is** published as the fragment root,
+where on macOS the NSView stands for the frame and the frame node is not
+published at all — UIA requires a root that owns the HWND.
+
+**Known risk areas for the first run,** written down now so the next Windows
+session knows where to look: COM refcounting across the element cache (elements
+outlive the provider by design and reach it through a nulled indirection);
+`Navigate` sibling walks; whether `ProviderOptions_UseComThreading` is enough to
+keep UIA off the widget tree from its own threads; the
+`UiaRaiseNotificationEvent` SDK-version guard; and whether returning `nullptr`
+from `ElementProviderFromPoint` for the frame itself is the behaviour UIA wants.
+
+Original text follows.
+
+### 6.4 — win32 provider (`hosts/crossplatform/platform_win32.cpp`) — as originally planned
 
 - `WM_GETOBJECT` in `XplWndProc` (`platform_win32.cpp:420`) →
   `UiaReturnRawElementProvider`.

@@ -3380,6 +3380,20 @@ namespace xpl_host
     return true;
   }
 
+  bool Session::a11y_set_value_user(uint32_t slot, float normalized)
+  {
+    if (slot == 0 || !_widgets.exists(slot)) return false;
+    WidgetData& wd = _widgets[slot];
+    // Only widgets that actually carry NEUI_PARAM_VALUE. A CUSTOMDRAW whose value
+    // lives in the client's own state is not one of them - the client owns that
+    // value, and writing the attr would put the two out of step.
+    if (!wd.type) return false;
+    if (strcmp(wd.type, NEUI_W_KNOB) != 0 && strcmp(wd.type, NEUI_W_SLIDER) != 0)
+      return false;
+    widget_set_value_user_gesture(wd, normalized);
+    return true;
+  }
+
   // ---- SliderWidget --------------------------------------------------------
 
   // Read NEUI_ATTR_ORIENTATION ("horizontal" / "vertical") into `is_vertical`.

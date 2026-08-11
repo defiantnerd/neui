@@ -552,4 +552,14 @@ namespace xpl_host
   void platform_a11y_announce(void* frame_native_handle, const char* utf8,
                               bool assertive);
 
+  // "Is an AT actually listening right now", when the platform can say. Backs
+  // half of NEUI_API_A11Y::is_active, which is documented as ADVISORY - a client
+  // must never gate correctness on it.
+  //
+  // Only win32 can answer honestly (UiaClientsAreListening). macOS has no such
+  // signal by design - accessibility there is lazy, so "has anything queried us"
+  // is the only truthful answer and that is what the Session flag tracks. A
+  // platform with no provider returns false, which is not conservative but exact.
+  bool platform_a11y_is_listening();
+
 } // namespace xpl_host

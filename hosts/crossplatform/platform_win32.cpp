@@ -10,6 +10,9 @@
 
 #include "host.h"
 #include "platform.h"
+// UI Automation provider (NEUI_API_A11Y). Its own TU, like the macOS provider -
+// see a11y_win32.h, including what "ships unverified" means for it.
+#include "a11y_win32.h"
 #include "../../backends/d2d/d2d_backend.h"
 #include "../shared/win32/image_loader_win32.h"
 #include "../shared/win32/icon_win32.h"
@@ -556,6 +559,10 @@ namespace xpl_host
     }
 
     case WM_NCDESTROY: {
+      // Drop this window's UIA provider. A client can still hold element
+      // references afterwards; the provider's teardown makes them answer "gone"
+      // instead of reaching into a destroyed Session.
+      a11y_win32_window_destroyed(hwnd);
       // Free WindowUserData allocated in create_appwindow / create_plugwindow.
       auto* wud = get_wud(hwnd);
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -692,6 +699,22 @@ namespace xpl_host
     // host; no widget has its own HWND. When the user switches to / from
     // another app, replay WIDGET_FOCUS for the logically-focused widget so
     // clients see the same event timing as on the win32 host.
+
+    case WM_GETOBJECT: {
+      // The UI Automation entry point: a client asking a window "what is in you".
+      // Only UiaRootObjectId is ours; an MSAA (IAccessible) request falls through
+      // to DefWindowProc, since there is no MSAA bridge here and answering one
+      // with a UIA provider would be worse than not answering.
+      auto* wud = get_wud(hwnd);
+      if (wud && wud->session) {
+        intptr_t lr = 0;
+        if (a11y_win32_handle_get_object(hwnd, wud->session, wud->widget_index,
+                                         static_cast<intptr_t>(wParam),
+                                         static_cast<intptr_t>(lParam), &lr))
+          return static_cast<LRESULT>(lr);
+      }
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
 
     case WM_KILLFOCUS: {
       auto* wud = get_wud(hwnd);
@@ -2303,13 +2326,22 @@ namespace xpl_host
     }
   }
 
-  // Accessibility: the UI Automation provider is 6.4 (plans/accessibility.md).
-  // Until it lands these are no-ops - a client's declarations are stored and
-  // simply unread, which is the same honest state Linux is in.
-  void platform_a11y_notify(void* /*frame_native_handle*/,
-                            uint32_t /*widget_id*/, int /*change*/) {}
-  void platform_a11y_announce(void* /*frame_native_handle*/,
-                              const char* /*utf8*/, bool /*assertive*/) {}
+  // Accessibility. A frame's native handle IS its HWND on win32 (there is no
+  // embedded-view special case as on macOS), so these forward directly.
+  void platform_a11y_notify(void* frame_native_handle, uint32_t widget_id,
+                            int change)
+  {
+    a11y_win32_notify(frame_native_handle, widget_id, change);
+  }
+  void platform_a11y_announce(void* frame_native_handle, const char* utf8,
+                              bool assertive)
+  {
+    a11y_win32_announce(frame_native_handle, utf8, assertive);
+  }
+  // UIA is the one platform API that will say whether a client is attached, and
+  // it answers BEFORE the first query - which is why is_active consults it as
+  // well as the "has anything queried us" flag.
+  bool platform_a11y_is_listening() { return a11y_win32_clients_listening(); }
 
   // -------------------------------------------------------------------------
   // Relative (unbounded) pointer mode.

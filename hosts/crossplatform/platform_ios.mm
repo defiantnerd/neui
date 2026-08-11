@@ -2482,6 +2482,7 @@ namespace xpl_host
                             uint32_t /*widget_id*/, int /*change*/) {}
   void platform_a11y_announce(void* /*frame_native_handle*/,
                               const char* /*utf8*/, bool /*assertive*/) {}
+  bool platform_a11y_is_listening() { return false; }
 
   // Toast animation heartbeat. The toast is painted inside the frame's NEUIView
   // (shared Session::paint_toast, topmost in the paint pass), so we just kick
