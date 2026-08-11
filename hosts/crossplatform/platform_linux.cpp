@@ -3183,6 +3183,16 @@ namespace
     static_cast<LinuxWindow*>(native_handle)->needs_paint = true;
   }
 
+  void platform_force_paint(void* native_handle)
+  {
+    if (!native_handle) return;
+    // Paint straight into the window's Cairo surface, bypassing the needs_paint
+    // / run-loop round trip so the layout caches exist by the time this returns.
+    // paint_window self-guards on the frame having a render context, which is
+    // exactly the "no usable surface yet" best-effort case.
+    paint_window(static_cast<LinuxWindow*>(native_handle));
+  }
+
   bool platform_run()
   {
     if (!g_display) return true;

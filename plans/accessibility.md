@@ -1,6 +1,6 @@
 # Accessibility (`NEUI_API_A11Y`) — implementation plan
 
-Status: **plan only, nothing implemented.** All five open decisions were resolved
+Status: **6.0 shipped** (see below); 6.1 onward not started. All five open decisions were resolved
 on 2026-08-11 (§7), so implementation is unblocked; build order at the end of §8.
 This is Wave 6 of
 `plans/sst-neuigui-gap-response.md` (its §3 sketch, lines 991-1027), worked out
@@ -180,7 +180,64 @@ not be compiled here; a provider is far more intricate than either. Doing the
 platform we can run VoiceOver against first means the shared model's design gets
 validated by a real AT before a second, unverifiable provider is written on it.
 
-### 6.0 — prerequisites (no public API change)
+### 6.0 — prerequisites — **SHIPPED 2026-08-11**, with a design change
+
+Implemented, but **not** the way this section proposed. Building it surfaced a
+dependency the plan had missed, so the approach changed; the original text is
+kept below for the record.
+
+**What the plan missed:** it assumed the whole layout computation could be moved
+out of the paint path into a non-painting helper. It cannot. `TabViewWidget::paint`
+derives its body rect from chip widths measured with `backend->measure_text`
+(`host.cpp:1665-1685`), so TABVIEW layout is not reproducible without a live
+render context — and `SectionWidget::paint` mutates scroll state as a side effect
+of computing its layout (`host.cpp:1357-1365`). A second, non-painting
+implementation of either would have been a drift hazard sitting under an
+accessibility provider, which is the worst place for one.
+
+**What shipped instead — a hybrid that keeps layout single-sourced:**
+
+1. Only the **origin arithmetic** was extracted, into `child_origin_of`
+   (`host.cpp`), and it *reads* the layout the paint pass cached rather than
+   recomputing anything. `paint_widgets_recursive` and the new
+   `refresh_abs_positions_recursive` both go through it, so the two walks cannot
+   disagree by construction.
+2. `Session::refresh_abs_positions(frame)` — the non-painting walk. No PREUPDATE
+   dispatch, no drawing, no layout recomputation.
+3. `Session::ensure_abs_positions(frame)` — the entry point for out-of-band
+   positional queries. For the cold-start case (frame never painted, so the
+   layout caches are empty) it forces **one synchronous paint** via a new
+   `platform_force_paint` seam, then walks. This is the plan's own "fallback",
+   promoted to the primary cold-start path: it reuses the real layout code
+   instead of duplicating it, and Wave 5 already measured the cost at ~0.9 ms for
+   a 100-widget frame, which is nothing for a once-per-frame-lifetime event.
+   `platform_force_paint` is implemented on all five platform layers
+   (macOS `-display`, win32 `RDW_UPDATENOW`, Linux direct `paint_window`, iOS
+   degrades to invalidate, null no-op) and documented as best-effort — a hidden
+   or unmapped window may legitimately do nothing, leaving cached geometry stale
+   rather than wrong.
+4. Per-frame focus traversal: `focus_next` now scopes to the frame owning the
+   focused widget via a new `Session::frame_of`, falling back to the first
+   visible frame.
+
+**Verification:** `tests/focus_smoke_macos.mm` (new, 15 checks, two real
+NSWindows) — and it was confirmed to *fail* (6 failures) against the old
+cross-frame behaviour before being accepted, with the symptom "want focus on
+A.button1, got B.button1". Repaint bench: **0.87 ms before and after in Release**
+(the shared helper inlines away); Debug is ~2.7 % slower, which is the expected
+cost of a non-inlined call in the descent path and does not matter. All 434
+Tier-1 cases, ctest, and all seven macOS harnesses pass.
+
+**Known limitation, deliberately not fixed:** the `frame_of` fallback picks the
+first *visible* frame when no widget has focus, not the frame that owns OS
+keyboard focus — `Session::_os_focused` is session-level, not per-frame, so that
+information does not exist yet. Only reachable by pressing Tab at a
+freshly-opened second window before clicking in it; the harness covers the main
+path.
+
+Original text follows.
+
+### 6.0 — prerequisites (no public API change) — as originally planned
 
 - **Factor the absolute-position walk out of the paint path.** Extract from
   `paint_widgets_recursive` (`host.cpp:2421-2500`) the part computing a child's
@@ -758,7 +815,7 @@ Revised upward from revision 1, which under-sized 6.2 by calling the adapter thi
 
 | Phase | Size | Verifiable here? |
 |---|---|---|
-| 6.0 prerequisites | medium — the layout refactor is the risk | yes |
+| 6.0 prerequisites | **done** — landed as a hybrid, see 6.0 | yes, incl. a new harness |
 | 6.1 client seam | small | yes (compiles + attr round-trip) |
 | 6.2 shared model + Tier-1 tests | medium | yes, fully |
 | 6.2b host adapter | **large — the real bulk of the wave** | macOS only |

@@ -88,6 +88,21 @@ if(APPLE AND NOT NEUI_IOS)
   target_link_libraries(neui_cursor_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
+  # Focus-traversal harness: asserts TAB traversal is per FRAME (it used to
+  # collect tab stops across every frame in the session, so tabbing off the last
+  # control of one window moved the logical focus into another window while the
+  # OS keyboard focus stayed put), that reverse traversal and wraparound also
+  # stay in-frame, that a second frame cycles independently, and that a click
+  # inside a chip-bearing SECTION's child still reports the child with correct
+  # widget-local coordinates (guarding the shared child-origin helper). Realizes
+  # two real NSWindows, so built but NOT ctest-registered.
+  add_executable(neui_focus_smoke_macos focus_smoke_macos.mm)
+  target_include_directories(neui_focus_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_focus_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_focus_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
   # Tree-model context-menu harness (NEUI_W_POPUPMENU + popup_tree_menu):
   # asserts a POPUPMENU never becomes the frame's menu bar (read from
   # [NSApp mainMenu]), that its ROOT rows are ordinary pickable rows with

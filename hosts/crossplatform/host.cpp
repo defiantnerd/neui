@@ -2418,6 +2418,40 @@ namespace xpl_host
   // happens with the renderer transform set so the child paints at its
   // own (x, y) which maps to the correct absolute position - so widget
   // paint code can stay coordinate-agnostic.
+  // Where a widget's CHILDREN start - in both the parent-relative space the
+  // renderer's translate uses and the frame-local absolute space cached on each
+  // widget. Extracted so the painting walk and the non-painting
+  // refresh_abs_positions walk share ONE definition of the offset rules and
+  // cannot drift apart.
+  //
+  // Note the direction of the dependency: this READS the layout a SECTION /
+  // TABVIEW cached during its own paint (section_layout_ptr) instead of
+  // recomputing it. That is deliberate - TabViewWidget's body rect depends on
+  // backend->measure_text for the chip widths (host.cpp:1665-1685), so it is not
+  // reproducible without a live render context. Layout computation therefore
+  // stays single-sourced in the paint path; only the offset arithmetic is
+  // shared. Before a frame's first paint these caches are empty, which is what
+  // Session::abs_positions_valid reports on.
+  struct ChildOrigin { int rel_x, rel_y, abs_x, abs_y; };
+
+  static ChildOrigin child_origin_of(WidgetData& wd)
+  {
+    ChildOrigin o{ wd.x, wd.y, wd.abs_x, wd.abs_y };
+    // Children of a SECTION / TABVIEW are positioned relative to the BODY's
+    // top-left, and a scrolling section additionally shifts by (-scroll).
+    const auto* slay = wd.section_layout_ptr();
+    if (slay) {
+      auto* sst = wd.scroll_state_ptr();
+      const int sx = sst ? sst->scroll_x : 0;
+      const int sy = sst ? sst->scroll_y : 0;
+      o.rel_x = wd.x     + slay->body_x - sx;
+      o.rel_y = wd.y     + slay->body_y - sy;
+      o.abs_x = wd.abs_x + slay->body_x - sx;
+      o.abs_y = wd.abs_y + slay->body_y - sy;
+    }
+    return o;
+  }
+
   static void paint_widgets_recursive(neui_render_backend_t* backend,
                                       neui_render_ctx_t ctx,
                                       neui_detail::Tree<WidgetData>& widgets,
@@ -2463,20 +2497,14 @@ namespace xpl_host
         // non-selected TABPAGE children). Without this gate the children of
         // a hidden parent would still paint.
         if (wd.visible) {
-        auto* sst = wd.scroll_state_ptr();
         const auto* slay = wd.section_layout_ptr();
-        int child_origin_x = wd.x;
-        int child_origin_y = wd.y;
-        int abs_origin_x   = wd.abs_x;
-        int abs_origin_y   = wd.abs_y;
+        const ChildOrigin org = child_origin_of(wd);
+        const int child_origin_x = org.rel_x;
+        const int child_origin_y = org.rel_y;
+        const int abs_origin_x   = org.abs_x;
+        const int abs_origin_y   = org.abs_y;
         bool pushed_clip = false;
         if (slay) {
-          int sx = sst ? sst->scroll_x : 0;
-          int sy = sst ? sst->scroll_y : 0;
-          child_origin_x = wd.x + slay->body_x - sx;
-          child_origin_y = wd.y + slay->body_y - sy;
-          abs_origin_x   = wd.abs_x + slay->body_x - sx;
-          abs_origin_y   = wd.abs_y + slay->body_y - sy;
           if (backend->push_clip && slay->body_w > 0 && slay->body_h > 0) {
             backend->push_clip(ctx,
                                 static_cast<float>(wd.x + slay->body_x),
@@ -2610,6 +2638,11 @@ namespace xpl_host
     // by `inset` (so cached abs_x/abs_y stay screen-accurate for hit-test) and
     // paint the band over the cleared strip afterwards. inset is 0 on Win32 /
     // macOS (native menu) and for frames without a menubar.
+    // Mark the frame as having painted at least once. ensure_abs_positions
+    // reads this to decide whether the SECTION / TABVIEW body-layout caches it
+    // depends on have been populated yet.
+    if (parent_index != 0 && _widgets.exists(parent_index))
+      _widgets[parent_index].painted_once = true;
     int inset = frame_top_inset(parent_index);
     if (inset > 0 && _backend->push_transform && _backend->translate) {
       _backend->push_transform(ctx);
@@ -2652,6 +2685,76 @@ namespace xpl_host
   }
 
   // -------------------------------------------------------------------------
+  // Absolute-position refresh without painting
+  //
+  // abs_x/abs_y are normally a by-product of paint_widgets_recursive, which is
+  // fine for hit-testing (input cannot arrive before the first paint) but not
+  // for anything that must answer a positional question out-of-band - an
+  // accessibility provider being the motivating case, since a screen reader can
+  // probe a window that has not painted yet. This walk reproduces exactly the
+  // origin arithmetic the paint walk uses (via the shared child_origin_of) and
+  // nothing else: no PREUPDATE dispatch, no drawing, no layout recomputation.
+  static void refresh_abs_positions_recursive(neui_detail::Tree<WidgetData>& widgets,
+                                              uint32_t parent_index,
+                                              int parent_abs_x, int parent_abs_y)
+  {
+    uint32_t idx = widgets.child(parent_index);
+    while (idx != 0) {
+      if (widgets.exists(idx)) {
+        auto& wd = widgets[idx];
+        wd.abs_x = parent_abs_x + wd.x;
+        wd.abs_y = parent_abs_y + wd.y;
+        // Descend only into visible containers, matching the paint walk - an
+        // invisible parent hides its whole subtree, so its descendants' cached
+        // positions are meaningless either way.
+        if (wd.visible) {
+          const ChildOrigin org = child_origin_of(wd);
+          refresh_abs_positions_recursive(widgets, idx, org.abs_x, org.abs_y);
+        }
+      }
+      idx = widgets.next(idx);
+    }
+  }
+
+  void Session::refresh_abs_positions(uint32_t frame_index)
+  {
+    if (frame_index == 0 || !_widgets.exists(frame_index)) return;
+    // Same root offset the paint walk starts from: the in-frame menubar band on
+    // hosts that draw it (0 on win32 / macOS and for frames without a menubar).
+    refresh_abs_positions_recursive(_widgets, frame_index, 0,
+                                    frame_top_inset(frame_index));
+  }
+
+  void Session::ensure_abs_positions(uint32_t frame_index)
+  {
+    if (frame_index == 0 || !_widgets.exists(frame_index)) return;
+    auto& fw = _widgets[frame_index];
+    // Cold start: before the frame's first paint, the SECTION / TABVIEW body
+    // rects that child_origin_of reads have never been computed, so the walk
+    // alone would place every child of a section at the section's own origin.
+    // Force ONE synchronous paint to populate them rather than duplicating the
+    // layout code - TabViewWidget's body rect needs backend->measure_text, so a
+    // non-painting recomputation could not match it anyway. Cheap: Wave 5
+    // measured a full 100-widget frame at ~0.9 ms.
+    if (!fw.painted_once && fw.native_handle)
+      platform_force_paint(fw.native_handle);
+    refresh_abs_positions(frame_index);
+  }
+
+  // The tree slot of the FRAME owning `widget_index` (a root child), or 0.
+  uint32_t Session::frame_of(uint32_t widget_index) const
+  {
+    if (widget_index == 0 || !_widgets.exists(widget_index)) return 0;
+    if (_widgets.get_parent(widget_index) == 0) return widget_index;
+    auto parents = _widgets.get_all_parents(widget_index);
+    // get_all_parents walks upward, so the LAST entry is the root child.
+    for (size_t i = parents.size(); i-- > 0; )
+      if (_widgets.exists(parents[i]) && _widgets.get_parent(parents[i]) == 0)
+        return parents[i];
+    return 0;
+  }
+
+  // -------------------------------------------------------------------------
   // Tab stop / focus cycling
 
   static void collect_tab_stops(neui_detail::Tree<WidgetData>& widgets,
@@ -2672,13 +2775,25 @@ namespace xpl_host
 
   void Session::focus_next(bool forward)
   {
-    std::vector<uint32_t> stops;
-    uint32_t root_child = _widgets.child(0);
-    while (root_child != 0) {
-      if (_widgets.exists(root_child))
-        collect_tab_stops(_widgets, root_child, stops);
-      root_child = _widgets.next(root_child);
+    // Traversal is PER FRAME. Collecting across every root child would let TAB
+    // walk out of one window and into a widget in another - each frame owns its
+    // own native surface and its own OS keyboard focus, so moving the logical
+    // focus there would leave the two disagreeing (and the user pressing keys at
+    // a window that doesn't hold focus).
+    uint32_t frame = frame_of(_focused_widget);
+    if (frame == 0) {
+      // No focused widget yet: start in the first visible frame rather than
+      // sweeping all of them. Same result as before for the single-frame case.
+      uint32_t rc = _widgets.child(0);
+      while (rc != 0) {
+        if (_widgets.exists(rc) && _widgets[rc].visible) { frame = rc; break; }
+        rc = _widgets.next(rc);
+      }
     }
+    if (frame == 0 || !_widgets.exists(frame)) return;
+
+    std::vector<uint32_t> stops;
+    collect_tab_stops(_widgets, frame, stops);
 
     if (stops.empty()) return;
 

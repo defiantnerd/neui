@@ -94,6 +94,10 @@ namespace xpl_host
     void* native_icon   = nullptr;
     neui_render_ctx_t render_ctx = nullptr;
     uint32_t dpi = 96;
+    // FRAMES only: set the first time paint_frame runs for this frame. Read by
+    // Session::ensure_abs_positions to tell whether the SECTION / TABVIEW body
+    // layout caches (which only the paint path computes) exist yet.
+    bool painted_once = false;
 
     // ---- Zoom (NEUI_ATTR_UI_SCALE) ------------------------------------------
     // The user zoom for a FRAME, clamped, 1.0 when unset. Read live from the
@@ -946,8 +950,29 @@ namespace xpl_host
     int frame_client_height(uint32_t widget_index);
 
     // Move keyboard focus to the next (forward=true) or previous (false) widget
-    // that has both tab_stop=true and visible=true. Wraps around.
+    // that has both tab_stop=true and visible=true, WITHIN the frame that owns
+    // the currently focused widget. Wraps around inside that frame; never moves
+    // focus into a different window.
     void focus_next(bool forward);
+
+    // Recompute every widget's cached frame-local abs_x/abs_y under `frame_index`
+    // WITHOUT painting. Normally these are a by-product of the paint walk, which
+    // leaves them at 0 until the frame's first paint - fine for hit-testing
+    // (input can't arrive that early) but not for an out-of-band positional
+    // query such as an accessibility provider's. Uses the same origin arithmetic
+    // as the paint walk; does not recompute SECTION / TABVIEW body layout, which
+    // needs a live render context (see child_origin_of in host.cpp).
+    void refresh_abs_positions(uint32_t frame_index);
+
+    // refresh_abs_positions, but safe on a frame that has never painted: forces
+    // one synchronous paint first so the SECTION / TABVIEW body-layout caches
+    // exist. THE entry point for out-of-band positional queries; prefer it over
+    // refresh_abs_positions unless you know the frame has already painted.
+    void ensure_abs_positions(uint32_t frame_index);
+
+    // Tree slot of the FRAME (root child) owning `widget_index`, or 0 if there
+    // is none. `widget_index` may itself be a frame.
+    uint32_t frame_of(uint32_t widget_index) const;
 
     // Handle an editing key for the currently focused widget.
     // Returns true if the key was consumed and should not be forwarded.

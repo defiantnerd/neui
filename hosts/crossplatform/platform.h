@@ -127,6 +127,21 @@ namespace xpl_host
   // next message-loop iteration. Used after focus changes to update the outline.
   void platform_invalidate(void* native_handle);
 
+  // Repaint a native window NOW, synchronously, before returning - unlike
+  // platform_invalidate, which only marks it dirty for the next loop iteration.
+  //
+  // Exists for out-of-band positional queries (Session::ensure_abs_positions):
+  // some layout state is only produced by the paint path, so a caller that must
+  // answer a geometry question about a never-painted frame has to make that
+  // paint happen rather than duplicate the computation. Do NOT reach for this to
+  // "make a repaint happen sooner" - that is what platform_invalidate is for.
+  //
+  // Best-effort: a platform with no synchronous repaint entry point, or a window
+  // that is hidden / off-screen / not yet mapped, may legitimately do nothing, in
+  // which case the caller's cached geometry stays stale rather than becoming
+  // wrong. Must not be called from inside a paint (it would re-enter).
+  void platform_force_paint(void* native_handle);
+
   // Start / stop a 16 ms repaint heartbeat on a frame's native window.
   // Used by the toast overlay (and any future animation that does not
   // belong to a single widget). The platform layer is responsible for

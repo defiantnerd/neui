@@ -2237,6 +2237,15 @@ namespace xpl_host
     [view setNeedsDisplay];
   }
 
+  void platform_force_paint(void* native_handle)
+  {
+    // UIKit has no synchronous -display equivalent that is safe to call
+    // out-of-band (CoreAnimation drives drawing on its own transaction), so this
+    // degrades to marking dirty. Callers treat a no-op as "geometry stays as it
+    // was", which is the documented best-effort contract.
+    platform_invalidate(native_handle);
+  }
+
   // UIApplicationMain owns the run loop on iOS; neui never owns / stops it.
   bool platform_run() { return true; }
   bool platform_pump_once() { return true; }

@@ -1963,6 +1963,15 @@ namespace xpl_host
     [frame_content_view(native_handle) setNeedsDisplay:YES];
   }
 
+  void platform_force_paint(void* native_handle)
+  {
+    if (!native_handle) return;
+    // -display marks the view dirty and runs drawRect: before returning, which
+    // is what makes this synchronous. AppKit skips the draw for a view that is
+    // not in a visible window - the documented best-effort case.
+    [frame_content_view(native_handle) display];
+  }
+
   bool platform_run()
   {
     [NSApp run];

@@ -49,6 +49,8 @@ namespace xpl_host
   float platform_get_scale_factor(void* /*native_handle*/) { return 1.0f; }
 
   void platform_invalidate(void* /*native_handle*/) {}
+  // No windows and no paint path, so there is nothing to force.
+  void platform_force_paint(void* /*native_handle*/) {}
 
   bool platform_run() { return true; }
   bool platform_pump_once() { return true; }

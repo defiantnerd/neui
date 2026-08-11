@@ -1869,6 +1869,16 @@ namespace xpl_host
       InvalidateRect(static_cast<HWND>(native_handle), nullptr, FALSE);
   }
 
+  void platform_force_paint(void* native_handle)
+  {
+    if (!native_handle) return;
+    // RDW_UPDATENOW sends WM_PAINT immediately rather than posting it, so the
+    // paint has happened by the time this returns. A hidden window is skipped
+    // by the OS - the documented best-effort case.
+    RedrawWindow(static_cast<HWND>(native_handle), nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_UPDATENOW);
+  }
+
   static void dispatch_one(MSG& msg)
   {
     // Menu accelerator translation runs before TranslateMessage so a
