@@ -652,6 +652,8 @@ namespace
     ev.data.wheel.widget        = { hw->widget_id };
     ev.data.wheel.x             = static_cast<int>(lx);
     ev.data.wheel.y             = static_cast<int>(ly);
+    // is_flipped stays 0: libinput applies natural-scroll in the input stack
+    // before XI2 valuators reach us, so we cannot tell (see events.h).
     ev.data.wheel.delta         = delta;
     ev.data.wheel.is_horizontal = horizontal ? 1 : 0;
     ev.data.wheel.buttonmap     = neui_detail::x11_buttonmap(be.state);

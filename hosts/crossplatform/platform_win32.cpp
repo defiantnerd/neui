@@ -1172,6 +1172,9 @@ namespace xpl_host
       // fallback. Flip the sign so positive delta = scroll-left, matching
       // the WM_MOUSEHWHEEL convention.
       bool shift_held = (wParam & MK_SHIFT) != 0;
+      // is_flipped stays 0: Windows applies the Precision-Touchpad "reverse
+      // scrolling direction" setting in the DRIVER, with no API to query it, so
+      // "not inverted or unknown" is the only honest answer (see events.h).
       ev.data.wheel.delta         = shift_held ? -delta : delta;
       ev.data.wheel.is_horizontal = shift_held ? 1 : 0;
       // The wheel messages pack the key/button state in the LOW word (the

@@ -9,6 +9,7 @@
 
 #include "attrs.h"
 #include "behavior.h"
+#include "wheel_direction.h"
 
 // Behavior runtime - per-widget input state + the host-agnostic dispatch
 // helpers. Both xpl + native hosts include this header and call the
@@ -526,19 +527,15 @@ namespace neui_detail
       if (delta == 0) return true;
       const uint32_t bmap = event->data.wheel.buttonmap;
 
-      // Undo the platform layer's Shift->horizontal flip. The win32 + macOS xpl
-      // layers turn a Shift-held VERTICAL notch into a horizontal one and NEGATE
-      // the delta, to match the WM_MOUSEHWHEEL "positive = scroll-left"
-      // convention. That flip lives in the platform layer BY DESIGN, so a
-      // consumer with no horizontal axis - which a value handler is - has to
-      // recover the physical direction here, or Shift would silently reverse the
-      // control (it did, before this).
-      //
-      // Deliberately narrow: only a horizontal notch WITH Shift held is treated
-      // as a flipped vertical one. A genuine tilt-wheel / trackpad horizontal
-      // notch (is_horizontal, no Shift) keeps behaving exactly as it always has.
-      if (event->data.wheel.is_horizontal && (bmap & NEUI_MK_SHIFT))
-        delta = -delta;
+      // PHYSICAL direction. Two sign changes have to come off before a value
+      // handler can use this delta - the platform layer's Shift->horizontal flip,
+      // and the OS's natural-scrolling inversion (issue #21) - and both live in
+      // wheel_direction.h now, so this handler, the built-in KNOB and the built-in
+      // SLIDER cannot drift apart. The Shift half used to be open-coded here; the
+      // inversion half was simply missing, which made a trackpad swipe move a
+      // behavior-driven control the wrong way for anyone on the macOS default.
+      delta = wheel_physical_delta(delta, event->data.wheel.is_horizontal, bmap,
+                                   event->data.wheel.is_flipped);
 
       float sign = (delta > 0) ? -1.0f : 1.0f;
       int   mag  = (delta > 0) ? delta : -delta;

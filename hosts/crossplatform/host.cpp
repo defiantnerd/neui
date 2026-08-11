@@ -8,6 +8,7 @@
 #include "platform.h"
 #include "../shared/dnd_dispatch.h"
 #include "../shared/widget_paint_knob.h"
+#include "../shared/wheel_direction.h"
 #include "../shared/widget_paint_section.h"
 #include "../shared/widget_paint_tabview.h"
 #include "../shared/widget_tabview_host.h"
@@ -3597,6 +3598,10 @@ namespace xpl_host
       // read as "fine" and wheel-up never did. The wheel payload carries a real
       // buttonmap now, so read that.
       bool fine = (event->data.wheel.buttonmap & NEUI_MK_SHIFT) != 0;
+      // PHYSICAL direction - a fader follows the user's fingers, not the delta
+      // the OS already inverted for content scrolling. Same reasoning as the
+      // KNOB; see wheel_direction.h (issue #21).
+      delta = neui_detail::wheel_physical_delta(event->data.wheel);
       float step = nudge_delta(*this, 1, fine ? 0.01f : 0.05f) *
                    (delta > 0 ? 1.0f : -1.0f);
       widget_set_value_user_gesture(*this, widget_get_value(*this) + step);
@@ -3991,9 +3996,15 @@ namespace xpl_host
       // read as "fine" and wheel-up never did. The wheel payload carries a real
       // buttonmap now, so read that.
       bool fine = (event->data.wheel.buttonmap & NEUI_MK_SHIFT) != 0;
-      // Wheel up INCREASES knob value, wheel down DECREASES - matching the
-      // SLIDER and the natural scroll direction (delta > 0 == scroll up on
-      // every platform).
+      // PHYSICAL direction, not the delta as delivered. `delta > 0 == scroll up`
+      // was only ever true with macOS natural scrolling OFF: the OS applies that
+      // preference before we see the event, so the same swipe arrived with
+      // opposite signs and a knob felt backwards for anyone on the default
+      // setting (issue #21). A knob has no content to move, so it follows the
+      // user's fingers - see wheel_direction.h, which also undoes the platform
+      // layer's Shift->horizontal flip.
+      delta = neui_detail::wheel_physical_delta(event->data.wheel);
+      // Wheel up INCREASES knob value, wheel down DECREASES - matching the SLIDER.
       float step = nudge_delta(*this, 1, fine ? 0.01f : 0.05f) *
                    (delta > 0 ? 1.0f : -1.0f);
       widget_set_value_user_gesture(*this, widget_get_value(*this) + step);

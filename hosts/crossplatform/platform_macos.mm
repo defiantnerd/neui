@@ -964,6 +964,10 @@ void wake_app_event_pump()
   ev.data.wheel.delta         = delta;
   ev.data.wheel.is_horizontal = horizontal ? 1 : 0;
   // Same NEUI_MK_* bits as the mouse path, from the same shared helper.
+  // The ONLY platform that can report this. A value consumer needs it to
+  // recover the physical gesture direction (issue #21); a scrolling consumer
+  // ignores it and keeps using the delta the OS adjusted for it.
+  ev.data.wheel.is_flipped    = event.isDirectionInvertedFromDevice ? 1 : 0;
   ev.data.wheel.buttonmap     = mac_buttonmap(NSEvent.pressedMouseButtons,
                                                event.modifierFlags);
 

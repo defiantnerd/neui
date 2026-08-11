@@ -33,6 +33,7 @@ add_executable(neui_tests
   test_component_loader.cpp
   test_a11y_tree.cpp
   test_a11y_uia_map.cpp
+  test_wheel_direction.cpp
   # mujson lives in the core lib, but the suite links no library, so its TU is
   # compiled directly into the test executable (same pattern as the *.cpp above).
   ${PROJECT_SOURCE_DIR}/src/mujson.cpp)

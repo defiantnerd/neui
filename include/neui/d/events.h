@@ -170,6 +170,26 @@ extern "C" {
     int delta;
     int is_horizontal;
     uint32_t buttonmap;
+    // 1 when the OS ALREADY INVERTED this delta relative to the user's physical
+    // gesture - macOS "Natural scrolling", which is on by default.
+    //
+    // Why you may need it: for CONTENT scrolling the delta is right as delivered
+    // (moving the content with your fingers is the point of the preference), so a
+    // scrolling consumer should ignore this field. For a VALUE control there is no
+    // content to move and the user's mental model is the direction their fingers
+    // travelled - so a knob or fader wants `is_flipped ? -delta : delta`, or the
+    // same physical swipe raises the value with the preference on and lowers it
+    // with the preference off.
+    //
+    // NOT UNIFORM ACROSS PLATFORMS, and the field is named for what it can
+    // actually promise: 1 means "definitely inverted", 0 means "not inverted, OR
+    // this platform cannot tell". Only macOS can answer
+    // (NSEvent.isDirectionInvertedFromDevice). Windows applies the
+    // Precision-Touchpad "reverse scrolling direction" setting in the driver with
+    // no queryable API, and on Linux libinput applies natural-scroll in the input
+    // stack before XI2 valuators reach us - on both, a user who inverts scrolling
+    // system-wide inverts neui's value controls with it, and neui cannot know.
+    int is_flipped;
   } neui_event_wheel_t;
 
   // event_key for all events like keydown/keyup/emitted key

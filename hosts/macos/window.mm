@@ -2486,6 +2486,9 @@ static float neui_snap_to_steps(float v, int steps)
   ev.data.wheel.x      = (int)p.x;
   ev.data.wheel.y      = (int)p.y;
   ev.data.wheel.delta  = ticks;
+  // See the xpl macOS layer: only macOS can report this, and a value consumer
+  // needs it to recover the physical direction (issue #21).
+  ev.data.wheel.is_flipped = event.isDirectionInvertedFromDevice ? 1 : 0;
   ev.data.wheel.buttonmap = neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons,
                                                         event.modifierFlags);
   sess->dispatch_event(&ev);
