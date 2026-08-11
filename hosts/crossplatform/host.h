@@ -998,11 +998,20 @@ namespace xpl_host
     // from empty caches - stale beats wrong - so a caller must not treat the
     // cached values as fresh.
     //
-    // MUST NOT be called from inside a paint: it can re-enter paint_frame on the
-    // same render context. Reachable from client code (a WIDGET_PREUPDATE
-    // handler runs mid-paint), so any future public entry point that leads here
-    // needs an in-paint guard.
+    // Returns false, changing nothing, when called FROM INSIDE A PAINT: the
+    // forced paint would re-enter paint_frame on the same render context, and a
+    // client can reach here from a WIDGET_PREUPDATE handler, which runs mid-
+    // paint. Enforced rather than documented (in_paint() below) because the
+    // failure mode is a corrupted frame or a crash inside a backend, not a
+    // wrong number - and an accessibility query that answers "not available"
+    // for one frame costs nothing.
     bool ensure_abs_positions(uint32_t frame_index);
+
+    // True while paint_frame is on the stack for ANY frame of this session.
+    // Set for the whole of paint_frame, so it also covers the client callbacks
+    // the paint makes (WIDGET_PREUPDATE, WIDGET_PAINT), which is the only way
+    // client code can be running mid-paint.
+    bool in_paint() const { return _in_paint > 0; }
 
     // Mark the frame owning `widget_index` as needing a paint before its cached
     // layout can be trusted. Called from structural mutations.
@@ -1389,6 +1398,35 @@ namespace xpl_host
       return s_next++;
     }
 
+    // Cache key for a platform provider's node tree.
+    //
+    // Providers are PULL, not push (plans/accessibility.md §4.1): the tree is
+    // built on query behind this counter, never eagerly on change. An AT asks
+    // for children, then for each child's role / name / value / frame, so
+    // rebuilding per query would be O(n) rebuilds for one traversal - but a
+    // cache with no invalidation would answer from a tree that no longer
+    // matches the window.
+    //
+    // PAINT IS THE INVALIDATION SIGNAL. Anything that changes what the window
+    // SHOWS also repaints it, so bumping this once per paint_frame covers every
+    // visible mutation - text, items, selection, scroll, value, geometry -
+    // without a bump at each of the several hundred mutation sites, which is
+    // where a hand-wired scheme would rot. The non-visible changes an AT still
+    // has to hear about (focus, a client's own notify()) bump it explicitly.
+    //
+    // Consequence worth knowing: a frame animating at 60 Hz rebuilds on every
+    // query. That is the cheap direction of the trade (POD nodes, and only
+    // while an AT is actually querying) and it is never wrong.
+    uint32_t a11y_revision() const { return _a11y_revision; }
+    void bump_a11y_revision() { ++_a11y_revision; }
+
+    // Backs NEUI_API_A11Y::is_active. Set by a platform provider the first time
+    // it answers a query. macOS offers no "an AT attached" signal, so "has
+    // anything queried us" is the only honest answer - and the public header
+    // says so, and says not to gate correctness on it.
+    bool a11y_queried() const { return _a11y_queried; }
+    void mark_a11y_queried() { _a11y_queried = true; }
+
   public:
     neui_detail::Tree<WidgetData>  _widgets;
     neui_detail::AssetManager      _asset_manager;
@@ -1494,6 +1532,16 @@ namespace xpl_host
     // Indexed by tree slot, grown on demand; slot 0 (the root sentinel) is
     // never handed out so its entry stays 0.
     std::vector<uint32_t> _a11y_generation;
+
+    // Provider cache key + first-query flag - see a11y_revision() above.
+    uint32_t _a11y_revision = 1;
+    bool     _a11y_queried  = false;
+
+    // paint_frame nesting depth - see in_paint(). A counter rather than a bool
+    // because one frame's paint can legitimately be on the stack while another
+    // frame paints (a client PREUPDATE handler that shows a dialog), and a bool
+    // would clear the guard on the inner paint's exit.
+    int _in_paint = 0;
 
     // Try to consume a Win32 MSG via this session's menubar accelerator
     // tables. Implemented in widgets.cpp; called from platform_run().

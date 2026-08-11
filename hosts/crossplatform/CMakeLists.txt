@@ -38,8 +38,11 @@ elseif(NEUI_IOS)
     "-framework QuartzCore"
   )
 elseif(APPLE)
-  target_sources(neui-xplhost PRIVATE platform_macos.mm)
-  set_source_files_properties(platform_macos.mm PROPERTIES
+  # a11y_macos.mm is the NSAccessibility provider (NEUI_API_A11Y); separate TU
+  # from the platform layer so the provider does not pull in window / input /
+  # drag machinery it has no use for.
+  target_sources(neui-xplhost PRIVATE platform_macos.mm a11y_macos.mm)
+  set_source_files_properties(platform_macos.mm a11y_macos.mm PROPERTIES
     COMPILE_FLAGS "-fobjc-arc"
   )
   target_link_libraries(neui-xplhost PRIVATE neui-backend-cg

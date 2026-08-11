@@ -913,6 +913,18 @@ namespace xpl_host
     uint32_t ref = (new_idx != 0) ? new_idx : _focused_widget;
     void* frame = find_parent_native_handle(ref);
     if (frame) platform_invalidate(frame);
+
+    // Tell an attached AT where focus went. Bump first: the provider resolves
+    // the widget against a freshly built tree, and the FOCUSED bit it needs to
+    // report lives in that tree. Focus gets an explicit bump because it is one
+    // of the few changes a repaint does not necessarily express - the frame can
+    // repaint pixel-identically (focus decorations are suppressed while the
+    // frame lacks OS focus) and the newly focused control can even be scrolled
+    // out of view.
+    bump_a11y_revision();
+    if (frame && new_idx != 0 && _widgets.exists(new_idx))
+      platform_a11y_notify(frame, _widgets[new_idx].widget_id,
+                           a11y_notify_focus);
   }
 
   void Session::set_hovered(uint32_t new_idx)
@@ -2568,6 +2580,21 @@ namespace xpl_host
   void Session::paint_frame(neui_render_ctx_t ctx, uint32_t parent_index)
   {
     if (!_backend || !ctx) return;
+    // In-paint guard + accessibility cache key, both for the WHOLE paint
+    // including the client callbacks it makes (PREUPDATE / WIDGET_PAINT). A
+    // client can call into the framework from those, and an accessibility query
+    // that forced a second paint on this same render context would corrupt the
+    // frame - see Session::ensure_abs_positions and in_paint().
+    //
+    // The bump is here rather than at each mutation site because a paint is the
+    // one thing every visible change has in common; see a11y_revision().
+    struct PaintScope
+    {
+      int& depth;
+      explicit PaintScope(int& d) : depth(d) { ++depth; }
+      ~PaintScope() { --depth; }
+    } paint_scope(_in_paint);
+    bump_a11y_revision();
     // Choose the palette for this frame BEFORE reading any colour: the
     // begin_frame clear, the widget paints, the combo / popup overlays,
     // and the focus outline all flow through current_palette(). Frames
@@ -2732,6 +2759,12 @@ namespace xpl_host
   bool Session::ensure_abs_positions(uint32_t frame_index)
   {
     if (frame_index == 0 || !_widgets.exists(frame_index)) return false;
+    // Never from inside a paint. The force-paint below would re-enter
+    // paint_frame on a render context that is mid-frame, and the reachable path
+    // is real: an accessibility query arriving while a client WIDGET_PREUPDATE
+    // or WIDGET_PAINT handler runs. Refusing costs one unanswered query; the
+    // alternative is a corrupted frame or a crash inside a backend.
+    if (in_paint()) return false;
     auto& fw = _widgets[frame_index];
     // The layout state child_origin_of reads (SECTION / TABVIEW body rects) is
     // produced only by a paint. Two cases need one forcing:
@@ -2764,6 +2797,15 @@ namespace xpl_host
     uint32_t frame = frame_of(widget_index);
     if (frame != 0 && _widgets.exists(frame))
       _widgets[frame].layout_dirty = true;
+    // A structural change must invalidate the accessibility cache WITHOUT
+    // waiting for a paint. Paint is the invalidation signal for everything a
+    // repaint expresses (see a11y_revision), but a destroy is exactly the case
+    // where waiting is wrong: not every mutation path repaints promptly, and a
+    // provider answering from a tree that still contains a destroyed widget
+    // would hand an AT its name, role and rectangle - a wrong answer, not a
+    // stale one. Cheap: an increment, and the rebuild only happens if something
+    // actually queries.
+    bump_a11y_revision();
   }
 
   // The tree slot of the FRAME owning `widget_index` (a root child), or 0.

@@ -2300,6 +2300,14 @@ namespace xpl_host
     }
   }
 
+  // Accessibility: the UI Automation provider is 6.4 (plans/accessibility.md).
+  // Until it lands these are no-ops - a client's declarations are stored and
+  // simply unread, which is the same honest state Linux is in.
+  void platform_a11y_notify(void* /*frame_native_handle*/,
+                            uint32_t /*widget_id*/, int /*change*/) {}
+  void platform_a11y_announce(void* /*frame_native_handle*/,
+                              const char* /*utf8*/, bool /*assertive*/) {}
+
   // -------------------------------------------------------------------------
   // Relative (unbounded) pointer mode.
   //

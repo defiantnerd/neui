@@ -139,6 +139,12 @@ namespace xpl_host
   void     platform_timer_start(Session*, uint32_t)                            {}
   void     platform_timer_stop(Session*)                                       {}
 
+  // Accessibility: no surface, so no provider and nothing to notify. The
+  // declarations a client makes are still stored (they live in the widget's
+  // attribute bag) and simply go unread.
+  void platform_a11y_notify(void*, uint32_t, int)                              {}
+  void platform_a11y_announce(void*, const char*, bool)                        {}
+
   // Toast animation - no platform timer on the null host; toasts will
   // still paint a single frame if the client invalidates manually.
   void platform_start_toast_animation(void* /*native_handle*/)                {}

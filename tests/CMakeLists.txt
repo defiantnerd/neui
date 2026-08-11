@@ -126,6 +126,24 @@ if(APPLE AND NOT NEUI_IOS)
   target_link_libraries(neui_a11y_tree_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
+  # Accessibility PROVIDER harness: the third a11y layer, and the only one that
+  # exercises what the OS actually calls. Talks to the frame's NSView through the
+  # real NSAccessibility protocol (children / hit test / focused element / role /
+  # label / value / frame / perform), never through the adapter API - so it tests
+  # the property that matters: what VoiceOver asks for is what it gets. Two
+  # checks carry the weight: an element's SCREEN rect is cross-validated by
+  # posting a real click at its centre (an inverted Y-flip passes every other
+  # assertion), and the in-paint guard is asserted by querying from inside a real
+  # WIDGET_PAINT. Realizes two real NSWindows, so built but NOT ctest-registered.
+  add_executable(neui_a11y_provider_smoke_macos a11y_provider_smoke_macos.mm)
+  target_include_directories(neui_a11y_provider_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/hosts/crossplatform
+    ${PROJECT_SOURCE_DIR}/hosts/shared)
+  target_compile_features(neui_a11y_provider_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_a11y_provider_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
   # Focus-traversal harness: asserts TAB traversal is per FRAME (it used to
   # collect tab stops across every frame in the session, so tabbing off the last
   # control of one window moved the logical focus into another window while the

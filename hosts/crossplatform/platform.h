@@ -510,4 +510,46 @@ namespace xpl_host
   void platform_timer_start(Session* session, uint32_t interval_ms);
   void platform_timer_stop(Session* session);
 
+  // -------------------------------------------------------------------------
+  // Accessibility (NEUI_API_A11Y, <neui/d/a11y.h>).
+  //
+  // The TREE itself is not a seam: a11y_adapter.cpp + hosts/shared/a11y_tree.h
+  // build it once, portably, for every platform (the xpl host paints one native
+  // surface per frame, so the tree has to be synthesised whatever the platform
+  // provider API looks like). What a platform layer adds is the PROVIDER - the
+  // object the OS asks - plus the two things a provider cannot pull:
+  // notifications, and a spoken announcement with no node behind it.
+  //
+  // Both take the FRAME's native handle, because a provider is rooted at one
+  // frame's native surface (per-frame focus, per-frame subtree - see G3 in
+  // plans/accessibility.md). A platform with no provider implements these as
+  // no-ops and the accessibility API stays honest: declarations are stored and
+  // cost nothing, and nothing reads them. That is Linux, iOS and null today.
+
+  // What changed, for platform_a11y_notify. The first five mirror
+  // neui_a11y_change_t exactly, so a client's notify() forwards its argument
+  // unchanged. Focus has no public counterpart - a client never drives focus by
+  // hand - so it sits above the public range rather than renumbering it.
+  enum A11yNotifyKind
+  {
+    a11y_notify_value     = 0,   // == NEUI_A11Y_CHANGE_VALUE
+    a11y_notify_name      = 1,
+    a11y_notify_state     = 2,
+    a11y_notify_structure = 3,
+    a11y_notify_selection = 4,
+    a11y_notify_focus     = 100
+  };
+
+  // `widget_id` is the PUBLIC widget id (session << 16 | slot), not a tree
+  // slot, so this seam needs no Session. A provider that has not been asked for
+  // anything yet should do nothing: posting a notification for a tree it has
+  // never built would make the OS query at an arbitrary moment for no reason.
+  void platform_a11y_notify(void* frame_native_handle, uint32_t widget_id,
+                            int change /* A11yNotifyKind */);
+
+  // Speak `utf8` now, with no node behind it - the accessibility counterpart of
+  // a toast. `assertive` interrupts whatever is being spoken.
+  void platform_a11y_announce(void* frame_native_handle, const char* utf8,
+                              bool assertive);
+
 } // namespace xpl_host

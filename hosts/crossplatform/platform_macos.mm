@@ -23,6 +23,9 @@
 
 #include "host.h"
 #include "platform.h"
+// NSAccessibility provider (NEUI_API_A11Y). Lives in its own TU - see the
+// header - so the NEUIView overrides below stay one line each.
+#include "a11y_macos.h"
 
 #include <unordered_map>
 #include "../shared/macos/modal_pump_macos.h"
@@ -341,6 +344,40 @@ void wake_app_event_pump()
   if (z != 1.0f && z > 0.0f) { p.x /= z; p.y /= z; }
   return p;
 }
+
+// ---- Accessibility (NSAccessibility) --------------------------------------
+//
+// As far as the OS is concerned this view IS the frame - one native surface per
+// frame - so these four hooks are the whole platform-side accessibility
+// surface. Every answer comes from the shared node tree (a11y_macos.mm ->
+// a11y_adapter.cpp -> hosts/shared/a11y_tree.h); nothing about widgets is
+// decided here. The hit-test point arrives in SCREEN coordinates, which is why
+// the provider owns the conversion.
+
+- (NSArray*)accessibilityChildren
+{
+  return xpl_host::mac_a11y_children(self, session, widget_index);
+}
+
+- (id)accessibilityHitTest:(NSPoint)point
+{
+  id hit = xpl_host::mac_a11y_hit_test(self, session, widget_index, point);
+  // No node there (or the frame itself): let AppKit answer with the view, so a
+  // click on empty frame background still reports the window rather than
+  // nothing at all.
+  return hit ? hit : [super accessibilityHitTest:point];
+}
+
+- (id)accessibilityFocusedUIElement
+{
+  id el = xpl_host::mac_a11y_focused_element(self, session, widget_index);
+  return el ? el : [super accessibilityFocusedUIElement];
+}
+
+// A group, not a window: the NSWindow above us already carries the window role
+// and title, and reporting a second window here would make VoiceOver announce
+// the frame twice.
+- (NSString*)accessibilityRole { return NSAccessibilityGroupRole; }
 
 - (void)dispatchMouseEventForType:(neui_event_type_t)type
                             event:(NSEvent*)event
@@ -2617,6 +2654,29 @@ namespace xpl_host
     if (it == m.end()) return;
     [it->second invalidate];
     m.erase(it);
+  }
+
+  // -------------------------------------------------------------------------
+  // Accessibility seams. The provider itself lives in a11y_macos.mm; these two
+  // functions exist only to turn a frame's native handle into the content view
+  // it is rooted at, which is the one thing that file deliberately does not
+  // know (a handle is an NSWindow* for a standalone frame and an NEUIView* for
+  // a DAW-embedded one - see is_embedded_view).
+
+  void platform_a11y_notify(void* frame_native_handle, uint32_t widget_id,
+                            int change)
+  {
+    NSView* v = frame_content_view(frame_native_handle);
+    if (!v) return;
+    mac_a11y_notify(v, widget_id, change);
+  }
+
+  void platform_a11y_announce(void* frame_native_handle, const char* utf8,
+                              bool assertive)
+  {
+    // A null handle is legal here: an announcement has no node behind it, and
+    // the provider falls back to NSApp when there is no window to post on.
+    mac_a11y_announce(frame_content_view(frame_native_handle), utf8, assertive);
   }
 
   uint64_t platform_now_ms()

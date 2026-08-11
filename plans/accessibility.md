@@ -1,6 +1,6 @@
 # Accessibility (`NEUI_API_A11Y`) — implementation plan
 
-Status: **6.0 + 6.1 + 6.2 + 6.2b shipped** (see those sections); 6.3 onward not started. All five open decisions were resolved
+Status: **6.0 + 6.1 + 6.2 + 6.2b + 6.3 shipped** (see those sections); 6.6 onward not started. All five open decisions were resolved
 on 2026-08-11 (§7), so implementation is unblocked; build order at the end of §8.
 This is Wave 6 of
 `plans/sst-neuigui-gap-response.md` (its §3 sketch, lines 991-1027), worked out
@@ -743,7 +743,119 @@ valid", but `ensure_abs_positions` returns **true** for a frame that has painted
 before whose forced repaint could not happen (hidden window) — that reports
 last-painted, i.e. stale, geometry. The header now says so.
 
-### 6.3 — macOS provider (`hosts/crossplatform/platform_macos.mm`)
+### 6.3 — macOS provider — **SHIPPED 2026-08-11**
+
+Landed as `hosts/crossplatform/a11y_macos.{h,mm}` (a TU of its own, not inside
+`platform_macos.mm` as this section proposed — the provider needs none of that
+file's window / input / drag machinery, and the four `NEUIView` overrides it does
+need are one line each). VoiceOver now reads a neui window: roles, names, values,
+screen rectangles, focus, and press / increment / decrement actions.
+
+**What shipped**
+
+- `NEUIA11yElement` (an `NSAccessibilityElement` subclass) per node, holding only
+  a node id — every answer comes from the provider's current tree, so an element
+  that outlives its node degrades to "gone" rather than reporting stale facts.
+- `NEUIA11yProvider` per frame, attached to the content view as an **associated
+  object**, so its lifetime is the view's and nothing tracks view teardown.
+- Role mapping with the platform's own conventions rather than invented roles:
+  KNOB → `AXSlider` (+ `accessibilityRoleDescription` "knob"), COMBOBOX →
+  `AXPopUpButton` (a neui combobox has no text entry), tabs → `AXRadioButton`
+  (what `NSTabView` does), list / tree / grid children → `AXRow` / `AXCell`, a
+  grid header → `AXButton` described as "column header" (it *is* a sort button),
+  a password INPUTBOX → the secure **subrole** (there is no secure role) and no
+  value at all.
+- Checkbox-ish roles report a NUMBER value (0 / 1, and **2 for a tri-state's
+  mixed**), because that is where VoiceOver reads their state from; everything
+  else reports the model's formatted string.
+- Actions route through paths the user already has: press = the same
+  `on_keydown(SPACE)` the space bar reaches, increment / decrement = the same
+  `on_keydown(RIGHT/LEFT)` the arrow keys reach — so **an AT increment fires
+  `GESTURE_BEGIN` / `VALUE_CHANGED` / `GESTURE_END` exactly like a keypress**,
+  which is what a DAW needs to record one automation edit. A sub-element presses
+  by a synthesised click at its own reported centre.
+- Notifications: `platform_a11y_notify` / `platform_a11y_announce` (two new
+  platform seams, no-ops on win32 / Linux / iOS / null). `Session::set_focus`
+  posts focused-element-changed; a client's `notify()` forwards its enum
+  unchanged; `announce()` posts `NSAccessibilityAnnouncementRequested` on the
+  window. `is_active()` now answers honestly (`Session::a11y_queried`).
+- **The in-paint guard the 6.0 review left open.** `Session::in_paint()` is set
+  for the whole of `paint_frame` (including the client callbacks it makes), and
+  `ensure_abs_positions` refuses while it is set. A client can reach the
+  accessibility path from a `WIDGET_PAINT` handler, and forcing a second paint on
+  a live render context is a corrupted frame, not a wrong number.
+
+**Cache invalidation, decided here.** The tree is pull-not-push behind
+`Session::a11y_revision()`, and **paint is the invalidation signal**: anything
+that changes what the window shows also repaints it, so one bump per
+`paint_frame` covers every visible mutation without a bump at each of several
+hundred mutation sites. Three things bump explicitly because a paint does not
+express them, or does not express them *in time*: focus (the frame can repaint
+pixel-identically), a client's `notify()`, and — added after the harness caught
+it — `mark_layout_dirty`. Cost of the whole scheme in the repaint bench: **0.86 ms
+for 100 CUSTOMDRAW widgets, unchanged from the 0.87 ms baseline.**
+
+**Two real defects, both caught by the new harness before commit**
+
+1. **A destroyed widget kept answering.** With invalidation keyed only on paint,
+   `w_destroy` — which does *not* repaint (see the new `docs/deferred-issues.md`
+   entry) — left the cached tree intact, so an AT could still read the destroyed
+   widget's role, name and rectangle. That is a wrong answer, not a stale one,
+   and it is exactly what the per-instance generation exists to prevent — the
+   generation cannot help if the tree is never rebuilt. `mark_layout_dirty` now
+   bumps the revision, so every structural mutation invalidates immediately.
+2. **An AT-performed action raced its own repaint.** Press a checkbox, read its
+   value back: `platform_invalidate` only *schedules* a paint, so the follow-up
+   query could arrive first and answer with the pre-press state. The action
+   performers now bump the revision themselves.
+
+**A vacuous check, found by mutation and fixed** — worth recording because it is
+the failure mode that makes a green harness misleading. The obvious hit-test
+check ("a screen point resolves to the element that reported that rect") passes
+with `mac_a11y_hit_test` **returning nil for everything**: the `NEUIView`
+override falls back to `[super accessibilityHitTest:]`, and AppKit finds the
+element by walking the children we publish and reading their frames. Two checks
+were added at the places where the two paths genuinely disagree, and both were
+verified to fail when the provider's hit test is stubbed out:
+
+- a child scrolled below a scrolling SECTION's fold — published (so a focused
+  control that scrolls away stays reachable) but **not** at its reported position,
+  so ours skips it; and
+- an **open COMBOBOX's drop rows**, which are painted outside the collapsed bar's
+  rect. AppKit's hierarchical walk will not descend into a child whose own frame
+  does not contain the point, so it can never reach them; the flat node hit test
+  can. Without this the AT cannot point at the list the user is looking at.
+
+Also corrected by mutation: the per-frame scoping in `-focusedElement` changes no
+observable behaviour (the element table only ever holds one frame's nodes, so the
+lookup misses anyway). It stays as an explicit early-out, and its comment now
+says so instead of claiming to be the mechanism.
+
+**Coverage.** `tests/a11y_provider_smoke_macos.mm` (new, 72 checks, two real
+NSWindows) drives the real protocol only — never the adapter API — so it tests
+what VoiceOver would actually ask for. Every fix above was verified by reverting
+it and watching the specific check fail (11 mutations in total). The two checks
+that carry the weight: an element's screen rect is cross-validated by **posting a
+real click at its centre** (an inverted Y-flip passes every other assertion in
+the file), and the in-paint guard is asserted by querying **from inside a real
+`WIDGET_PAINT`** — both the adapter path (refused) and the provider path (keeps
+the last good tree rather than reporting an empty window).
+
+**Deliberately not done in 6.3**, and none of it blocks VoiceOver from reading a
+window: the text interfaces (`AXNumberOfCharacters` / selected-range / ranged
+attributes for INPUTBOX / MULTILINE — an AT can read the value but not navigate
+by character); the `NSAccessibilityTable` / `Row` protocols, so a GRID's
+`total_child_count` is not advertised as a set size; pressing a MENU ITEM or an
+open combobox's drop row (their input is hit-tested at frame level by the
+platform layer, not by the owning widget, so a synthesised click would land
+nowhere — declined rather than offered-and-inert, and both remain fully
+keyboard-operable, which is how a VoiceOver user drives a pop-up button on this
+platform anyway); and `NSAccessibilityLayoutChangedNotification` is posted
+without its `userInfo` element list.
+
+Original text follows.
+
+### 6.3 — macOS provider (`hosts/crossplatform/platform_macos.mm`) — as originally planned
 
 `NEUIView` (`platform_macos.mm:99`) becomes the accessibility container:
 

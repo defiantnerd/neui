@@ -3667,6 +3667,16 @@ namespace
     refresh_timer_arm();
   }
 
+  // Accessibility: Linux has NO provider yet - AT-SPI is its own wave (see
+  // plans/accessibility.md 6.5), so a neui window stays opaque to Orca. Both
+  // seams are no-ops rather than absent so the shared host code has one shape
+  // on every platform; a client's declarations are stored and cost nothing,
+  // and start being read the day the AT-SPI provider lands.
+  void platform_a11y_notify(void* /*frame_native_handle*/,
+                            uint32_t /*widget_id*/, int /*change*/) {}
+  void platform_a11y_announce(void* /*frame_native_handle*/,
+                              const char* /*utf8*/, bool /*assertive*/) {}
+
   // -------------------------------------------------------------------------
   // Relative (unbounded) pointer mode. Warp-back model, same as win32; see
   // dispatch_motion for the echo filtering and platform.h for why macOS differs.

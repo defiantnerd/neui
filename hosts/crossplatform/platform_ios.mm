@@ -2475,6 +2475,14 @@ namespace xpl_host
     m.erase(it);
   }
 
+  // Accessibility: iOS would need a UIAccessibility provider (UIAccessibility-
+  // Container on the frame's UIView), which is not part of this wave. No-ops,
+  // so declarations are stored and unread rather than silently half-working.
+  void platform_a11y_notify(void* /*frame_native_handle*/,
+                            uint32_t /*widget_id*/, int /*change*/) {}
+  void platform_a11y_announce(void* /*frame_native_handle*/,
+                              const char* /*utf8*/, bool /*assertive*/) {}
+
   // Toast animation heartbeat. The toast is painted inside the frame's NEUIView
   // (shared Session::paint_toast, topmost in the paint pass), so we just kick
   // that view's CADisplayLink, which calls setNeedsDisplay each vsync until the

@@ -2462,11 +2462,24 @@ namespace xpl_host
     if (!s) return;
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
-    // The provider that consumes this lands in 6.3. Until then the honest
-    // behaviour is to validate and do nothing: a client can already write its
-    // declarations and call notify, and they start being read the moment the
-    // provider exists, with no client change.
-    (void)what;
+    // Bump first: a provider answers from a tree built behind this counter, so
+    // without the bump it would re-read the SAME cached node and the
+    // notification would tell an AT to fetch a value that has not changed.
+    // (Client-driven changes - set_value / set_name / set_state on a
+    // hand-painted widget - are exactly the ones a repaint does not have to
+    // express, which is why this is not left to paint_frame's bump.)
+    s->bump_a11y_revision();
+    // Structure changes also invalidate the cached LAYOUT the tree is built
+    // from: a client saying "children changed" means the node geometry the
+    // provider would report is no longer trustworthy.
+    if (what == NEUI_A11Y_CHANGE_STRUCTURE) s->mark_layout_dirty(idx);
+
+    void* frame = s->find_parent_native_handle(idx);
+    if (!frame) return;
+    // The public enum's five members map 1:1 onto the platform seam's first
+    // five, so this forwards unchanged - see A11yNotifyKind in platform.h.
+    platform_a11y_notify(frame, s->_widgets[idx].widget_id,
+                         static_cast<int>(what));
   }
 
   static void NEUI_ABI a11y_announce(neui_session_t session, const char* utf8,
@@ -2474,17 +2487,30 @@ namespace xpl_host
   {
     auto* s = get_session(session);
     if (!s || !utf8 || !*utf8) return;
-    (void)assertive;   // consumed by the platform provider (6.3)
+    // An announcement has no node behind it, so any of this session's frames
+    // can carry it; the first realized one is as good as any (on macOS the
+    // notification is posted on its window). A session with no realized frame
+    // still reaches the platform layer, which decides whether it can speak
+    // without one.
+    void* frame = nullptr;
+    for (uint32_t idx = s->_widgets.child(0); idx != 0;
+         idx = s->_widgets.next(idx)) {
+      if (!s->_widgets.exists(idx)) continue;
+      auto& wd = s->_widgets[idx];
+      if (wd.is_frame() && wd.native_handle) { frame = wd.native_handle; break; }
+    }
+    platform_a11y_announce(frame, utf8, assertive);
   }
 
   static bool NEUI_ABI a11y_is_active(neui_session_t session)
   {
     auto* s = get_session(session);
     if (!s) return false;
-    // No provider yet, so nothing has ever queried us. Reporting false here is
-    // correct rather than merely conservative - and the header already warns
-    // that correctness must not depend on this.
-    return false;
+    // "Has an accessibility provider ever been asked about this session" - the
+    // only honest answer on a platform with no attach signal, which the public
+    // header spells out along with the warning not to gate correctness on it.
+    // False on a platform with no provider at all, since nothing can query.
+    return s->a11y_queried();
   }
 
   neui_a11y_api_t a11y_api = {
