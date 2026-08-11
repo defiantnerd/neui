@@ -63,6 +63,10 @@
 //                      intervening paint (the framework's own notifications).
 //   17  DEAD FRAME    - after its frame is destroyed, an element answers "gone"
 //                      rather than the whole stale tree it was built from.
+//   18  DECLARATIONS  - the client-declaration pattern examples/a11y_example.cpp
+//                      teaches: a CUSTOMDRAW reads as a slider with real units,
+//                      and as a checked toggle, purely because of set_role /
+//                      set_value_text / set_state.
 //
 // Realizes two real NSWindows, so built but NOT ctest-registered; run
 // ./tests/<config>/neui_a11y_provider_smoke_macos manually.
@@ -371,6 +375,24 @@ int main()
     a11y->set_role(sess, cdbtn, NEUI_A11Y_ROLE_BUTTON);
     a11y->set_name(sess, cdbtn, "Custom");
     g_declared_cd = cdbtn.id;
+
+    // 18's surface: the exact pattern examples/a11y_example.cpp teaches - a
+    // CUSTOMDRAW that declares a role AND publishes a value the framework cannot
+    // see (set_value + set_value_text), and one that declares a toggle and
+    // publishes its checked-ness through set_state.
+    neui_widget_t cd_knob = w->create(sess, fa, NEUI_W_CUSTOMDRAW,
+                                     210, 76, 40, 40, nullptr);
+    a11y->set_role(sess, cd_knob, NEUI_A11Y_ROLE_SLIDER);
+    a11y->set_name(sess, cd_knob, "Cutoff custom");
+    a11y->set_value_range(sess, cd_knob, -60.0f, 6.0f, 1.0f);
+    a11y->set_value(sess, cd_knob, 0.42f);
+    a11y->set_value_text(sess, cd_knob, "-32.3 dB");
+    neui_widget_t cd_toggle = w->create(sess, fa, NEUI_W_CUSTOMDRAW,
+                                       210, 120, 40, 24, nullptr);
+    a11y->set_role(sess, cd_toggle, NEUI_A11Y_ROLE_TOGGLE_BUTTON);
+    a11y->set_name(sess, cd_toggle, "Bypass custom");
+    a11y->set_state(sess, cd_toggle, NEUI_A11Y_STATE_CHECKED,
+                    NEUI_A11Y_STATE_CHECKED);
 
     // Check 12's probe surface. Zero-size would be dropped from the tree, so it
     // is a real (small) CUSTOMDRAW; its WIDGET_PAINT runs the in-paint query.
@@ -880,6 +902,34 @@ int main()
         id after = [e_chk3b accessibilityValue];
         check(![before isEqual:after],
               "16 a real click changes the reported value with NO paint in between");
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // 18 THE CLIENT-DECLARATION PATTERN, end to end - what
+    //    examples/a11y_example.cpp exists to teach. A plugin UI is built from
+    //    custom-painted controls whose values live in the CLIENT's own state, so
+    //    every fact here reaches an AT only because the client declared it.
+    {
+      id e_cdk = element_labelled(va, @"Cutoff custom");
+      check(e_cdk != nil, "18 a declared CUSTOMDRAW slider is published");
+      if (e_cdk) {
+        check_eq_str(str_of([e_cdk accessibilityRole]), "AXSlider",
+                     "18 ...as a slider, because the client said so");
+        // set_value_text wins over the range mapping - the client wanted units.
+        check_eq_str(str_of([e_cdk accessibilityValue]), "-32.3 dB",
+                     "18 ...and speaks the value text the client published");
+      }
+      id e_cdt = element_labelled(va, @"Bypass custom");
+      check(e_cdt != nil, "18 a declared CUSTOMDRAW toggle is published");
+      if (e_cdt) {
+        check_eq_str(str_of([e_cdt accessibilityRole]), "AXButton",
+                     "18 ...as a button (UIA/AppKit have no toggle-button role)");
+        check_eq_str(str_of([e_cdt accessibilitySubrole]), "AXToggle",
+                     "18 ...with the toggle subrole");
+        id v = [e_cdt accessibilityValue];
+        check([v isKindOfClass:[NSNumber class]] && [(NSNumber*)v intValue] == 1,
+              "18 ...and reports CHECKED from the client's set_state override");
       }
     }
 

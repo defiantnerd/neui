@@ -1,6 +1,7 @@
 # Accessibility (`NEUI_API_A11Y`) — implementation plan
 
-Status: **6.0 + 6.1 + 6.2 + 6.2b + 6.3 + 6.6 + 6.4 shipped** (see those sections); 6.7 remains.
+Status: **WAVE 6 COMPLETE** - 6.0, 6.1, 6.2, 6.2b, 6.3, 6.4, 6.6, 6.7 all shipped
+(6.5, Linux AT-SPI, was split out into its own future wave by decision 1 in §7).
 **6.4 ships UNVERIFIED** - see its section and `docs/accessibility.md`. All five open decisions were resolved
 on 2026-08-11 (§7), so implementation is unblocked; build order at the end of §8.
 This is Wave 6 of
@@ -1319,7 +1320,52 @@ What actually belongs here:
   focused element, or none.
 - Only **`deferred-issues.md:12` ("Tier B focus parity")** retires with this wave.
 
-### 6.7 — docs + retirement
+### 6.7 — docs + example — **SHIPPED 2026-08-11**
+
+Most of this section had already landed with the phases that needed it, which is
+worth recording rather than re-claiming:
+
+- `docs/accessibility.md` — created in 6.4 (the unverified-status obligation had
+  to land with the code it describes), and extended here.
+- The **Subsystem reference** row in `CLAUDE.md` and the `NEUI_API_A11Y` entry in
+  the named-interface list — 6.4 and 6.1 respectively.
+- **`k_well_known_attrs` rows for every `neui.a11y.*` key** — already present from
+  6.1, all 11, verified by diffing the public header's macros against the table. I
+  had recorded this as outstanding; it was not.
+- `deferred-issues.md`'s "Tier B focus parity" — retired in 6.6.
+
+What actually shipped here:
+
+**`examples/a11y_example.cpp` + `neui_a11y_example`.** The plugin-UI shape, which
+is the case that matters: two custom-painted controls (a knob and a bypass
+toggle), a value that is normalized internally and declared in real dB, a
+LABEL-names-INPUTBOX pairing, a decorative backdrop opted out with `ROLE_NONE`,
+and a built-in KNOB alongside for contrast — it declares almost nothing and still
+reads correctly, which is the point. The `KEYDOWN` handler is there deliberately:
+a declared role makes an AT *offer* that role's actions, and for a hand-painted
+control only the client can perform them, so the example handles SPACE and the
+arrows rather than leaving the offered action inert. Runs on the xpl host by name
+(the documented `neui_get_api(NULL)` trap), and prints `is_active` to show it is
+false until something queries.
+
+**Executed coverage for that pattern.** An example whose whole point is what a
+screen reader hears cannot be verified by reading it, so the provider harness
+gained check 18: a declared CUSTOMDRAW reads as `AXSlider` with the client's
+`"-32.3 dB"` value text, and a declared toggle reads as a button with the toggle
+subrole reporting CHECKED from a `set_state` override. Both mutation-verified
+(dropping the a11y value-text channel, and dropping the state-mask override, each
+fail exactly one). The example itself was run — window shown, `is_active: no` —
+though its window did not appear in a screen capture on this machine, so "it looks
+right" is not claimed, only "it runs and its declarations produce the intended
+tree".
+
+**New deferred entries**, closing out what the wave leaves open: no MSAA bridge on
+win32 (`WM_GETOBJECT` answers UIA only), containers windowed rather than
+virtualized (a 10000-row GRID publishes the visible window and its true total, but
+neither provider advertises that total as a set size), and no sub-element
+ScrollItem.
+
+### 6.7 — docs + retirement — as originally planned
 
 - New `docs/accessibility.md`; a **Subsystem reference** row in `CLAUDE.md`; a
   `NEUI_API_A11Y` entry in the named-interface-dispatch list (xpl-only, alongside

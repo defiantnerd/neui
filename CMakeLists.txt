@@ -492,6 +492,33 @@ if(APPLE)
   target_link_libraries(neui_zoom_example PRIVATE neui-macoshost)
 endif()
 
+# Accessibility example (NEUI_API_A11Y). The plugin-UI shape: custom-painted
+# controls with declared roles, a normalized value declared in real units
+# (-60..+6 dB), and LABEL-names-INPUTBOX pairings - the three things an
+# accessibility framework cannot infer. xpl host only (the interface is
+# xpl-only), and the one example whose point is what a screen reader HEARS.
+if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.rc")
+  add_executable(neui_a11y_example WIN32
+    examples/a11y_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_a11y_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_a11y_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_a11y_example WIN32 examples/a11y_example.cpp)
+elseif(APPLE)
+  add_executable(neui_a11y_example MACOSX_BUNDLE examples/a11y_example.cpp)
+else()
+  add_executable(neui_a11y_example examples/a11y_example.cpp)
+endif()
+target_link_libraries(neui_a11y_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_a11y_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_a11y_example PRIVATE neui-macoshost)
+endif()
+
 # Filmstrip / stitchmap knob example. Generates a vertical frame strip into a
 # SURFACE, tags it via assets->set_frame_layout, and drives it with a compound
 # asset layer whose "frame" prop is bound to NEUI_PARAM_VALUE + a rotational
