@@ -22,6 +22,7 @@
 #include "../shared/win32/cursor_win32.h"
 #include "../shared/win32/toast_win32.h"
 #include "../shared/win32/file_dialog_win32.h"
+#include "../shared/wheel_direction.h"
 #include "../shared/shortcut_format.h"
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_section.h"
@@ -639,10 +640,16 @@ namespace win32_host
     if (msg == WM_MOUSEWHEEL) {
       short delta = static_cast<short>(HIWORD(wParam));
       bool fine = (LOWORD(wParam) & MK_SHIFT) != 0;
-      // Wheel up INCREASES knob value, wheel down DECREASES - matching the
-      // SLIDER and the natural scroll direction.
+      // Wheel up DECREASES, down INCREASES - the shared value convention (see
+      // hosts/shared/wheel_direction.h), which a behavior asset's WHEEL handler
+      // has always used and which the built-in knobs now follow too.
+      //
+      // No inversion to undo here: Windows applies the touchpad's "reverse
+      // scrolling direction" setting in the driver with no way to query it, so
+      // this delta is taken as physical (neui_event_wheel_t::is_flipped is
+      // documented as "0 = not inverted OR unknown" for exactly this reason).
       float step = nudge_delta_w32(wd, 1, fine ? 0.01f : 0.05f) *
-                   (delta > 0 ? 1.0f : -1.0f);
+                   neui_detail::wheel_value_sign(delta);
       widget_set_value_user_gesture_w32(wd, widget_get_value_w32(wd) + step);
       return;
     }

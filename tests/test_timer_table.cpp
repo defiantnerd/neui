@@ -62,7 +62,7 @@ TEST_CASE("TimerTable: sub-minimum intervals clamp up")
   // The clamped value is what the event reports, not the requested 1.
   std::vector<TimerEntry> out;
   t.tick(NEUI_TIMER_MIN_INTERVAL_MS, out);
-  CHECK_EQ(out.size(), (size_t)1);
+  REQUIRE_EQ(out.size(), (size_t)1);
   CHECK_EQ(out[0].interval_ms, (uint32_t)NEUI_TIMER_MIN_INTERVAL_MS);
 }
 
@@ -211,7 +211,7 @@ TEST_CASE("TimerTable: adding DURING a tick does not fire in the same tick")
   CHECK(t.is_live(b));
   // The snapshot already taken (`out`) holds only `a`, so b cannot fire in the
   // tick that created it...
-  CHECK_EQ(out.size(), (size_t)1);
+  REQUIRE_EQ(out.size(), (size_t)1);
   CHECK_EQ(out[0].id, a);
   // ...and b waits a full interval before its first fire.
   CHECK_EQ(due_count(t, 15), (size_t)0);
@@ -270,7 +270,7 @@ TEST_CASE("tick_and_dispatch: dispatches each due timer once with its interval")
   t.tick_and_dispatch(20, [&](uint32_t id, uint32_t iv) {
     fired.push_back(id); intervals.push_back(iv);
   });
-  CHECK_EQ(fired.size(), (size_t)2);
+  REQUIRE_EQ(fired.size(), (size_t)2);
   CHECK_EQ(intervals[0], 10u);
   CHECK_EQ(intervals[1], 20u);
   CHECK(fired[0] == a || fired[1] == a);
@@ -287,7 +287,7 @@ TEST_CASE("tick_and_dispatch: a handler removing ANOTHER due timer stops it firi
     fired.push_back(id);
     if (id == a) t.remove(b);     // b is later in the same snapshot
   });
-  CHECK_EQ(fired.size(), (size_t)1);
+  REQUIRE_EQ(fired.size(), (size_t)1);
   CHECK_EQ(fired[0], a);
   CHECK_FALSE(t.is_live(b));
 }

@@ -133,7 +133,7 @@ TEST_CASE("a11y: a nonexistent parent is treated as a frame root")
   std::vector<A11yInput> in;
   in.push_back(widget_row(7, 99, NEUI_W_BUTTON));   // 99 never emitted
   auto nodes = build_a11y_tree(in);
-  CHECK_EQ(nodes.size(), (size_t)1);
+  REQUIRE_EQ(nodes.size(), (size_t)1);
   CHECK(a11y_id_null(nodes[0].parent));
 }
 
@@ -260,7 +260,7 @@ TEST_CASE("a11y: subtree pruning does not depend on parents preceding children")
   in.push_back(widget_row(1, 0, NEUI_W_APPWINDOW, 0, 0, 300, 200));
   auto nodes = build_a11y_tree(in);
 
-  CHECK_EQ(nodes.size(), (size_t)1);
+  REQUIRE_EQ(nodes.size(), (size_t)1);
   CHECK_EQ(nodes[0].id.widget_id, (uint32_t)1);
 }
 
@@ -726,7 +726,7 @@ TEST_CASE("a11y: list rows become ordered LIST_ITEM children")
   const A11yNode* list = find_widget(nodes, 2);
   CHECK(list != nullptr);
   CHECK_EQ(list->role, NEUI_A11Y_ROLE_LIST);
-  CHECK_EQ(list->children.size(), (size_t)3);
+  REQUIRE_EQ(list->children.size(), (size_t)3);
   // Order must be row order, not discovery order.
   CHECK_EQ(list->children[0].sub_index, 0);
   CHECK_EQ(list->children[1].sub_index, 1);
@@ -739,7 +739,7 @@ TEST_CASE("a11y: an empty container yields the container and no children")
   std::vector<A11yInput> in;
   in.push_back(widget_row(1, 0, NEUI_W_LISTBOX, 0, 0, 120, 60));
   auto nodes = build_a11y_tree(in);
-  CHECK_EQ(nodes.size(), (size_t)1);
+  REQUIRE_EQ(nodes.size(), (size_t)1);
   CHECK_EQ(nodes[0].children.size(), (size_t)0);
 }
 
@@ -776,7 +776,7 @@ TEST_CASE("a11y: a GRID yields headers, rows and cells with correct parentage")
   const A11yNode* r0 = a11y_find(nodes, row0);
   CHECK(r0 != nullptr);
   CHECK_EQ(r0->role, NEUI_A11Y_ROLE_ROW);
-  CHECK_EQ(r0->children.size(), (size_t)2);
+  REQUIRE_EQ(r0->children.size(), (size_t)2);
   CHECK_EQ(a11y_find(nodes, r0->children[0])->role, NEUI_A11Y_ROLE_CELL);
   CHECK_EQ(a11y_find(nodes, r0->children[0])->name, std::string("file"));
 }

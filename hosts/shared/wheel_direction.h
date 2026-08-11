@@ -63,4 +63,37 @@ namespace neui_detail
     return wheel_physical_delta(w.delta, w.is_horizontal, w.buttonmap,
                                 w.is_flipped);
   }
+
+  // ---------------------------------------------------------------------------
+  // WHICH WAY A VALUE CONTROL MOVES - the single source of truth.
+  //
+  // THE CONVENTION: wheel/fingers UP DECREASES the value, DOWN INCREASES it.
+  // That is the audio-plugin convention, decided by the project owner
+  // (2026-08-11), and it is what a behavior asset's WHEEL handler has always
+  // done. The built-in KNOB and SLIDER used to do the OPPOSITE - on all three
+  // hosts - so a behavior-driven knob and a native one felt opposite in the same
+  // UI, and the behavior runtime's comment claimed it "matches the existing KNOB"
+  // while doing the reverse of it.
+  //
+  // WHY IT IS A FUNCTION AND NOT FOUR OPEN-CODED TERNARIES. That inconsistency
+  // survived because the sign lived in five places (xpl KNOB, xpl SLIDER, the
+  // behavior runtime, the native macOS knob, the native win32 knob) and nothing
+  // tied them together. Everything that moves a VALUE from a wheel now calls
+  // this, so the convention is one line, Tier-1 tested, and reversing it is a
+  // one-line edit rather than an archaeology exercise.
+  //
+  // Takes the PHYSICAL delta (run it through wheel_physical_delta first), so the
+  // answer does not depend on the user's natural-scrolling preference.
+  inline float wheel_value_sign(int physical_delta)
+  {
+    return (physical_delta > 0) ? -1.0f : 1.0f;
+  }
+
+  // |delta|, for callers that scale by the line count (one notch should advance
+  // by step * lines, not by a single step - otherwise the wheel feels dead at
+  // typical step values).
+  inline int wheel_magnitude(int physical_delta)
+  {
+    return (physical_delta < 0) ? -physical_delta : physical_delta;
+  }
 }

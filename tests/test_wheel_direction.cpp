@@ -98,6 +98,42 @@ TEST_CASE("wheel: both corrections compose, and only the intended ones")
   CHECK_EQ(wheel_physical_delta(wheel(1, false, NEUI_MK_CONTROL, true)), -1);
 }
 
+TEST_CASE("wheel: the VALUE convention is up-decreases, in one place")
+{
+  // The audio-plugin convention (decided 2026-08-11). It lives in one function
+  // because it previously lived in FIVE - xpl KNOB, xpl SLIDER, the behavior
+  // runtime, the native macOS knob, the native win32 knob - and the behavior
+  // runtime disagreed with the other four while its comment claimed to match
+  // them. Nothing tied them together, so nothing caught it.
+  CHECK_EQ(neui_detail::wheel_value_sign(1), -1.0f);    // wheel/fingers up
+  CHECK_EQ(neui_detail::wheel_value_sign(5), -1.0f);    // magnitude is irrelevant
+  CHECK_EQ(neui_detail::wheel_value_sign(-1), 1.0f);    // wheel/fingers down
+  CHECK_EQ(neui_detail::wheel_value_sign(-5), 1.0f);
+  // A zero delta never reaches a value consumer (each returns early), but the
+  // sign must still be defined rather than accidental.
+  CHECK_EQ(neui_detail::wheel_value_sign(0), 1.0f);
+}
+
+TEST_CASE("wheel: magnitude is the absolute value, so notches scale")
+{
+  CHECK_EQ(neui_detail::wheel_magnitude(3), 3);
+  CHECK_EQ(neui_detail::wheel_magnitude(-3), 3);
+  CHECK_EQ(neui_detail::wheel_magnitude(0), 0);
+}
+
+TEST_CASE("wheel: direction is INDEPENDENT of the natural-scrolling setting")
+{
+  // The property a user would actually notice, end to end: one physical gesture
+  // moves a value ONE way, whatever the OS preference says. Before the fix,
+  // toggling the macOS checkbox reversed every knob.
+  const int swipe_down_pref_on  = wheel_physical_delta(wheel(+1, false, 0, true));
+  const int swipe_down_pref_off = wheel_physical_delta(wheel(-1, false, 0, false));
+  CHECK_EQ(neui_detail::wheel_value_sign(swipe_down_pref_on),
+           neui_detail::wheel_value_sign(swipe_down_pref_off));
+  // ...and a swipe down INCREASES, per the convention.
+  CHECK_EQ(neui_detail::wheel_value_sign(swipe_down_pref_on), 1.0f);
+}
+
 TEST_CASE("wheel: the four-argument and payload forms agree")
 {
   for (int d : { -2, -1, 0, 1, 2 })

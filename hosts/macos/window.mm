@@ -12,6 +12,7 @@
 #include "checkbox_image.h"
 #include "../shared/macos/image_loader_macos.h"
 #include "../shared/macos/keys_macos.h"
+#include "../shared/wheel_direction.h"
 #include "../shared/macos/theme_provider_macos.h"
 #include "../shared/macos/clipboard_macos.h"
 #include "../shared/macos/modal_pump_macos.h"
@@ -2461,14 +2462,23 @@ static float neui_snap_to_steps(float v, int steps)
   if (wants_knob) {
     auto* wd = macos_host::widget_for_id(widget_id);
     if (wd && !wd->enabled) return;  // disabled knob ignores the wheel
-    // Match the xpl host's wheel-up = increase convention (matches the slider).
     bool fine = (event.modifierFlags & NSEventModifierFlagShift) != 0;
     int steps = [self knobSteps];
     float magnitude = (steps >= 2)
       ? (1.0f / (float)(steps - 1))
       : (fine ? 0.01f : 0.05f);
-    float sign = (ticks > 0) ? 1.0f : -1.0f;
-    int   mag_ticks = (ticks > 0) ? ticks : -ticks;
+    // PHYSICAL direction, then the shared value convention (up decreases). This
+    // path had both bugs: it read the OS-adjusted sign, so natural scrolling
+    // reversed it (issue #21), and it moved the opposite way from a behavior
+    // asset's WHEEL handler.
+    // buttonmap 0 and is_horizontal 0: this path only ever sees a VERTICAL tick
+    // count, so there is no Shift->horizontal flip for the helper to undo - only
+    // the OS inversion.
+    const int phys = neui_detail::wheel_physical_delta(
+      (int)ticks, /*is_horizontal*/0, /*buttonmap*/0u,
+      event.isDirectionInvertedFromDevice ? 1 : 0);
+    float sign = neui_detail::wheel_value_sign(phys);
+    int   mag_ticks = neui_detail::wheel_magnitude(phys);
     [self setKnobValueFromUserGesture:[self knobValue]
                                        + sign * magnitude * (float)mag_ticks];
     return;

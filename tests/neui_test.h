@@ -14,6 +14,7 @@
 //   CHECK_EQ(a, b)       CHECK_EQ(a, b)             (identical)
 //   CHECK_APPROX(a, b)   CHECK(a == doctest::Approx(b))
 //   REQUIRE(expr)        REQUIRE(expr)              (identical, aborts case)
+//   REQUIRE_EQ(a, b)     CHECK_EQ + aborts the case (use before indexing)
 //   neui_test::Approx    doctest::Approx
 //
 // To migrate: drop in doctest.h, replace this include, delete test_main.cpp
@@ -145,5 +146,17 @@ namespace neui_test
 #define REQUIRE(expr)                                                          \
   do {                                                                         \
     if (!::neui_test::report((expr), "REQUIRE", #expr, __FILE__, __LINE__))    \
+      throw ::neui_test::RequireFailed{};                                      \
+  } while (0)
+
+// REQUIRE_EQ - the same abort-the-case behaviour with CHECK_EQ's "want X, got Y"
+// reporting. USE THIS FOR A SIZE CHECK THAT LATER INDEXING DEPENDS ON. With
+// CHECK_EQ, a container that came back the wrong size still gets indexed on the
+// next line, so one honest failure turns into an out-of-bounds crash that takes
+// the whole suite down and hides every case after it - which is exactly how a
+// caught mutation nearly read as an uncaught one.
+#define REQUIRE_EQ(a, b)                                                       \
+  do {                                                                         \
+    if (!::neui_test::report_eq((a), (b), #a, #b, __FILE__, __LINE__))         \
       throw ::neui_test::RequireFailed{};                                      \
   } while (0)

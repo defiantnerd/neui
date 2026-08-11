@@ -56,7 +56,7 @@ TEST_CASE("file dialog: glob rejects null inputs rather than crashing")
 TEST_CASE("file dialog: pattern list splits on ';' and trims")
 {
   auto p = parse_filter_patterns("*.png; *.jpg ;;*.gif");
-  CHECK_EQ(p.size(), (size_t)3);
+  REQUIRE_EQ(p.size(), (size_t)3);
   CHECK_EQ(p[0], std::string("*.png"));
   CHECK_EQ(p[1], std::string("*.jpg"));
   CHECK_EQ(p[2], std::string("*.gif"));
@@ -77,9 +77,9 @@ TEST_CASE("file dialog: descriptor decodes to filters, empty entries dropped")
   d.filters = f; d.filter_count = 4;
 
   auto fl = parse_filters(&d);
-  CHECK_EQ(fl.size(), (size_t)3);
+  REQUIRE_EQ(fl.size(), (size_t)3);
   CHECK_EQ(fl[0].label, std::string("PNG images"));
-  CHECK_EQ(fl[0].patterns.size(), (size_t)2);
+  REQUIRE_EQ(fl[0].patterns.size(), (size_t)2);
   CHECK_EQ(fl[1].label, std::string("*.wav"));
   CHECK(fl[2].matches_everything());
   CHECK(!fl[0].matches_everything());
@@ -128,7 +128,7 @@ TEST_CASE("file dialog: default_filter follows the entry, not the parsed slot")
   neui_file_dialog_t d = {};
   d.filters = f; d.filter_count = 3;
   auto fl = parse_filters(&d);
-  CHECK_EQ(fl.size(), (size_t)2);
+  REQUIRE_EQ(fl.size(), (size_t)2);
   CHECK_EQ(fl[0].source_index, (uint32_t)1);
   CHECK_EQ(fl[1].source_index, (uint32_t)2);
 
@@ -289,7 +289,7 @@ TEST_CASE("file dialog: listing drops dot entries and sorts dirs first")
 {
   auto v = list_directory_view(raw_listing(), nullptr, false);
   // "." / ".." / dot-files gone; dirs (Apple, beta) before files.
-  CHECK_EQ(v.size(), (size_t)5);
+  REQUIRE_EQ(v.size(), (size_t)5);
   CHECK_EQ(v[0].name, std::string("Apple"));
   CHECK(v[0].is_dir);
   CHECK_EQ(v[1].name, std::string("beta"));
@@ -316,7 +316,7 @@ TEST_CASE("file dialog: a type filter never hides directories")
   FileFilter png; png.patterns = { "*.png" };
   auto v = list_directory_view(raw_listing(), &png, false);
   // Both dirs survive; only the two .png files remain of the files.
-  CHECK_EQ(v.size(), (size_t)4);
+  REQUIRE_EQ(v.size(), (size_t)4);
   CHECK_EQ(v[0].name, std::string("Apple"));
   CHECK_EQ(v[1].name, std::string("beta"));
   CHECK_EQ(v[2].name, std::string("IMG.PNG"));
@@ -329,7 +329,7 @@ TEST_CASE("file dialog: listing sort is a total order over case variants")
     { "b", false }, { "A", false }, { "a", false }, { "B", false },
   };
   auto v = list_directory_view(raw, nullptr, false);
-  CHECK_EQ(v.size(), (size_t)4);
+  REQUIRE_EQ(v.size(), (size_t)4);
   // Case-insensitive groups the pairs; the tiebreak orders within a pair
   // deterministically ('A' < 'a' by byte value).
   CHECK_EQ(v[0].name, std::string("A"));

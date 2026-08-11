@@ -3602,8 +3602,9 @@ namespace xpl_host
       // the OS already inverted for content scrolling. Same reasoning as the
       // KNOB; see wheel_direction.h (issue #21).
       delta = neui_detail::wheel_physical_delta(event->data.wheel);
+      // Same shared convention as the KNOB and the behavior runtime.
       float step = nudge_delta(*this, 1, fine ? 0.01f : 0.05f) *
-                   (delta > 0 ? 1.0f : -1.0f);
+                   neui_detail::wheel_value_sign(delta);
       widget_set_value_user_gesture(*this, widget_get_value(*this) + step);
       repaint();
       return true;
@@ -4004,9 +4005,11 @@ namespace xpl_host
       // user's fingers - see wheel_direction.h, which also undoes the platform
       // layer's Shift->horizontal flip.
       delta = neui_detail::wheel_physical_delta(event->data.wheel);
-      // Wheel up INCREASES knob value, wheel down DECREASES - matching the SLIDER.
+      // Direction from the shared convention (up DECREASES - the audio-plugin
+      // convention a behavior asset's WHEEL handler has always used). The KNOB
+      // used to do the opposite, so the two felt opposite in one UI.
       float step = nudge_delta(*this, 1, fine ? 0.01f : 0.05f) *
-                   (delta > 0 ? 1.0f : -1.0f);
+                   neui_detail::wheel_value_sign(delta);
       widget_set_value_user_gesture(*this, widget_get_value(*this) + step);
       repaint();
       return true;

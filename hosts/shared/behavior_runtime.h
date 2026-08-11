@@ -517,8 +517,10 @@ namespace neui_detail
                                                 ctx.widget_w, ctx.widget_h,
                                                 local_x, local_y);
       if (!H) return false;
-      // Wheel up DECREASES, wheel down INCREASES (audio-plugin convention,
-      // matches the existing KNOB). Delta arrives in lines (Win32 converts
+      // Wheel up DECREASES, wheel down INCREASES - the audio-plugin convention,
+      // and since 2026-08-11 the built-in KNOB / SLIDER follow it too (they used
+      // to do the reverse, which is what the old version of this comment wrongly
+      // claimed to match). Delta arrives in lines (Win32 converts
       // WHEEL_DELTA notches via SPI_GETWHEELSCROLLLINES; macOS / xpl pass
       // +/-1 per notch). Multiply by |delta| so one notch advances by
       // `step * lines_per_notch` rather than a single `step`, otherwise
@@ -537,8 +539,10 @@ namespace neui_detail
       delta = wheel_physical_delta(delta, event->data.wheel.is_horizontal, bmap,
                                    event->data.wheel.is_flipped);
 
-      float sign = (delta > 0) ? -1.0f : 1.0f;
-      int   mag  = (delta > 0) ? delta : -delta;
+      // The shared convention (up decreases), now used by the built-in KNOB and
+      // SLIDER too - so this handler and a native knob finally agree.
+      float sign = wheel_value_sign(delta);
+      int   mag  = wheel_magnitude(delta);
 
       // Per-notch magnitude. With detents configured the detent IS the
       // quantisation, so one notch advances exactly one of them and

@@ -109,7 +109,7 @@ TEST_CASE("set_sort + ensure_sort_clean reorder rows ASC")
   GridModel m = make_sorted_grid(1, {{"banana"}, {"apple"}, {"cherry"}});
   grid_set_sort(m, 0, NEUI_GRID_SORT_ASC);
   auto v = col0_in_visual_order(m);
-  CHECK_EQ((int)v.size(), 3);
+  REQUIRE_EQ((int)v.size(), 3);
   CHECK_EQ(v[0], "apple");
   CHECK_EQ(v[1], "banana");
   CHECK_EQ(v[2], "cherry");
@@ -185,7 +185,7 @@ TEST_CASE("add_sort: cycle direction on an existing level")
   grid_set_sort(m, 0, NEUI_GRID_SORT_ASC);
   // add_sort on a column already in the stack updates the direction.
   grid_add_sort(m, 0, NEUI_GRID_SORT_DESC);
-  CHECK_EQ((int)m.sort_stack.size(), 1);
+  REQUIRE_EQ((int)m.sort_stack.size(), 1);
   CHECK_EQ(m.sort_stack[0].dir, NEUI_GRID_SORT_DESC);
   grid_ensure_sort_clean(m);
   CHECK_EQ(grid_visual_to_logical(m, 0), 1);   // "b" sorted first under DESC
@@ -198,7 +198,7 @@ TEST_CASE("add_sort NONE removes an existing level, keeps the rest")
   grid_set_sort(m, 0, NEUI_GRID_SORT_ASC);
   grid_add_sort(m, 1, NEUI_GRID_SORT_DESC);
   grid_add_sort(m, 0, NEUI_GRID_SORT_NONE);
-  CHECK_EQ((int)m.sort_stack.size(), 1);
+  REQUIRE_EQ((int)m.sort_stack.size(), 1);
   CHECK_EQ(m.sort_stack[0].col, 1);
   CHECK_EQ(m.sort_stack[0].dir, NEUI_GRID_SORT_DESC);
 }
@@ -250,7 +250,7 @@ TEST_CASE("grid_apply_header_click plain click on a different column replaces st
   grid_apply_header_click(m, 0, false);              // [{0, DESC}]
   auto d = grid_apply_header_click(m, 1, false);     // [{1, ASC}] (replace)
   CHECK_EQ((int)d, (int)NEUI_GRID_SORT_ASC);
-  CHECK_EQ((int)m.sort_stack.size(), 1);
+  REQUIRE_EQ((int)m.sort_stack.size(), 1);
   CHECK_EQ(m.sort_stack[0].col, 1);
   CHECK_EQ(m.sort_stack[0].dir, NEUI_GRID_SORT_ASC);
 }
@@ -261,7 +261,7 @@ TEST_CASE("grid_apply_header_click shift on a new column appends a level")
   grid_apply_header_click(m, 0, false);              // [{0, ASC}]
   auto d = grid_apply_header_click(m, 1, true);      // append [{0, ASC}, {1, ASC}]
   CHECK_EQ((int)d, (int)NEUI_GRID_SORT_ASC);
-  CHECK_EQ((int)m.sort_stack.size(), 2);
+  REQUIRE_EQ((int)m.sort_stack.size(), 2);
   CHECK_EQ(m.sort_stack[1].col, 1);
 }
 
@@ -272,11 +272,11 @@ TEST_CASE("grid_apply_header_click shift cycles an existing secondary level")
   grid_apply_header_click(m, 1, true);   // secondary added at ASC
   auto d = grid_apply_header_click(m, 1, true);  // cycle to DESC
   CHECK_EQ((int)d, (int)NEUI_GRID_SORT_DESC);
-  CHECK_EQ((int)m.sort_stack.size(), 2);
+  REQUIRE_EQ((int)m.sort_stack.size(), 2);
   CHECK_EQ(m.sort_stack[1].dir, NEUI_GRID_SORT_DESC);
   auto d3 = grid_apply_header_click(m, 1, true);  // remove
   CHECK_EQ((int)d3, (int)NEUI_GRID_SORT_NONE);
-  CHECK_EQ((int)m.sort_stack.size(), 1);
+  REQUIRE_EQ((int)m.sort_stack.size(), 1);
   CHECK_EQ(m.sort_stack[0].col, 0);
 }
 
