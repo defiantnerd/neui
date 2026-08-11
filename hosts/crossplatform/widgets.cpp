@@ -424,7 +424,7 @@ namespace xpl_host
             // blocked. Remember where focus was so closing can give it back.
             // Do not overwrite on a re-entrant show: the saved value would
             // become the focus INSIDE the dialog and the owner's would be lost.
-            if (!fw->modal_pump_active) {
+            if (!fw->modal_pump_active()) {
               fw->prev_focus     = s->_focused_widget;
               fw->prev_focus_gen = s->a11y_generation(s->_focused_widget);
             }
@@ -435,8 +435,14 @@ namespace xpl_host
             // window it just blocked, which is the whole defect. Clearing is the
             // honest fallback: no control here can take it.
             if (!s->is_in_subtree(s->_focused_widget, idx)) s->set_focus(0);
-            fw->modal_pump_active = true;
-            platform_run_modal_until(&fw->modal_pump_active);
+            // Hold a share of the flag across the pump. The pump outlives the
+            // widget in the ordinary case - a client callback destroying the
+            // dialog is how a modal show is meant to end - so polling through
+            // `fw` would be polling freed memory. This local is what keeps the
+            // flag itself alive to be read.
+            auto keep_running = fw->modal_pump_flag;
+            *keep_running = true;
+            platform_run_modal_until(keep_running.get());
           }
         }
       }

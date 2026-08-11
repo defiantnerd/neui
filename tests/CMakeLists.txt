@@ -215,6 +215,33 @@ if(APPLE AND NOT NEUI_IOS)
     "-framework AppKit" "-framework CoreGraphics")
 endif()
 
+# Windows-only: focus + modal-teardown harness. The counterpart to
+# focus_smoke_macos.mm, and NOT a port of it: the portable focus logic lives in
+# Session and is proven once on macOS, so this one targets the half win32 writes
+# for itself - the WM_DESTROY teardown that calls Session::end_modal, which
+# dispatches WIDGET_FOCUS to the client synchronously and so can have the widget
+# freed underneath it. Drives client tree mutation from inside that dispatch on
+# both routes out of a modal dialog (user close / client destroy) and on the
+# owned-frame cascade a closing owner triggers. Realizes real HWNDs and blocks in
+# real nested modal pumps, so it is built but NOT ctest-registered; run
+# tests/<config>/neui_focus_smoke_win32.exe manually. A console target on
+# purpose - the checks report on stdout.
+if(WIN32)
+  add_executable(neui_focus_smoke_win32 focus_smoke_win32.cpp)
+  target_include_directories(neui_focus_smoke_win32 PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_focus_smoke_win32 PRIVATE cxx_std_17)
+  # neui-win32host is linked because neui_init() references its registration
+  # wrapper unconditionally once it is compiled in - not because this harness
+  # uses the native host (it asks for neui.host.crossplatform explicitly, which
+  # is the only host with the focus / modal code under test).
+  # dbghelp backs the harness's own crash reporter: a memory-lifetime harness that
+  # answered a fault with nothing but 0xC0000005 would name neither the phase nor
+  # the frame, so it symbolizes the faulting stack itself.
+  target_link_libraries(neui_focus_smoke_win32 PRIVATE
+    neui neui-xplhost neui-win32host dbghelp)
+endif()
+
 # Linux-only: Cairo software backend offscreen smoke test. Unlike neui_tests
 # this links a real backend (neui-backend-cairo), so it is gated to the
 # platforms where that backend is built.

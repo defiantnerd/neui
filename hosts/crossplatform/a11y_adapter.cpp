@@ -687,7 +687,7 @@ namespace xpl_host
           WidgetData& wd = s._widgets[idx];
           if (wd.is_dialog() && wd.owner_index == frame_index && wd.visible) {
             if (auto* fw = dynamic_cast<FrameWidget*>(&wd))
-              if (fw->modal_pump_active) return true;
+              if (fw->modal_pump_active()) return true;
           }
         }
         idx = s._widgets.next(idx);

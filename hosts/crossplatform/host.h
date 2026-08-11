@@ -344,7 +344,19 @@ namespace xpl_host
     bool is_frame() const override { return true; }
     // True while a modal DIALOG is blocking inside platform_run_modal_until.
     // Set in widget_show; cleared by the destroy path so the pump exits.
-    bool modal_pump_active = false;
+    //
+    // Held INDIRECTLY, and that is load-bearing rather than a style choice: the
+    // pump polls this flag for as long as the dialog is up, while the documented
+    // way OUT of a modal dialog is for a client callback to destroy the dialog
+    // WIDGET - which frees this FrameWidget with the pump still polling. A plain
+    // member meant the poll read freed memory, and whether the loop then exited
+    // came down to what the allocator happened to leave in the byte: it survived
+    // by luck on the client-destroy path, and hung outright when the destroy came
+    // from a callback dispatched during the dialog's own WM_DESTROY. widget_show
+    // keeps a share alive across the pump, so the poll always sees the value
+    // end_modal actually wrote.
+    std::shared_ptr<bool> modal_pump_flag = std::make_shared<bool>(false);
+    bool modal_pump_active() const { return modal_pump_flag && *modal_pump_flag; }
     // For a modal DIALOG: the widget that held focus when the dialog was shown,
     // restored when it closes. Focus is session-global and key routing goes by
     // it rather than by which window the key arrived at, so a dialog MUST take

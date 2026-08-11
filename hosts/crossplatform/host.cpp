@@ -2956,7 +2956,7 @@ namespace xpl_host
     if (frame_index == 0 || !_widgets.exists(frame_index)) return;
     auto* fw = dynamic_cast<FrameWidget*>(&_widgets[frame_index]);
     if (!fw) return;
-    fw->modal_pump_active = false;
+    if (fw->modal_pump_flag) *fw->modal_pump_flag = false;
 
     // Take the saved focus and clear it in one go, so a later widget_destroy on
     // the same dialog cannot restore a second time.
@@ -3137,8 +3137,15 @@ namespace xpl_host
     const bool handled = dispatch_event(ev);
     ev->data.mouse.x = frame_x;
     ev->data.mouse.y = frame_y;
-    if (!handled)
-      w.on_mouse_event(ev);
+    if (handled) return;
+    // The client callback just ran, so the tree may have changed under us: "the
+    // OK button was clicked, tear the dialog down" is the most ordinary handler
+    // there is, and returning false from it - the documented default, meaning
+    // "also do the built-in handling" - is exactly what brings us here. `w` is a
+    // reference INTO the slot, so re-resolve instead of calling through it; a
+    // destroyed widget simply has no built-in handling left to run.
+    if (!_widgets.exists(widget_idx)) return;
+    _widgets[widget_idx].on_mouse_event(ev);
   }
 
   // Wheel events bubble up the widget-tree parent chain so a scrolling
@@ -3165,7 +3172,10 @@ namespace xpl_host
       ev->data.wheel.x = frame_x;
       ev->data.wheel.y = frame_y;
       if (handled) return true;
-      return w.on_mouse_event(ev);
+      // Same re-entrancy as dispatch_mouse_event: the client callback above may
+      // have destroyed this widget, and `w` is a reference into its slot.
+      if (!_widgets.exists(i)) return false;
+      return _widgets[i].on_mouse_event(ev);
     };
     if (widget_idx == stop_before) return false;
     if (try_widget(widget_idx)) return true;
