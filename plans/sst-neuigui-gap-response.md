@@ -988,10 +988,16 @@ Not in his list; it is the perf item that actually applies to him.
   Worth running early and handing him the number: it may well retire his
   granularity anxiety outright.
 
-### Wave 6 — accessibility (his #12)
+### Wave 6 — accessibility (his #12) — **COMPLETE** (2026-08-11)
 
 The one real programme. Build it in the **xpl host**, once.
 
+> **SHIPPED.** `NEUI_API_A11Y` + the portable node model + the xpl adapter + the
+> macOS NSAccessibility and win32 UI Automation providers are all in. macOS is
+> verified against VoiceOver; win32 is verified programmatically through the real
+> UIA client stack but **no screen reader has heard it**; **Linux (AT-SPI) was split
+> out into its own future wave.** Status table: `docs/accessibility.md`.
+>
 > **The worked-out plan now lives in `plans/accessibility.md`** — read that, not
 > this section, before implementing. It is implementation-ready where the sketch
 > below is a scoping outline, and it **supersedes** it on seven points (its §9

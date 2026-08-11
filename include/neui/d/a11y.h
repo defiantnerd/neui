@@ -214,6 +214,15 @@ typedef struct neui_a11y_api
   // i.e. a hand-painted CUSTOMDRAW. Built-in KNOB / SLIDER need neither this nor
   // notify(): the framework reads NEUI_PARAM_VALUE directly and raises its own
   // change notifications. Follow this with notify(NEUI_A11Y_CHANGE_VALUE).
+  //
+  // PRECEDENCE: once set, this OVERRIDES NEUI_PARAM_VALUE for everything an AT is
+  // told - including on a built-in KNOB / SLIDER, where the two can therefore
+  // disagree. Setting it on a built-in is not useful and is easy to do by
+  // accident on a widget that was a CUSTOMDRAW earlier in its life; there is no
+  // "clear" call, so treat it as declare-it-and-keep-it-current. (A win32-only
+  // bug where the numeric read ignored this precedence entirely - announcing a
+  // declared 0.6 of -60..0 dB as -60 dB - was the one defect the provider's first
+  // Windows run found; both platforms now follow the order stated here.)
   void (NEUI_ABI *set_value)(neui_session_t session, neui_widget_t widget,
                              float normalized);
 

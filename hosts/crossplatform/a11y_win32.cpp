@@ -1,5 +1,6 @@
-// win32 UI Automation provider. See a11y_win32.h for what "unverified" means
-// here and what stands in for execution.
+// win32 UI Automation provider. Shipped unverified; verified on Windows
+// 2026-08-11 through the real UIA client stack - see a11y_win32.h for exactly
+// what that covers and what it does not (nothing has HEARD this yet).
 //
 // SHAPE. One provider per frame HWND, holding the node tree the shared adapter
 // builds. One COM class for every element, root included: UIA discovers patterns

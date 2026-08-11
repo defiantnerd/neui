@@ -34,7 +34,8 @@
 // _POINTER / _EMBED. On Windows and macOS neui_get_api(NULL) hands back the
 // NATIVE host first, which returns NULL for it - so this asks for the xpl host by
 // name. See docs/accessibility.md for per-platform status (macOS reads this
-// today; Windows is written but unverified; Linux has no provider yet).
+// today; Windows is verified programmatically but no screen reader has heard it;
+// Linux has no provider yet). Narrator on THIS example is the open Windows task.
 
 #include <neui/neui.h>
 

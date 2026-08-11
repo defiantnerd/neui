@@ -11,7 +11,8 @@
 #include "host.h"
 #include "platform.h"
 // UI Automation provider (NEUI_API_A11Y). Its own TU, like the macOS provider -
-// see a11y_win32.h, including what "ships unverified" means for it.
+// see a11y_win32.h for its verification status (run on Windows, never heard by a
+// screen reader).
 #include "a11y_win32.h"
 #include "../../backends/d2d/d2d_backend.h"
 #include "../shared/win32/image_loader_win32.h"

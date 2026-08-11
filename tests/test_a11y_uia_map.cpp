@@ -1,11 +1,13 @@
 // Tier-1 tests for the UI Automation mapping tables (hosts/shared/a11y_uia_map.h).
 //
-// These exist because the win32 provider itself cannot be compiled or run on the
+// These exist because the win32 provider could not be compiled or run on the
 // machine it was written on, and the tables are where the likely bugs are: a role
 // mapped to the wrong control type, a pattern advertised that the provider does
-// not implement, an inverted state bit. The COM plumbing stays unverified until
-// someone runs Inspect.exe / Narrator against it; this at least means the
-// SEMANTICS are executed somewhere.
+// not implement, an inverted state bit. They remain the only part of the provider
+// a non-Windows machine executes, so they are what keeps it editable from here.
+// The COM plumbing is no longer unverified - tests/a11y_provider_smoke_win32.cpp
+// drives it through the real UIA client stack (2026-08-11) - but that harness runs
+// only on Windows, and no screen reader has heard it yet.
 //
 // What these tests CANNOT do: confirm the numeric constants are the ones Windows
 // actually uses - a test can only agree with the number I wrote down. That job

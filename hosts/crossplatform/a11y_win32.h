@@ -2,9 +2,35 @@
 
 // win32 UI Automation provider - the Windows half of NEUI_API_A11Y.
 //
-// SHIPS UNVERIFIED. This file cannot be compiled or run on the machine it was
-// written on (see plans/accessibility.md 6.4 and docs/accessibility.md). What it
-// has instead of execution:
+// This file SHIPPED UNVERIFIED - written on a machine that could not compile it -
+// and has since been compiled and RUN (2026-08-11). See plans/accessibility.md
+// 6.4 and docs/accessibility.md.
+//
+// VERIFIED BY tests/a11y_provider_smoke_win32.cpp: 57 checks through the real UIA
+// CLIENT stack (CUIAutomation, the same API Narrator uses), with the client on its
+// own MTA thread while the UI thread pumps - so every call crosses an apartment
+// boundary and ProviderOptions_UseComThreading is exercised the way an AT
+// exercises it, rather than the one arrangement no AT produces. All five risk
+// areas this file shipped with hold up (element lifetime across a frame destroy,
+// Navigate vs FindAll, UseComThreading, the UiaRaiseNotificationEvent guard,
+// nullptr from ElementProviderFromPoint for the frame). The ~40 static_asserts on
+// UIA constants pass against the real SDK, which was the highest-value safeguard
+// and had never been exercised before that run.
+//
+// The first run found ONE real defect, and it was in the hand-written glue rather
+// than anywhere the shared model reaches - which is where this header predicted it
+// would be: range_of() ignored NEUI_ATTR_A11Y_VALUE, so a CUSTOMDRAW holding its
+// value in client state reported 0.0. See the comment at that fix.
+//
+// STILL NOT VERIFIED: whether the announcements are SENSIBLE. No screen reader and
+// no Inspect.exe session has looked at a neui window. An automated client proves
+// the tree, roles, names, geometry and actions are what the code intends; it
+// cannot tell you Narrator reads a knob in a way a blind user would want. macOS
+// had that pass (VoiceOver); Windows has not. Narrator on neui_a11y_example is the
+// remaining task, and it is a judgement call rather than pass/fail.
+//
+// What stood in for execution while it was unverified - and still earns its keep
+// for anyone editing this file from macOS or Linux:
 //   * the node tree, the adapter and the cache-invalidation SCHEME are shared
 //     with the macOS provider, which IS verified against VoiceOver by
 //     tests/a11y_provider_smoke_macos.mm. Note carefully what that does and does
@@ -12,15 +38,16 @@
 //     re-implements the same decisions, and review found two of the nine macOS
 //     defects re-broken here in exactly that glue (the notify path rebuilt the
 //     whole tree per event; the root's child list omitted unparented nodes).
-//     "Shares the design" is not "inherits the fixes";
+//     "Shares the design" is not "inherits the fixes" - and the one defect that
+//     survived to the first run was in the glue as well;
 //   * the role / pattern / state mapping tables live in
 //     hosts/shared/a11y_uia_map.h and are Tier-1 tested on every platform;
 //   * every UIA constant is static_asserted against the real SDK headers in the
 //     .cpp, so a wrong number fails the BUILD instead of producing a subtly
 //     wrong tree at runtime;
 //   * a stub-header parse check under -Wall -Wextra confirms it parses and that
-//     every symbol it references is one that was accounted for.
-// None of that is a substitute for Inspect.exe. Expect real bugs on first run.
+//     every symbol it references is one that was accounted for. It is a
+//     typo-and-signature net only: the range_of defect was perfectly-formed C++.
 //
 // The provider is bound to the FRAME's HWND: one native window per frame, so one
 // fragment root per frame, and per-frame focus (see G3 in the plan).

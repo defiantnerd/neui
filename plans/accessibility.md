@@ -2,7 +2,9 @@
 
 Status: **WAVE 6 COMPLETE** - 6.0, 6.1, 6.2, 6.2b, 6.3, 6.4, 6.6, 6.7 all shipped
 (6.5, Linux AT-SPI, was split out into its own future wave by decision 1 in §7).
-**6.4 ships UNVERIFIED** - see its section and `docs/accessibility.md`. All five open decisions were resolved
+**6.4 shipped unverified and was VERIFIED on Windows 2026-08-11** (programmatically, through the
+real UIA client stack; no screen-reader pass yet) - see its section and
+`docs/accessibility.md`. All five open decisions were resolved
 on 2026-08-11 (§7), so implementation is unblocked; build order at the end of §8.
 This is Wave 6 of
 `plans/sst-neuigui-gap-response.md` (its §3 sketch, lines 991-1027), worked out
@@ -974,13 +976,14 @@ Original text follows.
   write paths; `announce` → `NSAccessibilityAnnouncementRequestedNotification`.
 - Modern `NSAccessibilityProtocol` style, not the deprecated attribute bag.
 
-### 6.4 — win32 provider — **SHIPPED 2026-08-11, UNVERIFIED**
+### 6.4 — win32 provider — **SHIPPED 2026-08-11; VERIFIED 2026-08-11** (see the first-run section below)
 
 Landed as `hosts/crossplatform/a11y_win32.{h,cpp}` (its own TU, mirroring
 `a11y_macos.mm`) plus a `WM_GETOBJECT` case, a `WM_NCDESTROY` teardown, and the
-three platform seams in `platform_win32.cpp`. It has **never been compiled and
-never been run.** Everything below is about what was done to reduce the odds of
-that being a disaster, and none of it replaces Inspect.exe.
+three platform seams in `platform_win32.cpp`. **When it shipped it had never been
+compiled and never been run.** Everything in this section is about what was done to
+reduce the odds of that being a disaster; the *outcome* is in **6.4 first-run
+verification** below, and it is the part to read first now.
 
 **The design decision that matters: shrink the unverifiable surface.**
 
@@ -1122,6 +1125,55 @@ that suite.
 Tier-1: **11 → 16 cases, 118 → 128 checks.** The parse check earned its keep this
 round: it caught three symbols I had never declared and a duplicated class member
 while these fixes were being made.
+
+#### 6.4 first-run verification — **2026-08-11, on Windows**
+
+Obligation 2 of §7 decision 2, discharged: the provider was compiled and run.
+`tests/a11y_provider_smoke_win32.cpp` — **57 checks** — drives every query through
+the real UIA **client** stack (`CUIAutomation`, the API Narrator itself uses), with
+the client on its own **MTA thread** while the UI thread pumps. That shape is the
+substance of the test rather than an implementation detail: the provider declares
+`ProviderOptions_UseComThreading` precisely so UIA cannot reach the widget tree
+from its own threads, so a client on the UI thread would exercise the one
+arrangement no assistive technology ever produces.
+
+**All five named risk areas hold up** — element lifetime across a frame destroy
+(elements outlive the provider through a nulled indirection and answer "gone");
+`Navigate` sibling walks, cross-checked against `FindAll` for membership *and*
+order; `UseComThreading`; the `UiaRaiseNotificationEvent` version guard; and
+`nullptr` from `ElementProviderFromPoint` for the frame itself, where UIA does fall
+back to the host provider as hoped. **The ~40 `static_assert`s on UIA constants
+pass against the real SDK** — safeguard #1, and its first ever exercise. Geometry is
+cross-validated the way the macOS harness does it: post a real click at the
+reported screen centre and assert the *production* hit-test names the same widget,
+because a rect and an a11y hit-test drawn from one cache agree even when both are
+wrong.
+
+**One real defect, and it was in the glue** — where the header predicted it, and
+where the two re-broken macOS defects had been. `range_of()` read the value from
+`NEUI_PARAM_VALUE` and never consulted `NEUI_ATTR_A11Y_VALUE`, so a CUSTOMDRAW
+holding its value in client state — the exact case `a11y->set_value` exists to
+serve — reported 0.0: a declared 0.6 of −60..0 dB announced as −60 dB. Invisible to
+a native SLIDER, whose value really is in the attribute bag, which is why no other
+check caught it. Fixed by mirroring `read_declarations`' precedence; the node
+cannot supply the number, since the portable model keeps only the formatted string.
+Mutation-verified both ways.
+
+**Two observations worth carrying forward.** First, the safeguard ranking held:
+the `static_assert`s and the Tier-1 mapping tables found nothing on first run
+because they had already done their work, while the one defect that survived was
+precisely the kind neither can see — perfectly-formed C++ in hand-written glue, the
+same shape as `get_IsReadOnly`. Second, **the whole-phase lesson is that "shares a
+verified design" buys nothing for glue**: three defects in this provider (two found
+by review, one by execution) were all re-implementations of decisions already
+correct on macOS.
+
+**What is still not verified: whether announcements are sensible.** §5's "Manual,
+once" criterion — a screen reader on `neui_a11y_example`, plus Inspect.exe — has
+been met on macOS (VoiceOver) and **not** on Windows. An automated client proves
+the tree, roles, names, geometry and actions are what the code intends; only a
+human can say Narrator reads a knob usefully. That remains open, and it is a
+judgement call rather than pass/fail.
 
 Original text follows.
 
@@ -1513,16 +1565,25 @@ events a keypress does; combo overlay rows appearing only while open; a stale no
 id after a destroy+recreate resolving to nothing.
 
 **Known coverage hole, stated rather than glossed:** the adapter (6.2b) is where
-most of the extraction bugs will live, it needs host types so Tier-1 cannot reach
-it, and on win32/Linux it is exercised only through providers we cannot run. The
-macOS harness is its only executed coverage. This is the same asymmetry Wave 4.3
-had, and it is the argument behind §7 decision 2.
+most of the extraction bugs will live, and it needs host types so Tier-1 cannot
+reach it. **Narrowed 2026-08-11**: it now has executed coverage on *two* platforms —
+the macOS harness and, through the UIA provider harness, Windows. It remains
+unexercised on Linux, which has no provider to reach it through. This was the same
+asymmetry Wave 4.3 had, and it was the argument behind §7 decision 2.
 
 **Manual, once** — VoiceOver on `neui_a11y_example` plus Accessibility Inspector's
 audit. Automated tests cannot tell us whether announcements are *sensible*, only
-that they exist. Record the result in the commit message.
+that they exist. Record the result in the commit message. **Done on macOS; still
+open on Windows** (Narrator) — see 6.4 first-run verification.
 
-**win32 / Linux** — stub-header parse checks only, explicitly labelled unverified.
+**win32** — planned as a stub-header parse check only. **Superseded 2026-08-11**:
+`tests/a11y_provider_smoke_win32.cpp` (57 checks, real UIA client stack, MTA thread)
+and `tests/focus_smoke_win32.cpp` (26 checks over five modal / teardown routes) now
+execute on Windows. Neither is ctest-registered — both realize real HWNDs and post
+real input. The parse check survives as the way to edit `a11y_win32.cpp` from macOS
+or Linux without waiting for CI.
+
+**Linux** — nothing but the parse check; no provider exists to test (§7 decision 1).
 
 ---
 
@@ -1531,8 +1592,8 @@ that they exist. Record the result in the commit message.
 | Risk | Mitigation |
 |---|---|
 | The 6.0 layout refactor destabilises paint | Pure refactor; repaint bench before/after; all six visual harnesses re-run. Fallback: force-paint before first query. |
-| UIA provider is large and unverifiable here | Land it last, parse-check it, ship labelled unverified, expect a follow-up. |
-| Adapter bugs invisible on win32/Linux | §5 hole is acknowledged; keep the adapter's per-type extraction as small, obvious functions and prefer shared helpers already covered by Tier-1. |
+| UIA provider is large and unverifiable here | Land it last, parse-check it, ship labelled unverified, expect a follow-up. **Outcome: exactly that** - the follow-up Windows session found one real defect, in hand-written glue. |
+| Adapter bugs invisible on win32/Linux | §5 hole is acknowledged; keep the adapter's per-type extraction as small, obvious functions and prefer shared helpers already covered by Tier-1. **Half-retired 2026-08-11**: the win32 provider harness now exercises the adapter on Windows too. Linux is still blind. |
 | Stale node references misresolve after slot reuse | Generation counter (§4.3) + its own test. |
 | Scope creep into a11y *text* interfaces (`AXTextMarker`, UIA TextPattern) | Out of scope. INPUTBOX/MULTILINE expose value + selection only; full text navigation is a separate wave. |
 | AT-SPI swallows the wave | Resolved: split out of this wave (§7 decision 1). |
@@ -1548,6 +1609,11 @@ that they exist. Record the result in the commit message.
 2. **win32 UIA (6.4) → written and shipped unverified**, with the two obligations
    spelled out in §6.4: the limitation stated in `docs/accessibility.md` prose,
    and Inspect.exe as the opening move of the next Windows session.
+   **Both discharged 2026-08-11.** Obligation 2 was met by something stronger than
+   Inspect.exe for the things a tool can check — a 57-check harness through the real
+   UIA client stack from an MTA thread — and weaker for the one thing it cannot:
+   nobody has *heard* it. Narrator on `neui_a11y_example` is what remains. See
+   **6.4 first-run verification**.
 3. **MSAA fallback → no.** UIA only; deferred item recorded.
 4. **Text interfaces → no.** INPUTBOX/MULTILINE expose value + selection only;
    character/word/line navigation is its own wave.
@@ -1570,7 +1636,7 @@ Revised upward from revision 1, which under-sized 6.2 by calling the adapter thi
 | 6.2 shared model + Tier-1 tests | **done** — 46 cases, mutation-checked | yes, fully |
 | 6.2b host adapter | **large — the real bulk of the wave** | macOS only |
 | 6.3 macOS provider | medium | **yes, incl. VoiceOver** |
-| 6.4 win32 provider | large | no — **ships unverified by decision** |
+| 6.4 win32 provider | large | not when written — **shipped unverified by decision**; verified on Windows 2026-08-11 (57-check UIA-client harness; Narrator pass still open) |
 | ~~6.5 AT-SPI~~ | ~~large~~ | **out of this wave** (§7 decision 1) |
 | 6.6 focus determinism | small (most of it turned out to be already done) | yes |
 | 6.7 docs + example | small | yes |

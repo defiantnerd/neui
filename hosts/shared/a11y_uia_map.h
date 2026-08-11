@@ -8,14 +8,19 @@
 // UI Automation mapping tables - the portable half of the win32 accessibility
 // provider.
 //
-// WHY THIS FILE EXISTS. The win32 provider cannot be compiled or run on the
-// machine it is being written on, so it ships unverified (see
-// plans/accessibility.md 6.4). The COM plumbing genuinely cannot be checked from
-// here - but the part most likely to be WRONG is not the plumbing, it is these
-// tables: a role mapped to the wrong control type, a state bit mapped to the
-// wrong property, a pattern advertised that the provider does not implement.
+// WHY THIS FILE EXISTS. The win32 provider was written on a machine that could
+// not compile or run it, so it shipped unverified (see plans/accessibility.md
+// 6.4; it has since been run on Windows). The COM plumbing could not be checked
+// from there - but the part most likely to be WRONG is not the plumbing, it is
+// these tables: a role mapped to the wrong control type, a state bit mapped to
+// the wrong property, a pattern advertised that the provider does not implement.
 // Pulling them out of the .cpp puts them where Tier-1 tests run on any platform,
-// which turns the unverifiable surface into just the COM glue.
+// which turned the unverifiable surface into just the COM glue.
+//
+// That call was vindicated by the first Windows run: nothing here was wrong, and
+// the single defect it did find was in the hand-written glue this file exists to
+// shrink. The tables stay here - they are still the only part of the provider
+// that a non-Windows machine can execute, which is what keeps it editable.
 //
 // TWO SAFEGUARDS, and the second is the important one:
 //   1. Tier-1 tests (tests/test_a11y_uia_map.cpp) execute every mapping here.
