@@ -154,6 +154,25 @@ void click_in(NSWindow* win, float lx, float ly)
   [v mouseDown:ev];
 }
 
+// kVK_* keycodes go through mac_keycode_to_neui in the platform layer, so this
+// drives the production key path rather than poking widget state.
+void post_key(NSWindow* win, unsigned short kvk)
+{
+  NSView* v = [win contentView];
+  if (!v) return;
+  NSEvent* ev = [NSEvent keyEventWithType:NSEventTypeKeyDown
+                                 location:NSZeroPoint
+                            modifierFlags:0
+                                timestamp:0
+                             windowNumber:[win windowNumber]
+                                  context:nil
+                               characters:@""
+              charactersIgnoringModifiers:@""
+                                isARepeat:NO
+                                  keyCode:kvk];
+  [v keyDown:ev];
+}
+
 void pump(double seconds)
 {
   [[NSRunLoop mainRunLoop] runUntilDate:
@@ -178,7 +197,8 @@ int main()
     auto* items = (neui_items_api_t*)  api->get_interface(sess, NEUI_API_ITEMS);
     auto* grid  = (neui_grid_api_t*)   api->get_interface(sess, NEUI_API_GRID);
     auto* a11y  = (neui_a11y_api_t*)   api->get_interface(sess, NEUI_API_A11Y);
-    if (!w || !attrs || !items || !grid || !a11y) {
+    auto* tree_api = (neui_tree_api_t*) api->get_interface(sess, NEUI_API_TREE);
+    if (!w || !attrs || !items || !grid || !a11y || !tree_api) {
       std::printf("FAIL: missing interface\n"); return 1;
     }
 
@@ -229,7 +249,7 @@ int main()
     // ---------------------------------------------------------------------
     // Frame B - the pruning / overlay / scrolling cases. Content max 212 x 324.
     neui_widget_t fb = w->create(sess, widget_none, NEUI_W_APPWINDOW,
-                                 360, 100, 230, 340, nullptr);
+                                 360, 40, 230, 496, nullptr);
     w->set_text(sess, fb, "a11y B");
 
     // 11: declared decorative - this section AND its button must disappear.
@@ -259,6 +279,18 @@ int main()
       if (i == 5) scr_last  = b;
     }
 
+    // 16: a TREEVIEW that will be SCROLLED so its window starts below depth 0 -
+    // the parent of every visible row is then outside the window. That is the
+    // case that used to orphan tree items onto the frame, so it needs a real
+    // scroll position rather than a synthetic one.
+    neui_widget_t tree = w->create(sess, fb, NEUI_W_TREEVIEW, 12, 344, 200, 80, nullptr);
+    neui_item_t troot = tree_api->add(sess, tree, tree_item_root, "Group", nullptr);
+    for (int i = 0; i < 12; ++i) {
+      char buf[24];
+      std::snprintf(buf, sizeof(buf), "kid %d", i);
+      tree_api->add(sess, tree, troot, buf, nullptr);
+    }
+
     // 14: a COMBOBOX, closed for now.
     neui_widget_t combo = w->create(sess, fb, NEUI_W_COMBOBOX, 12, 192, 150, 22, nullptr);
     items->add(sess, combo, "alpha", nullptr);
@@ -276,6 +308,24 @@ int main()
     w->set_text(sess, p2, "Two");
     neui_widget_t p2b = w->create(sess, p2, NEUI_W_BUTTON, 8, 8, 100, 26, nullptr);
     w->set_text(sess, p2b, "on page two");
+
+    // 17: a COMBOBOX inside a SCROLLING section, low enough that its open drop
+    // list extends past the section body. Session::paint_frame paints the overlay
+    // after the widget walk with every clip popped, so those rows really are on
+    // screen and clickable - the adapter must not report them clipped by the
+    // section, or a11y_hit_test would skip them as OFFSCREEN.
+    neui_widget_t scr2 = w->create(sess, fb, NEUI_W_SECTION, 12, 436, 200, 44, nullptr);
+    attrs->set_string(sess, scr2, NEUI_ATTR_SCROLL_MODE, "vertical");
+    attrs->set_string(sess, scr2, NEUI_ATTR_ALIGN_TEXT, "none");
+    neui_widget_t combo2 = w->create(sess, scr2, NEUI_W_COMBOBOX, 8, 8, 140, 22, nullptr);
+    for (int i = 0; i < 6; ++i) {
+      char buf[16];
+      std::snprintf(buf, sizeof(buf), "opt %d", i);
+      items->add(sess, combo2, buf, nullptr);
+    }
+    items->set_selected(sess, combo2, 0);
+    // Filler so the section really does scroll (and so really does clip).
+    w->create(sess, scr2, NEUI_W_BUTTON, 8, 40, 120, 26, nullptr);
 
     w->show(sess, fb);
 
@@ -367,6 +417,10 @@ int main()
       const int rows = count_sub(ta, list, A11ySubKind::list_row);
       check(rows > 0 && rows < 100,
             "5  a 100-item list emits only its visible rows");
+      // 60px box / 18px rows = 3 whole rows plus a partial 4th. paint_scrollable_
+      // list uses CEILING division, and that partial row is clickable, so the
+      // adapter must emit 4 - a floor would hide a row the user can select.
+      check_eq_int(rows, 4, "5  incl. the partially visible trailing row (ceil)");
       const A11yNode* r0 = find_sub(ta, list, A11ySubKind::list_row, 0);
       check(r0 != nullptr, "5  row 0 is a node");
       if (r0) {
@@ -529,6 +583,106 @@ int main()
         // rows must not be reported on top of the bar itself.
         check(r0->y >= n2->y + n2->h,
               "14 open rows sit on the overlay, not on the collapsed bar");
+      }
+      // Dismiss it. An open combo consumes EVERY click in the frame
+      // (handle_combo_click), so leaving it open would make the next check's
+      // click land on this overlay instead of its own target.
+      post_key(wb, 0x35);                 // kVK_Escape
+      pump(0.10);
+    }
+
+    // 17  An overlay that escapes a clipped ancestor is NOT offscreen.
+    std::printf("\n-- overlay vs ancestor clip --\n");
+    {
+      const A11yNode* sn = find_widget(tb, scr2);
+      const A11yNode* cn = find_widget(tb, combo2);
+      check(sn && cn, "17 the clipped section and its combobox are nodes");
+      if (sn && cn) {
+        // Open it by clicking its collapsed bar, at the rect the adapter reports.
+        click_in(wb, (float)(cn->x + cn->w / 2), (float)(cn->y + cn->h / 2));
+        pump(0.15);
+        auto t3 = xpl_host::a11y_build_tree_for_frame(fb);
+        const int rows = count_sub(t3, combo2, A11ySubKind::list_row);
+        check(rows > 0, "17 the drop rows appear");
+        // 6 rows x 18px of list from a 44px-tall section near the frame's bottom
+        // edge: rows land outside the section body in one direction or the other
+        // (overlay_rect flips the list ABOVE the bar when below would overflow
+        // the frame, which is the case here - so check both directions rather
+        // than assuming which).
+        int offscreen = 0, outside_section = 0;
+        for (const auto& nd : t3) {
+          if (nd.id.widget_id != combo2.id) continue;
+          if (nd.id.sub_kind != (int32_t)A11ySubKind::list_row) continue;
+          if (nd.state & NEUI_A11Y_STATE_OFFSCREEN) ++offscreen;
+          if (nd.y + nd.h <= sn->y || nd.y >= sn->y + sn->h) ++outside_section;
+        }
+        check(outside_section > 0,
+              "17 some rows really do fall outside the section body");
+        check_eq_int(offscreen, 0,
+                     "17 yet no drop row is reported OFFSCREEN");
+      }
+    }
+
+    // 16  TREEVIEW hierarchy under a SCROLLED window.
+    std::printf("\n-- treeview --\n");
+    {
+      // Expand the group and walk the selection down so the window ends up
+      // starting below the depth-0 row. There is no public expand call, so RIGHT
+      // does it - and RIGHT needs a selection first (on_keydown bails when
+      // nothing is selected), which set_selected provides.
+      w->set_focus(sess, tree);
+      tree_api->set_selected(sess, tree, troot);
+      pump(0.05);
+      post_key(wb, 0x7C);                 // kVK_RightArrow - expand
+      for (int i = 0; i < 9; ++i) post_key(wb, 0x7D);   // kVK_DownArrow
+      pump(0.15);
+
+      auto tt = xpl_host::a11y_build_tree_for_frame(fb);
+      const A11yNode* tn = find_widget(tt, tree);
+      check(tn != nullptr, "16 the treeview is a node");
+      if (!tn) { std::printf("        (skipping the rest)\n"); }
+      else {
+        check_eq_int(tn->role, NEUI_A11Y_ROLE_TREE, "16 TREEVIEW -> TREE");
+        check_eq_int(tn->total_child_count, 13,
+                     "16 reports all 13 visible-order items as its total");
+        check(tn->first_child_index > 0,
+              "16 the window really is scrolled past the group row");
+
+        const int item_nodes = count_sub(tt, tree, A11ySubKind::tree_item);
+        check(item_nodes > 0 && item_nodes < 13,
+              "16 only the windowed rows are emitted");
+
+        // THE regression: with the window starting below depth 0, every emitted
+        // row's parent item is outside the window. Each row must still land
+        // INSIDE the treeview - never as a root of the frame, which is what a
+        // parent id no node carries degrades to.
+        int roots = 0, under_tree = 0, under_item = 0;
+        for (const auto& nd : tt) {
+          if (nd.id.widget_id != tree.id) continue;
+          if (nd.id.sub_kind != (int32_t)A11ySubKind::tree_item) continue;
+          if (neui_detail::a11y_id_null(nd.parent)) { ++roots; continue; }
+          if (neui_detail::a11y_id_equal(nd.parent, tn->id)) { ++under_tree; continue; }
+          const A11yNode* p = neui_detail::a11y_find(tt, nd.parent);
+          if (p && p->id.sub_kind == (int32_t)A11ySubKind::tree_item) ++under_item;
+          else ++roots;                  // parent named but not present == orphan
+        }
+        check_eq_int(roots, 0,
+                     "16 no tree item escapes the treeview when scrolled");
+        check(under_tree + under_item == item_nodes,
+              "16 every emitted item is inside the treeview");
+        if (roots)
+          std::printf("        %d of %d items became roots of the frame\n",
+                      roots, item_nodes);
+
+        // Row rects must not overlap the scrollbar gutter - 13 items in a 4-row
+        // box means the scrollbar is showing.
+        for (const auto& nd : tt) {
+          if (nd.id.widget_id != tree.id) continue;
+          if (nd.id.sub_kind != (int32_t)A11ySubKind::tree_item) continue;
+          check(nd.w < tn->w,
+                "16 a row is narrower than the treeview (scrollbar gutter)");
+          break;
+        }
       }
     }
 

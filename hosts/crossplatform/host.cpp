@@ -8259,9 +8259,10 @@ namespace xpl_host
   // failure mode is an AT pointing at the wrong place on screen, which is worse
   // than not reporting a position at all.
 
-  int list_row_height()    { return LIST_ITEM_H(); }
-  int tree_row_height()    { return TREE_ROW_H(); }
-  int menubar_band_height(){ return MENUBAR_BAND_H; }
+  int list_row_height()         { return LIST_ITEM_H(); }
+  int tree_row_height()         { return TREE_ROW_H(); }
+  int menubar_band_height()     { return MENUBAR_BAND_H; }
+  int scrollbar_gutter_width()  { return SCROLLBAR_W; }
 
   void Session::collect_menu_elements(uint32_t menu_idx,
                                       std::vector<MenuElementRect>& out)
@@ -8276,6 +8277,11 @@ namespace xpl_host
     // band itself. Where the OS owns the menu it also owns its accessibility,
     // and publishing our own copy would have the AT read every menu twice.
     if (!is_popup && !platform_menubar_in_frame()) return;
+    // ...and only while it is visible, matching frame_menubar() / paint_menubar.
+    // A hidden menubar reserves no band (frame_top_inset returns 0), so its
+    // children occupy y 0..band_h - reporting band items there would put phantom
+    // menus on top of real widgets.
+    if (!is_popup && !mb.visible) return;
 
     // Which frame's surface is this menu drawn on, and is its cascade open?
     uint32_t frame_index = 0;

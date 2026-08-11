@@ -676,6 +676,73 @@ One implementation hazard worth remembering: the sub-element emitters take the
 container's **index** in the output vector, never a reference. They push rows
 themselves, and a `push_back` can reallocate out from under a held reference.
 
+**Post-review fixes** (a fable review of 6.1 + 6.2 + 6.2b; every finding verified
+against the source before changing anything):
+
+1. **TREEVIEW items escaped the treeview when scrolled.** Parentage was
+   reconstructed from emission order via a depth→last-id array, which windowing
+   invalidates: with the window starting below depth 0, `by_depth[depth-1]` was a
+   default-constructed (null) id, and `build_a11y_tree` turns an unresolvable
+   parent into a **root of the frame** — tree items announced as siblings of the
+   window. Measured 3 of 4 emitted items orphaned. Now read from the item model's
+   own `parent_id`, climbing to the nearest ancestor that is inside the window
+   (else the treeview itself, which is the honest answer — that ancestor is not in
+   this tree). Order-independent, so windowing cannot break it again. The harness
+   had **no TREEVIEW at all**, which is why nothing caught it; it now drives
+   expansion + 9 DOWN keys through the real key path to reach a scrolled window.
+2. **An open COMBOBOX overlay inside a clipped ancestor reported OFFSCREEN.**
+   `paint_frame` paints the overlay after the widget walk with every clip popped,
+   and the click handlers hit-test it at frame level, so a drop list extending
+   past an enclosing scrolling SECTION is genuinely visible and clickable — but
+   the adapter intersected the ancestor clip, and `a11y_hit_test` skips OFFSCREEN
+   nodes, so the AT could not reach rows the user can click. Overlay rows now
+   carry only the overlay rect.
+3. **The generation counter did not survive session-slot reuse.** `destroy()`
+   drops a whole `Session` without walking its widgets, and `create_session`
+   reuses the slot **with the same session id** — so a per-session counter
+   restarting at 0 let an id minted in the old incarnation validate against an
+   unrelated widget in the new one. Replaced with a per-widget-instance id from a
+   **process-wide** counter, assigned at `w_create` instead of bumped at destroy:
+   one call site instead of two, and no way to free a slot without invalidating
+   it.
+4. **Floor vs ceiling on visible rows.** LISTBOX / TREEVIEW paint use *ceiling*
+   division and the partial trailing row is clickable; the adapter used floor, so
+   a selectable row did not exist for the AT.
+5. **Row width ignored the scrollbar gutter**, so reported rects overlapped the
+   10 px scrollbar and `a11y_hit_test` over the scrollbar announced a row.
+   `scrollbar_gutter_width()` joins the metric accessors.
+6. **A hidden MENUBAR still reported band items** (Linux only, inspection-only
+   here): `frame_menubar` / `frame_top_inset` both require `visible`, so nothing
+   is drawn and children occupy y 0..24 — phantom menus over real widgets.
+   `collect_menu_elements` now gates on `mb.visible`.
+
+Three findings were **not** code changes, and the reasons are worth keeping:
+
+- **`validate` re-entrancy.** `collect_menu_elements` runs the same per-item
+  enable verdict paint runs, which can call the client's
+  `NEUI_API_MENU_CLIENT::validate` — but from an out-of-band query at an
+  arbitrary runloop point rather than at an input moment. A validate that
+  destroyed a widget or edited the menu would invalidate the `text` pointers and
+  the mid-walk `WidgetData` references. Documented as a contract on the method
+  rather than defensively snapshotting, since copying every menu string on every
+  a11y query to defend against a client bug is the wrong trade.
+- **The KNOB right-click "Reset to default" popup is not reported.** It is a
+  painted, clickable overlay (`_popup_active`) with no owning widget — its items
+  are bare strings in `Session::_popup_items`. Exposing it needs a decision about
+  what node owns them, so it is a design question for 6.7's docs rather than an
+  omission to patch here.
+- **`build_a11y_tree` is O(n²)** (linear `find_index` inside loops, nested pass
+  5). Windowing keeps n small for every container, with one unbounded axis:
+  `NEUI_ATTR_GRID_ROW_HEIGHT` has no lower clamp, so `row_h = 1` yields ~10⁴-10⁵
+  cells. Left alone deliberately — clamping would make the reported rows disagree
+  with the painted ones, and silently capping the emitted set would read as
+  "covered everything". Recorded here as the known cost.
+
+Also corrected: `a11y_adapter.h` claimed `false` meant "geometry could not be made
+valid", but `ensure_abs_positions` returns **true** for a frame that has painted
+before whose forced repaint could not happen (hidden window) — that reports
+last-painted, i.e. stale, geometry. The header now says so.
+
 ### 6.3 — macOS provider (`hosts/crossplatform/platform_macos.mm`)
 
 `NEUIView` (`platform_macos.mm:99`) becomes the accessibility container:

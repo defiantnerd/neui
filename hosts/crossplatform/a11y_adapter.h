@@ -42,11 +42,17 @@ namespace xpl_host
 
   // Collect the input rows for `frame_index`, appending to `out`.
   //
-  // Returns false - having appended nothing - when the frame is unknown, or
-  // when its cached geometry could not be made valid (Session::ensure_abs_
-  // positions failed because the window is not realized / not mapped). A caller
-  // that gets false must not fall back to reporting positions: an AT pointing a
+  // Returns false - having appended nothing - when the frame is unknown, is not
+  // a frame, or has NEVER PAINTED (so the SECTION / TABVIEW body rects and
+  // TABVIEW chip rects the walk needs do not exist yet). A caller that gets
+  // false must not fall back to reporting positions of its own: an AT pointing a
   // magnifier at the wrong place is worse than an AT told "not available".
+  //
+  // True does NOT promise the geometry is fresh. A frame that has painted before
+  // but whose tree changed since, and whose forced repaint could not happen
+  // (hidden / unmapped window), reports its LAST-PAINTED layout - stale beats
+  // wrong is the documented contract of Session::ensure_abs_positions, and the
+  // staleness is not detectable from here.
   //
   // MUST NOT be called from inside a paint - ensure_abs_positions can force one.
   bool a11y_collect_frame_inputs(Session& s, uint32_t frame_index,

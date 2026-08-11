@@ -42,6 +42,7 @@ namespace xpl_host
   int list_row_height();
   int tree_row_height();
   int menubar_band_height();
+  int scrollbar_gutter_width();
 
   // -------------------------------------------------------------------------
   // Base widget class - holds all common fields and the virtual interface.
@@ -1339,24 +1340,53 @@ namespace xpl_host
     // Needs the owning frame's render context for text measurement, exactly as
     // the click / hover handlers already do out of band (see tp_claim); returns
     // nothing when the frame has no context yet.
+    //
+    // CONTRACT: a NEUI_API_MENU_CLIENT::validate implementation must not mutate
+    // the session. This runs the same per-item enable verdict paint runs, which
+    // means it can call back into client code - but unlike paint it can be
+    // reached from an out-of-band accessibility query at an arbitrary runloop
+    // point. A validate that destroyed a widget or edited the menu would
+    // invalidate the `text` / `shortcut` pointers below, and the WidgetData
+    // references the caller is holding, mid-walk.
     void collect_menu_elements(uint32_t menu_idx,
                                std::vector<MenuElementRect>& out);
 
-    // Per-tree-slot reuse counter. Widget ids are (session << 16 | slot) and
-    // slots are recycled with no staleness detection, while both UI Automation
-    // and NSAccessibility hold element references across long spans. The
-    // adapter stamps this into every A11yNodeId so a reference to a destroyed
-    // widget resolves to nothing instead of silently answering with whatever
-    // widget later took the slot. Bumped when a slot is freed.
+    // Per-widget-INSTANCE accessibility id. Widget ids are
+    // (session << 16 | slot) and slots are recycled with no staleness detection,
+    // while both UI Automation and NSAccessibility hold element references
+    // across long spans. The adapter stamps this into every A11yNodeId so a
+    // reference to a destroyed widget resolves to nothing instead of silently
+    // answering with whatever widget later took the slot.
+    //
+    // The value comes from a PROCESS-WIDE monotonic counter, assigned once when
+    // the widget is created. A per-session counter is not enough: `destroy()`
+    // drops a whole Session without walking its widgets, and create_session
+    // reuses the freed slot WITH THE SAME SESSION ID - so a per-session counter
+    // restarting at 0 would let an id minted in the old incarnation validate
+    // against an unrelated widget in the new one, which is exactly the
+    // wrong-answer-instead-of-no-answer failure this exists to prevent.
+    // Assigning at create (rather than bumping at destroy) also means there is
+    // one call site instead of two and no way to free a slot without
+    // invalidating it: the next occupant simply gets a value nobody has seen.
+    //
+    // 0 means "no instance id", which no live widget has - so a stale id whose
+    // slot is now empty also fails to resolve.
     uint32_t a11y_generation(uint32_t slot) const
     {
       return slot < _a11y_generation.size() ? _a11y_generation[slot] : 0;
     }
-    void a11y_bump_generation(uint32_t slot)
+    void a11y_assign_generation(uint32_t slot)
     {
       if (slot >= _a11y_generation.size())
         _a11y_generation.resize(slot + 1, 0);
-      ++_a11y_generation[slot];
+      _a11y_generation[slot] = next_a11y_instance_id();
+    }
+    // Wraps after 2^32 widget creations in one process, which no session-based
+    // UI reaches; the counter starts at 1 so 0 stays reserved.
+    static uint32_t next_a11y_instance_id()
+    {
+      static uint32_t s_next = 1;
+      return s_next++;
     }
 
   public:
@@ -1460,9 +1490,9 @@ namespace xpl_host
     // Indices of MENUBAR widgets for WM_COMMAND routing.
     std::vector<uint32_t> _menubars;
 
-    // Per-tree-slot accessibility generation - see a11y_generation() above.
+    // Per-slot accessibility instance id - see a11y_generation() above.
     // Indexed by tree slot, grown on demand; slot 0 (the root sentinel) is
-    // never handed out so its entry is unused.
+    // never handed out so its entry stays 0.
     std::vector<uint32_t> _a11y_generation;
 
     // Try to consume a Win32 MSG via this session's menubar accelerator

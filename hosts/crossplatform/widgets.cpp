@@ -111,11 +111,6 @@ namespace xpl_host
     if (client_api && client_api->ondestroy)
       client_api->ondestroy(token, IndexToWidget(s->_session_id, idx), wd->userdata);
 
-    // Invalidate any accessibility element reference an AT is still holding for
-    // this slot BEFORE the slot can be handed to a different widget. This is the
-    // only place a slot is freed, which is exactly why the bump belongs here.
-    s->a11y_bump_generation(idx);
-
     s->_widgets.remove(idx);
   }
 
@@ -231,6 +226,14 @@ namespace xpl_host
 
     s->_widgets[idx].index     = idx;
     s->_widgets[idx].widget_id = IndexToWidget(s->_session_id, idx).id;
+
+    // Stamp the accessibility instance id. Doing it at CREATE rather than
+    // bumping at destroy means a freed slot cannot be handed on without being
+    // invalidated - the next occupant simply gets a value no AT has ever seen -
+    // and it covers the case a destroy-side bump could not: `destroy(session)`
+    // drops a whole Session without walking its widgets, and the session id is
+    // then reused. See Session::a11y_generation.
+    s->a11y_assign_generation(idx);
 
     // Map implicit type variants onto platform-neutral attributes so internal
     // behavior can be driven uniformly.

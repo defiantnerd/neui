@@ -241,11 +241,16 @@ namespace xpl_host
       int visible = 0;
       const int row_h = list_row_height();
       if (row_h <= 0) return;
+      // The overlay is drawn OUTSIDE the widget walk, so no ancestor clip
+      // applies to its rows; an in-place list's rows inherit the walk's clip
+      // normally. Getting this wrong marks visible, clickable rows OFFSCREEN,
+      // and a11y_hit_test skips those - the AT cannot reach them.
+      bool inherit_ancestor_clip = true;
 
       if (is_open_combo) {
-        // The overlay is the single source of truth shared with paint + hit-test,
-        // including the flip above the bar when the list would overflow. Needs
-        // the backend for its auto-fit width measurement.
+        // The overlay rect is the single source of truth shared with paint +
+        // hit-test, including the flip above the bar when the list would
+        // overflow. Needs the backend for its auto-fit width measurement.
         if (!s._backend) return;
         auto r = combo->overlay_rect(s._backend);
         row_x  = static_cast<int>(r.x);
@@ -253,14 +258,29 @@ namespace xpl_host
         row_w  = static_cast<int>(r.w);
         clip_h = static_cast<int>(r.h);
         visible = combo->max_drop_visible();
+        // Session::paint_frame paints the overlay AFTER paint_widgets_recursive,
+        // at frame identity with every clip popped, and the click handlers
+        // hit-test it at frame level too. So a drop list that extends past an
+        // enclosing scrolling SECTION is genuinely on screen and genuinely
+        // clickable, and must not be reported as clipped by that section.
+        inherit_ancestor_clip = false;
       } else {
-        visible = lw->height / row_h;
+        // Ceiling division, matching paint_scrollable_list: a partial trailing
+        // row IS drawn and IS clickable (ListItemsWidget::on_mouse_event divides
+        // the raw offset by the row height), so omitting it would hide a real
+        // row from the AT. The clip below keeps it partially-inside rather than
+        // OFFSCREEN.
+        visible = (lw->height + row_h - 1) / row_h;
+        // The scrollbar steals a gutter from the row width once it shows.
+        if (n > lw->height / row_h) row_w -= scrollbar_gutter_width();
       }
       if (visible < 1) visible = 1;
+      if (row_w < 0) row_w = 0;
 
       const int first = static_cast<int>(lw->scroll_offset);
-      Clip rows_clip = clip_intersect(
-        clip, Clip{ true, row_x, row_y, row_w, clip_h });
+      const Clip own_clip{ true, row_x, row_y, row_w, clip_h };
+      Clip rows_clip = inherit_ancestor_clip
+                         ? clip_intersect(clip, own_clip) : own_clip;
 
       c.out[ci].total_child_count = n;
       c.out[ci].first_child_index = first;
@@ -300,17 +320,33 @@ namespace xpl_host
 
       const int row_h = tree_row_height();
       if (row_h <= 0) return;
-      const int first   = static_cast<int>(tv->scroll_offset);
-      int visible = tv->height / row_h;
+      const int first = static_cast<int>(tv->scroll_offset);
+      // Ceiling division, matching TreeviewWidget::paint - see emit_list_rows.
+      int visible = (tv->height + row_h - 1) / row_h;
       if (visible < 1) visible = 1;
+      int row_w = tv->width;
+      if (n > tv->height / row_h) row_w -= scrollbar_gutter_width();
+      if (row_w < 0) row_w = 0;
 
-      Clip rows_clip = clip_intersect(
-        clip, Clip{ true, tv->abs_x, tv->abs_y, tv->width, visible * row_h });
+      const Clip rows_clip = clip_intersect(
+        clip, Clip{ true, tv->abs_x, tv->abs_y, row_w, tv->height });
 
-      // Depth -> the node id of the last row emitted at that depth, so a child
-      // row can name its parent row. Rebuilt as we walk, which is correct
-      // because flatten_visible is in display order (parents before children).
-      std::vector<A11yNodeId> by_depth;
+      // Which items are INSIDE the emitted window. A row's parent link may only
+      // name one of these: naming an item that was windowed out gives an id no
+      // node carries, and build_a11y_tree turns a row whose parent it cannot
+      // resolve into a ROOT of the frame - i.e. a tree item announced as a
+      // sibling of the window, outside the treeview entirely.
+      std::vector<uint32_t> in_window;
+      in_window.reserve(static_cast<size_t>(visible));
+      for (int i = 0; i < visible; ++i) {
+        const int vis_row = first + i;
+        if (vis_row < 0 || vis_row >= n) break;
+        in_window.push_back(rows[static_cast<size_t>(vis_row)].id);
+      }
+      auto windowed = [&in_window](uint32_t id) {
+        for (uint32_t x : in_window) if (x == id) return true;
+        return false;
+      };
 
       for (int i = 0; i < visible; ++i) {
         const int vis_row = first + i;
@@ -323,13 +359,28 @@ namespace xpl_host
         // sub_index is the ITEM id, not the row position: a row position shifts
         // whenever an ancestor is collapsed, so an id built from it would name a
         // different item after any expand / collapse.
-        r.id     = make_id(s, slot, A11ySubKind::tree_item,
-                           static_cast<int32_t>(vr.id));
-        const int depth = vr.depth;
-        r.parent = (depth > 0 && depth <= static_cast<int>(by_depth.size()))
-                     ? by_depth[static_cast<size_t>(depth) - 1] : parent;
+        r.id = make_id(s, slot, A11ySubKind::tree_item,
+                       static_cast<int32_t>(vr.id));
+        // Real hierarchy, read from the item model rather than reconstructed
+        // from emission order (which windowing breaks: scroll down and the
+        // parents of the first visible rows are no longer in the walk). Climb to
+        // the nearest ancestor that IS in the window; if none is, the treeview
+        // itself is the honest parent - that ancestor is not in this tree.
+        A11yNodeId pid = parent;
+        uint32_t up = it->second.parent_id;
+        for (size_t guard = 0; guard <= in_window.size() && up != 0; ++guard) {
+          if (windowed(up)) {
+            pid = make_id(s, slot, A11ySubKind::tree_item,
+                          static_cast<int32_t>(up));
+            break;
+          }
+          auto ancestor = tv->tree_items.find(up);
+          if (ancestor == tv->tree_items.end()) break;
+          up = ancestor->second.parent_id;
+        }
+        r.parent = pid;
         r.x = tv->abs_x; r.y = tv->abs_y + i * row_h;
-        r.w = tv->width; r.h = row_h;
+        r.w = row_w; r.h = row_h;
         apply_clip(r, rows_clip);
         r.visible       = true;
         r.enabled       = tv->enabled && it->second.enabled;
@@ -339,10 +390,6 @@ namespace xpl_host
         r.expanded      = it->second.expanded;
         r.text = it->second.text.empty() ? nullptr : it->second.text.c_str();
         c.out.push_back(r);
-
-        if (static_cast<int>(by_depth.size()) <= depth)
-          by_depth.resize(static_cast<size_t>(depth) + 1);
-        by_depth[static_cast<size_t>(depth)] = r.id;
       }
     }
 
