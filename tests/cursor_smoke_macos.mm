@@ -19,6 +19,10 @@
 //   4. OVERRIDE    - the GRID's positional column-resize cursor still works, and
 //                    off the divider it now falls back to the widget's own
 //                    NEUI_ATTR_CURSOR instead of forcing an arrow.
+//   5. DRAG        - a widget that holds the pointer keeps its cursor until
+//                    release, even while the pointer is outside its rect
+//                    (issue #20), and the GRID's positional override still
+//                    outranks the press target during a column drag.
 //
 // Hover is driven by posting real NSEvents into the view's -mouseMoved:, which
 // is the same entry point AppKit uses, so the whole production path runs
@@ -94,6 +98,28 @@ void move_mouse_to(float lx, float ly)
                                   clickCount:0
                                     pressure:0];
   [v mouseMoved:ev];
+}
+
+// Press / release at a LOGICAL widget-tree coordinate, through the same view
+// entry points AppKit uses - so _pressed_widget is set by the production path
+// rather than poked.
+void mouse_button(float lx, float ly, bool down)
+{
+  NSView* v = [g_window contentView];
+  if (!v) return;
+  const CGFloat h = [v bounds].size.height;
+  NSEvent* ev = [NSEvent mouseEventWithType:(down ? NSEventTypeLeftMouseDown
+                                                  : NSEventTypeLeftMouseUp)
+                                    location:NSMakePoint(lx, h - ly)
+                               modifierFlags:0
+                                   timestamp:0
+                                windowNumber:[g_window windowNumber]
+                                     context:nil
+                                 eventNumber:0
+                                  clickCount:1
+                                    pressure:(down ? 1.0f : 0.0f)];
+  if (down) [v mouseDown:ev];
+  else      [v mouseUp:ev];
 }
 
 bool NEUI_ABI onevent(void*, neui_event_t*) { return false; }
@@ -325,6 +351,50 @@ int main()
     move_mouse_to(455, 110);                  // out to the background
     expect_cursor([NSCursor arrowCursor],
                     "a divider override does not leak outside the GRID");
+
+    // ---- 5. A DRAG OWNS THE CURSOR (issue #20) --------------------------
+    //
+    // Reported from the sst-neuigui evaluation: with the cursor resolved from the
+    // HOVERED widget only, dragging off a widget's rect reverted the shape
+    // mid-drag even though every mouse event was still being routed to the press
+    // target. Platform convention is the opposite - a splitter keeps its resize
+    // arrow when you overshoot it - so the press target has to win until release.
+    //
+    // hand_btn carries "pointer"; the window background carries nothing.
+    move_mouse_to(hand_cx, hand_cy);
+    expect_cursor([NSCursor pointingHandCursor],
+                    "5  precondition: hovering the button shows its cursor");
+    mouse_button(hand_cx, hand_cy, true);          // grab it
+    expect_cursor([NSCursor pointingHandCursor],
+                    "5  pressing it keeps its cursor");
+    // Drag well outside the button AND outside its section, over bare frame
+    // background whose resolved cursor is the arrow.
+    move_mouse_to(455, 110);
+    expect_cursor([NSCursor pointingHandCursor],
+                    "5  dragging OUTSIDE the widget keeps the DRAG's cursor");
+    // ...and releasing hands the cursor back to whatever is actually under the
+    // pointer. Without a refresh on release the drag's shape would stay on
+    // screen until the next hover transition.
+    mouse_button(455, 110, false);
+    expect_cursor([NSCursor arrowCursor],
+                    "5  releasing restores the cursor under the pointer");
+
+    // 5b The GRID's positional override must still outrank the press target -
+    //    during a column-resize drag the GRID *is* the pressed widget, so if the
+    //    widget attr won, the resize arrow would be replaced by the grid's own
+    //    "open-hand" for the whole drag. (This is also the question the reporter
+    //    explicitly left open.) drop_cursor_override_on_hover_change already had
+    //    the drag rule; this pins that the two paths agree.
+    move_mouse_to(10 + kCol0, 120 + 8);            // onto the divider
+    expect_cursor([NSCursor resizeLeftRightCursor],
+                    "5b precondition: the divider override is armed");
+    mouse_button(10 + kCol0, 120 + 8, true);       // start the column drag
+    move_mouse_to(455, 110);                        // overshoot, off the grid
+    expect_cursor([NSCursor resizeLeftRightCursor],
+                    "5b a column drag keeps ew-resize past the GRID's edge");
+    mouse_button(455, 110, false);
+    expect_cursor([NSCursor arrowCursor],
+                    "5b ...and releasing lets it go");
 
     neui->destroy(sess);
 

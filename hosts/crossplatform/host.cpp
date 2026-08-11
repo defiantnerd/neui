@@ -1087,12 +1087,27 @@ namespace xpl_host
 
   void Session::refresh_cursor()
   {
-    // An internal override (GRID column-resize band) outranks the widget attr:
-    // it is positional feedback about what a drag right here would do, which is
-    // more specific than "this widget generally shows a hand".
+    // A DRAG OWNS THE CURSOR. While a widget holds the pointer (it is the
+    // press target, and every mouse event is being routed to it regardless of
+    // where the pointer has wandered), its cursor persists until release - which
+    // is what makes a drag feel anchored, and why a splitter keeps showing the
+    // resize arrow when you overshoot it. Resolving from the hovered widget
+    // instead made a fader or splitter flicker back to the arrow the moment the
+    // pointer left its rect, mid-drag (issue #20).
+    //
+    // Note this is the rule drop_cursor_override_on_hover_change already applied
+    // to the OVERRIDE path; the widget-attr path simply had not been given it.
+    const uint32_t target = (_pressed_widget != 0) ? _pressed_widget
+                                                   : _hovered_widget;
+    // An internal override (GRID column-resize band) still outranks the widget
+    // attr, drag or no drag: it is positional feedback about what a drag right
+    // here would do, which is more specific than "this widget generally shows a
+    // hand" - and during a column drag the GRID *is* the pressed widget, so
+    // letting the attr win would replace the resize arrow with the grid's own
+    // cursor for the whole drag.
     int kind = (_cursor_override != NEUI_CURSOR_DEFAULT)
                  ? _cursor_override
-                 : resolve_cursor_for(_hovered_widget);
+                 : resolve_cursor_for(target);
 
     if (kind == _cursor_applied) return;
     _cursor_applied = kind;
@@ -1296,6 +1311,22 @@ namespace xpl_host
 
     if (new_idx != 0 && _widgets.exists(new_idx))
       _widgets[new_idx].pressed = true;
+
+    // The press target now decides the cursor (see refresh_cursor), so both
+    // grabbing and releasing have to re-resolve it. Releasing is the one that
+    // matters: without it the drag's shape would stay on screen until the next
+    // hover transition happened to refresh it.
+    //
+    // A RELEASE also ends the override's drag exemption.
+    // drop_cursor_override_on_hover_change keeps a GRID column-resize override
+    // alive while its owner holds the press, and it only ever ran on hover
+    // transitions - so when the drag ENDED somewhere else, the override stayed
+    // armed until the pointer happened to move again. Re-evaluating it here (with
+    // _pressed_widget already cleared, so the exemption no longer applies) is
+    // what makes "the override lives exactly as long as the drag" true rather
+    // than approximately true.
+    if (new_idx == 0) drop_cursor_override_on_hover_change(_hovered_widget);
+    refresh_cursor();
 
     // Same rationale as set_hovered: frame repaint so .pressed-aware widgets
     // (BUTTON) flip to their pressed visual immediately.
