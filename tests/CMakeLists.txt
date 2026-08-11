@@ -240,6 +240,22 @@ if(WIN32)
   # the frame, so it symbolizes the faulting stack itself.
   target_link_libraries(neui_focus_smoke_win32 PRIVATE
     neui neui-xplhost neui-win32host dbghelp)
+
+  # UI Automation PROVIDER harness - the first execution of a11y_win32.cpp, which
+  # shipped explicitly unverified. Every query goes through the real UIA CLIENT
+  # stack (CUIAutomation) from a separate MTA thread while the UI thread pumps, so
+  # ProviderOptions_UseComThreading is exercised the way an assistive technology
+  # exercises it rather than the one arrangement no AT produces. Realizes a real
+  # HWND and posts real input, so built but NOT ctest-registered; run
+  # tests/<config>/neui_a11y_provider_smoke_win32.exe manually.
+  add_executable(neui_a11y_provider_smoke_win32 a11y_provider_smoke_win32.cpp)
+  target_include_directories(neui_a11y_provider_smoke_win32 PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_a11y_provider_smoke_win32 PRIVATE cxx_std_17)
+  # ole32 for CoCreateInstance, oleaut32 for the BSTR helpers the client side
+  # needs to read names and values back out.
+  target_link_libraries(neui_a11y_provider_smoke_win32 PRIVATE
+    neui neui-xplhost neui-win32host ole32 oleaut32)
 endif()
 
 # Linux-only: Cairo software backend offscreen smoke test. Unlike neui_tests

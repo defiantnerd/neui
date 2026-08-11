@@ -830,7 +830,16 @@ private:
     float lo = 0.0f, hi = 1.0f;
     if (!declared_range(&lo, &hi)) return false;
     const float step = wd->attrs->get_float(NEUI_ATTR_A11Y_RANGE_STEP, 0.0f);
-    const float v    = wd->attrs->get_float(NEUI_PARAM_VALUE, 0.0f);
+    // Mirror the adapter's precedence (read_declarations in a11y_adapter.cpp): a
+    // DECLARED a11y value overrides the widget's own. set_value exists precisely
+    // for a control whose value the framework cannot see - a CUSTOMDRAW holding it
+    // in client state - so reading NEUI_PARAM_VALUE alone reported 0 for the one
+    // case the API is there to serve. The node cannot supply this: the model keeps
+    // only the FORMATTED value string, so the numeric read has to come back to the
+    // attributes and therefore has to repeat the precedence rather than inherit it.
+    const float v = wd->attrs->has(NEUI_ATTR_A11Y_VALUE)
+                      ? wd->attrs->get_float(NEUI_ATTR_A11Y_VALUE, 0.0f)
+                      : wd->attrs->get_float(NEUI_PARAM_VALUE, 0.0f);
     *out = uia::range_values(v, lo, hi, step);
     return true;
   }
