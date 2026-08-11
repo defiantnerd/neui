@@ -341,8 +341,17 @@ char kProviderKey;
 @implementation NEUIA11yProvider
 {
   __weak NSView*        _view;
+  // Re-validated on every refresh, never trusted across one. A provider can
+  // outlive both the session and the frame it describes: the AX runtime keeps
+  // vended elements alive while a remote client holds tokens, and a plugin
+  // editor is routinely destroyed while the DAW's window - which IS our native
+  // handle when embedded - is still up. So the pointer is only as good as the
+  // (session id, frame instance id) pair it was resolved from.
   xpl_host::Session*    _session;
+  uint32_t              _session_id;
   uint32_t              _frame_index;
+  uint32_t              _frame_generation;
+  BOOL                  _dead;
   std::vector<A11yNode> _nodes;
   // node key -> NEUIA11yElement. Persistent across rebuilds so an AT-held
   // reference keeps working; entries for nodes that disappear are dropped.
@@ -357,13 +366,39 @@ char kProviderKey;
 {
   self = [super init];
   if (!self) return nil;
-  _view           = v;
-  _session        = s;
-  _frame_index    = frame_index;
-  _elements       = [NSMutableDictionary dictionary];
-  _built_revision = 0;
-  _built          = NO;
+  _view             = v;
+  _session          = s;
+  _session_id       = s ? (s->get_session_id() & 0xffff) : 0;
+  _frame_index      = frame_index;
+  _frame_generation = s ? s->a11y_generation(frame_index) : 0;
+  _dead             = NO;
+  _elements         = [NSMutableDictionary dictionary];
+  _built_revision   = 0;
+  _built            = NO;
   return self;
+}
+
+// Everything the provider answers goes through -refresh first, so this is the
+// single point where the session pointer is re-established. Once dead, dead:
+// there is no path back, and every element degrades to "gone" rather than
+// answering about a window that no longer exists.
+- (BOOL)revalidate
+{
+  if (_dead) return NO;
+  xpl_host::Session* s = xpl_host::a11y_live_session(_session_id);
+  // s != _session catches a session slot recycled under the same id; the
+  // generation test below catches it again if the allocator happened to hand
+  // out the same address.
+  if (!s || s != _session ||
+      !xpl_host::a11y_frame_is_live(*s, _frame_index, _frame_generation)) {
+    _dead    = YES;
+    _session = nullptr;
+    _nodes.clear();
+    [_elements removeAllObjects];
+    _built   = NO;
+    return NO;
+  }
+  return YES;
 }
 
 - (id)topLevelParent
@@ -382,7 +417,9 @@ char kProviderKey;
 
 - (void)refresh
 {
-  if (!_session) return;
+  // The frame or its whole session may be gone since the last query - see
+  // -revalidate. This must come before any other use of _session.
+  if (![self revalidate]) return;
   // First query of any kind is what backs NEUI_API_A11Y::is_active.
   _session->mark_a11y_queried();
 
@@ -394,10 +431,16 @@ char kProviderKey;
 
   // An empty result means the frame could not be DESCRIBED right now (never
   // painted, or the query arrived mid-paint and the in-paint guard refused),
-  // not that the window emptied. Keep the last good tree and do NOT record the
-  // revision, so the next query retries. Reporting "no children" would make
-  // VoiceOver announce an empty window and stop.
-  if (fresh.empty() && _built) return;
+  // not that the window emptied. Keep whatever we last had and do NOT record
+  // the revision, so the next query retries: reporting "no children" would make
+  // VoiceOver announce an empty window and stop. "The frame is gone" is a
+  // different thing entirely and -revalidate has already handled it above.
+  //
+  // Not gated on _built: a FIRST query that is refused must also retry, or the
+  // empty tree gets cached against a revision that paint_frame already bumped
+  // at its start - so nothing would bump again when the paint ends and the
+  // window would stay empty to the AT indefinitely.
+  if (fresh.empty()) return;
 
   _nodes          = std::move(fresh);
   _built_revision = rev;
@@ -407,7 +450,15 @@ char kProviderKey;
   // would invalidate every reference VoiceOver is holding.
   NSMutableDictionary<NSString*, NEUIA11yElement*>* next =
     [NSMutableDictionary dictionaryWithCapacity:_nodes.size()];
+  const A11yNodeId frame_id =
+    xpl_host::a11y_widget_node_id(*_session, _frame_index);
   for (const A11yNode& nd : _nodes) {
+    // NO ELEMENT FOR THE FRAME NODE. The VIEW stands for the frame, and the
+    // NSWindow above it already carries the window role and title. Publishing
+    // one would make -accessibilityParent hand an AT a hidden AXWindow that
+    // appears in nobody's children and whose own children are a second copy of
+    // the entire window - parent and children walks would disagree.
+    if (a11y_id_equal(nd.id, frame_id)) continue;
     NSString* k = key_for_id(nd.id);
     NEUIA11yElement* el = _elements[k];
     if (!el) {
@@ -440,11 +491,11 @@ char kProviderKey;
   if (!_session) return @[];
   const A11yNodeId frame_id =
     xpl_host::a11y_widget_node_id(*_session, _frame_index);
-  // Children of the frame node - the VIEW stands for the frame, so publishing
-  // the frame node as well would nest a window inside a window. Nodes with no
-  // resolvable parent are included too: build_a11y_tree re-parents survivors
-  // onto their nearest surviving ancestor, and anything it could not place is
-  // still real content that must not vanish.
+  // Children of the frame node. The frame itself has no element (see -refresh),
+  // so a top-level widget's -accessibilityParent resolves to the view and the
+  // two walks agree. Nodes with no resolvable parent are included too:
+  // build_a11y_tree re-parents survivors onto their nearest surviving ancestor,
+  // and anything it could not place is still real content that must not vanish.
   NSMutableArray* out = [NSMutableArray array];
   for (const A11yNode& nd : _nodes) {
     if (a11y_id_equal(nd.id, frame_id)) continue;
@@ -549,12 +600,37 @@ char kProviderKey;
 
 // ---- Actions -------------------------------------------------------------
 //
-// Every action routes through a path the USER already has: a widget row presses
-// via the same on_keydown() the space bar reaches, a stepper via the same
-// on_keydown() the arrow keys reach (so an AT increment fires GESTURE_BEGIN /
-// VALUE_CHANGED / GESTURE_END exactly like a keypress, which is what a DAW
-// needs to record an automation edit), and a sub-element via a synthesised
-// click at its own reported centre. Nothing here reimplements widget behaviour.
+// Every action routes through a path the USER already has, and routes through
+// ALL of it: a widget row presses via the same two-stage key dispatch the space
+// bar takes (client's KEYDOWN handler first, then the widget's own on_keydown),
+// a stepper via the same arrow-key dispatch (so an AT increment fires
+// GESTURE_BEGIN / VALUE_CHANGED / GESTURE_END exactly like a keypress, which is
+// what a DAW needs to record one automation edit), and a sub-element via a
+// synthesised click at its own reported centre. Nothing here reimplements widget
+// behaviour.
+//
+// The client-first half matters most for the case <neui/d/a11y.h> calls the
+// highest-value declaration a client can make: a CUSTOMDRAW with a declared
+// role. Its activation lives in the CLIENT's handlers, and CustomDrawWidget's
+// own on_keydown only forwards to a behavior asset - so dispatching straight to
+// the widget would have made VoiceOver OFFER press / increment on every declared
+// button and slider and then do nothing, which this file's own rule calls worse
+// than offering nothing.
+
+// The space bar / arrow key path, verbatim: the client gets first refusal via a
+// KEYDOWN scoped to this widget, then the widget's virtual. Mirrors
+// -[NEUIView keyDown:] (platform_macos.mm).
+- (BOOL)sendKey:(uint32_t)keycode to:(xpl_host::WidgetData*)wd
+{
+  if (!wd || !_session) return NO;
+  if (wd->emit_events) {
+    neui_event_t ev{};
+    ev.type     = NEUI_EVENT_KEYDOWN;
+    ev.data.key = { { wd->widget_id }, keycode, 0 };
+    if (_session->dispatch_event(&ev)) return YES;
+  }
+  return wd->on_keydown(keycode, 0) ? YES : NO;
+}
 
 - (BOOL)canPress:(const A11yNodeId&)nid
 {
@@ -596,7 +672,7 @@ char kProviderKey;
   _session->bump_a11y_revision();
 
   if (nid.sub_index < 0)
-    return wd->on_keydown(NEUI_KEY_SPACE, 0) ? YES : NO;
+    return [self sendKey:NEUI_KEY_SPACE to:wd];
 
   // Sub-element: click its centre. The rect is the one this element just
   // reported to the AT, and dispatch_mouse_event takes frame-local px, so the
@@ -614,6 +690,15 @@ char kProviderKey;
   ev.data.mouse.y = cy;
   ev.type = NEUI_EVENT_MOUSE_BUTTON_UP;
   _session->dispatch_mouse_event(slot, &ev);
+  // ...and the CLICK a real release produces when down and up land on the same
+  // widget (see -[NEUIView mouseUp:]). Without it a client keyed on CLICK over a
+  // grid / tab / list sees nothing from an AT press, even though the widget's own
+  // internal handler already acted on the DOWN.
+  ev.data.mouse.x = cx;
+  ev.data.mouse.y = cy;
+  ev.data.mouse.buttonmap = 0;      // the button is no longer held
+  ev.type = NEUI_EVENT_MOUSE_BUTTON_CLICK;
+  _session->dispatch_mouse_event(slot, &ev);
   return YES;
 }
 
@@ -628,7 +713,13 @@ char kProviderKey;
   xpl_host::WidgetData* wd = _session->get_widget(slot);
   if (!wd) return NO;
   _session->bump_a11y_revision();   // see -performPress:
-  return wd->on_keydown(up ? NEUI_KEY_RIGHT : NEUI_KEY_LEFT, 0) ? YES : NO;
+  // A declared real-world step is a promise in <neui/d/a11y.h>: "the increment
+  // an AT increment/decrement action should move by, in real-world units". The
+  // arrow keys move 10 % of the range (or one NEUI_ATTR_STEPS detent), which is
+  // not the same number, so honour the declaration when there is one - through a
+  // host helper, so the gesture + VALUE_CHANGED events are identical either way.
+  if (_session->a11y_step_value(slot, up ? true : false)) return YES;
+  return [self sendKey:(up ? NEUI_KEY_RIGHT : NEUI_KEY_LEFT) to:wd];
 }
 
 - (BOOL)focusNode:(const A11yNodeId&)nid
@@ -645,7 +736,7 @@ char kProviderKey;
 
 - (void)postForWidget:(uint32_t)widget_id change:(int)change
 {
-  if (!_session) return;
+  if (_dead || !_session) return;
   // Structure changes are about the container, not one element - and the tree
   // is rebuilt lazily anyway, so the view is the right thing to announce.
   NSView* v = _view;
@@ -654,7 +745,12 @@ char kProviderKey;
     return;
   }
 
-  [self refresh];
+  // Deliberately does NOT rebuild. A notification only says "re-ask about this
+  // element", so the element merely has to exist; rebuilding here would put a
+  // full tree build (and possibly a forced paint, via ensure_abs_positions) on
+  // every knob-drag event once an AT is attached, which is exactly the eager
+  // work the pull model exists to avoid. An element nothing has published yet
+  // has no AT waiting on it either.
   const uint32_t slot = widget_id & 0xffff;
   const A11yNodeId nid = xpl_host::a11y_widget_node_id(*_session, slot);
   NEUIA11yElement* el = _elements[key_for_id(nid)];

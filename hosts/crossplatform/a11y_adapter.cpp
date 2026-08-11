@@ -197,6 +197,17 @@ namespace xpl_host
 
       read_declarations(bag, row);
       read_labelled_by(s, bag, row);
+
+      // A TEXT FIELD's contents are its VALUE, not its name. Without this the
+      // text only ever reached the name fallback, so a field with a name (or a
+      // labelled_by - the very idiom set_labelled_by exists for) announced the
+      // label and offered no value at all: an AT could not read what the user
+      // had typed. A password field is deliberately excluded here as well as in
+      // the provider, so the contents are not sitting in the tree at all.
+      if ((type_is(wd, NEUI_W_INPUTBOX) || type_is(wd, NEUI_W_MULTILINE)) &&
+          !row.password && (!row.value_text || !*row.value_text))
+        row.value_text = row.text;
+
       return row;
     }
 
@@ -746,6 +757,23 @@ namespace xpl_host
 
   // The session table lives in host.cpp; same `extern` the widget API uses.
   extern std::vector<std::unique_ptr<Session>> sessions;
+
+  Session* a11y_live_session(uint32_t session_id)
+  {
+    if (session_id == 0 || session_id > sessions.size()) return nullptr;
+    return sessions[session_id - 1].get();
+  }
+
+  bool a11y_frame_is_live(Session& s, uint32_t frame_index,
+                          uint32_t frame_generation)
+  {
+    if (frame_index == 0 || !s._widgets.exists(frame_index)) return false;
+    if (!s._widgets[frame_index].is_frame()) return false;
+    // The instance id comes from a process-wide counter, so a recycled slot
+    // never matches - which is the whole reason this takes a generation rather
+    // than just testing existence.
+    return s.a11y_generation(frame_index) == frame_generation;
+  }
 
   std::vector<A11yNode> a11y_build_tree_for_frame(neui_widget_t frame)
   {

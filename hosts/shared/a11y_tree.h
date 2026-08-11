@@ -410,6 +410,13 @@ namespace neui_detail
         // A labelled_by pointing at a pruned, missing or empty target degrades
         // to the widget's own text rather than to an unnamed control.
       }
+      // Text fields are the exception to the text-as-name fallback: their text is
+      // their VALUE (the adapter puts it there), so using it as the name too
+      // would make an AT read the contents twice and call them a label. An
+      // unnamed text field is correct here - it is genuinely unlabelled, and
+      // set_name / set_labelled_by is how a client fixes that.
+      if (role[i] == NEUI_A11Y_ROLE_TEXT_FIELD ||
+          role[i] == NEUI_A11Y_ROLE_TEXT_AREA) continue;
       if (r.text && *r.text) names[i] = r.text;
     }
     for (size_t i = 0; i < n; ++i) if (consumed_label[i]) keep[i] = 0;

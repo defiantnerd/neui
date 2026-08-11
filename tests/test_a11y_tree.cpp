@@ -438,12 +438,50 @@ TEST_CASE("a11y: a consumed LABEL is dropped so its words are not read twice")
 TEST_CASE("a11y: labelled_by pointing nowhere degrades to the widget's own text")
 {
   std::vector<A11yInput> in;
-  A11yInput field = widget_row(1, 0, NEUI_W_INPUTBOX);
-  field.labelled_by = { 42, 1, 0, -1 };   // never emitted
-  field.text = "Fallback";
-  in.push_back(field);
+  // A BUTTON, not an INPUTBOX: for a text field the text is the VALUE, not a
+  // name - see the next case, which pins that exception.
+  A11yInput btn = widget_row(1, 0, NEUI_W_BUTTON);
+  btn.labelled_by = { 42, 1, 0, -1 };   // never emitted
+  btn.text = "Fallback";
+  in.push_back(btn);
   auto nodes = build_a11y_tree(in);
   CHECK_EQ(nodes[0].name, std::string("Fallback"));
+}
+
+TEST_CASE("a11y: a text field's text is its value, never its name")
+{
+  // The adapter puts an INPUTBOX / MULTILINE's contents in value_text (a text
+  // field's text IS its value). If the name fallback also took it, an AT would
+  // read the contents twice and call them a label - and a field that DOES have a
+  // name would then have to choose between announcing the label and announcing
+  // what the user typed. So the text-as-name fallback skips these two roles.
+  std::vector<A11yInput> in;
+  A11yInput field = widget_row(1, 0, NEUI_W_INPUTBOX);
+  field.text       = "440";
+  field.value_text = "440";
+  in.push_back(field);
+  A11yInput area = widget_row(2, 0, NEUI_W_MULTILINE);
+  area.text       = "line one";
+  area.value_text = "line one";
+  in.push_back(area);
+
+  auto nodes = build_a11y_tree(in);
+  const A11yNode* f = find_widget(nodes, 1);
+  const A11yNode* a = find_widget(nodes, 2);
+  CHECK(f != nullptr);
+  CHECK(a != nullptr);
+  CHECK(f->name.empty());                                  // unnamed, not "440"
+  CHECK_EQ(f->value_text, std::string("440"));
+  CHECK(a->name.empty());
+  CHECK_EQ(a->value_text, std::string("line one"));
+
+  // A declared name still wins, and still does not become the value.
+  in[0].name = "Frequency";
+  auto named = build_a11y_tree(in);
+  const A11yNode* nf = find_widget(named, 1);
+  CHECK(nf != nullptr);
+  CHECK_EQ(nf->name, std::string("Frequency"));
+  CHECK_EQ(nf->value_text, std::string("440"));
 }
 
 TEST_CASE("a11y: a labelled_by cycle terminates and does not hang")

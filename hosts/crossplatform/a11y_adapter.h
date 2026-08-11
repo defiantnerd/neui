@@ -63,6 +63,22 @@ namespace xpl_host
   std::vector<neui_detail::A11yNode> a11y_build_frame_tree(Session& s,
                                                            uint32_t frame_index);
 
+  // The live Session for `session_id`, or nullptr when that session has been
+  // destroyed. A platform provider outlives the session it describes - both UI
+  // Automation and NSAccessibility keep vended elements alive while a remote AT
+  // holds tokens - so it must be able to ask whether its Session* is still a
+  // Session before dereferencing it.
+  Session* a11y_live_session(uint32_t session_id);
+
+  // True while `frame_index` is STILL the same live frame it was when a provider
+  // latched onto it. `frame_generation` is the value a11y_generation() returned
+  // for that slot at the time, so this rejects both "the frame was destroyed"
+  // and "the slot was recycled by a different widget" - the second being the
+  // case that would otherwise have a provider republish another window's
+  // contents under the dead window's elements.
+  bool a11y_frame_is_live(Session& s, uint32_t frame_index,
+                          uint32_t frame_generation);
+
   // Same, resolving the session from a public frame handle. The platform
   // providers already hold a Session*, so this exists for the accessibility
   // harness (and any future tooling) which only has public handles. Empty

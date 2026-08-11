@@ -1427,6 +1427,14 @@ namespace xpl_host
     bool a11y_queried() const { return _a11y_queried; }
     void mark_a11y_queried() { _a11y_queried = true; }
 
+    // One accessibility increment / decrement on a value widget, honouring the
+    // real-world step declared via NEUI_API_A11Y::set_value_range. False when no
+    // step was declared - the caller then falls back to the arrow-key path, so
+    // keyboard and AT agree whenever the client named no step. Implemented in
+    // host.cpp next to the value helpers, because it has to raise the same
+    // GESTURE_BEGIN / VALUE_CHANGED / GESTURE_END triple a keypress does.
+    bool a11y_step_value(uint32_t slot, bool up);
+
   public:
     neui_detail::Tree<WidgetData>  _widgets;
     neui_detail::AssetManager      _asset_manager;

@@ -40,7 +40,8 @@
 //                      fallback DISAGREE - see 4c for why the plain case alone
 //                      proves nothing.
 //    5  FOCUS        - per FRAME: frame A reports its focused element, B nil.
-//    6  PRESS        - AT press on a BUTTON reaches the client as a CLICK.
+//    6  PRESS        - AT press on a BUTTON reaches the client as a CLICK; 6b is
+//                      the client-first key path a declared CUSTOMDRAW needs.
 //    7  INCREMENT    - AT increment on a KNOB fires GESTURE_BEGIN / VALUE_CHANGED
 //                      / GESTURE_END and moves the value, like an arrow key.
 //    8  VALUE TEXT   - a declared range announces "-27", not "50 %".
@@ -56,6 +57,10 @@
 //   13  DISABLED     - a disabled control refuses the press action.
 //   14  SECURE       - a password field carries the secure subrole and no value.
 //   15  IS_ACTIVE    - false until something queries, true afterwards.
+//   16  LIVE STATE    - a built-in user change is visible to the AT with no
+//                      intervening paint (the framework's own notifications).
+//   17  DEAD FRAME    - after its frame is destroyed, an element answers "gone"
+//                      rather than the whole stale tree it was built from.
 //
 // Realizes two real NSWindows, so built but NOT ctest-registered; run
 // ./tests/<config>/neui_a11y_provider_smoke_macos manually.
@@ -108,6 +113,12 @@ float    g_value         = -1.0f;
 int      g_gesture_begin = 0, g_gesture_end = 0;
 uint32_t g_item_widget   = 0;
 int      g_item_index    = -1;
+// Check 6b: a CUSTOMDRAW with a declared role, whose activation lives in the
+// CLIENT's key handler - the case <neui/d/a11y.h> calls the highest-value
+// declaration a client can make.
+uint32_t g_declared_cd    = 0;
+uint32_t g_key_widget     = 0;
+uint32_t g_key_code       = 0;
 
 // Check 12: set from inside a real WIDGET_PAINT.
 neui_widget_t g_paint_probe_frame = widget_none;
@@ -127,6 +138,13 @@ bool onevent(void*, neui_event_t* ev)
   switch (ev->type) {
     case NEUI_EVENT_MOUSE_BUTTON_CLICK:
       g_click_widget = ev->data.mouse.widget.id;
+      break;
+    case NEUI_EVENT_KEYDOWN:
+      g_key_widget = ev->data.key.widget.id;
+      g_key_code   = ev->data.key.keycode;
+      // Consume it, exactly as a client implementing a custom control would -
+      // that is what makes this the client-first path rather than the widget's.
+      if (g_declared_cd != 0 && g_key_widget == g_declared_cd) return true;
       break;
     case NEUI_EVENT_MOUSE_BUTTON_DOWN:
       g_mouse_widget = ev->data.mouse.widget.id;
@@ -298,6 +316,7 @@ int main()
     neui_widget_t lbl = w->create(sess, fa, NEUI_W_LABEL, 12, 12, 80, 20, nullptr);
     w->set_text(sess, lbl, "Cutoff");
     neui_widget_t inp = w->create(sess, fa, NEUI_W_INPUTBOX, 100, 12, 140, 22, nullptr);
+    w->set_text(sess, inp, "440");
     a11y->set_labelled_by(sess, inp, lbl);
 
     neui_widget_t knob = w->create(sess, fa, NEUI_W_KNOB, 12, 44, 60, 60, nullptr);
@@ -339,6 +358,17 @@ int main()
       const char* vals[2] = { buf, "42" };
       grid->add_row(sess, gr, vals);
     }
+
+    // 6b's surface: a CUSTOMDRAW that declares itself a button. Its activation
+    // exists only in the client's KEYDOWN handler above - CustomDrawWidget's own
+    // on_keydown just forwards to a behavior asset - so an AT press reaches it
+    // only if the provider gives the client first refusal the way a real
+    // keystroke does.
+    neui_widget_t cdbtn = w->create(sess, fa, NEUI_W_CUSTOMDRAW,
+                                   140, 174, 100, 22, nullptr);
+    a11y->set_role(sess, cdbtn, NEUI_A11Y_ROLE_BUTTON);
+    a11y->set_name(sess, cdbtn, "Custom");
+    g_declared_cd = cdbtn.id;
 
     // Check 12's probe surface. Zero-size would be dropped from the tree, so it
     // is a real (small) CUSTOMDRAW; its WIDGET_PAINT runs the in-paint query.
@@ -405,6 +435,30 @@ int main()
     // 15b: the query above is the first one.
     check(a11y->is_active(sess), "15 is_active is true after the first AT query");
 
+    // 1b PARENT / CHILDREN SYMMETRY. The frame node must NOT be published as an
+    //    element: the view stands for the frame and the NSWindow above it already
+    //    carries the window role. Publishing one made a top-level widget's parent
+    //    a hidden AXWindow that appeared in nobody's children and whose own
+    //    children were a second copy of the whole window - so a parent walk and a
+    //    children walk disagreed, which is what breaks VoiceOver's
+    //    jump-to-container. 72 checks missed this because none asked for a parent.
+    if (e_btn) {
+      id parent = [e_btn accessibilityParent];
+      // The parent resolves to the frame's real NSWindow: AppKit treats a plain
+      // group NSView as ignored and folds it away, so the window's children ARE
+      // our top-level elements. What must never happen is the parent being one of
+      // OUR elements - the frame node used to get an element of its own, so a
+      // parent walk landed on a hidden AXWindow that appeared in nobody's
+      // children and whose children were a second copy of the whole window.
+      check(parent != nil, "1b a top-level widget has a parent");
+      check(![parent isKindOfClass:[NSAccessibilityElement class]],
+            "1b ...and it is a real AppKit object, not a phantom frame element");
+      check([[parent accessibilityChildren] containsObject:e_btn],
+            "1b ...whose own children contain it (parent / children agree)");
+      check_eq_int(count_role(va, @"AXWindow"), 0,
+                   "1b no AXWindow element is published inside the frame");
+    }
+
     // ---------------------------------------------------------------------
     // 2  NAMES - the LABEL names the INPUTBOX and is itself dropped.
     id e_inp = element_labelled(va, @"Cutoff");
@@ -416,6 +470,12 @@ int main()
     // reads "Cutoff" twice.
     check_eq_int(count_role(va, @"AXStaticText"), 0,
                  "2  the consumed LABEL is not published as static text");
+    // 2b A NAMED text field must still expose what the user typed. It used to
+    //    announce the label and offer NO value, so there was no way to hear the
+    //    contents of exactly the fields the API tells clients to label.
+    if (e_inp)
+      check_eq_str(str_of([e_inp accessibilityValue]), "440",
+                   "2b ...and the field's contents are its VALUE");
 
     // ---------------------------------------------------------------------
     // 3  SCREEN GEOMETRY, cross-validated by a real click. This is the check
@@ -525,6 +585,29 @@ int main()
             "6  ...and arrives as MOUSE_BUTTON_CLICK on that button");
     }
 
+    // 6b THE CLIENT GETS FIRST REFUSAL, as it does for a real keystroke
+    //    (-[NEUIView keyDown:] dispatches KEYDOWN before falling back to the
+    //    widget's virtual). Dispatching straight to the widget made VoiceOver
+    //    OFFER press on every client-declared CUSTOMDRAW role and then do
+    //    nothing, since CustomDrawWidget::on_keydown only forwards to a behavior
+    //    asset - offered-but-inert, which this code's own rule calls worse than
+    //    offering nothing.
+    {
+      id e_cd = element_labelled(va, @"Custom");
+      check(e_cd != nil, "6b a CUSTOMDRAW with a declared role is published");
+      if (e_cd) {
+        check_eq_str(str_of([e_cd accessibilityRole]), "AXButton",
+                     "6b ...as the role the client declared");
+        g_key_widget = 0; g_key_code = 0;
+        check([e_cd isAccessibilitySelectorAllowed:@selector(accessibilityPerformPress)],
+              "6b ...and offers press");
+        check([e_cd accessibilityPerformPress],
+              "6b press succeeds because the CLIENT handled it");
+        check(g_key_widget == cdbtn.id && g_key_code == NEUI_KEY_SPACE,
+              "6b ...having arrived as a KEYDOWN(SPACE) scoped to that widget");
+      }
+    }
+
     // ---------------------------------------------------------------------
     // 7  INCREMENT on the KNOB - the arrow-key path, gestures included.
     id e_knob = element_labelled(va, @"Cutoff knob");
@@ -546,6 +629,25 @@ int main()
       check_eq_int(g_gesture_end,   1, "7  ...and exactly one GESTURE_END");
       check([e_knob accessibilityPerformDecrement], "7  decrement is performed");
       check(g_value > 0.45f && g_value < 0.55f, "7  ...returning to 0.5");
+
+      // 7b A DECLARED STEP is a promise in <neui/d/a11y.h>: "the increment an AT
+      //    increment/decrement action should move by, in real-world units". It
+      //    was stored and then ignored - every AT increment moved the arrow-key
+      //    10 %, so a client declaring -60..+6 dB step 1 got 6.6 dB per press.
+      //    3 dB of a 66 dB span is 0.04545 normalized.
+      a11y->set_value_range(sess, knob, -60.0f, 6.0f, 3.0f);
+      attrs->set_float(sess, knob, NEUI_PARAM_VALUE, 0.5f);
+      g_value = -1.0f; g_gesture_begin = g_gesture_end = 0;
+      check([e_knob accessibilityPerformIncrement],
+            "7b increment with a declared step is performed");
+      check(g_value > 0.5449f && g_value < 0.5460f,
+            "7b ...and moves by the DECLARED 3 dB, not the arrow key's 10 %");
+      check_eq_int(g_gesture_begin, 1,
+                   "7b ...still bracketed by one GESTURE_BEGIN");
+      check_eq_int(g_gesture_end, 1, "7b ...and one GESTURE_END");
+      // Back to a continuous range for the value-text check below.
+      a11y->set_value_range(sess, knob, -60.0f, 6.0f, 0.0f);
+      attrs->set_float(sess, knob, NEUI_PARAM_VALUE, 0.5f);
     }
 
     // ---------------------------------------------------------------------
@@ -591,12 +693,18 @@ int main()
       }
       // Pressing a row selects it - the synthesised-click path.
       if (rows.count > 1) {
-        g_item_widget = 0; g_item_index = -1;
+        g_item_widget = 0; g_item_index = -1; g_click_widget = 0;
         check([rows[1] isAccessibilitySelectorAllowed:@selector(accessibilityPerformPress)],
               "10 a list row offers press");
         check([rows[1] accessibilityPerformPress], "10 row press is performed");
         check(g_item_widget == list.id && g_item_index == 1,
               "10 ...and selects that row (ITEM_SELECTED, index 1)");
+        // A real release also produces MOUSE_BUTTON_CLICK when down and up land
+        // on the same widget. Widget-internal handlers act on the DOWN (which is
+        // why the selection above worked), but a client keyed on CLICK saw
+        // nothing from an AT press - so the synthesised click was a half-click.
+        check(g_click_widget == list.id,
+              "10b ...and the synthesised click also delivers CLICK to the client");
       }
     }
     id e_grid = element_with_role(va, @"AXTable");
@@ -641,6 +749,25 @@ int main()
             "11 ...and no name");
       check(![e_doomed accessibilityPerformPress],
             "11 ...and refuses to be pressed");
+
+      // 11d THE CASE THE GENERATION ACTUALLY EXISTS FOR, and the one the checks
+      //     above do NOT cover: they pass even with the generation stripped out,
+      //     because a destroyed widget is simply absent from the rebuilt tree.
+      //     Create a new widget so the freed tree slot is RECYCLED, then ask the
+      //     held element again. Without the per-instance generation its node id
+      //     would now match the newcomer and it would answer with the new
+      //     widget's role, name and rectangle - a wrong answer, which is the
+      //     whole failure mode this machinery is for.
+      neui_widget_t recycled = w->create(sess, fa, NEUI_W_BUTTON,
+                                         12, 148, 120, 22, nullptr);
+      w->set_text(sess, recycled, "Recycled");
+      pump(0.2);
+      check(element_labelled(va, @"Recycled") != nil,
+            "11d the widget created into the freed slot is published");
+      check_eq_str(str_of([e_doomed accessibilityRole]), "AXUnknown",
+                   "11d the element held across the recycle still reports unknown");
+      check([e_doomed accessibilityLabel] == nil,
+            "11d ...and does NOT answer with the new occupant's name");
     }
 
     // ---------------------------------------------------------------------
@@ -686,13 +813,62 @@ int main()
             "14 ...and its contents are never offered as a value");
     }
 
+    // ---------------------------------------------------------------------
+    // 16 A BUILT-IN change must reach the AT without waiting for a paint.
+    //    <neui/d/a11y.h> promises the framework raises notifications itself for
+    //    every built-in widget; a client only needs notify() for hand-painted
+    //    controls. Whether the NSAccessibility notification is delivered needs an
+    //    AXObserver (and permissions) to observe, so what is asserted here is the
+    //    part that would make the notification useless anyway: the value an AT
+    //    re-reads IMMEDIATELY after a user-driven change is the new one, with no
+    //    intervening pump. Before, the cache was keyed on paint alone.
+    {
+      id e_chk3b = element_labelled(va, @"Tri");
+      if (e_chk3b) {
+        const NSRect r = [e_chk3b accessibilityFrame];
+        NSPoint in_win = [wa convertRectFromScreen:
+                              NSMakeRect(NSMidX(r), NSMidY(r), 1, 1)].origin;
+        NSPoint in_view = [va convertPoint:in_win fromView:nil];
+        // The FIRST click also moves focus, and set_focus bumps the revision -
+        // so asserting on it would pass even with the framework's own change
+        // notifications disabled (verified by mutation). Click twice: the second
+        // press leaves focus exactly where it is, so the only thing that can
+        // refresh the cache is the change notification itself. A tri-state cycles
+        // on every press, so its value moves each time.
+        click_view_local(wa, in_view.x, in_view.y);
+        id before = [e_chk3b accessibilityValue];
+        click_view_local(wa, in_view.x, in_view.y);   // no focus change this time
+        id after = [e_chk3b accessibilityValue];
+        check(![before isEqual:after],
+              "16 a real click changes the reported value with NO paint in between");
+      }
+    }
+
     // An announcement has no node behind it; assert only that it is safe to
     // call (whether speech happens is VoiceOver's business, not testable here).
     a11y->announce(sess, "harness announcement", false);
     a11y->notify(sess, knob, NEUI_A11Y_CHANGE_VALUE);
     check(true, "-- announce + notify are safe to call with no AT attached");
 
-    w->destroy(sess, fb);
+    // ---------------------------------------------------------------------
+    // 17 A DESTROYED FRAME must not keep answering. An AT holds vended elements
+    //    for as long as it likes, and the empty-tree-means-retry rule (12b) used
+    //    to swallow "the frame is gone" too - so every element of a closed window
+    //    kept reporting its widgets' roles, names and screen rects forever, and
+    //    the per-instance generation could not help because the ids in the kept
+    //    tree still matched. `e_off` is frame B's scrolled-away button, captured
+    //    at check 4b.
+    if (e_off) {
+      w->destroy(sess, fb);
+      pump(0.2);
+      check_eq_str(str_of([e_off accessibilityRole]), "AXUnknown",
+                   "17 an element of a destroyed FRAME reports unknown");
+      check(NSIsEmptyRect([e_off accessibilityFrame]),
+            "17 ...and an empty rect, not the closed window's geometry");
+      check([e_off accessibilityLabel] == nil, "17 ...and no name");
+    } else {
+      w->destroy(sess, fb);
+    }
     w->destroy(sess, fa);
     api->destroy(sess);
 

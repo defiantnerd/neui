@@ -831,7 +831,8 @@ observable behaviour (the element table only ever holds one frame's nodes, so th
 lookup misses anyway). It stays as an explicit early-out, and its comment now
 says so instead of claiming to be the mechanism.
 
-**Coverage.** `tests/a11y_provider_smoke_macos.mm` (new, 72 checks, two real
+**Coverage.** `tests/a11y_provider_smoke_macos.mm` (new, 94 checks after the
+review below, two real
 NSWindows) drives the real protocol only — never the adapter API — so it tests
 what VoiceOver would actually ask for. Every fix above was verified by reverting
 it and watching the specific check fail (11 mutations in total). The two checks
@@ -843,8 +844,8 @@ the last good tree rather than reporting an empty window).
 
 **Deliberately not done in 6.3**, and none of it blocks VoiceOver from reading a
 window: the text interfaces (`AXNumberOfCharacters` / selected-range / ranged
-attributes for INPUTBOX / MULTILINE — an AT can read the value but not navigate
-by character); the `NSAccessibilityTable` / `Row` protocols, so a GRID's
+attributes for INPUTBOX / MULTILINE — an AT reads the value, since the review
+below fixed that, but cannot navigate by character or word); the `NSAccessibilityTable` / `Row` protocols, so a GRID's
 `total_child_count` is not advertised as a set size; pressing a MENU ITEM or an
 open combobox's drop row (their input is hit-tested at frame level by the
 platform layer, not by the owning widget, so a synthesised click would land
@@ -852,6 +853,103 @@ nowhere — declined rather than offered-and-inert, and both remain fully
 keyboard-operable, which is how a VoiceOver user drives a pop-up button on this
 platform anyway); and `NSAccessibilityLayoutChangedNotification` is posted
 without its `userInfo` element list.
+
+#### 6.3 post-review fixes
+
+A review of the first cut found **nine real defects**. Every one was verified
+against the source before being changed, and every fix was verified by reverting
+it and watching a specific check fail. Ordered as the review ranked them:
+
+1. **`accessibilityParent` handed an AT a phantom window.** The adapter emits the
+   frame as the tree's root node, `-refresh` built an element for *every* node,
+   and a top-level widget's parent id **is** the frame — so a parent walk landed
+   on a hidden `AXWindow` that appeared in nobody's `accessibilityChildren` and
+   whose own children were a second copy of the entire window. Parent and
+   children walks disagreed, which is what breaks VoiceOver's jump-to-container.
+   No element is built for the frame node now; the parent resolves to the frame's
+   real `NSWindow` (AppKit treats a plain group `NSView` as ignored and folds it
+   away, so the window's children *are* our top-level elements). **72 checks
+   missed this because not one asked for a parent.**
+2. **A destroyed FRAME kept answering the whole stale tree.** The
+   empty-tree-means-retry rule swallowed "the frame is gone" too, so every
+   element of a closed window went on reporting its widgets' roles, names and
+   screen rects — and the per-instance generation could not help, because the ids
+   in the *kept* tree still matched. Worse, a recycled session slot could have the
+   provider republish another window's content under the dead window's elements.
+3. **A raw `Session*` with no invalidation.** A provider outlives what it
+   describes: the AX runtime keeps vended elements alive while a remote client
+   holds tokens, and a plugin editor is routinely destroyed while the DAW's window
+   — which *is* our native handle when embedded — is still up. Fixed together with
+   2 by `-revalidate`: the pointer is re-resolved from `(session id, frame
+   instance id)` on every refresh via two new adapter helpers
+   (`a11y_live_session` / `a11y_frame_is_live`), and once dead it is dead.
+4. **AT actions skipped the client half of the key path.** A real space bar
+   dispatches `KEYDOWN` to the client *first* and only then calls the widget's
+   virtual; the provider called the virtual directly. So a **CUSTOMDRAW with a
+   declared role** — which `<neui/d/a11y.h>` calls the highest-value declaration a
+   client can make — had press and increment *offered* by VoiceOver and then did
+   nothing, since `CustomDrawWidget::on_keydown` only forwards to a behavior
+   asset. Offered-but-inert, which this code's own rule calls worse than offering
+   nothing. Actions now mirror `-[NEUIView keyDown:]` exactly, and
+   `<neui/d/a11y.h>` now documents the contract: a press arrives as
+   `NEUI_KEY_SPACE`, a step as `NEUI_KEY_RIGHT`/`LEFT`.
+5. **`set_value_range`'s `step` was stored and ignored.** The header promises it is
+   "the increment an AT increment/decrement action should move by, in real-world
+   units"; every increment moved the arrow keys' 10 %, so a client declaring
+   −60..+6 dB step 1 got **6.6 dB per press**. New `Session::a11y_step_value`
+   applies the declared step through `widget_set_value_user_gesture`, so the
+   `GESTURE_BEGIN` / `VALUE_CHANGED` / `GESTURE_END` triple is identical either
+   way; no declared step still falls back to the arrow-key path, so keyboard and
+   AT agree whenever the client named no step.
+6. **No notifications for built-in widgets**, despite the header promising the
+   framework raises them itself. Wired in **one place** — `Session::dispatch_event`
+   maps the user-driven change events (value, checkbox, list / tree / grid / tab
+   selection, scroll, behavior attr writes) to a notification kind — rather than a
+   call bolted onto each mutation path, which is where such a scheme rots. It runs
+   *before* the client callback, so a client consuming the event does not suppress
+   the AT's notification. `-postForWidget:` no longer rebuilds the tree: a
+   notification only says "re-ask", so putting a full build (and possibly a forced
+   paint) on every knob-drag event was exactly the eager work the pull model
+   exists to avoid.
+7. **A named text field's contents were unreadable.** `value_text` came only from
+   client declarations, and the widget's text was a *name* fallback — so a field
+   with `set_name` or `set_labelled_by` (the very idiom the API recommends)
+   announced its label and offered **no value at all**. The adapter now puts an
+   INPUTBOX / MULTILINE's text in `value_text`, and the model skips the
+   text-as-name fallback for those two roles (an unnamed text field is correct —
+   it genuinely is unlabelled). This changed a 6.2 Tier-1 case that asserted the
+   old rule on an INPUTBOX; it was rewritten on a BUTTON, where text-as-name is
+   right, and a new case pins the text-field exception. Also makes the password
+   check meaningful, which until now passed for the wrong reason.
+8. **A first-ever query refused mid-paint cached the empty tree forever.** The
+   keep-last-good rule was gated on `_built`, and `paint_frame` bumps the revision
+   at its *start* — so an empty tree got recorded against a revision nothing would
+   bump again, and the window stayed empty to the AT indefinitely. The gate is
+   gone: a refused rebuild never records its revision.
+9. **Toasts were silent.** A toast is host-drawn chrome, not a widget and not in
+   the tree, so a blind user simply missed it — while the header promised the
+   framework announces its own. `Session::toast_show` now announces (non-assertive
+   — a toast is informational, and interrupting is worse than waiting).
+
+Smaller items from the same review, all fixed: the synthesised sub-element click
+was a **half-click** (DOWN + UP, no `CLICK`), so a client keyed on `CLICK` saw
+nothing from an AT press; `set_focus(0)` posting nothing is now documented rather
+than merely true; and `a11y_tree.h`'s node-id comment still said "the adapter
+bumps the counter on destroy", which the 6.2b review had already replaced with
+assign-at-create.
+
+**Two of my own checks were vacuous** — found by mutation, not by reading:
+
+- The check that a built-in change reaches the AT passed with the notification
+  hook fully disabled, because the *first* click also moves focus and `set_focus`
+  bumps the revision. It now clicks a tri-state **twice**, so the second press
+  changes no focus and only the change notification can refresh the cache.
+- The client-first key path had no check at all. There is now a CUSTOMDRAW that
+  declares itself a button and whose activation exists only in the harness's
+  `KEYDOWN` handler — the exact scenario defect 4 broke.
+
+Harness: **72 → 94 checks**. Mutation count for the phase: **20**, all caught
+after the two vacuous ones were repaired. Repaint bench unchanged (0.84 ms).
 
 Original text follows.
 

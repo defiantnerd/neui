@@ -166,6 +166,21 @@ typedef struct neui_a11y_api
   // assets also drive buttons, toggles, XY pads and drag sources, and telling a
   // screen-reader user "slider" about something that is not one is worse than
   // telling them "group". Declare it and the guessing problem disappears.
+  //
+  // WHAT A DECLARED ROLE OBLIGES YOU TO HANDLE. Declaring a role also makes the
+  // AT offer that role's ACTIONS, and for a hand-painted widget only you can
+  // perform them. They arrive as ordinary key events on your widget, exactly as
+  // if the user had pressed the key - your NEUI_EVENT_KEYDOWN handler gets first
+  // refusal, and returning true consumes it:
+  //   * a press (BUTTON / CHECKBOX / TOGGLE_BUTTON / RADIO_BUTTON) arrives as
+  //     NEUI_KEY_SPACE;
+  //   * an increment / decrement (SLIDER) arrives as NEUI_KEY_RIGHT /
+  //     NEUI_KEY_LEFT - or, when you declared a `step` via set_value_range and
+  //     the widget is a built-in KNOB / SLIDER, the host applies that step
+  //     itself and no key is sent.
+  // A CUSTOMDRAW that declares an actionable role and ignores those keys leaves
+  // the AT offering an action that does nothing. The built-in widgets already
+  // handle them, so a declared role on a BUTTON / KNOB / SLIDER needs nothing.
   void (NEUI_ABI *set_role)(neui_session_t session, neui_widget_t widget,
                             neui_a11y_role_t role);
 
@@ -233,7 +248,18 @@ typedef struct neui_a11y_api
 
   // Tell any attached AT that something about `widget` changed, so it can
   // re-read it. Needed ONLY after set_value / set_name / set_state on a
-  // hand-painted widget; every built-in widget raises its own notifications.
+  // hand-painted widget: the framework raises its own notification for every
+  // built-in USER-DRIVEN change it already reports as an event - value, checkbox
+  // state, list / tree / grid / tab selection, scroll, and a behavior asset's
+  // attribute writes - plus focus changes.
+  //
+  // Two things it does NOT cover, both worth knowing: a PROGRAMMATIC change
+  // (attrs->set_float, widgets->set_text) raises nothing, because it is
+  // indistinguishable from any other client write - call this after one if an AT
+  // should hear about it; and editing text in an INPUTBOX / MULTILINE raises no
+  // notification of its own (the value an AT reads afterwards is correct, but
+  // nothing prompts it to re-read).
+  //
   // Cheap and safe when no AT is attached.
   void (NEUI_ABI *notify)(neui_session_t session, neui_widget_t widget,
                           neui_a11y_change_t what);

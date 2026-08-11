@@ -488,8 +488,69 @@ namespace xpl_host
     sync_timer_tick();
   }
 
+  // Which user-driven change events an accessibility provider has to hear about,
+  // and as what. <neui/d/a11y.h> promises "the framework raises these itself for
+  // every built-in widget", and this is where it keeps that promise: one place
+  // that sees every built-in change, rather than a notify call bolted onto each
+  // of the value / check / selection paths, which is where such a scheme rots.
+  //
+  // Deliberately NOT the whole event set - only the ones that change what an AT
+  // would speak. Returns -1 for everything else, which is the common case and
+  // costs one switch.
+  static int a11y_kind_for_event(neui_event_type_t t)
+  {
+    switch (t) {
+      case NEUI_EVENT_VALUE_CHANGED:
+      case NEUI_EVENT_ATTR_CHANGED:      return a11y_notify_value;
+      case NEUI_EVENT_CHECKBOX_CHANGED:  return a11y_notify_state;
+      case NEUI_EVENT_ITEM_SELECTED:
+      case NEUI_EVENT_TREE_ITEM_SELECTED:
+      case NEUI_EVENT_GRID_ROW_SELECTED:
+      case NEUI_EVENT_GRID_CELL_SELECTED:
+      case NEUI_EVENT_TAB_SELECTED:      return a11y_notify_selection;
+      // Scrolling changes WHICH children are on screen (and their OFFSCREEN
+      // state), so it is a layout change rather than a value change.
+      case NEUI_EVENT_SCROLL_CHANGED:    return a11y_notify_structure;
+      default:                           return -1;
+    }
+  }
+
+  // The widget a given event payload is about. Only called for the handful of
+  // types above, so it only has to know those payloads.
+  static uint32_t a11y_widget_of_event(const neui_event_t* ev)
+  {
+    switch (ev->type) {
+      case NEUI_EVENT_VALUE_CHANGED:     return ev->data.value.widget.id;
+      case NEUI_EVENT_ATTR_CHANGED:      return ev->data.attr.widget.id;
+      case NEUI_EVENT_CHECKBOX_CHANGED:  return ev->data.checkbox.widget.id;
+      case NEUI_EVENT_ITEM_SELECTED:     return ev->data.item.widget.id;
+      case NEUI_EVENT_TREE_ITEM_SELECTED:return ev->data.tree.widget.id;
+      case NEUI_EVENT_GRID_ROW_SELECTED: return ev->data.grid_row.widget.id;
+      case NEUI_EVENT_GRID_CELL_SELECTED:return ev->data.grid_cell.widget.id;
+      case NEUI_EVENT_TAB_SELECTED:      return ev->data.tab.widget.id;
+      case NEUI_EVENT_SCROLL_CHANGED:    return ev->data.scroll.widget.id;
+      default:                           return 0;
+    }
+  }
+
   bool Session::dispatch_event(neui_event_t* event)
   {
+    // Accessibility notification for the built-in widgets. Before the client
+    // callback, so a client that consumes the event does not suppress it - the
+    // AT still needs to hear that the value changed. The revision bump is what
+    // makes the AT's follow-up query see the NEW state: platform_invalidate only
+    // schedules a paint, so the query can easily arrive before it.
+    const int a11y_kind = a11y_kind_for_event(event->type);
+    if (a11y_kind >= 0) {
+      const uint32_t wid = a11y_widget_of_event(event);
+      const uint32_t slot = wid & 0xffff;
+      if (slot != 0 && _widgets.exists(slot)) {
+        bump_a11y_revision();
+        if (void* frame = find_parent_native_handle(slot))
+          platform_a11y_notify(frame, wid, a11y_kind);
+      }
+    }
+
     if (_client_widget_api && _client_widget_api->onevent)
       return _client_widget_api->onevent(_token, event);
     return false;
@@ -922,6 +983,10 @@ namespace xpl_host
     // frame lacks OS focus) and the newly focused control can even be scrolled
     // out of view.
     bump_a11y_revision();
+    // Nothing is posted when focus is CLEARED (new_idx == 0): there is no
+    // element to name as the new focus, and NSAccessibility / UIA both expect a
+    // focused-element-changed notification to carry one. An AT re-reads focus
+    // from the provider on its next query, which then answers "none".
     if (frame && new_idx != 0 && _widgets.exists(new_idx))
       platform_a11y_notify(frame, _widgets[new_idx].widget_id,
                            a11y_notify_focus);
@@ -3179,6 +3244,38 @@ namespace xpl_host
     widget_emit_gesture(wd, true);
     widget_set_value_user(wd, new_v);
     widget_emit_gesture(wd, false);
+  }
+
+  // One accessibility increment / decrement, honouring the real-world step a
+  // client declared with NEUI_API_A11Y::set_value_range.
+  //
+  // Returns false when there is no declared step to honour, which is the signal
+  // for the caller to fall back to the ordinary arrow-key path (10 % of the
+  // range, or one NEUI_ATTR_STEPS detent) - the right answer when the client
+  // named no step, since then keyboard and AT should move by the same amount.
+  //
+  // Lives here rather than in the provider because it must produce the SAME
+  // events a keypress does, and widget_set_value_user_gesture (the thing that
+  // brackets the change in GESTURE_BEGIN / _END) is file-local to host.cpp.
+  bool Session::a11y_step_value(uint32_t slot, bool up)
+  {
+    if (slot == 0 || !_widgets.exists(slot)) return false;
+    WidgetData& wd = _widgets[slot];
+    if (!wd.attrs) return false;
+    // Both ends are needed to turn a real-world step into a normalized one - the
+    // same all-or-nothing rule the adapter applies to the range itself.
+    if (!wd.attrs->has(NEUI_ATTR_A11Y_RANGE_MIN) ||
+        !wd.attrs->has(NEUI_ATTR_A11Y_RANGE_MAX)) return false;
+    const float step = wd.attrs->get_float(NEUI_ATTR_A11Y_RANGE_STEP, 0.0f);
+    if (!(step > 0.0f)) return false;             // 0 = continuous, and catches NaN
+    float lo = wd.attrs->get_float(NEUI_ATTR_A11Y_RANGE_MIN, 0.0f);
+    float hi = wd.attrs->get_float(NEUI_ATTR_A11Y_RANGE_MAX, 1.0f);
+    if (lo > hi) { float t = lo; lo = hi; hi = t; }
+    const float span = hi - lo;
+    if (!(span > 0.0f)) return false;
+    const float d = step / span;                  // normalized increment
+    widget_set_value_user_gesture(wd, widget_get_value(wd) + (up ? d : -d));
+    return true;
   }
 
   // ---- SliderWidget --------------------------------------------------------
@@ -5764,6 +5861,16 @@ namespace xpl_host
     ts.text   = text ? text : "";
     ts.active = true;
     ts.start_ms = platform_now_ms();
+
+    // A toast is host-drawn chrome that is not a widget and not in the a11y
+    // tree, so a screen reader would otherwise never know it appeared - the
+    // window would flash a message that a blind user simply misses.
+    // <neui/d/a11y.h> promises the framework announces its own toasts; this is
+    // that. Not assertive: a toast is informational by definition, and
+    // interrupting whatever the user is listening to would be worse than
+    // waiting for a gap.
+    if (!ts.text.empty())
+      platform_a11y_announce(fw->native_handle, ts.text.c_str(), false);
 
     // Measure lines with the default text format. The xpl backend has no
     // measure-text-with-explicit-font seam beyond push_font, so we use
