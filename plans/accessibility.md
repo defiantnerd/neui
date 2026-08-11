@@ -1,6 +1,6 @@
 # Accessibility (`NEUI_API_A11Y`) — implementation plan
 
-Status: **6.0 + 6.1 shipped** (see those sections); 6.2 onward not started. All five open decisions were resolved
+Status: **6.0 + 6.1 + 6.2 shipped** (see those sections); 6.2b onward not started. All five open decisions were resolved
 on 2026-08-11 (§7), so implementation is unblocked; build order at the end of §8.
 This is Wave 6 of
 `plans/sst-neuigui-gap-response.md` (its §3 sketch, lines 991-1027), worked out
@@ -450,7 +450,39 @@ labelled-by go in the existing per-widget `AttrBag` (`host.h:141`) under
 `neui.a11y.*` keys, each with a `k_well_known_attrs` row per the house rule. No
 new per-widget struct, no cost on widgets that declare nothing.
 
-### 6.2 — the portable model: `hosts/shared/a11y_tree.h`
+### 6.2 — the portable model — **SHIPPED 2026-08-11**
+
+Landed as specified (POD input, one self-describing row per node candidate,
+generation-stamped ids), with 46 Tier-1 cases in `tests/test_a11y_tree.cpp`.
+
+**One real design bug, found by mutation-testing the new tests rather than by
+reading them.** Deliberately breaking the nearest-surviving-ancestor walk broke
+no test — which exposed that the walk was unreachable *and* that the reason it was
+unreachable was itself wrong. The first cut pruned the descendants of every
+dropped row, but the paint walk gates **painting** on size (`host.cpp:2470`) and
+**descent** only on visibility (`:2465`), so a zero-size container's children are
+genuinely on screen. Pruning them would have hidden real, visible controls from a
+screen reader. The drop decision is now split:
+
+| dropped because | subtree |
+|---|---|
+| invisible | also dropped — the paint walk does not descend either |
+| `ROLE_NONE` | also dropped — the client declared it decorative |
+| zero size | **kept**, re-parented to the nearest surviving ancestor |
+
+That split is what makes the ancestor walk reachable, and its absence now fails a
+test. The lesson worth keeping: the test that "covered" this was passing
+vacuously because it parented the control to the frame rather than to the pruned
+node, so it never exercised re-parenting at all.
+
+Also stated and tested rather than assumed: subtree pruning is a fixed-point
+iteration, not a single pass, so it does not silently depend on the adapter
+emitting parents before children — proven with reversed input, because that
+dependency would break the first time an adapter batched sub-elements.
+
+Original specification follows.
+
+### 6.2 — the portable model: `hosts/shared/a11y_tree.h` — as originally planned
 
 Header-only, `inline`, **no host types** — the contract `grid_model.h` and
 `scrollbar.h` already honour (verified: they include only shared + public
@@ -878,7 +910,7 @@ Revised upward from revision 1, which under-sized 6.2 by calling the adapter thi
 |---|---|---|
 | 6.0 prerequisites | **done** — landed as a hybrid, see 6.0 | yes, incl. a new harness |
 | 6.1 client seam | **done** | yes — 31-check harness |
-| 6.2 shared model + Tier-1 tests | medium | yes, fully |
+| 6.2 shared model + Tier-1 tests | **done** — 46 cases, mutation-checked | yes, fully |
 | 6.2b host adapter | **large — the real bulk of the wave** | macOS only |
 | 6.3 macOS provider | medium | **yes, incl. VoiceOver** |
 | 6.4 win32 provider | large | no — **ships unverified by decision** |
