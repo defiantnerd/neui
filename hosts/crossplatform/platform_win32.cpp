@@ -497,8 +497,9 @@ namespace xpl_host
     case WM_DESTROY: {
       auto* wud = get_wud(hwnd);
       if (wud) {
+        const uint32_t self_idx = wud->widget_index;
         // Release the D2D render context before the HWND is gone.
-        auto* wd = wud->session->get_widget(wud->widget_index);
+        auto* wd = wud->session->get_widget(self_idx);
         if (wd) {
           auto* backend = platform_get_backend();
           if (backend && wd->render_ctx) {
@@ -517,7 +518,6 @@ namespace xpl_host
           // "re-enable owner" path. DestroyWindow re-enters WM_DESTROY
           // synchronously for each owned frame.
           {
-            uint32_t self_idx = wud->widget_index;
             wd->native_handle = nullptr;
             for (uint32_t idx : wud->session->_widgets.release_order()) {
               if (idx == 0 || idx == self_idx) continue;
@@ -530,6 +530,15 @@ namespace xpl_host
               }
             }
           }
+          // Re-resolve before going on: the DestroyWindow calls above re-entered
+          // this same WM_DESTROY for each owned frame, and an owned modal dialog's
+          // teardown runs Session::end_modal -> set_focus, which dispatches
+          // WIDGET_FOCUS synchronously. So client code has run and may have
+          // destroyed THIS widget (freeing the slot, and with it the WidgetData
+          // `wd` points at). Everything below dereferences it.
+          wd = wud->session->get_widget(self_idx);
+          if (!wd) return 0;
+
           // Dialog teardown: re-enable and re-activate the owner so input
           // returns there. Must happen before native_handle is cleared, since
           // owner_index is read from this widget's state. Skip when the
@@ -550,9 +559,15 @@ namespace xpl_host
             // macOS / Linux teardown paths (Session::end_modal), so a user-driven
             // close and a client destroy behave the same way.
             if (dynamic_cast<FrameWidget*>(wd))
-              wud->session->end_modal(wd->index);
+              wud->session->end_modal(self_idx);
+            // NOTHING may dereference `wd` after this point. end_modal restores
+            // the owner's focus, which dispatches WIDGET_FOCUS to the client, and
+            // "the dialog closed -> destroy it" is the ordinary handler to write:
+            // that frees this slot and leaves `wd` dangling. Nothing needs to run
+            // here anyway - native_handle was already cleared above, before the
+            // owned-frame loop - so the clear that used to sit at the end of this
+            // block was both redundant and a write into freed memory.
           }
-          wd->native_handle = nullptr;
         }
       }
       return 0;
