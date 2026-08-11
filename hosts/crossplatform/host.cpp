@@ -120,6 +120,7 @@ namespace xpl_host
   extern neui_embed_api_t     embed_api;
   extern neui_timer_api_t     timer_api;
   extern neui_pointer_api_t   pointer_api;
+  extern neui_a11y_api_t      a11y_api;
 
   // Resolve a Session* from a 1-based session id (the upper 16 bits of a
   // widget id). Used by the iOS platform layer's NEUI_API_METRICS seam to walk
@@ -181,6 +182,7 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_EMBED))     return &embed_api;
     if (!strcmp(iface, NEUI_API_TIMER))     return &timer_api;
     if (!strcmp(iface, NEUI_API_POINTER))   return &pointer_api;
+    if (!strcmp(iface, NEUI_API_A11Y))      return &a11y_api;
     return nullptr;
   }
 

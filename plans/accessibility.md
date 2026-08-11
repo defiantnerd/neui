@@ -1,6 +1,6 @@
 # Accessibility (`NEUI_API_A11Y`) — implementation plan
 
-Status: **6.0 shipped** (see below); 6.1 onward not started. All five open decisions were resolved
+Status: **6.0 + 6.1 shipped** (see those sections); 6.2 onward not started. All five open decisions were resolved
 on 2026-08-11 (§7), so implementation is unblocked; build order at the end of §8.
 This is Wave 6 of
 `plans/sst-neuigui-gap-response.md` (its §3 sketch, lines 991-1027), worked out
@@ -295,7 +295,30 @@ Original text follows.
   back to the frame with OS focus. Fixes **G3**(a). Needs its own harness check —
   two frames, Tab must not cross.
 
-### 6.1 — client seam: `include/neui/d/a11y.h`
+### 6.1 — client seam: `include/neui/d/a11y.h` — **SHIPPED 2026-08-11**
+
+Landed as specified, with `set_value` included (the gap revision 1's review found)
+and one addition the writing surfaced: **input validation belongs at the door, not
+in the model.** `set_value_range` rejects `min == max` (it would divide by zero in
+any normalized→real mapping downstream), `set_value` clamps out-of-range values
+and turns NaN into 0 (an AT announcing "103 percent" is worse than a pinned
+value), `set_state` masks the stored values so out-of-mask bits cannot become
+silent noise, and `set_labelled_by` rejects a self-reference rather than leaving it
+for the model's cycle guard. Every clearing path removes its key so the derived
+default returns, instead of storing an empty value that would override the default
+with nothing.
+
+`notify` / `announce` / `is_active` are honest no-ops until 6.3: a client can write
+its declarations today and they start being read when the provider exists, with no
+client change. `is_active` returning false is correct, not merely conservative.
+
+Verified by `tests/a11y_smoke_macos.mm` (new, 31 checks, no window needed) —
+including that the interface is NULL on the **native** macOS host, which is the
+documented trap since `neui_get_api(NULL)` returns the native host first there.
+
+Original specification follows.
+
+### 6.1 — client seam: `include/neui/d/a11y.h` — as originally planned
 
 New public header, `NEUI_API_A11Y`, xpl-host-only — so it carries the same
 feature-detect warning `timer.h` / `pointer.h` / `embed.h` do: on win32/macOS
@@ -854,7 +877,7 @@ Revised upward from revision 1, which under-sized 6.2 by calling the adapter thi
 | Phase | Size | Verifiable here? |
 |---|---|---|
 | 6.0 prerequisites | **done** — landed as a hybrid, see 6.0 | yes, incl. a new harness |
-| 6.1 client seam | small | yes (compiles + attr round-trip) |
+| 6.1 client seam | **done** | yes — 31-check harness |
 | 6.2 shared model + Tier-1 tests | medium | yes, fully |
 | 6.2b host adapter | **large — the real bulk of the wave** | macOS only |
 | 6.3 macOS provider | medium | **yes, incl. VoiceOver** |

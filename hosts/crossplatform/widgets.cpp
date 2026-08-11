@@ -2303,6 +2303,198 @@ namespace xpl_host
   };
 
   // ---------------------------------------------------------------------------
+  // Accessibility API (NEUI_API_A11Y) - per-widget declarations that a platform
+  // accessibility provider reads. Every setter is a store into the widget's
+  // ordinary AttrBag: the declarations have to outlive any single query (an AT
+  // can ask at any time, including before the frame is shown), and reusing the
+  // bag means no second lifetime to manage and zero cost on a widget that
+  // declares nothing.
+  //
+  // Clearing convention throughout: NULL / "" REMOVES the key so the derived
+  // default comes back, rather than storing an empty string that would override
+  // the default with nothing.
+
+  // Store-or-remove for the string-valued declarations.
+  static void a11y_set_str(neui_session_t session, neui_widget_t widget,
+                           const char* key, const char* utf8)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    if (!utf8 || !*utf8) {
+      if (wd.attrs) wd.attrs->remove(key);
+      return;
+    }
+    neui_detail::ensure_attrs(wd.attrs).set_string(key, utf8);
+  }
+
+  static void NEUI_ABI a11y_set_role(neui_session_t session, neui_widget_t widget,
+                                     neui_a11y_role_t role)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    // ROLE_DEFAULT means "derive", which is the absence of a declaration - so
+    // remove the key rather than storing 0 and having the model special-case it.
+    if (role == NEUI_A11Y_ROLE_DEFAULT) {
+      if (wd.attrs) wd.attrs->remove(NEUI_ATTR_A11Y_ROLE);
+      return;
+    }
+    neui_detail::ensure_attrs(wd.attrs)
+      .set_int(NEUI_ATTR_A11Y_ROLE, static_cast<int>(role));
+  }
+
+  static void NEUI_ABI a11y_set_name(neui_session_t session, neui_widget_t widget,
+                                     const char* utf8)
+  { a11y_set_str(session, widget, NEUI_ATTR_A11Y_NAME, utf8); }
+
+  static void NEUI_ABI a11y_set_description(neui_session_t session,
+                                            neui_widget_t widget,
+                                            const char* utf8)
+  { a11y_set_str(session, widget, NEUI_ATTR_A11Y_DESCRIPTION, utf8); }
+
+  static void NEUI_ABI a11y_set_value_text(neui_session_t session,
+                                           neui_widget_t widget,
+                                           const char* utf8)
+  { a11y_set_str(session, widget, NEUI_ATTR_A11Y_VALUE_TEXT, utf8); }
+
+  static void NEUI_ABI a11y_set_value_range(neui_session_t session,
+                                            neui_widget_t widget,
+                                            float min, float max, float step)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    // min == max is the documented "clear" - and also the degenerate range that
+    // would make any normalized->real mapping divide by zero downstream, so it
+    // must not be stored.
+    if (!(min < max) && !(min > max)) {
+      if (wd.attrs) {
+        wd.attrs->remove(NEUI_ATTR_A11Y_RANGE_MIN);
+        wd.attrs->remove(NEUI_ATTR_A11Y_RANGE_MAX);
+        wd.attrs->remove(NEUI_ATTR_A11Y_RANGE_STEP);
+      }
+      return;
+    }
+    auto& bag = neui_detail::ensure_attrs(wd.attrs);
+    bag.set_float(NEUI_ATTR_A11Y_RANGE_MIN,  min);
+    bag.set_float(NEUI_ATTR_A11Y_RANGE_MAX,  max);
+    bag.set_float(NEUI_ATTR_A11Y_RANGE_STEP, step);
+  }
+
+  static void NEUI_ABI a11y_set_value(neui_session_t session,
+                                      neui_widget_t widget, float normalized)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    // Clamp rather than reject: a client computing a normalized value from its
+    // own state can drift slightly outside [0..1], and an AT announcing 103% is
+    // a worse outcome than silently pinning it.
+    if (!(normalized >= 0.0f)) normalized = 0.0f;   // also catches NaN
+    if (normalized > 1.0f)     normalized = 1.0f;
+    neui_detail::ensure_attrs(s->_widgets[idx].attrs)
+      .set_float(NEUI_ATTR_A11Y_VALUE, normalized);
+  }
+
+  static void NEUI_ABI a11y_set_state(neui_session_t session,
+                                      neui_widget_t widget,
+                                      uint32_t mask, uint32_t values)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    if (mask == 0) {                       // documented: restore derivation
+      if (wd.attrs) {
+        wd.attrs->remove(NEUI_ATTR_A11Y_STATE_MASK);
+        wd.attrs->remove(NEUI_ATTR_A11Y_STATE_VALUES);
+      }
+      return;
+    }
+    auto& bag = neui_detail::ensure_attrs(wd.attrs);
+    bag.set_int(NEUI_ATTR_A11Y_STATE_MASK,   static_cast<int>(mask));
+    // Bits set outside the mask would be meaningless (the model only consults
+    // masked bits), so drop them at the door instead of storing noise.
+    bag.set_int(NEUI_ATTR_A11Y_STATE_VALUES, static_cast<int>(values & mask));
+  }
+
+  static void NEUI_ABI a11y_set_labelled_by(neui_session_t session,
+                                            neui_widget_t widget,
+                                            neui_widget_t label)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    // widget_none clears. A self-reference is rejected here rather than left for
+    // the model's cycle guard - it can only be a caller bug, and dropping it at
+    // the door keeps the stored data trustworthy.
+    if (label.id == widget_none.id || label.id == widget.id) {
+      if (wd.attrs) wd.attrs->remove(NEUI_ATTR_A11Y_LABELLED_BY);
+      return;
+    }
+    neui_detail::ensure_attrs(wd.attrs)
+      .set_int(NEUI_ATTR_A11Y_LABELLED_BY, static_cast<int>(label.id));
+  }
+
+  static void NEUI_ABI a11y_notify(neui_session_t session, neui_widget_t widget,
+                                   neui_a11y_change_t what)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    // The provider that consumes this lands in 6.3. Until then the honest
+    // behaviour is to validate and do nothing: a client can already write its
+    // declarations and call notify, and they start being read the moment the
+    // provider exists, with no client change.
+    (void)what;
+  }
+
+  static void NEUI_ABI a11y_announce(neui_session_t session, const char* utf8,
+                                     bool assertive)
+  {
+    auto* s = get_session(session);
+    if (!s || !utf8 || !*utf8) return;
+    (void)assertive;   // consumed by the platform provider (6.3)
+  }
+
+  static bool NEUI_ABI a11y_is_active(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    if (!s) return false;
+    // No provider yet, so nothing has ever queried us. Reporting false here is
+    // correct rather than merely conservative - and the header already warns
+    // that correctness must not depend on this.
+    return false;
+  }
+
+  neui_a11y_api_t a11y_api = {
+    NEUI_VERSION,
+    a11y_set_role,
+    a11y_set_name,
+    a11y_set_description,
+    a11y_set_value_range,
+    a11y_set_value,
+    a11y_set_value_text,
+    a11y_set_state,
+    a11y_set_labelled_by,
+    a11y_notify,
+    a11y_announce,
+    a11y_is_active,
+  };
+
+  // ---------------------------------------------------------------------------
   // Asset API (NEUI_API_ASSETS) - session-scoped media handles backed by
   // the AssetManager's handle table. Handles encode the session id in the
   // upper 16 bits like neui_widget_t; cross-session handles are dropped.

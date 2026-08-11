@@ -10,6 +10,7 @@
 
 #include <neui/d/attrs.h>
 #include <neui/d/grid.h>
+#include <neui/d/a11y.h>
 
 // Shared attribute bag used by both hosts. Stored lazily on a widget so the
 // per-widget overhead is one pointer when unused.
@@ -93,6 +94,17 @@ namespace neui_detail
     { NEUI_ATTR_FONT_FAMILY,          AttrKind::STRING },
     { NEUI_ATTR_FONT_SIZE,            AttrKind::FLOAT  },
     { NEUI_ATTR_FONT_WEIGHT,          AttrKind::INT    },
+    { NEUI_ATTR_A11Y_ROLE,            AttrKind::INT    },
+    { NEUI_ATTR_A11Y_NAME,            AttrKind::STRING },
+    { NEUI_ATTR_A11Y_DESCRIPTION,     AttrKind::STRING },
+    { NEUI_ATTR_A11Y_VALUE_TEXT,      AttrKind::STRING },
+    { NEUI_ATTR_A11Y_VALUE,           AttrKind::FLOAT  },
+    { NEUI_ATTR_A11Y_RANGE_MIN,       AttrKind::FLOAT  },
+    { NEUI_ATTR_A11Y_RANGE_MAX,       AttrKind::FLOAT  },
+    { NEUI_ATTR_A11Y_RANGE_STEP,      AttrKind::FLOAT  },
+    { NEUI_ATTR_A11Y_STATE_MASK,      AttrKind::INT    },
+    { NEUI_ATTR_A11Y_STATE_VALUES,    AttrKind::INT    },
+    { NEUI_ATTR_A11Y_LABELLED_BY,     AttrKind::INT    },
     { NEUI_PARAM_VALUE,               AttrKind::FLOAT  },
     { NEUI_PARAM_DEFAULT,             AttrKind::FLOAT  },
     { NEUI_ATTR_GRID_ROW_HEIGHT,              AttrKind::INT },

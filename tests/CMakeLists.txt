@@ -88,6 +88,21 @@ if(APPLE AND NOT NEUI_IOS)
   target_link_libraries(neui_cursor_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
+  # Accessibility-declaration harness (NEUI_API_A11Y): asserts the interface is
+  # present on the xpl host and NULL on the native macOS host (the documented
+  # feature-detect trap), that every clearing path removes its key rather than
+  # storing an empty value, that a degenerate min==max range and an out-of-range
+  # or NaN normalized value are handled at the door, that set_state stores only
+  # in-mask bits, and that cross-session handles are dropped. Shows no window, so
+  # it needs no GUI session - but it links the host, so it cannot be Tier-1. Built
+  # but NOT ctest-registered, for consistency with the other harnesses.
+  add_executable(neui_a11y_smoke_macos a11y_smoke_macos.mm)
+  target_include_directories(neui_a11y_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_a11y_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_a11y_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
   # Focus-traversal harness: asserts TAB traversal is per FRAME (it used to
   # collect tab stops across every frame in the session, so tabbing off the last
   # control of one window moved the logical focus into another window while the
