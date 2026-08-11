@@ -22,6 +22,7 @@
 // took the slot.
 
 #include "neui_test.h"
+#include <cmath>   // std::nanf for the NaN cases
 
 #include "a11y_tree.h"
 

@@ -8,6 +8,7 @@
 // like a framework bug.
 
 #include "neui_test.h"
+#include <cstring>   // std::strcmp
 
 #include "cursor_kind.h"
 

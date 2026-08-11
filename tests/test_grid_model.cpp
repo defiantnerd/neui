@@ -1,4 +1,5 @@
 #include "neui_test.h"
+#include <cmath>   // std::fabs
 
 #include "grid_model.h"
 

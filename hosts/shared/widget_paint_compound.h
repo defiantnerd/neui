@@ -1,6 +1,7 @@
 #pragma once
 
 #include <neui/neui.h>
+#include <cmath>   // std::ceil / fabs / sqrt
 
 #include <qrcodegen.hpp>
 

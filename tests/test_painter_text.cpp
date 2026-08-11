@@ -10,6 +10,7 @@
 
 #include "neui_test.h"
 
+#include <cstring>   // strlen on a const char* - libc++ supplies it transitively, libstdc++ does not
 #include "painter.h"
 
 #include <algorithm>
