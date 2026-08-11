@@ -111,6 +111,11 @@ namespace xpl_host
     if (client_api && client_api->ondestroy)
       client_api->ondestroy(token, IndexToWidget(s->_session_id, idx), wd->userdata);
 
+    // Invalidate any accessibility element reference an AT is still holding for
+    // this slot BEFORE the slot can be handed to a different widget. This is the
+    // only place a slot is freed, which is exactly why the bump belongs here.
+    s->a11y_bump_generation(idx);
+
     s->_widgets.remove(idx);
   }
 

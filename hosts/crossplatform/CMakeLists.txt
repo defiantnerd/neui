@@ -4,6 +4,7 @@ add_library(neui-xplhost
   host.cpp
   widgets.cpp
   asset_manager.cpp
+  a11y_adapter.cpp
 )
 
 target_include_directories(neui-xplhost

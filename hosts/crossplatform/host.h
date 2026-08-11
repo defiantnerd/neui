@@ -32,6 +32,17 @@ namespace xpl_host
   // can gate the zoom on platforms that divide input by it.
   bool platform_supports_ui_scale();
 
+  // ---- Painted row metrics -------------------------------------------------
+  // The row pitches the LISTBOX / COMBOBOX / TREEVIEW paint code lays out with,
+  // and the in-frame menubar band height. Defined in host.cpp beside that paint
+  // code; declared here so the accessibility adapter (a11y_adapter.cpp) reports
+  // the same row rectangles the paint walk actually drew instead of keeping a
+  // second copy of the numbers, which would drift the first time either is
+  // touched. All logical px, already through scaled_painted_metric.
+  int list_row_height();
+  int tree_row_height();
+  int menubar_band_height();
+
   // -------------------------------------------------------------------------
   // Base widget class - holds all common fields and the virtual interface.
   // Derived classes add type-specific fields and override virtual methods.
@@ -1294,6 +1305,60 @@ namespace xpl_host
     // MSG-based and so does not run on Linux.
     bool try_menubar_accel(uint32_t keycode, uint32_t modifiers);
 
+    // ---- Accessibility support (consumed by a11y_adapter.cpp) ---------------
+
+    // One on-screen menu element: a MENUBAR band label, or a row of an open
+    // dropdown / popup cascade. Frame-local logical px, matching widget
+    // abs_x/abs_y. `text` points into the owning MenubarWidget::menu_items and
+    // is therefore only valid until that item model is next mutated.
+    struct MenuElementRect
+    {
+      uint32_t    item_id     = 0;
+      uint32_t    parent_item = 0;   // 0 = a top-level band label
+      int         x = 0, y = 0, w = 0, h = 0;
+      bool        enabled     = false;
+      bool        checked     = false;
+      bool        has_submenu = false;
+      bool        separator   = false;
+      bool        expanded    = false;  // this item's submenu is currently open
+      const char* text        = nullptr;
+      const char* shortcut    = nullptr;  // display label, "" when none
+    };
+
+    // Collect the on-screen geometry of `menu_idx`'s items. Appends to `out`.
+    //
+    // Which elements exist depends on what is actually on screen, because that
+    // is what an AT should see:
+    //   - MENUBAR, in-frame platforms only (Linux): the band labels always, plus
+    //     the rows of an open cascade. On win32 / macOS the menu is a real
+    //     HMENU / NSMenu that the OS already exposes to the AT, so this reports
+    //     NOTHING rather than publishing a duplicate the user would hear twice.
+    //   - POPUPMENU: the open cascade rows while Session::_tree_popup_active
+    //     names it, nothing otherwise (it has no resting visual presence).
+    //
+    // Needs the owning frame's render context for text measurement, exactly as
+    // the click / hover handlers already do out of band (see tp_claim); returns
+    // nothing when the frame has no context yet.
+    void collect_menu_elements(uint32_t menu_idx,
+                               std::vector<MenuElementRect>& out);
+
+    // Per-tree-slot reuse counter. Widget ids are (session << 16 | slot) and
+    // slots are recycled with no staleness detection, while both UI Automation
+    // and NSAccessibility hold element references across long spans. The
+    // adapter stamps this into every A11yNodeId so a reference to a destroyed
+    // widget resolves to nothing instead of silently answering with whatever
+    // widget later took the slot. Bumped when a slot is freed.
+    uint32_t a11y_generation(uint32_t slot) const
+    {
+      return slot < _a11y_generation.size() ? _a11y_generation[slot] : 0;
+    }
+    void a11y_bump_generation(uint32_t slot)
+    {
+      if (slot >= _a11y_generation.size())
+        _a11y_generation.resize(slot + 1, 0);
+      ++_a11y_generation[slot];
+    }
+
   public:
     neui_detail::Tree<WidgetData>  _widgets;
     neui_detail::AssetManager      _asset_manager;
@@ -1394,6 +1459,11 @@ namespace xpl_host
 
     // Indices of MENUBAR widgets for WM_COMMAND routing.
     std::vector<uint32_t> _menubars;
+
+    // Per-tree-slot accessibility generation - see a11y_generation() above.
+    // Indexed by tree slot, grown on demand; slot 0 (the root sentinel) is
+    // never handed out so its entry is unused.
+    std::vector<uint32_t> _a11y_generation;
 
     // Try to consume a Win32 MSG via this session's menubar accelerator
     // tables. Implemented in widgets.cpp; called from platform_run().

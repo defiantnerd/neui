@@ -320,10 +320,38 @@ TEST_CASE("a11y: a scrolling SECTION is a scroll area, a plain one is a group")
   A11yInput plain = widget_row(1, 0, NEUI_W_SECTION);
   CHECK_EQ(a11y_derive_role(plain), NEUI_A11Y_ROLE_GROUP);
   A11yInput scrolling = widget_row(1, 0, NEUI_W_SECTION);
-  scrolling.has_clip = true;
-  scrolling.clip_x = 0; scrolling.clip_y = 0;
-  scrolling.clip_w = 40; scrolling.clip_h = 20;
+  scrolling.scrollable = true;
   CHECK_EQ(a11y_derive_role(scrolling), NEUI_A11Y_ROLE_SCROLL_AREA);
+}
+
+TEST_CASE("a11y: scroll-area-ness comes from the section itself, not from a clip")
+{
+  // Both directions of the bug the host adapter exposed. The model used to
+  // derive SCROLL_AREA from has_clip, which is the clip an ANCESTOR imposes.
+  //
+  // Direction 1: a scrolling section's own row carries its ancestor's clip -
+  // usually none - so it looked like a plain group and an AT would never know
+  // the content scrolls.
+  A11yInput scrolls_but_unclipped = widget_row(1, 0, NEUI_W_SECTION);
+  scrolls_but_unclipped.scrollable = true;
+  scrolls_but_unclipped.has_clip   = false;
+  CHECK_EQ(a11y_derive_role(scrolls_but_unclipped), NEUI_A11Y_ROLE_SCROLL_AREA);
+
+  // Direction 2: a PLAIN section nested inside a scrolling one inherits that
+  // clip, so it used to be announced as a scroll area that cannot scroll.
+  A11yInput clipped_but_static = widget_row(1, 0, NEUI_W_SECTION);
+  clipped_but_static.scrollable = false;
+  clipped_but_static.has_clip   = true;
+  clipped_but_static.clip_x = 0; clipped_but_static.clip_y = 0;
+  clipped_but_static.clip_w = 40; clipped_but_static.clip_h = 20;
+  CHECK_EQ(a11y_derive_role(clipped_but_static), NEUI_A11Y_ROLE_GROUP);
+
+  // The clip still does its own job on that row: OFFSCREEN is unaffected.
+  A11yInput off = widget_row(1, 0, NEUI_W_SECTION);
+  off.x = 100; off.y = 0; off.w = 10; off.h = 10;
+  off.has_clip = true;
+  off.clip_x = 0; off.clip_y = 0; off.clip_w = 40; off.clip_h = 20;
+  CHECK((a11y_derive_state(off) & NEUI_A11Y_STATE_OFFSCREEN) != 0);
 }
 
 TEST_CASE("a11y: sub-element kinds derive their own roles")

@@ -1,6 +1,6 @@
 # Accessibility (`NEUI_API_A11Y`) — implementation plan
 
-Status: **6.0 + 6.1 + 6.2 shipped** (see those sections); 6.2b onward not started. All five open decisions were resolved
+Status: **6.0 + 6.1 + 6.2 + 6.2b shipped** (see those sections); 6.3 onward not started. All five open decisions were resolved
 on 2026-08-11 (§7), so implementation is unblocked; build order at the end of §8.
 This is Wave 6 of
 `plans/sst-neuigui-gap-response.md` (its §3 sketch, lines 991-1027), worked out
@@ -626,6 +626,55 @@ Because it needs host types it cannot be Tier-1 tested. Its coverage is the macO
 harness (§5), and that is a real asymmetry to state rather than paper over: on
 win32 and Linux the adapter is shared code that is *exercised* only through
 providers we cannot run.
+
+**SHIPPED** (`hosts/crossplatform/a11y_adapter.{h,cpp}`, ~640 lines +
+`tests/a11y_tree_smoke_macos.mm`, 78 checks). Entry points:
+`a11y_collect_frame_inputs` (rows), `a11y_build_frame_tree` (rows + model),
+`a11y_build_tree_for_frame` (same from a public handle, for the harness),
+`a11y_widget_node_id` / `a11y_slot_of_node_id` (identity, generation-checked).
+What the implementation settled beyond the sketch:
+
+- **Three seams were added to `host.cpp` rather than duplicated in the adapter**,
+  because the alternative is a second copy of a number that drifts and points an
+  AT at the wrong place: `list_row_height()` / `tree_row_height()` /
+  `menubar_band_height()` expose the file-static painted metrics, and
+  `Session::collect_menu_elements` owns the menu geometry (it is built by the
+  same `mb_build_band` / `mb_build_columns` calls paint and hit-test use, over
+  anonymous-namespace layout types the adapter's TU cannot see).
+- **A native menu bar reports NOTHING.** `collect_menu_elements` returns nothing
+  for a MENUBAR unless `platform_menubar_in_frame()`: on win32 / macOS the OS
+  owns the `HMENU` / `NSMenu` and already exposes it, so publishing our own copy
+  would make an AT read every menu twice. A POPUPMENU reports only while
+  `_tree_popup_active` names it.
+- **Out-of-band `measure_text` on a stored `render_ctx` is established practice**,
+  not a new risk: `tp_claim` already does exactly this from the click path.
+- **Cell `sub_index` packs as `row * 1024 + col` with a FIXED stride**, not the
+  live column count — a live count would silently re-point every held cell id at
+  a different cell when a column is added.
+- **Grid rows are keyed by LOGICAL row and tree items by ITEM id**, so a
+  reference survives a re-sort / an expand-collapse respectively.
+- **A latent model bug surfaced here and was fixed.** Revision 2 derived
+  SCROLL_AREA from `has_clip`, which is the clip an *ancestor* imposes — wrong in
+  both directions: a scrolling SECTION's own row carries no clip of its own (so
+  it read as a plain group), and a plain SECTION nested inside a scrolling one
+  inherits one (so it read as a scroll area that cannot scroll). `A11yInput`
+  gained an explicit `scrollable`, set from the widget's own scroll state. Two
+  Tier-1 cases now cover both directions. **Only a live adapter could expose
+  this** — with fabricated rows the conflation is invisible.
+
+Coverage notes. The harness's load-bearing check is #3: it posts a REAL click at
+the centre of a reported rectangle and asserts the production hit-test resolves
+the same widget with matching widget-local coordinates. Every other assertion
+compares the adapter against its own bookkeeping, so a systematically wrong
+origin would keep them all agreeing — the same trap the focus harness hit.
+Four mutations were run and all four failed a test: dropping the child clip
+intersection (kills OFFSCREEN), zeroing the generation stamp (kills slot-reuse
+rejection), emitting all grid rows instead of the window, and parenting cells to
+the table instead of their row.
+
+One implementation hazard worth remembering: the sub-element emitters take the
+container's **index** in the output vector, never a reference. They push rows
+themselves, and a `push_back` can reallocate out from under a held reference.
 
 ### 6.3 — macOS provider (`hosts/crossplatform/platform_macos.mm`)
 

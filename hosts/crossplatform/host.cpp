@@ -8247,6 +8247,120 @@ namespace xpl_host
     return false;
   }
 
+  // -------------------------------------------------------------------------
+  // Accessibility support seams (consumed by a11y_adapter.cpp)
+  //
+  // Two things the adapter needs live here rather than in its own translation
+  // unit: the painted row metrics (file-static, right next to the paint code
+  // they belong to) and the menu cascade geometry (built by mb_build_band /
+  // mb_build_columns over anonymous-namespace layout types). Both are exposed
+  // as accessors so there is exactly ONE definition of each - a second copy in
+  // the adapter would drift the first time either side was touched, and the
+  // failure mode is an AT pointing at the wrong place on screen, which is worse
+  // than not reporting a position at all.
+
+  int list_row_height()    { return LIST_ITEM_H(); }
+  int tree_row_height()    { return TREE_ROW_H(); }
+  int menubar_band_height(){ return MENUBAR_BAND_H; }
+
+  void Session::collect_menu_elements(uint32_t menu_idx,
+                                      std::vector<MenuElementRect>& out)
+  {
+    if (!_backend || !_widgets.exists(menu_idx)) return;
+    auto* mbp = dynamic_cast<MenubarWidget*>(&_widgets[menu_idx]);
+    if (!mbp) return;
+    const MenubarWidget& mb = *mbp;
+
+    const bool is_popup = !mb.is_menubar();
+    // A real menu BAR only has an on-screen presence where this host draws the
+    // band itself. Where the OS owns the menu it also owns its accessibility,
+    // and publishing our own copy would have the AT read every menu twice.
+    if (!is_popup && !platform_menubar_in_frame()) return;
+
+    // Which frame's surface is this menu drawn on, and is its cascade open?
+    uint32_t frame_index = 0;
+    std::vector<uint32_t> path;
+    if (is_popup) {
+      if (!_tree_popup_active || _tree_popup_menu != menu_idx) return;
+      frame_index = _tree_popup_frame;
+      path        = _menu_path;
+    } else {
+      frame_index = frame_of(menu_idx);
+      if (_menu_open && _menu_bar == menu_idx) path = _menu_path;
+    }
+    if (frame_index == 0 || !_widgets.exists(frame_index)) return;
+
+    const auto& fw = _widgets[frame_index];
+    neui_render_ctx_t ctx = fw.render_ctx;
+    // Text measurement needs a context. Reporting nothing beats reporting rects
+    // measured as zero-width, which would collapse every item onto one point.
+    if (!ctx) return;
+
+    // Shared lookup: the geometry structs hold COPIES of the item text, but the
+    // rows we emit must point at storage that outlives this call, so the text
+    // comes from the item model itself.
+    auto item_text = [&mb](uint32_t id, const char** text, const char** shortcut) {
+      auto it = mb.menu_items.find(id);
+      if (it == mb.menu_items.end()) return;
+      if (text)     *text     = it->second.text.c_str();
+      if (shortcut) *shortcut = it->second.shortcut.c_str();
+    };
+
+    std::vector<MenuBandItem> band;
+    if (!is_popup) {
+      mb_build_band(this, ctx, mb, band);
+      const int band_h = MENUBAR_BAND_H;
+      for (const auto& b : band) {
+        MenuElementRect e;
+        e.item_id     = b.item_id;
+        e.parent_item = 0;
+        e.x = b.x; e.y = 0; e.w = b.w; e.h = band_h;
+        e.has_submenu = menu_item_has_children(mb, b.item_id);
+        // Same rule mb_build_columns applies to a dropdown row: a submenu
+        // holder reports its own flag (a validate() verdict is about a command,
+        // and a submenu has none), a leaf goes through the full verdict.
+        auto bit = mb.menu_items.find(b.item_id);
+        e.enabled = e.has_submenu ? (bit != mb.menu_items.end() && bit->second.enabled)
+                                  : menu_item_enabled(mb, b.item_id);
+        e.expanded    = !path.empty() && path[0] == b.item_id;
+        item_text(b.item_id, &e.text, &e.shortcut);
+        out.push_back(e);
+      }
+    }
+
+    if (path.empty()) return;
+
+    // The open cascade. mb_build_columns is the same call the paint and
+    // hit-test paths make, with the same arguments, so the reported rows are
+    // the rows on screen by construction.
+    std::vector<MenuColL> cols;
+    if (is_popup) {
+      static const std::vector<MenuBandItem> kNoBand;
+      mb_build_columns(this, ctx, mb, fw.width, fw.height, kNoBand, path, cols,
+                       _tree_popup_x, _tree_popup_y);
+    } else {
+      mb_build_columns(this, ctx, mb, fw.width, fw.height, band, path, cols);
+    }
+
+    for (size_t level = 0; level < cols.size(); ++level) {
+      const MenuColL& col = cols[level];
+      for (const auto& r : col.rows) {
+        MenuElementRect e;
+        e.item_id     = r.item_id;
+        e.parent_item = col.parent_item;
+        e.x = col.x; e.y = col.y + r.y; e.w = col.w; e.h = r.h;
+        e.enabled     = r.enabled;
+        e.checked     = r.checked;
+        e.has_submenu = r.submenu;
+        e.separator   = r.separator;
+        // A row whose submenu is the NEXT open column is the expanded one.
+        e.expanded    = (level + 1 < path.size()) && path[level + 1] == r.item_id;
+        item_text(r.item_id, &e.text, &e.shortcut);
+        out.push_back(e);
+      }
+    }
+  }
+
 } // namespace xpl_host
 
 // -------------------------------------------------------------------------

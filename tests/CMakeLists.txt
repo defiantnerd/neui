@@ -104,6 +104,28 @@ if(APPLE AND NOT NEUI_IOS)
   target_link_libraries(neui_a11y_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
+  # Accessibility ADAPTER harness: the other half of the a11y coverage. Where
+  # test_a11y_tree.cpp feeds the portable model fabricated rows, this drives the
+  # host adapter off a LIVE widget tree - roles from real widget types, list /
+  # grid / tab sub-elements windowed to what is visible, pruning, OFFSCREEN,
+  # combobox overlay geometry, and the slot-reuse generation guard. The load-
+  # bearing check cross-validates a reported rectangle against the production
+  # hit-test by posting a real click at its centre, so a systematically wrong
+  # origin cannot pass by agreeing with itself. Links the host internals (it
+  # calls a11y_build_tree_for_frame directly) and realizes two real NSWindows,
+  # so built but NOT ctest-registered.
+  add_executable(neui_a11y_tree_smoke_macos a11y_tree_smoke_macos.mm)
+  target_include_directories(neui_a11y_tree_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/hosts/crossplatform
+    ${PROJECT_SOURCE_DIR}/hosts/shared)
+  target_compile_features(neui_a11y_tree_smoke_macos PRIVATE cxx_std_17)
+  # neui-macoshost is linked because neui_init() references its registration
+  # wrapper unconditionally when it was compiled in - not because this harness
+  # uses the native host (it asks for neui.host.crossplatform explicitly).
+  target_link_libraries(neui_a11y_tree_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
   # Focus-traversal harness: asserts TAB traversal is per FRAME (it used to
   # collect tab stops across every frame in the session, so tabbing off the last
   # control of one window moved the logical focus into another window while the

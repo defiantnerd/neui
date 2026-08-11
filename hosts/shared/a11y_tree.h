@@ -92,8 +92,19 @@ namespace neui_detail
     int x = 0, y = 0, w = 0, h = 0;
 
     // Enclosing scroll / overlay clip, for OFFSCREEN. Absent = not clipped.
+    // This is the clip imposed on this row BY AN ANCESTOR, not the one this row
+    // imposes on its own children - see `scrollable`.
     bool has_clip = false;
     int  clip_x = 0, clip_y = 0, clip_w = 0, clip_h = 0;
+
+    // This row scrolls its own content, so it is a scroll area rather than a
+    // plain container. Kept separate from has_clip on purpose: revision 2 of the
+    // model derived "scroll area" from has_clip, which reads plausibly but is
+    // wrong in both directions - a scrolling SECTION's own row carries its
+    // ANCESTOR's clip (so it looked like a plain group), and a plain SECTION
+    // nested inside a scrolling one inherits a clip (so it looked like a scroll
+    // area). Two different facts need two different fields.
+    bool scrollable = false;
 
     // Framework-derived state.
     bool visible    = true;
@@ -197,10 +208,11 @@ namespace neui_detail
     if (a11y_type_is(t, NEUI_W_IMAGE))      return NEUI_A11Y_ROLE_IMAGE;
     if (a11y_type_is(t, NEUI_W_TABVIEW))    return NEUI_A11Y_ROLE_TAB_LIST;
     // A scrolling SECTION is a scroll area; a plain one is just a group. The
-    // adapter signals "scrolling" by supplying a clip, which is exactly the
-    // property that makes it a scroll area to an AT.
+    // adapter sets `scrollable` from the widget's own scroll state - NOT from
+    // has_clip, which is the clip an ancestor imposes and answers a different
+    // question (see A11yInput::scrollable).
     if (a11y_type_is(t, NEUI_W_SECTION))
-      return in.has_clip ? NEUI_A11Y_ROLE_SCROLL_AREA : NEUI_A11Y_ROLE_GROUP;
+      return in.scrollable ? NEUI_A11Y_ROLE_SCROLL_AREA : NEUI_A11Y_ROLE_GROUP;
     if (a11y_type_is(t, NEUI_W_TABPAGE))    return NEUI_A11Y_ROLE_GROUP;
     // CUSTOMDRAW: deliberately a plain group. See set_role in <neui/d/a11y.h>
     // for why guessing from an attached behavior asset is the wrong move.
