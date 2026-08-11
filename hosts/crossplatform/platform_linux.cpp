@@ -904,7 +904,8 @@ namespace
 
     // Tab cycles logical focus (hand-rolled traversal, like win32/macOS).
     if (keycode == NEUI_KEY_TAB) {
-      s->focus_next(!(mods & NEUI_KMOD_SHIFT));
+      // Pass the frame that received the key (see Session::focus_next).
+      s->focus_next(!(mods & NEUI_KMOD_SHIFT), lw->widget_index);
       return;
     }
 

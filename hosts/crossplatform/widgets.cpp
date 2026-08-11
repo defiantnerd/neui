@@ -243,6 +243,11 @@ namespace xpl_host
       s->_menubars.push_back(idx);
     }
 
+    // A new widget can change a SECTION / TABVIEW body rect (auto content
+    // extent) and certainly has no cached layout of its own, so the owning
+    // frame's cached layout must not be trusted until it repaints.
+    s->mark_layout_dirty(idx);
+
     return IndexToWidget(s->_session_id, idx);
   }
 
@@ -252,6 +257,10 @@ namespace xpl_host
     if (!s) return;
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
+
+    // Mark the owning frame BEFORE the slot is freed - afterwards frame_of()
+    // can no longer walk up from this index.
+    s->mark_layout_dirty(idx);
 
     // A destroyed TABPAGE drops a tab: capture the parent TABVIEW so we can
     // re-flow its strip + page geometry after the slot is freed (the selected
@@ -404,6 +413,7 @@ namespace xpl_host
       platform_hide_window(wd.native_handle);
     else
       wd.visible = false;
+    s->mark_layout_dirty(idx);
   }
 
   static void NEUI_ABI w_set_pos(neui_session_t session, neui_widget_t widget,
@@ -416,6 +426,7 @@ namespace xpl_host
     auto& wd = s->_widgets[idx];
 
     wd.x = x; wd.y = y; wd.width = width; wd.height = height;
+    s->mark_layout_dirty(idx);
 
     if (wd.is_frame() && wd.native_handle)
       platform_set_window_pos(wd.native_handle, x, y, width, height, wd.dpi);
@@ -431,6 +442,7 @@ namespace xpl_host
     auto& wd = s->_widgets[idx];
 
     wd.width = width; wd.height = height;
+    s->mark_layout_dirty(idx);
 
     if (wd.is_frame() && wd.native_handle)
       platform_set_window_pos(wd.native_handle, wd.x, wd.y, width, height, wd.dpi);

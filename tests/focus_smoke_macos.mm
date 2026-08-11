@@ -234,7 +234,10 @@ int main()
 
     // ---- 3. reverse traversal ---------------------------------------------
     // Land on a known control first so the reverse step is deterministic.
-    while (g_focused != g.a1.id) post_tab(wa, false);
+    // Bounded: an empty tab-stop list (the failure mode this file exists to
+    // catch) would make an unbounded loop HANG instead of reporting.
+    for (int i = 0; i < 16 && g_focused != g.a1.id; ++i) post_tab(wa, false);
+    check(g_focused == g.a1.id, "reached A's first control within 16 Tabs");
     post_tab(wa, true);
     check_focus(g.a3, "Shift+Tab walks backwards within frame A");
     check(!in_frame_b(g_focused), "reverse traversal stays in frame A");
@@ -257,25 +260,50 @@ int main()
     // child's 120x26 box, near where we clicked. A stale abs_x/abs_y (the
     // failure mode if the two walks disagree) reports the section itself, or
     // coords offset by the whole band.
-    g_mouse_widget = 0; g_mouse_x = g_mouse_y = -1;
-    // Frame-local point 8 px into the child horizontally. Vertically, aim at the
-    // child's middle by probing down the column until the child answers.
-    bool hit_child = false;
-    for (int probe_y = 90; probe_y <= 190 && !hit_child; ++probe_y) {
-      g_mouse_widget = 0;
+    // Probe down the column and record the FIRST frame-local y at which the
+    // child answers - that y is the child's top edge, which is the number that
+    // actually encodes the body offset.
+    //
+    // Why the top edge and not just "the child was hit": hit-testing and
+    // widget-local conversion both derive from the same abs cache, so a
+    // CONSISTENT origin error keeps them agreeing with each other and any
+    // "coords are inside the box" assertion passes anyway. The band offset only
+    // moves y, so y is the axis that can detect it.
+    //
+    // The section is at frame-local (12, 90) and its child at body-relative
+    // (10, 10), so with the band honoured the child's top edge is 90 + band + 10
+    // (122 here, band = 22).
+    //
+    // VERIFIED DISCRIMINATING: dropping the body offset from child_origin_of's
+    // ABS output (leaving the paint translate intact) makes this section report
+    // first hit at y=112 with child-local (8, 12) instead of y=122 with (8, 0),
+    // and the "y == 0 local" assertion below is the one that fires. The
+    // mechanism is the section's body CLIP: it still starts at 90+band, so
+    // clicks above it are rejected and the first accepted row lands 12 px into
+    // a child whose hit rect has slid up. The `> 100` check alone does NOT
+    // catch that case - it is here for the grosser failure where the child's
+    // rect collapses onto the section origin.
+    int first_hit_y = -1;
+    for (int probe_y = 90; probe_y <= 200 && first_hit_y < 0; ++probe_y) {
+      g_mouse_widget = 0; g_mouse_x = g_mouse_y = -1;
       click_in(wa, 30.0f, (float)probe_y);
-      if (g_mouse_widget == g.a3.id) hit_child = true;
+      if (g_mouse_widget == g.a3.id) first_hit_y = probe_y;
     }
-    check(hit_child, "a click inside the section's child reports the CHILD");
-    if (hit_child) {
-      bool local_ok = (g_mouse_x >= 0 && g_mouse_x < 120 &&
-                       g_mouse_y >= 0 && g_mouse_y < 26);
-      std::printf("        child-local coords = (%d, %d)\n", g_mouse_x, g_mouse_y);
-      check(local_ok, "widget-local coords fall inside the child's own box");
-      // x is the strong assertion: the child starts at frame-local x=22
-      // (section 12 + body-relative 10), so clicking at 30 must report ~8.
+    check(first_hit_y >= 0, "a click inside the section's child reports the CHILD");
+    if (first_hit_y >= 0) {
+      std::printf("        child top edge at frame-local y = %d"
+                  " (band-less layout would be 100)\n", first_hit_y);
+      check(first_hit_y > 100,
+            "child sits BELOW the chip band (body offset applied, not dropped)");
+      // Sanity bound: a plausible chip band, so a wildly wrong offset also fails.
+      check(first_hit_y <= 130, "child top edge is within one chip band of 100");
+      // x: the child starts at frame-local 22 (section 12 + body-relative 10),
+      // so a click at 30 must report ~8 widget-local.
+      std::printf("        child-local coords at first hit = (%d, %d)\n",
+                  g_mouse_x, g_mouse_y);
       check(g_mouse_x >= 6 && g_mouse_x <= 10,
             "widget-local x matches the section body offset (expected ~8)");
+      check(g_mouse_y == 0, "first hit is the child's top row (y == 0 local)");
     }
 
     w->destroy(sess, g.b_win);

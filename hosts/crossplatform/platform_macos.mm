@@ -961,7 +961,9 @@ void wake_app_event_pump()
   // Tab cycles logical focus inside our hand-rolled Tab traversal - same as
   // the win32 path. Consume here; the focus_next path doesn't fire KEYDOWN.
   if (keycode == NEUI_KEY_TAB) {
-    session->focus_next(!(mods & NEUI_KMOD_SHIFT));
+    // Pass the frame this view belongs to: it is the window that actually has
+    // the keystroke, which is the only right answer when nothing is focused yet.
+    session->focus_next(!(mods & NEUI_KMOD_SHIFT), widget_index);
     return;
   }
 

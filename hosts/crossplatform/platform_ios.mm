@@ -714,7 +714,8 @@ API_AVAILABLE(ios(13.4))
       // KEYDOWN. (Menubar Command-accelerators never arrive here - UIKit matches
       // -keyCommands first - so there is no double-fire to guard against.)
       if (keycode == NEUI_KEY_TAB) {
-        session->focus_next(!(mods & NEUI_KMOD_SHIFT));
+        // Pass the frame that received the key (see Session::focus_next).
+        session->focus_next(!(mods & NEUI_KMOD_SHIFT), widget_index);
         handled_any = true;
         continue;
       }

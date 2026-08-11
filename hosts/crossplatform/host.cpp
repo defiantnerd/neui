@@ -2431,7 +2431,7 @@ namespace xpl_host
   // reproducible without a live render context. Layout computation therefore
   // stays single-sourced in the paint path; only the offset arithmetic is
   // shared. Before a frame's first paint these caches are empty, which is what
-  // Session::abs_positions_valid reports on.
+  // WidgetData::painted_once / Session::ensure_abs_positions deal with.
   struct ChildOrigin { int rel_x, rel_y, abs_x, abs_y; };
 
   static ChildOrigin child_origin_of(WidgetData& wd)
@@ -2641,8 +2641,10 @@ namespace xpl_host
     // Mark the frame as having painted at least once. ensure_abs_positions
     // reads this to decide whether the SECTION / TABVIEW body-layout caches it
     // depends on have been populated yet.
-    if (parent_index != 0 && _widgets.exists(parent_index))
+    if (parent_index != 0 && _widgets.exists(parent_index)) {
       _widgets[parent_index].painted_once = true;
+      _widgets[parent_index].layout_dirty = false;
+    }
     int inset = frame_top_inset(parent_index);
     if (inset > 0 && _backend->push_transform && _backend->translate) {
       _backend->push_transform(ctx);
@@ -2725,20 +2727,41 @@ namespace xpl_host
                                     frame_top_inset(frame_index));
   }
 
-  void Session::ensure_abs_positions(uint32_t frame_index)
+  bool Session::ensure_abs_positions(uint32_t frame_index)
   {
-    if (frame_index == 0 || !_widgets.exists(frame_index)) return;
+    if (frame_index == 0 || !_widgets.exists(frame_index)) return false;
     auto& fw = _widgets[frame_index];
-    // Cold start: before the frame's first paint, the SECTION / TABVIEW body
-    // rects that child_origin_of reads have never been computed, so the walk
-    // alone would place every child of a section at the section's own origin.
-    // Force ONE synchronous paint to populate them rather than duplicating the
-    // layout code - TabViewWidget's body rect needs backend->measure_text, so a
-    // non-painting recomputation could not match it anyway. Cheap: Wave 5
-    // measured a full 100-widget frame at ~0.9 ms.
-    if (!fw.painted_once && fw.native_handle)
+    // The layout state child_origin_of reads (SECTION / TABVIEW body rects) is
+    // produced only by a paint. Two cases need one forcing:
+    //   - the frame has never painted, so every cache is empty;
+    //   - the widget tree changed since the last paint (post-show dynamic
+    //     creation is a supported pattern), so a NEW section's cache is empty
+    //     even though the frame has painted before.
+    // Forcing a real paint beats duplicating the layout code: TabViewWidget's
+    // body rect needs backend->measure_text, so a non-painting recomputation
+    // could not match it anyway. Cheap - Wave 5 measured a full 100-widget frame
+    // at ~0.9 ms, and this is once per change, not per query.
+    if ((!fw.painted_once || fw.layout_dirty) && fw.native_handle)
       platform_force_paint(fw.native_handle);
+    // If the paint did not happen (hidden / unmapped window, or not yet
+    // realized), the caches are still empty and walking now would OVERWRITE the
+    // cached geometry with band-less, partially-wrong values. The documented
+    // contract is that geometry goes stale rather than wrong, so leave it alone
+    // and report failure; the caller decides what to do with an unanswerable
+    // positional query.
+    if (!fw.painted_once) return false;
     refresh_abs_positions(frame_index);
+    return true;
+  }
+
+  // Mark the frame owning `widget_index` as needing a paint before its cached
+  // layout can be trusted. Called from the structural mutations (create /
+  // destroy / geometry / show / hide); cleared by paint_frame.
+  void Session::mark_layout_dirty(uint32_t widget_index)
+  {
+    uint32_t frame = frame_of(widget_index);
+    if (frame != 0 && _widgets.exists(frame))
+      _widgets[frame].layout_dirty = true;
   }
 
   // The tree slot of the FRAME owning `widget_index` (a root child), or 0.
@@ -2747,7 +2770,10 @@ namespace xpl_host
     if (widget_index == 0 || !_widgets.exists(widget_index)) return 0;
     if (_widgets.get_parent(widget_index) == 0) return widget_index;
     auto parents = _widgets.get_all_parents(widget_index);
-    // get_all_parents walks upward, so the LAST entry is the root child.
+    // get_all_parents walks upward and STOPS at knone, so its last entry is the
+    // root SENTINEL (slot 0), not the root child - scan from the end for the
+    // first entry whose own parent is the sentinel. The sentinel itself fails
+    // that test (get_parent(0) == knone), so it is skipped rather than returned.
     for (size_t i = parents.size(); i-- > 0; )
       if (_widgets.exists(parents[i]) && _widgets.get_parent(parents[i]) == 0)
         return parents[i];
@@ -2773,20 +2799,38 @@ namespace xpl_host
     }
   }
 
-  void Session::focus_next(bool forward)
+  void Session::focus_next(bool forward, uint32_t frame_hint)
   {
     // Traversal is PER FRAME. Collecting across every root child would let TAB
     // walk out of one window and into a widget in another - each frame owns its
     // own native surface and its own OS keyboard focus, so moving the logical
     // focus there would leave the two disagreeing (and the user pressing keys at
     // a window that doesn't hold focus).
-    uint32_t frame = frame_of(_focused_widget);
+    //
+    // `frame_hint` is the frame whose native surface DELIVERED the Tab, which the
+    // platform layer always knows. Prefer it over the focused widget's frame: it
+    // is the only source that is right when nothing is focused yet, and it is
+    // what makes "Tab at a freshly-opened second window" focus that window's
+    // first control instead of some other frame's.
+    uint32_t frame = 0;
+    if (frame_hint != 0 && _widgets.exists(frame_hint) &&
+        _widgets[frame_hint].is_frame())
+      frame = frame_hint;
+    if (frame == 0) frame = frame_of(_focused_widget);
     if (frame == 0) {
-      // No focused widget yet: start in the first visible frame rather than
-      // sweeping all of them. Same result as before for the single-frame case.
+      // Last resort (no hint, nothing focused): the first root child that is
+      // actually a REALIZED frame. Testing `visible` here would be useless -
+      // every widget is created visible=true (widgets.cpp:191) and hide() on a
+      // realized frame deliberately leaves the flag alone (widgets.cpp:403-406),
+      // so `visible` does not distinguish shown frames from unshown ones.
+      // native_handle does, and it also skips a menu-model root (POPUPMENU is
+      // isroot but is not a window and holds no tab stops).
       uint32_t rc = _widgets.child(0);
       while (rc != 0) {
-        if (_widgets.exists(rc) && _widgets[rc].visible) { frame = rc; break; }
+        if (_widgets.exists(rc)) {
+          auto& cand = _widgets[rc];
+          if (cand.is_frame() && cand.native_handle) { frame = rc; break; }
+        }
         rc = _widgets.next(rc);
       }
     }

@@ -1311,7 +1311,8 @@ namespace xpl_host
       }
       if (wParam == VK_TAB) {
         bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        wud->session->focus_next(!shift);
+        // Pass the frame that received the key (see Session::focus_next).
+        wud->session->focus_next(!shift, wud->widget_index);
         return 0;  // consumed - do not feed to DefWindowProc
       }
       dispatch_key_to_focused(wud->session, NEUI_EVENT_KEYDOWN,

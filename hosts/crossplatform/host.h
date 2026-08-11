@@ -98,6 +98,12 @@ namespace xpl_host
     // Session::ensure_abs_positions to tell whether the SECTION / TABVIEW body
     // layout caches (which only the paint path computes) exist yet.
     bool painted_once = false;
+    // FRAMES only: the widget tree under this frame changed since the last
+    // paint, so a cached SECTION / TABVIEW body rect may be missing or stale.
+    // Set by Session::mark_layout_dirty from the structural mutations; cleared
+    // by paint_frame. `painted_once` alone is not enough - a section created
+    // AFTER the last paint has an empty cache in a frame that has painted.
+    bool layout_dirty = false;
 
     // ---- Zoom (NEUI_ATTR_UI_SCALE) ------------------------------------------
     // The user zoom for a FRAME, clamped, 1.0 when unset. Read live from the
@@ -950,10 +956,14 @@ namespace xpl_host
     int frame_client_height(uint32_t widget_index);
 
     // Move keyboard focus to the next (forward=true) or previous (false) widget
-    // that has both tab_stop=true and visible=true, WITHIN the frame that owns
-    // the currently focused widget. Wraps around inside that frame; never moves
-    // focus into a different window.
-    void focus_next(bool forward);
+    // that has both tab_stop=true and visible=true, WITHIN one frame. Wraps
+    // around inside that frame; never moves focus into a different window.
+    //
+    // `frame_hint` is the frame whose native surface delivered the key - the
+    // platform layer always knows it, and PASSING IT IS STRONGLY PREFERRED: it
+    // is the only correct answer when no widget is focused yet. 0 falls back to
+    // the focused widget's frame, then to the first realized frame.
+    void focus_next(bool forward, uint32_t frame_hint = 0);
 
     // Recompute every widget's cached frame-local abs_x/abs_y under `frame_index`
     // WITHOUT painting. Normally these are a by-product of the paint walk, which
@@ -964,11 +974,27 @@ namespace xpl_host
     // needs a live render context (see child_origin_of in host.cpp).
     void refresh_abs_positions(uint32_t frame_index);
 
-    // refresh_abs_positions, but safe on a frame that has never painted: forces
-    // one synchronous paint first so the SECTION / TABVIEW body-layout caches
-    // exist. THE entry point for out-of-band positional queries; prefer it over
-    // refresh_abs_positions unless you know the frame has already painted.
-    void ensure_abs_positions(uint32_t frame_index);
+    // refresh_abs_positions, but safe on a frame whose cached layout may not
+    // exist yet: forces one synchronous paint first when the frame has never
+    // painted or its tree changed since it last did. THE entry point for
+    // out-of-band positional queries; prefer it over refresh_abs_positions
+    // unless you know the frame has already painted since its last change.
+    //
+    // Returns false when the positions could NOT be made valid (window hidden /
+    // unmapped / not yet realized, so the forced paint did not happen). In that
+    // case the cached geometry is deliberately left ALONE rather than recomputed
+    // from empty caches - stale beats wrong - so a caller must not treat the
+    // cached values as fresh.
+    //
+    // MUST NOT be called from inside a paint: it can re-enter paint_frame on the
+    // same render context. Reachable from client code (a WIDGET_PREUPDATE
+    // handler runs mid-paint), so any future public entry point that leads here
+    // needs an in-paint guard.
+    bool ensure_abs_positions(uint32_t frame_index);
+
+    // Mark the frame owning `widget_index` as needing a paint before its cached
+    // layout can be trusted. Called from structural mutations.
+    void mark_layout_dirty(uint32_t widget_index);
 
     // Tree slot of the FRAME (root child) owning `widget_index`, or 0 if there
     // is none. `widget_index` may itself be a frame.

@@ -228,12 +228,50 @@ A.button1, got B.button1". Repaint bench: **0.87 ms before and after in Release*
 cost of a non-inlined call in the descent path and does not matter. All 434
 Tier-1 cases, ctest, and all seven macOS harnesses pass.
 
-**Known limitation, deliberately not fixed:** the `frame_of` fallback picks the
-first *visible* frame when no widget has focus, not the frame that owns OS
-keyboard focus — `Session::_os_focused` is session-level, not per-frame, so that
-information does not exist yet. Only reachable by pressing Tab at a
-freshly-opened second window before clicking in it; the harness covers the main
-path.
+**Review follow-up (same day).** A review of the first cut found three real
+defects, all fixed before push:
+
+1. **The "first visible frame" fallback was really "first root child".** Every
+   widget is created `visible = true` (`widgets.cpp:191`) and `hide()` on a
+   *realized* frame deliberately leaves the flag alone (`widgets.cpp:403-406`),
+   so `visible` does not distinguish shown frames from unshown ones. The fallback
+   could therefore focus a control in a never-shown window, or — worse — pick a
+   first root child with no tab stops (a splash frame of LABELs, or a POPUPMENU,
+   which is `isroot` but not a window) and leave **Tab dead session-wide**. Also
+   corrected: the claim that the OS-focused frame "does not exist yet" was wrong.
+   Every `focus_next` call site already knows the frame that received the key, so
+   `focus_next` now takes a `frame_hint` and all four platform layers pass it.
+   The last-resort fallback tests `is_frame() && native_handle`, not `visible`.
+2. **`painted_once` meant "painted once ever", not "layout caches valid".** A
+   SECTION added *after* the last paint — post-show dynamic creation is a
+   supported pattern — has an empty body-rect cache in a frame that has painted,
+   so `ensure_abs_positions` would have skipped the force-paint and placed that
+   section's children at the section origin. Added a `layout_dirty` flag set by
+   `Session::mark_layout_dirty` from create / destroy / set_pos / set_size / hide
+   and cleared by `paint_frame`.
+3. **"Stale rather than wrong" was documented but not implemented.** When the
+   forced paint was a no-op (hidden / unmapped / unrealized window),
+   `ensure_abs_positions` still walked and *overwrote* good cached geometry with
+   band-less values. It now returns `bool` and leaves the cache untouched when it
+   cannot make the positions valid, so the caller must handle an unanswerable
+   query rather than silently trusting wrong numbers.
+
+Also fixed: two comments describing things that do not exist (a
+`Session::abs_positions_valid` member; a claim that `get_all_parents`' last entry
+is the root child — it is the root *sentinel*, and the loop works by skipping
+it); an unbounded `while` in the harness that would have **hung** on exactly the
+empty-tab-stop regression above instead of reporting it; and the harness's
+coordinate check, which was near-vacuous because hit-testing and widget-local
+conversion both derive from the same cache, so any *consistent* origin error kept
+them agreeing. It now records the child's top edge and asserts the widget-local
+y at that row; verified discriminating by breaking `child_origin_of`'s abs output
+and watching it fail.
+
+**Remaining known limitation:** `ensure_abs_positions` is documented as unsafe to
+call during a paint (it can re-enter `paint_frame` on the same context) but
+nothing enforces it. Harmless today — it has no callers — but a `WIDGET_PREUPDATE`
+handler runs mid-paint, so **6.3 must add an in-paint guard** before the provider
+becomes reachable from client code.
 
 Original text follows.
 
