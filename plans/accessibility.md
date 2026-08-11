@@ -1,6 +1,8 @@
 # Accessibility (`NEUI_API_A11Y`) — implementation plan
 
-Status: **plan only, nothing implemented.** This is Wave 6 of
+Status: **plan only, nothing implemented.** All five open decisions were resolved
+on 2026-08-11 (§7), so implementation is unblocked; build order at the end of §8.
+This is Wave 6 of
 `plans/sst-neuigui-gap-response.md` (its §3 sketch, lines 991-1027), worked out
 to the point where it can be built. Where this plan contradicts that sketch, this
 plan is the newer decision and the differences are called out in §9.
@@ -54,8 +56,8 @@ carry whatever the OS gives them for free.
 2. VoiceOver on macOS can navigate an xpl frame, announce each control with a
    sensible role and name, read a knob's value as a human-readable string, and
    follow focus as Tab moves.
-3. The same tree is exposed to UIA on Windows and (if §7 decision 1 says so) AT-SPI on
-   Linux.
+3. The same tree is exposed to UIA on Windows. Linux/AT-SPI is explicitly OUT of
+   this wave (§7 decision 1) and Linux therefore has no provider yet.
 4. Focus is deterministic and per-frame.
 5. Zero measurable cost when no assistive technology is attached.
 
@@ -505,23 +507,37 @@ providers we cannot run.
 - `UiaRaiseAutomationEvent`, `UiaRaiseAutomationPropertyChangedEvent`,
   `UiaRaiseNotificationEvent` (for `announce`).
 - New link library `uiautomationcore`; `UiaClientsAreListening()` backs `is_active`.
-- **Verification constraint, stated plainly:** cannot be compiled or run on the
-  machine this is being built on. It gets the stub-header parse check that caught
-  the Wave 4.3 win32 defects, and ships marked **inspection-only, unverified at
-  runtime** until someone runs Narrator/Inspect against it. Given the size of the
-  UIA surface, expect real bugs on first run.
+- **Ships unverified — decided 2026-08-11** (§7 decision 2). It cannot be compiled
+  or run on the machine this is being built on. It gets the stub-header parse check
+  that caught the Wave 4.3 win32 defects, and ships marked **inspection-only,
+  unverified at runtime** until someone runs Narrator/Inspect against it. Given the
+  size of the UIA surface *and* that the adapter feeding it (6.2b) has no executed
+  coverage on Windows at all (§5), **expect real bugs on first run** — this is the
+  largest block of unverified code the programme has carried. Two obligations that
+  follow from the decision, not optional:
+  1. `docs/accessibility.md` says so in prose, not just the commit message — a
+     reader evaluating whether to rely on it must not have to dig through git log.
+  2. The first Windows session after this lands treats "run Inspect.exe against
+     `neui_a11y_example`" as the opening move, before anything is built on top.
 
-### 6.5 — Linux AT-SPI — recommend deferring to its own wave
+### 6.5 — Linux AT-SPI — **OUT OF THIS WAVE** (decided 2026-08-11)
 
-Gated on `NEUI_HAS_DBUS`, no-op when absent (the pattern theme tracking and the
-file-dialog portal already use). **Honest scoping:** registering with
-`org.a11y.Bus` and hand-implementing even a minimal
+Split into its own wave per §7 decision 1. Wave 6 is therefore
+**6.0-6.4 + 6.6 + 6.7**, and Linux ships with **no** accessibility provider —
+a neui window on Linux stays opaque to Orca until the AT-SPI wave lands. That is
+a real, user-visible gap and belongs in `docs/deferred-issues.md` when this wave
+lands, not just in this plan.
+
+Retained here as the scoping note for that future wave: gate on `NEUI_HAS_DBUS`,
+no-op when absent (the pattern theme tracking and the file-dialog portal already
+use). Registering with `org.a11y.Bus` and hand-implementing even a minimal
 `Accessible` + `Component` + `Value` + `Action` + `Selection` surface over raw
 libdbus is comparable in size to everything in 6.0-6.4 combined, and cannot be
-runtime-verified here either. Recommendation: land 6.0-6.4 + 6.6 + 6.7 as Wave 6
-and treat AT-SPI as its own wave with its own decision about hand-rolled libdbus
-vs an atk/at-spi2 dependency. The shared model makes it a pure add-on whenever it
-happens, which is the point of building it first.
+runtime-verified on the machine this is being built on either. The open question
+for that wave is hand-rolled libdbus vs an atk/at-spi2 dependency — deliberately
+left undecided, since the shared model makes AT-SPI a pure add-on whenever it
+happens and the choice is better made with the providers' shape already known.
+That is the point of building the model first.
 
 ### 6.6 — focus determinism (scope corrected)
 
@@ -712,25 +728,27 @@ that they exist. Record the result in the commit message.
 | Adapter bugs invisible on win32/Linux | §5 hole is acknowledged; keep the adapter's per-type extraction as small, obvious functions and prefer shared helpers already covered by Tier-1. |
 | Stale node references misresolve after slot reuse | Generation counter (§4.3) + its own test. |
 | Scope creep into a11y *text* interfaces (`AXTextMarker`, UIA TextPattern) | Out of scope. INPUTBOX/MULTILINE expose value + selection only; full text navigation is a separate wave. |
-| AT-SPI swallows the wave | Split it out per §6.5. |
+| AT-SPI swallows the wave | Resolved: split out of this wave (§7 decision 1). |
 | Windowed containers read as "the list is short" | Providers must always report `total_child_count`; the Tier-1 test pins it. |
 
 ---
 
-## 7. Open decisions — needed before 6.1 is written
+## 7. Decisions — **all five resolved 2026-08-11**, 6.1 is unblocked
 
-1. **Is 6.5 (AT-SPI) in this wave or its own?** Recommendation: **its own** — it
-   is plausibly as large as the rest combined and is the least-used of the three.
-2. **Does 6.4 (win32 UIA) ship unverified, or wait for a Windows session?**
-   Recommendation: **write it, ship it labelled unverified**, consistent with the
-   rest of this programme — but say so in the docs, not just the commit. Given §5's
-   coverage hole, waiting is also defensible; this is a judgement call about how
-   much unverified surface is acceptable.
-3. **MSAA (`IAccessible`) fallback on win32?** Some older audio hosts and screen
-   readers still go through it. Recommendation: **no** — UIA only, note as deferred.
-4. **Text interfaces in scope?** Recommendation: **no** (see §6).
-5. **Full container virtualization in v1?** Recommendation: **no** — windowed
-   children per §4.2, with the limitation documented.
+1. **AT-SPI (6.5) → its own wave.** Wave 6 is 6.0-6.4 + 6.6 + 6.7. Linux ships
+   with no provider in the meantime; that gap goes in `docs/deferred-issues.md`
+   (§6.5).
+2. **win32 UIA (6.4) → written and shipped unverified**, with the two obligations
+   spelled out in §6.4: the limitation stated in `docs/accessibility.md` prose,
+   and Inspect.exe as the opening move of the next Windows session.
+3. **MSAA fallback → no.** UIA only; deferred item recorded.
+4. **Text interfaces → no.** INPUTBOX/MULTILINE expose value + selection only;
+   character/word/line navigation is its own wave.
+5. **Full container virtualization → no.** Windowed children per §4.2, with the
+   "an AT cannot reach an unscrolled row" limitation documented.
+
+Decisions 3-5 were taken as the recommended defaults; 1 and 2 were called
+explicitly. Nothing in §7 blocks implementation any more.
 
 ---
 
@@ -745,10 +763,14 @@ Revised upward from revision 1, which under-sized 6.2 by calling the adapter thi
 | 6.2 shared model + Tier-1 tests | medium | yes, fully |
 | 6.2b host adapter | **large — the real bulk of the wave** | macOS only |
 | 6.3 macOS provider | medium | **yes, incl. VoiceOver** |
-| 6.4 win32 provider | large | no |
-| 6.5 AT-SPI | large — recommend deferring | no |
+| 6.4 win32 provider | large | no — **ships unverified by decision** |
+| ~~6.5 AT-SPI~~ | ~~large~~ | **out of this wave** (§7 decision 1) |
 | 6.6 focus determinism | small (most of it turned out to be already done) | yes |
 | 6.7 docs + example | small | yes |
+
+Build order: **6.0 → 6.1 → 6.2 → 6.2b → 6.3 → 6.6 → 6.4 → 6.7.** 6.6 sits before
+6.4 deliberately — per-frame focus is verifiable here and the win32 provider reads
+focus, so the unverifiable phase should be built against settled behaviour.
 
 ---
 
