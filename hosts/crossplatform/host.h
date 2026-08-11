@@ -345,6 +345,13 @@ namespace xpl_host
     // True while a modal DIALOG is blocking inside platform_run_modal_until.
     // Set in widget_show; cleared by the destroy path so the pump exits.
     bool modal_pump_active = false;
+    // For a modal DIALOG: the widget that held focus when the dialog was shown,
+    // restored when it closes. Focus is session-global and key routing goes by
+    // it rather than by which window the key arrived at, so a dialog MUST take
+    // focus off its input-blocked owner - otherwise typing into the dialog edits
+    // the window the dialog just blocked. Restoring on close is the other half:
+    // without it the user is left with focus nowhere after dismissing a dialog.
+    uint32_t prev_focus = 0;
     // Active toast overlay (at most one per frame; replace-on-second-call).
     ToastState toast;
   };
@@ -1016,6 +1023,27 @@ namespace xpl_host
     // Mark the frame owning `widget_index` as needing a paint before its cached
     // layout can be trusted. Called from structural mutations.
     void mark_layout_dirty(uint32_t widget_index);
+
+    // Move focus OUT of `root_index`'s subtree if that is where it currently is.
+    //
+    // Called from every path that makes a widget unreachable while it may hold
+    // focus: destroy, hide, and a TABVIEW page being deselected. Without it
+    // _focused_widget keeps naming something the user can neither see nor reach -
+    // a dead keyboard at best, and at worst keystrokes landing on an invisible
+    // control, or (after a destroy) focus silently transferring to whatever
+    // widget is next created into the recycled tree slot, with no focus event
+    // fired for it.
+    //
+    // `try_next` picks the next tab stop in the same frame, which is right when
+    // the widget still EXISTS and is merely out of sight (hide / tab switch).
+    // A destroy passes false: the tree is mid-mutation, and choosing an arbitrary
+    // neighbour on behalf of the client is a UX decision the framework should not
+    // make. Either way a proper focus-lost event is dispatched, so a client is
+    // told rather than left guessing.
+    void focus_leave_subtree(uint32_t root_index, bool try_next);
+
+    // True when `widget_index` is `root_index` or one of its descendants.
+    bool is_in_subtree(uint32_t widget_index, uint32_t root_index) const;
 
     // Tree slot of the FRAME (root child) owning `widget_index`, or 0 if there
     // is none. `widget_index` may itself be a frame.

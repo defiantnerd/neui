@@ -1457,9 +1457,18 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
         backend->destroy_context(wd->render_ctx);
         wd->render_ctx = nullptr;
       }
-      // Drop the modal pump flag so widget_show unwinds and returns.
-      if (auto* fw = dynamic_cast<xpl_host::FrameWidget*>(wd))
+      // Drop the modal pump flag so widget_show unwinds and returns - and WAKE
+      // the pump. run_modal_pump_macos blocks in nextEventMatchingMask: on
+      // distantFuture and only re-tests the flag once an event arrives, so
+      // clearing the flag alone is not enough: a dialog dismissed with no
+      // further user input (a client closing it from a timer or a callback, or
+      // any programmatic destroy) left the pump waiting forever and hung the
+      // app. A user-driven close happens to be followed by more input, which is
+      // why this was invisible.
+      if (auto* fw = dynamic_cast<xpl_host::FrameWidget*>(wd)) {
         fw->modal_pump_active = false;
+        wake_app_event_pump();
+      }
     }
   }
 

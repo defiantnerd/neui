@@ -39,7 +39,9 @@
 //                      rows) are the cases where our hit test and AppKit's
 //                      fallback DISAGREE - see 4c for why the plain case alone
 //                      proves nothing.
-//    5  FOCUS        - per FRAME: frame A reports its focused element, B nil.
+//    5  FOCUS        - per FRAME: frame A reports its focused element, B nil; 5b
+//                      is the focused-then-scrolled-away control, which must stay
+//                      in the tree and stay the reported focused element.
 //    6  PRESS        - AT press on a BUTTON reaches the client as a CLICK; 6b is
 //                      the client-first key path a declared CUSTOMDRAW needs.
 //    7  INCREMENT    - AT increment on a KNOB fires GESTURE_BEGIN / VALUE_CHANGED
@@ -393,12 +395,14 @@ int main()
                                       12, 52, 200, 60, nullptr);
     attrs->set_string(sess, scroller, NEUI_ATTR_SCROLL_MODE, "vertical");
     attrs->set_string(sess, scroller, NEUI_ATTR_ALIGN_TEXT, "none");
+    neui_widget_t s_first{};
     for (int i = 0; i < 6; ++i) {
       neui_widget_t b = w->create(sess, scroller, NEUI_W_BUTTON, 8, 6 + i * 34,
                                   120, 26, nullptr);
       char buf[16];
       std::snprintf(buf, sizeof(buf), "s%d", i);
       w->set_text(sess, b, buf);
+      if (i == 0) s_first = b;
     }
     // Check 4c: an open COMBOBOX paints its rows OUTSIDE its own rect, which is
     // the one hit-test case AppKit's hierarchical fallback cannot reach.
@@ -573,6 +577,41 @@ int main()
     id focused_b = [vb accessibilityFocusedUIElement];
     check(focused_b != e_btn,
           "5  frame B does NOT report frame A's focused element");
+
+    // 5b A FOCUSED CONTROL SCROLLED OUT OF VIEW must stay in the tree, report
+    //    OFFSCREEN, and still be what the provider names as focused. Pruning it
+    //    would be the tempting simplification and it is wrong twice over: the AT
+    //    would lose the element the keyboard is actually driving, and its user
+    //    would be told nothing has focus while typing goes somewhere. Note
+    //    set_focus auto-scrolls a control into view, so the scroll has to come
+    //    AFTER the focus - which is also the real sequence (focus a field, then
+    //    scroll the panel).
+    {
+      auto* scroll = (neui_scroll_api_t*)api->get_interface(sess, NEUI_API_SCROLL);
+      check(scroll != nullptr, "5b the scroll interface is available");
+      w->set_focus(sess, s_first);
+      pump(0.15);
+      if (scroll) scroll->set_scroll(sess, scroller, 0, 120);   // push s0 off the top
+      pump(0.15);
+      id e_focus_off = element_labelled(vb, @"s0");
+      check(e_focus_off != nil,
+            "5b the focused control is STILL in the tree after scrolling away");
+      if (e_focus_off) {
+        check([e_focus_off isAccessibilityFocused],
+              "5b ...and still reports itself focused");
+        // OFFSCREEN has no NSAccessibility attribute of its own, so the visible
+        // consequence is the one the model promises: it is not hit-testable at
+        // its reported position (that position is behind the section's clip).
+        NSRect rr = [e_focus_off accessibilityFrame];
+        id hit = [vb accessibilityHitTest:NSMakePoint(NSMidX(rr), NSMidY(rr))];
+        check(hit != e_focus_off,
+              "5b ...and is not hit-testable there (OFFSCREEN)");
+        check([vb accessibilityFocusedUIElement] == e_focus_off,
+              "5b ...and is still the frame's reported focused element");
+      }
+      if (scroll) scroll->set_scroll(sess, scroller, 0, 0);
+      pump(0.15);
+    }
 
     // ---------------------------------------------------------------------
     // 6  PRESS reaches the client as a real CLICK.

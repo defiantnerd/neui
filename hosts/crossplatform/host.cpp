@@ -1691,7 +1691,13 @@ namespace xpl_host
       pw.x = il; pw.y = it;
       pw.width  = pw_w;
       pw.height = pw_h;
+      const bool was_visible = pw.visible;
       pw.visible = (i == selected);
+      // A page going off screen must not keep the focus. Before this, switching
+      // tabs left the caret on a control the user could no longer see, and every
+      // subsequent keystroke went to it.
+      if (was_visible && !pw.visible && session)
+        session->focus_leave_subtree(pages[i], true);
     }
   }
 
@@ -2873,6 +2879,37 @@ namespace xpl_host
     bump_a11y_revision();
   }
 
+  bool Session::is_in_subtree(uint32_t widget_index, uint32_t root_index) const
+  {
+    if (widget_index == 0 || root_index == 0) return false;
+    if (widget_index == root_index) return true;
+    if (!_widgets.exists(widget_index)) return false;
+    for (uint32_t p : _widgets.get_all_parents(widget_index))
+      if (p == root_index) return true;
+    return false;
+  }
+
+  void Session::focus_leave_subtree(uint32_t root_index, bool try_next)
+  {
+    if (_focused_widget == 0) return;
+    if (!is_in_subtree(_focused_widget, root_index)) return;
+
+    if (try_next) {
+      // Frame-scoped, so this cannot move focus into another window. Resolve the
+      // frame BEFORE moving focus: frame_of walks up from the widget, and the
+      // widget we are moving away from is the only reliable route to it.
+      const uint32_t frame = frame_of(root_index);
+      focus_next(true, frame);
+      // focus_next cannot land back inside an invisible subtree (collect_tab_stops
+      // does not descend into one), but it CAN come back to the same widget when
+      // the frame has no other tab stop - in which case clearing is the honest
+      // answer rather than leaving focus where it was.
+      if (_focused_widget != 0 && !is_in_subtree(_focused_widget, root_index))
+        return;
+    }
+    set_focus(0);
+  }
+
   // The tree slot of the FRAME owning `widget_index` (a root child), or 0.
   uint32_t Session::frame_of(uint32_t widget_index) const
   {
@@ -2902,7 +2939,14 @@ namespace xpl_host
         auto& wd = widgets[idx];
         if (!wd.native_handle && !wd.is_menu_model() && wd.visible && wd.tab_stop && wd.enabled)
           out.push_back(idx);
-        collect_tab_stops(widgets, idx, out);
+        // Do NOT descend into an invisible container - matching the paint walk,
+        // which gates descent on visibility too. This used to recurse
+        // unconditionally, so Tab could land on a visible child of a hidden
+        // parent: most sharply on a TABVIEW, whose unselected pages are
+        // `visible = false` while their controls are not, which let Tab move
+        // focus onto a control on a page that is not on screen.
+        if (wd.visible)
+          collect_tab_stops(widgets, idx, out);
       }
       idx = widgets.next(idx);
     }

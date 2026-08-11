@@ -1,6 +1,6 @@
 # Accessibility (`NEUI_API_A11Y`) — implementation plan
 
-Status: **6.0 + 6.1 + 6.2 + 6.2b + 6.3 shipped** (see those sections); 6.6 onward not started. All five open decisions were resolved
+Status: **6.0 + 6.1 + 6.2 + 6.2b + 6.3 + 6.6 shipped** (see those sections); 6.4 + 6.7 remain. All five open decisions were resolved
 on 2026-08-11 (§7), so implementation is unblocked; build order at the end of §8.
 This is Wave 6 of
 `plans/sst-neuigui-gap-response.md` (its §3 sketch, lines 991-1027), worked out
@@ -1015,7 +1015,76 @@ left undecided, since the shared model makes AT-SPI a pure add-on whenever it
 happens and the choice is better made with the providers' shape already known.
 That is the point of building the model first.
 
-### 6.6 — focus determinism (scope corrected)
+### 6.6 — focus determinism — **SHIPPED 2026-08-11**
+
+The three bullets this section listed were nearly all already done (per-frame
+traversal in 6.0, per-frame focus reporting in 6.3), so the phase looked like a
+harness exercise. It was not: **auditing what focus can point at turned up six
+real defects**, five of them wrong on their own terms before accessibility enters
+the picture. Every one is a case of `_focused_widget` naming something the user
+can neither see nor reach.
+
+1. **Destroying the focused widget left focus dangling.** Nothing cleared
+   `_focused_widget`, so keystrokes went nowhere — and the next widget created
+   into the recycled tree slot **silently inherited focus**, with no focus event
+   ever fired for it. A control the user never touched was focused as far as the
+   framework, the client and any AT were concerned.
+2. **Hiding the focused widget left focus on something invisible.**
+3. **Deselecting a TABVIEW page left focus inside it.** `apply_page_geometry`
+   sets the page `visible = false` and touched nothing else, so the user carried
+   on typing into a control on a page that was no longer on screen.
+4. **`collect_tab_stops` descended into invisible containers.** It gated
+   *collection* on `visible` but recursed unconditionally, so **Tab could move
+   focus onto a control inside an unselected tab page** — the same bug as 3,
+   reachable without any programmatic focus call. Now gated like the paint walk.
+5. **A modal dialog did not take focus off its blocked owner.** Focus is
+   session-global and `-keyDown:` routes by it rather than by which window the key
+   arrived at, so **typing into the dialog edited a field in the window the dialog
+   had just blocked**. The dialog now focuses its first tab stop on show and
+   restores the previous focus on close.
+6. **The macOS modal pump could hang.** `run_modal_pump_macos` blocks in
+   `nextEventMatchingMask:` on `distantFuture` and only re-tests its flag when an
+   event arrives, so a dialog dismissed with **no further user input** (a client
+   closing it from a timer or a callback — or any programmatic destroy) left the
+   pump waiting forever and hung the app. A user-driven close is followed by more
+   input, which is why this had never been seen. Clearing the flag now posts a
+   wake-up event. Found because it hung the new harness check.
+
+1-3 and 5 route through one new helper, `Session::focus_leave_subtree(root,
+try_next)`, called from destroy / hide / page-deselect. `try_next` picks the next
+tab stop in the same frame, which is right when the widget still exists and is
+merely out of sight; a destroy passes false and clears, because the tree is
+mid-mutation and picking a neighbour on the client's behalf is a UX decision the
+framework should not make. Either way a proper focus-lost event is dispatched, so
+a client is told rather than left to infer.
+
+**Accessibility side.** The plan's remaining bullet — a focused control scrolled
+out of view stays in the tree, reports `OFFSCREEN`, and is still what the provider
+names as focused — is now asserted end to end in the provider harness (5b), and
+verified by mutation against the tempting simplification of pruning offscreen
+rows.
+
+**Verification.** `tests/focus_smoke_macos.mm` 15 → 35 checks, and the new ones
+are behavioural rather than bookkeeping: check 6 **types a character** to prove a
+recycled slot did not inherit focus (asserting the absence of a focus *event*
+proves nothing — no event fires either way), and check 9 **types into the dialog**
+and asserts the owner's field is untouched. Check 9 also has to run from inside
+the blocking modal pump, on a timer, since a modal `show()` does not return.
+7 mutations, all caught — including the pump hang, which reproduces as a timeout.
+
+Two of my own first-cut checks were wrong and were fixed before the phase landed:
+adding tab stops to frames A and B **silently invalidated three of 6.0's exact
+wrap-target assertions** (the new material moved to a third frame), and check 8
+initially selected the tab page that was *already* selected, so the switch was a
+no-op and the check passed with nothing happening.
+
+Retires `docs/deferred-issues.md`'s "Tier B focus parity" item, as planned, and
+records what is deliberately left: a destroy clears rather than moves focus, and
+`focus_next` still ignores `enabled` on containers.
+
+Original text follows.
+
+### 6.6 — focus determinism (scope corrected) — as originally planned
 
 Revision 1 claimed this wave retires three `deferred-issues.md` items and that it
 needed to make KNOB a tab stop. Both were wrong:

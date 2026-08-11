@@ -270,6 +270,17 @@ namespace xpl_host
     // can no longer walk up from this index.
     s->mark_layout_dirty(idx);
 
+    // Focus must not be left naming a slot that is about to be freed: keystrokes
+    // would go nowhere, and the next widget created into the recycled slot would
+    // silently inherit focus with no focus event ever fired. Also before the
+    // teardown, for the same reason mark_layout_dirty is.
+    s->focus_leave_subtree(idx, false);
+    // A modal DIALOG closing gives focus back to whatever held it when the dialog
+    // opened - otherwise dismissing a dialog leaves focus nowhere.
+    uint32_t restore_focus = 0;
+    if (auto* dfw = dynamic_cast<FrameWidget*>(&s->_widgets[idx]))
+      restore_focus = dfw->prev_focus;
+
     // A destroyed TABPAGE drops a tab: capture the parent TABVIEW so we can
     // re-flow its strip + page geometry after the slot is freed (the selected
     // index may now be out of range). Mirrors the win32 host's widget_destroy.
@@ -333,6 +344,10 @@ namespace xpl_host
           platform_invalidate(frame);
       }
     }
+
+    // Restore a closed modal dialog's saved focus, if that widget is still there.
+    if (restore_focus != 0 && s->_widgets.exists(restore_focus))
+      s->set_focus(restore_focus);
   }
 
   static void NEUI_ABI w_show(neui_session_t session, neui_widget_t widget)
@@ -399,6 +414,13 @@ namespace xpl_host
         if (is_modal_dialog) {
           auto* fw = dynamic_cast<FrameWidget*>(&wd);
           if (fw) {
+            // Take focus INTO the dialog before the pump starts. Focus is
+            // session-global and key routing goes by it, not by which window the
+            // key arrived at - so leaving focus in the owner meant typing into
+            // the dialog edited a field in the window the dialog had just
+            // blocked. Remember where focus was so closing can give it back.
+            fw->prev_focus = s->_focused_widget;
+            s->focus_next(true, idx);
             fw->modal_pump_active = true;
             platform_run_modal_until(&fw->modal_pump_active);
           }
@@ -413,6 +435,13 @@ namespace xpl_host
   {
     auto* s = get_session_for_widget(session, widget);
     if (!s) return;
+    // Hiding the focused widget (or an ancestor of it) must move focus on. The
+    // widget still exists, so the next tab stop in the same frame is the right
+    // destination and the keyboard stays usable.
+    {
+      uint32_t hidx = WidgetToIndex(widget);
+      if (s->_widgets.exists(hidx)) s->focus_leave_subtree(hidx, true);
+    }
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];

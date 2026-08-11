@@ -25,6 +25,15 @@
 //                      if the shared helper and the paint walk ever disagree,
 //                      section children are the first thing to break.
 //
+//   6-9. FOCUS IS NEVER LEFT SOMEWHERE UNREACHABLE - the focused widget being
+//                      destroyed (6), hidden (7), carried off screen by a tab
+//                      switch (8), or blocked by a modal dialog (9) must all move
+//                      focus. Each was wrong on its own terms (a dead keyboard,
+//                      or keystrokes landing on something invisible) before it
+//                      was an accessibility problem; check 9 proves it by TYPING
+//                      into the dialog and asserting the owner's field is
+//                      untouched.
+//
 // Focus is read from NEUI_EVENT_WIDGET_FOCUS, and keys / clicks are posted as
 // real NSEvents into -keyDown: / -mouseDown:, so the whole production path runs
 // and the harness cannot pass by agreeing with its own bookkeeping.
@@ -45,6 +54,8 @@ int g_failures = 0;
 
 // Last widget to receive focus, from NEUI_EVENT_WIDGET_FOCUS(focused=true).
 uint32_t g_focused = 0;
+// Focus LOSS, so checks 6-9 can tell "focus moved away" from "nothing happened".
+uint32_t g_unfocused = 0;
 // Last mouse event's widget + widget-local coords, for check 5.
 uint32_t g_mouse_widget = 0;
 int      g_mouse_x = -1, g_mouse_y = -1;
@@ -54,7 +65,14 @@ int      g_mouse_x = -1, g_mouse_y = -1;
 struct Ids {
   neui_widget_t a_win{}, a1{}, a2{}, a3{};
   neui_widget_t b_win{}, b1{}, b2{};
+  neui_widget_t c_win{};
   neui_widget_t sect{};
+  // Checks 6-9: focus must not be left pointing at something the user cannot
+  // see or reach.
+  neui_widget_t doomed{};              // destroyed while focused
+  neui_widget_t hideme{};              // hidden while focused
+  neui_widget_t tabview{}, page1{}, page2{}, tabfield{};
+  neui_widget_t dlg{}, dlg_btn{}, owner_field{};
 } g;
 
 void check(bool ok, const char* what)
@@ -71,6 +89,11 @@ const char* name_of(uint32_t id)
   if (id == g.b1.id)   return "B.button1";
   if (id == g.b2.id)   return "B.button2";
   if (id == g.sect.id) return "A.section";
+  if (id == g.doomed.id)      return "C.doomed";
+  if (id == g.hideme.id)      return "C.hideme";
+  if (id == g.tabfield.id)    return "C.page2_field";
+  if (id == g.dlg_btn.id)     return "dialog.button";
+  if (id == g.owner_field.id) return "C.owner_field";
   if (id == 0)         return "<none>";
   return "<other>";
 }
@@ -95,6 +118,7 @@ bool onevent(void*, neui_event_t* ev)
   switch (ev->type) {
     case NEUI_EVENT_WIDGET_FOCUS:
       if (ev->data.focus.focused) g_focused = ev->data.focus.widget.id;
+      else                        g_unfocused = ev->data.focus.widget.id;
       break;
     case NEUI_EVENT_MOUSE_BUTTON_DOWN:
       g_mouse_widget = ev->data.mouse.widget.id;
@@ -137,6 +161,32 @@ void post_tab(NSWindow* win, bool shift)
   [v keyDown:ev];
 }
 
+// Type one character through the production path (-keyDown: -> insertText:), so
+// "where do keystrokes actually LAND" is an observable fact rather than an
+// inference from what the framework says about focus.
+void type_char(NSWindow* win, NSString* ch)
+{
+  NSView* v = [win contentView];
+  if (!v) return;
+  NSEvent* ev = [NSEvent keyEventWithType:NSEventTypeKeyDown
+                                 location:NSZeroPoint
+                            modifierFlags:0
+                                timestamp:0
+                             windowNumber:[win windowNumber]
+                                  context:nil
+                               characters:ch
+              charactersIgnoringModifiers:ch
+                                isARepeat:NO
+                                  keyCode:0 /* kVK_ANSI_A */];
+  [v keyDown:ev];
+}
+
+void pump_briefly()
+{
+  [[NSRunLoop mainRunLoop] runUntilDate:
+      [NSDate dateWithTimeIntervalSinceNow:0.15]];
+}
+
 void click_in(NSWindow* win, float lx, float ly)
 {
   NSView* v = [win contentView];
@@ -170,7 +220,10 @@ int main()
     neui_session_t sess = api->create_session(&g_client, &app);
     auto* w = (neui_widget_api_t*)api->get_interface(sess, NEUI_API_WIDGETS);
     auto* attrs = (neui_attr_api_t*)api->get_interface(sess, NEUI_API_ATTRS);
-    if (!w || !attrs) { std::printf("FAIL: no widgets/attrs interface\n"); return 1; }
+    auto* tabs  = (neui_tabs_api_t*)api->get_interface(sess, NEUI_API_TABS);
+    if (!w || !attrs || !tabs) {
+      std::printf("FAIL: no widgets/attrs/tabs interface\n"); return 1;
+    }
 
     // ---- frame A: two buttons + a chip-bearing SECTION with one button -----
     // Sized from the content (300x230 client) with margins, per the house rule.
@@ -198,6 +251,28 @@ int main()
     w->set_text(sess, g.b2, "B two");
     w->show(sess, g.b_win);
 
+    // ---- frame C: the material for checks 6-9 ------------------------------
+    // A SEPARATE frame on purpose: checks 1-4 assert exact wrap targets from
+    // frames A and B, so adding tab stops to either would silently invalidate
+    // them (it did, the first time round).
+    g.c_win = w->create(sess, widget_none, NEUI_W_APPWINDOW, 80, 400, 300, 250, nullptr);
+    w->set_text(sess, g.c_win, "focus C");
+    g.doomed = w->create(sess, g.c_win, NEUI_W_BUTTON, 12, 12, 120, 26, nullptr);
+    w->set_text(sess, g.doomed, "doomed");
+    g.hideme = w->create(sess, g.c_win, NEUI_W_BUTTON, 12, 48, 120, 26, nullptr);
+    w->set_text(sess, g.hideme, "hideme");
+    g.owner_field = w->create(sess, g.c_win, NEUI_W_INPUTBOX, 150, 12, 120, 22, nullptr);
+    // A TABVIEW whose SECOND page holds a tab stop: switching away from page 2
+    // makes it invisible, and the control inside must not keep focus.
+    g.tabview = w->create(sess, g.c_win, NEUI_W_TABVIEW, 12, 84, 260, 140, nullptr);
+    g.page1 = w->create(sess, g.tabview, NEUI_W_TABPAGE, 0, 0, 0, 0, nullptr);
+    w->set_text(sess, g.page1, "one");
+    g.page2 = w->create(sess, g.tabview, NEUI_W_TABPAGE, 0, 0, 0, 0, nullptr);
+    w->set_text(sess, g.page2, "two");
+    g.tabfield = w->create(sess, g.page2, NEUI_W_BUTTON, 10, 10, 100, 26, nullptr);
+    w->set_text(sess, g.tabfield, "in page 2");
+    w->show(sess, g.c_win);
+
     // Let both frames realize + paint once (the section body layout the
     // coordinate check depends on is produced by the paint pass).
     [[NSRunLoop mainRunLoop] runUntilDate:
@@ -205,8 +280,10 @@ int main()
 
     NSWindow* wa = window_titled(@"focus A");
     NSWindow* wb = window_titled(@"focus B");
-    check(wa != nil && wb != nil, "both frames realized as NSWindows");
-    if (!wa || !wb) { std::printf("\nFOCUS FAILED (setup)\n"); return 1; }
+    NSWindow* wc = window_titled(@"focus C");
+    check(wa != nil && wb != nil && wc != nil,
+          "all three frames realized as NSWindows");
+    if (!wa || !wb || !wc) { std::printf("\nFOCUS FAILED (setup)\n"); return 1; }
 
     // ---- 1/2. forward traversal stays inside frame A -----------------------
     // First Tab with nothing focused picks frame A's first tab stop.
@@ -306,6 +383,132 @@ int main()
       check(g_mouse_y == 0, "first hit is the child's top row (y == 0 local)");
     }
 
+    // ---- 6-9. FOCUS MUST NOT POINT AT SOMETHING UNREACHABLE ---------------
+    //
+    // Four ways the framework used to leave _focused_widget on a widget the user
+    // can neither see nor reach. All four are wrong on their own terms - a dead
+    // keyboard, or keystrokes landing somewhere invisible - and all four also
+    // make an accessibility provider contradict itself, because the node it
+    // would report as focused is pruned from the tree (invisible) or gone.
+
+    // 6. DESTROY the focused widget. The old behaviour left _focused_widget
+    //    pointing at a freed tree slot: keystrokes went nowhere, and the next
+    //    widget created into that recycled slot silently inherited focus with no
+    //    focus event ever fired - so a control the user never touched was
+    //    "focused" as far as the framework and any AT were concerned.
+    w->set_focus(sess, g.doomed);
+    check_focus(g.doomed, "6 the doomed button takes focus");
+    g_focused = 0; g_unfocused = 0;
+    w->destroy(sess, g.doomed);
+    check(g_unfocused == g.doomed.id,
+          "6 destroying the focused widget fires focus-lost for it");
+    // A widget created into the recycled slot must NOT come up focused. Checking
+    // for the absence of a focus EVENT proves nothing here - the bug is that
+    // _focused_widget silently keeps naming the slot, and no event is fired
+    // either way. So make it an INPUTBOX and TYPE: with focus left dangling the
+    // characters land in a field the user never selected.
+    neui_widget_t recycled = w->create(sess, g.c_win, NEUI_W_INPUTBOX,
+                                       12, 12, 120, 22, nullptr);
+    // The check only means anything if the slot really was recycled (the low 16
+    // bits of a widget id ARE the tree slot), so assert that rather than assume.
+    check((recycled.id & 0xffff) == (g.doomed.id & 0xffff),
+          "6 the new widget did take the destroyed widget's tree slot");
+    type_char(wc, @"z");
+    {
+      char buf[64] = {0};
+      w->get_text(sess, recycled, buf, (int)sizeof(buf));
+      check(std::strlen(buf) == 0,
+            "6 a widget created into the freed slot does NOT inherit focus");
+    }
+    // And Tab still works afterwards - a dangling focus used to make the first
+    // Tab a no-op.
+    post_tab(wc, false);
+    check(g_focused != 0 && g_focused != recycled.id,
+          "6 Tab still moves focus after the focused widget was destroyed");
+
+    // 7. HIDE the focused widget. It still exists, so focus should move to the
+    //    next tab stop in the same frame rather than sit on something invisible.
+    w->set_focus(sess, g.hideme);
+    check_focus(g.hideme, "7 the hideme button takes focus");
+    g_focused = 0; g_unfocused = 0;
+    w->hide(sess, g.hideme);
+    check(g_unfocused == g.hideme.id,
+          "7 hiding the focused widget fires focus-lost for it");
+    check(g_focused != 0 && g_focused != g.hideme.id,
+          "7 ...and focus moves to another tab stop in the same frame");
+
+    // 8. DESELECT the tab page containing focus. apply_page_geometry sets the
+    //    page invisible; focus must leave with it. Before, the user typed into a
+    //    control on a page that was no longer on screen.
+    // Page 2 has to be the SELECTED page first, or set_selected(0) is a no-op and
+    // the whole check passes without anything happening - which is exactly what
+    // it did on the first run.
+    tabs->set_selected(sess, g.tabview, 1);
+    pump_briefly();
+    w->set_focus(sess, g.tabfield);
+    check_focus(g.tabfield, "8 a control inside the selected tab page takes focus");
+    g_focused = 0; g_unfocused = 0;
+    tabs->set_selected(sess, g.tabview, 0);   // page 2 goes off screen
+    pump_briefly();
+    check(g_unfocused == g.tabfield.id,
+          "8 selecting another tab fires focus-lost for the hidden control");
+    check(g_focused != g.tabfield.id,
+          "8 ...and focus does not stay inside the deselected page");
+    // Tab must not be able to reach it either, now that its page is hidden.
+    g_focused = 0;
+    bool reached_hidden = false;
+    for (int i = 0; i < 10; ++i) {
+      post_tab(wc, false);
+      if (g_focused == g.tabfield.id) { reached_hidden = true; break; }
+    }
+    check(!reached_hidden,
+          "8 Tab never lands on a control inside an unselected tab page");
+
+    // 9. A MODAL DIALOG must take focus off its input-blocked owner. Focus is
+    //    session-global and -keyDown: routes by it, not by which window the key
+    //    arrived at - so with focus left in the owner, typing INTO THE DIALOG
+    //    edited a field in the window the dialog had just blocked.
+    w->set_focus(sess, g.owner_field);
+    check_focus(g.owner_field, "9 the owner's text field takes focus");
+    g.dlg = w->create(sess, widget_none, NEUI_W_DIALOG, 200, 200, 200, 100, nullptr);
+    w->set_text(sess, g.dlg, "focus dlg");
+    g.dlg_btn = w->create(sess, g.dlg, NEUI_W_BUTTON, 12, 12, 120, 26, nullptr);
+    w->set_text(sess, g.dlg_btn, "dialog ok");
+    w->set_owner(sess, g.dlg, g.c_win);
+    g_focused = 0; g_unfocused = 0;
+    // A modal dialog's show() BLOCKS in a nested OS pump until the dialog is
+    // destroyed (that is the documented design), so everything this check needs
+    // has to run from inside that pump. The timer fires once, does the work, and
+    // destroys the dialog - which is what lets show() return.
+    __block int  dlg_focus_ok   = -1;
+    __block int  dlg_typing_ok  = -1;
+    __block bool dlg_window_ok  = false;
+    [NSTimer scheduledTimerWithTimeInterval:0.30 repeats:NO
+             block:^(NSTimer*) {
+      dlg_focus_ok = (g_focused == g.dlg_btn.id) ? 1 : 0;
+      NSWindow* wd = window_titled(@"focus dlg");
+      dlg_window_ok = (wd != nil);
+      if (wd) {
+        // The load-bearing part: a keystroke aimed at the dialog must not reach
+        // the blocked owner's field.
+        type_char(wd, @"x");
+        char buf[64] = {0};
+        w->get_text(sess, g.owner_field, buf, (int)sizeof(buf));
+        dlg_typing_ok = (std::strlen(buf) == 0) ? 1 : 0;
+      }
+      w->destroy(sess, g.dlg);      // ends the modal pump
+    }];
+    w->show(sess, g.dlg);           // blocks until the timer's destroy
+    check(dlg_window_ok, "9 the dialog realized as an NSWindow");
+    check(dlg_focus_ok == 1,
+          "9 showing a modal dialog focuses a control INSIDE the dialog");
+    check(dlg_typing_ok == 1,
+          "9 typing in the dialog does NOT edit the blocked owner's field");
+    pump_briefly();
+    check_focus(g.owner_field,
+                "9 closing the dialog gives focus back to where it was");
+
+    w->destroy(sess, g.c_win);
     w->destroy(sess, g.b_win);
     w->destroy(sess, g.a_win);
 
