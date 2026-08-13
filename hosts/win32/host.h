@@ -74,10 +74,24 @@ namespace win32_host {
     void* userdata = nullptr;
     // For DIALOG frames: tree index of the owner frame. 0 = no owner.
     uint32_t owner_index = 0;
-    // For modal DIALOG frames: true while widget_show is blocking in a
-    // nested GetMessageW pump. Cleared by the dialog HWND's WM_DESTROY so
-    // the pump exits and widget_show returns.
-    bool modal_pump_active = false;
+    // For modal DIALOG frames: holds true while widget_show is blocking in a
+    // nested GetMessageW pump. Cleared by the dialog HWND's WM_DESTROY so the
+    // pump exits and widget_show returns.
+    //
+    // Held INDIRECTLY, and that is load-bearing rather than a style choice: the
+    // pump routinely OUTLIVES this WidgetData, because the documented way out of
+    // a modal dialog is for a client callback to destroy the dialog WIDGET -
+    // which frees this slot with the pump still polling. Passing
+    // `&w.modal_pump_active` meant the poll read freed memory, and whether the
+    // loop exited came down to whatever the allocator left in the byte. The
+    // caller takes a SHARE across the pump, so the poll always sees the value
+    // WM_DESTROY actually wrote. Same fix as the xpl host's
+    // FrameWidget::modal_pump_flag, where tests/focus_smoke_win32.cpp caught it.
+    //
+    // Null until a frame actually goes modal - one WidgetData per widget makes a
+    // frame-only allocation worth skipping for everything else.
+    std::shared_ptr<bool> modal_pump_flag;
+    bool modal_pump_active() const { return modal_pump_flag && *modal_pump_flag; }
     // Win32-specific
     HWND hwnd = nullptr;
     HFONT hfont = nullptr;   // DPI-scaled font; owned by frame windows (APPWINDOW/PLUGWINDOW)

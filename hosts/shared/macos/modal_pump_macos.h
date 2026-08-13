@@ -17,6 +17,15 @@
 //   unwinds. Loops on [NSApp nextEventMatchingMask:] until the flag flips
 //   to false. The runloop mode is NSDefaultRunLoopMode so timers and
 //   sources still fire (panels, paint, etc.).
+//
+//   "Caller-owned" is a REQUIREMENT, not a description: the flag is re-read
+//   after every dispatched event, so it must outlive the pump independently of
+//   any widget. Do NOT pass a pointer into a WidgetData - the events this pump
+//   dispatches include the client callback that destroys the dialog, which is
+//   the documented way out of a modal show, and that frees the slot while the
+//   loop is still polling. Both hosts hold a std::shared_ptr<bool> and pass
+//   .get() (xpl FrameWidget::modal_pump_flag, native WidgetData::modal_pump_flag);
+//   an interior pointer was a real use-after-free in all four call sites.
 
 namespace neui_detail {
 

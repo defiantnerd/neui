@@ -161,6 +161,31 @@ if(APPLE AND NOT NEUI_IOS)
   target_link_libraries(neui_focus_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
+  # Modal-dialog LIFETIME harness, both macOS hosts. A blocking modal show polls
+  # a flag for as long as the dialog is up, while the documented way out is for a
+  # client callback to destroy the dialog WIDGET - which frees the memory the
+  # pump is polling. Every host passed an interior pointer into its pump, so the
+  # exit condition was read from freed memory: undefined behaviour that usually
+  # works, because the freed byte still holds the value written to it. The
+  # harness re-execs itself under GUARD MALLOC, which unmaps freed pages so the
+  # read faults instead of returning a plausible value - MallocScribble is NOT
+  # enough here, because the block is reused within microseconds in an AppKit
+  # process and the buggy code passed every phase under it. A watchdog thread
+  # covers the other failure shape (a pump that never comes back) so a hang is a
+  # named failure rather than silence, and each host runs in its OWN PROCESS
+  # (destroying a session leaves views that still paint - see
+  # docs/deferred-issues.md). Covers client-destroy, user-close, re-entrant
+  # destroy and slot reuse. Takes an optional argument: `xpl` / `native` for one
+  # host, or `native-known-defect` to deliberately reproduce the open
+  # third-sequential-dialog hang. Realizes real NSWindows and blocks in real
+  # nested pumps, so built but NOT ctest-registered.
+  add_executable(neui_modal_smoke_macos modal_smoke_macos.mm)
+  target_include_directories(neui_modal_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_modal_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_modal_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
   # Tree-model context-menu harness (NEUI_W_POPUPMENU + popup_tree_menu):
   # asserts a POPUPMENU never becomes the frame's menu bar (read from
   # [NSApp mainMenu]), that its ROOT rows are ordinary pickable rows with

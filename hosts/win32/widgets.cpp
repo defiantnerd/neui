@@ -2969,11 +2969,17 @@ namespace win32_host
           EnableWindow(owner_hwnd, FALSE);
         // Native blocking modal: spin a nested OS pump until the dialog
         // HWND is destroyed. AppWindowProc's WM_DESTROY for the dialog
-        // clears modal_pump_active, breaking the pump so widget_show
+        // clears the pump flag, breaking the pump so widget_show
         // returns to the caller.
         if (is_dialog && is_modal) {
-          w.modal_pump_active = true;
-          run_modal_until(&w.modal_pump_active);
+          // Hold a share of the flag across the pump. The pump outlives the
+          // widget in the ordinary case - a client callback destroying the
+          // dialog is how a modal show is meant to end - so polling through `w`
+          // would be polling freed memory. This local keeps the flag itself
+          // alive to be read; see host.h.
+          auto keep_running = std::make_shared<bool>(true);
+          w.modal_pump_flag = keep_running;
+          run_modal_until(keep_running.get());
         }
       }
     } else if (w.hwnd != nullptr) {

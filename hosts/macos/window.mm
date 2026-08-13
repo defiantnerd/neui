@@ -2547,7 +2547,9 @@ static float neui_snap_to_steps(float v, int steps)
   // unwinds and returns to the caller. No-op for non-modal frames.
   if (session && session->_widgets.exists(widget_index)) {
     auto& wd = session->_widgets[widget_index];
-    if (wd.modal_pump_active) wd.modal_pump_active = false;
+    // Writes THROUGH the share, so the waiting pump sees it even if this
+    // WidgetData is freed a moment later by the client's close handler.
+    if (wd.modal_pump_flag) *wd.modal_pump_flag = false;
   }
   if (is_appwindow) {
     if (--g_appwindow_count <= 0) {
@@ -3462,8 +3464,10 @@ namespace macos_host
       // run by widget_show AFTER create_descendants_native populates the
       // dialog - pumping here would block before the children are ever
       // created, leaving an empty dialog. windowWillClose: clears the flag
-      // to unwind the pump.
-      w.modal_pump_active = true;
+      // to unwind the pump. Allocated here rather than being a plain member: the
+      // pump outlives this WidgetData whenever a client callback destroys the
+      // dialog, which is the documented way out (see host.h).
+      w.modal_pump_flag = std::make_shared<bool>(true);
     } else {
       [window makeKeyAndOrderFront:nil];
     }
@@ -4557,12 +4561,19 @@ namespace macos_host
       // descendant controls exist.
       rebuild_key_view_loop_macos(this, index, native_window_from(w.native_window));
       // A modal DIALOG blocks here - AFTER its children exist - spinning a
-      // nested NSEvent pump until windowWillClose: clears modal_pump_active
-      // (create_dialog armed the flag + presented the sheet). Do not touch
-      // `w` after this returns: the dialog is typically destroyed (slot
-      // freed) by the OK / close handler that unwound the pump.
-      if (w.modal_pump_active)
-        neui_detail::run_modal_pump_macos(&w.modal_pump_active);
+      // nested NSEvent pump until windowWillClose: clears the flag
+      // (create_dialog armed it + presented the sheet). Do not touch `w` after
+      // this returns: the dialog is typically destroyed (slot freed) by the OK /
+      // close handler that unwound the pump.
+      //
+      // That is also why the flag is held by SHARE rather than passed as
+      // `&w.modal_pump_active`: "do not touch `w` afterwards" was not enough,
+      // because the pump reads the flag on every iteration and so was already
+      // touching `w` for the whole time the dialog was up. This local is what
+      // keeps the flag alive to be read.
+      auto keep_running = w.modal_pump_flag;
+      if (keep_running && *keep_running)
+        neui_detail::run_modal_pump_macos(keep_running.get());
       return;
     }
 

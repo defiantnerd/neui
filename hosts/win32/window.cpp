@@ -1131,8 +1131,12 @@ namespace win32_host
             EnableWindow(owner->hwnd, TRUE);
             SetForegroundWindow(owner->hwnd);
           }
-          // Drop the modal pump so widget_show unwinds and returns.
-          if (wd) wd->modal_pump_active = false;
+          // Drop the modal pump so widget_show unwinds and returns. Writes
+          // THROUGH the share, so the waiting pump sees it even when this
+          // WidgetData is freed a moment later by the client's close handler -
+          // which is the ordinary way a modal dialog ends. (`wd` is already
+          // known non-null here; the guard this replaces was redundant.)
+          if (wd->modal_pump_flag) *wd->modal_pump_flag = false;
         }
         return 0;
       }
