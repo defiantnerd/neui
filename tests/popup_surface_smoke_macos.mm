@@ -27,9 +27,16 @@
 //
 //   7. THE GATE   - the suppression that replaces an OS pointer capture: a press
 //                   outside the stack dismisses AND is swallowed, a press on a
-//                   shallower level closes only the deeper ones, hover is
-//                   suppressed in the owner but not in the popup, and Escape
-//                   closes.
+//                   shallower level closes only the deeper ones, hover and the
+//                   wheel are suppressed in the owner but not in the popup, and
+//                   Escape closes.
+//   8. RE-ENTRANCY - destroying the OWNER from the dismissal handler, while the
+//                   platform hook that dispatched it is still holding a pointer
+//                   into that frame. Only fails under Guard Malloc - see the
+//                   phase.
+//
+// Phase 7 runs BEFORE phase 6 in the source even though it is numbered after it:
+// phase 6 destroys the owner frame, so nothing that needs a live one can follow.
 //
 // Phase 7 calls Session's gate entry points directly (through the host header
 // and session_by_id) rather than synthesizing HID events. That is deliberate:
@@ -68,6 +75,13 @@ neui_widget_t g_detail{};
 struct Dismissal { uint32_t widget_id; uint32_t reason; };
 std::vector<Dismissal> g_dismissals;
 
+// Phase 8 arms this with the owner frame, so the dismissal handler destroys it
+// from inside the platform's dismissal hook - the documented client response, and
+// the one that frees the memory that hook is standing in.
+neui_session_t      g_sess{};
+neui_widget_api_t*  g_w = nullptr;
+neui_widget_t       g_destroy_owner_on_dismiss = { UINT32_MAX };
+
 bool NEUI_ABI onevent(void*, neui_event_t* ev)
 {
   if (ev->type == NEUI_EVENT_WIDGET_PAINT) {
@@ -80,6 +94,11 @@ bool NEUI_ABI onevent(void*, neui_event_t* ev)
   }
   if (ev->type == NEUI_EVENT_POPUP_DISMISSED) {
     g_dismissals.push_back({ ev->data.popup.widget.id, ev->data.popup.reason });
+    if (g_destroy_owner_on_dismiss.id != UINT32_MAX && g_w) {
+      const neui_widget_t victim = g_destroy_owner_on_dismiss;
+      g_destroy_owner_on_dismiss = { UINT32_MAX };   // once, and before the call
+      g_w->destroy(g_sess, victim);
+    }
     return true;
   }
   return false;
@@ -133,6 +152,8 @@ int main(int, char*[])
     check(w != nullptr,  "NEUI_API_WIDGETS missing");
     check(pu != nullptr, "NEUI_API_POPUP missing on the xpl host");
     if (!w || !pu) return 1;
+    g_sess = sess;
+    g_w    = w;   // phase 8's handler destroys a frame through these
 
     // The interface must be absent on the NATIVE macOS host - the documented
     // feature-detect trap is that neui_get_api(NULL) returns THAT one first.
@@ -322,6 +343,7 @@ int main(int, char*[])
         // every app using neui would pay for this feature.
         check(!s->popup_gate_press(frame_slot), "gate must be inert when closed");
         check(!s->popup_gate_hover(frame_slot), "hover gate must be inert when closed");
+        check(!s->popup_gate_wheel(frame_slot), "wheel gate must be inert when closed");
         check(!s->popup_gate_key(NEUI_KEY_ESCAPE), "Escape must pass through when closed");
 
         // One level open.
@@ -335,6 +357,17 @@ int main(int, char*[])
         // the popup's own rows could not highlight.
         check(s->popup_gate_hover(frame_slot),  "hover in the owner must be swallowed");
         check(!s->popup_gate_hover(picker_slot), "hover inside the popup must pass");
+
+        // The wheel is the same call, one axis further: swallowed outside the
+        // stack (a scroll must not move a control under an open picker), ordinary
+        // inside it - that second half is what makes the recommended idiom work,
+        // popup content in a scrolling SECTION sized to get_clamp_size.
+        check(s->popup_gate_wheel(frame_slot),   "wheel in the owner must be swallowed");
+        check(!s->popup_gate_wheel(picker_slot), "wheel inside the popup must pass");
+        // ...and unlike a press, a wheel OUTSIDE only suppresses. Dismissing on
+        // scroll would close the picker when a trackpad drifts a pixel.
+        check(s->popup_surface_open(), "a wheel outside must not dismiss the stack");
+        check(g_dismissals.empty(), "a wheel outside must report no dismissal");
 
         // A press on the owner dismisses AND is swallowed, and the swallow is
         // paired with exactly one release - if the release leaked, the widget
@@ -355,6 +388,10 @@ int main(int, char*[])
                  NEUI_POPUP_RIGHT);
         pump(0.20);
         check(s->popup_surface_depth(detail_slot) == 1, "detail should be depth 1");
+        // EVERY level scrolls, not just the deepest: a cascade whose parent is a
+        // long scrolling list is the ordinary case (pick a bank, then a preset).
+        check(!s->popup_gate_wheel(picker_slot), "wheel on a shallower level must pass");
+        check(!s->popup_gate_wheel(detail_slot), "wheel on the deepest level must pass");
         check(!s->popup_gate_press(picker_slot),
               "a press on a shallower level must NOT be swallowed");
         check(s->popup_surface_depth(picker_slot) == 0 &&
@@ -397,6 +434,62 @@ int main(int, char*[])
     NSWindow* orphan = window_for(w, sess, g_picker);
     check(orphan == nil || !orphan.isVisible,
           "no visible popup window may outlive its owner");
+
+    // ---- 8. DESTROYING THE OWNER FROM THE DISMISSAL HANDLER ------------------
+    // The hazard docs/popup-surfaces.md names: a dismissal is dispatched
+    // synchronously from inside a platform hook that is still holding a pointer
+    // into the frame it is about to lose. Resizing the owner dismisses, the
+    // handler destroys the owner, and NEUIView::setFrameSize: then has to not
+    // touch the WidgetData it resolved before the dispatch. Needs its own frame
+    // because it ends by destroying it.
+    //
+    // Reads of freed memory pass under the normal allocator, so this phase only
+    // FAILS under Guard Malloc:
+    //   DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib \
+    //     ./tests/<config>/neui_popup_surface_smoke_macos
+    {
+      g_dismissals.clear();
+      neui_widget_t frame2 = w->create(sess, none, NEUI_W_APPWINDOW,
+                                       220, 180, 420, 260, nullptr);
+      neui_widget_t anchor2 = w->create(sess, frame2, NEUI_W_BUTTON,
+                                        16, 40, 140, 28, nullptr);
+      w->set_text(sess, anchor2, "anchor");
+      neui_widget_t picker2 = w->create(sess, none, NEUI_W_POPUPSURFACE,
+                                        0, 0, 300, 200, nullptr);
+      w->create(sess, picker2, NEUI_W_CUSTOMDRAW, 0, 0, 300, 200, nullptr);
+      w->show(sess, frame2);
+      pump(0.30);
+
+      NSWindow* own2 = window_for(w, sess, frame2);
+      check(own2 != nil, "second owner window not realized");
+      check(pu->open(sess, picker2, anchor2, 0, 2, NEUI_POPUP_BELOW),
+            "open() against the second frame failed");
+      pump(0.25);
+      check(pu->is_open(sess, picker2), "the second popup should be open");
+
+      // Arm the handler, then resize the owner from OUTSIDE - AppKit drives
+      // setFrameSize:, which is the hook under test. Our own resize path would
+      // take the _self_resizing early-out and prove nothing.
+      g_destroy_owner_on_dismiss = frame2;
+      if (own2) {
+        NSRect f2 = own2.frame;
+        f2.size.width  += 40;
+        f2.size.height += 30;
+        [own2 setFrame:f2 display:YES];
+      }
+      pump(0.40);
+
+      check(g_destroy_owner_on_dismiss.id == UINT32_MAX,
+            "the dismissal handler never ran - the resize did not dismiss");
+      check(g_dismissals.size() == 1 &&
+            g_dismissals[0].reason == NEUI_POPUP_DISMISS_OWNER_MOVED,
+            "an owner resize should report exactly one OWNER_MOVED dismissal");
+      check(!pu->is_open(sess, picker2),
+            "the popup must be closed after its owner was destroyed");
+      NSWindow* orphan2 = window_for(w, sess, picker2);
+      check(orphan2 == nil || !orphan2.isVisible,
+            "no visible popup window may outlive an owner destroyed this way");
+    }
 
     host->destroy(sess);
     pump(0.20);

@@ -2455,7 +2455,7 @@ namespace xpl_host
   // is not a fallback here but the only correct answer. The type and
   // NEUI_API_POPUP still exist, and get_clamp_size reports the frame, which is
   // exactly the fact a client needs to lay out a browser instead of a wall of
-  // rows (plans/popup-surface.md).
+  // rows (docs/popup-surfaces.md).
   bool platform_supports_popup_surface() { return false; }
 
   void platform_get_work_area(void* /*near_native*/,

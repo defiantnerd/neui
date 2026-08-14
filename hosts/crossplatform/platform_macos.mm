@@ -269,8 +269,19 @@ void wake_app_event_pump()
   // re-placing it mid-resize is worse than closing it - which is what every OS
   // menu does. Skipped for the popup's own views and for our own placement.
   if (!xpl_host::popup_placing() && session->popup_surface_open() &&
-      ![self isPopupSurfaceView])
+      ![self isPopupSurfaceView]) {
     session->close_all_popup_surfaces(NEUI_POPUP_DISMISS_OWNER_MOVED);
+    // That dispatched POPUP_DISMISSED synchronously, and the documented client
+    // response - drop the state the popup was opened with - routinely means
+    // destroying the owner frame, which frees the WidgetData resolved above. So
+    // re-resolve before touching it again, exactly as the win32 (get_wud) and
+    // Linux (find_window) dismissal sites do; a frame that is gone has no RESIZE
+    // left to report. Without this the dispatch below reads wd->widget_id out of
+    // freed memory - invisible under the normal allocator, which is why the
+    // harness phase covering it runs under Guard Malloc.
+    wd = session->get_widget(widget_index);
+    if (!wd) return;
+  }
 
   // Report the height BELOW any in-frame menubar band so client layout matches
   // the other hosts. 0 on macOS (the menubar is the system menu bar), but

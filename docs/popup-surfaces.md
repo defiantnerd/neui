@@ -1,9 +1,11 @@
 # Popup surfaces (`NEUI_W_POPUPSURFACE` / `NEUI_API_POPUP`)
 
 An overlay that may leave its owner frame. Public API and the client-facing
-contract live in `include/neui/d/popup.h`; the design rationale and the open
-questions are in `plans/popup-surface.md` (response to issue #23). This file is
-the implementer's map.
+contract live in `include/neui/d/popup.h`; this file is the implementer's map and
+carries the design rationale. What is still *open* — the in-frame backing,
+keyboard, accessibility, re-pointing the built-ins — is in
+`plans/popup-surface.md`, and the limitations a client can hit are listed in
+`docs/deferred-issues.md`. Both trace back to issue #23.
 
 ## Why it exists
 
@@ -46,6 +48,37 @@ Consequences worth knowing:
 - A surface stores **screen** coordinates in `x`/`y`. It is the one frame kind
   whose position is not parent-relative, because it has no parent to be relative
   to and the platform needs screen placement.
+
+### Why two backings, and a clamp rect rather than a capability bit
+
+Whether a popup may exceed its frame is a real platform difference — owned
+top-level windows exist on win32 / macOS / X11 and do not on iOS, WASM, LVGL or
+null — but it is not something a client should write two UIs for. So the **type
+exists everywhere** and the backing varies, which keeps one content path in the
+client and one layout path in the host. A type that vanished where it cannot be a
+window would force the fork, and on iOS it would also mean client code that fails
+to build a menu at all.
+
+The one fact a client genuinely needs is not "am I a desktop window" but **"what
+box will I be clamped to"** — that changes *content*, not just placement: a
+1030×970 FX selector that must live in-frame is not a smaller grid, it is a
+scrolling or paged browser. Hence `get_clamp_size` returns a **rect**, and there is
+deliberately no capability boolean: a bit invites `if (desktop) { … } else { … }`,
+which is the fork this design exists to avoid. Pair it with the documented
+degradation idiom — put popup content in a scrolling `SECTION` — and the same
+client code is a 1030×970 desktop popup here and that grid scrolling inside a
+700×500 box there.
+
+The clamp rect must also never be asked to cover *placement* failures. If a host
+reports the monitor work area and a sandboxing DAW then z-orders the popup under
+its own window, that is a placement failure, a different concept with different
+documentation. Do not blur them.
+
+One more reason the in-frame backing is the cheap path rather than an emulation of
+the expensive one: a popup with a desktop backing gets **its own render target at
+its own size**, so on the Cairo software backend a 1030×970 popup is a ~4 MB ARGB
+buffer and a three-level cascade is three of them, allocated on a gesture. The
+in-frame backing needs no extra surface at all.
 
 ## Placement
 
@@ -104,8 +137,8 @@ then makes ambiguous.
 
 While a stack is open the widgets underneath must stop behaving like a live UI.
 That **suppression**, not event delivery, is what an OS pointer capture was ever
-buying, so it lives in the session (`popup_gate_press` / `_hover` / `_key` /
-`popup_take_release`) and is shared by both backings and all platforms:
+buying, so it lives in the session (`popup_gate_press` / `_hover` / `_wheel` /
+`_key` / `popup_take_release`) and is shared by both backings and all platforms:
 
 - press outside the stack → close everything, **swallow** (and swallow the paired
   release). One click must not both close a picker and move a parameter.
@@ -210,8 +243,14 @@ Four lifetime hazards the code exists to prevent:
   the frame slot is also snapshotted before the closes, since two menu closes run
   first). The same applies to any *other* client dispatch in the same handler —
   Linux's `ConfigureNotify` re-resolves a second time after its `RESIZE` dispatch.
-  macOS `setFrameSize:` (`platform_macos.mm:262-285`) has the same shape and has
-  not been audited for it.
+  macOS `setFrameSize:` had the same shape and **was** hit by it (audited and
+  fixed 2026-08-14): it resolved the `WidgetData` before the dismissal and then
+  read `wd->widget_id` to fill the `RESIZE` event, so an owner resize whose
+  handler destroyed the owner read freed memory — a clean SIGSEGV under Guard
+  Malloc, silent under the normal allocator. It re-resolves and bails now, and
+  phase 8 of `tests/popup_surface_smoke_macos.mm` covers it. The other two macOS
+  dismissal sites (`windowDidMove:` / `windowDidResignKey:`, and the two blocks in
+  `platform_popup_grab_begin`) return immediately after closing and need nothing.
 
 Closing pops the level from `_popup_surfaces` **before** any teardown or client
 dispatch, so the stack strictly shrinks and a client that closes another surface
@@ -327,7 +366,7 @@ handler had already destroyed.
 
 | | desktop backing | in-frame backing | notes |
 |---|---|---|---|
-| macOS (xpl) | **yes** | — | verified: `tests/popup_surface_smoke_macos.mm` + an interactive pass |
+| macOS (xpl) | **yes** | — | verified: `tests/popup_surface_smoke_macos.mm` (also under Guard Malloc) + an interactive pass |
 | win32 (xpl) | **yes** | not yet | verified 2026-08-14: `tests/popup_surface_smoke_win32.cpp` (one defect found, below) |
 | Linux (xpl) | **yes** | not yet | verified 2026-08-14: `tests/popup_surface_smoke_linux.cpp` (one defect found, below) |
 | iOS / null | never | not yet | an AUv3 view has no top-level window to escape into |
@@ -375,9 +414,24 @@ rather than neui. Built but not ctest-registered; run
 `./tests/<config>/neui_popup_surface_smoke_macos`. Phases: placement (the rect
 genuinely leaves the owner), ownership (`-childWindows`), activation (never key),
 clamping + flip, cascade (flat ownership, deepest-first unwind), lifetime (owner
-destroy leaves no window), and the input gate driven through `Session` directly
+destroy leaves no window), the input gate driven through `Session` directly
 (synthetic HID events would need an unlocked screen and Accessibility
-permission).
+permission), and the re-entrancy phase below.
+
+Run it under **Guard Malloc** as well, and not as a formality — phase 8 (destroy
+the owner from the dismissal handler) is the one phase whose defect is a *read* of
+freed memory, so it passes under the normal allocator and segfaults here:
+
+```
+DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib \
+  ./tests/<config>/neui_popup_surface_smoke_macos
+```
+
+Note it swallows buffered stdout on a crash, so a failing run can look like it
+printed nothing — the same trap the Linux harnesses hit. `lldb -b -o run` gives
+the frame directly. `neui_modal_smoke_macos` re-execs itself under Guard Malloc
+for this same class of defect; this harness does not, because only one of its
+phases needs it.
 
 `tests/popup_surface_smoke_win32.cpp` — the counterpart, and **not** a port. The
 portable half is proven once on macOS and is the same code here, so this targets

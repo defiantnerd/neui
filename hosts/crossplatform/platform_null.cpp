@@ -138,7 +138,7 @@ namespace xpl_host
 
   // Popup surfaces: no windows at all here, so the in-frame backing is the only
   // possible one and every seam below is inert. The TYPE still exists and
-  // NEUI_API_POPUP still answers - see plans/popup-surface.md for why a client
+  // NEUI_API_POPUP still answers - see docs/popup-surfaces.md for why a client
   // must never have to ask "does this platform have popups" and fork its UI.
   bool platform_supports_popup_surface() { return false; }
 
