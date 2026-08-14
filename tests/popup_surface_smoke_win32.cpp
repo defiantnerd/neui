@@ -768,6 +768,97 @@ int main()
     pump_for(200);
   }
 
+  phase("6c. UI_SCALE: placement and inheritance under a zoomed owner");
+  {
+    // The condition NO harness set, which is exactly why two defects lived here:
+    // every clamp / flip / offset assertion above is vacuous at zoom 1.0. Uses
+    // frame2 + the small surface so the zoomed box cannot reach the work-area
+    // edge - clamping here would mask the placement assertion.
+    auto* attrs = (neui_attr_api_t*) g_api->get_interface(sess, NEUI_API_ATTRS);
+    check(attrs != nullptr, "NEUI_API_ATTRS present");
+    HWND owner_b = hwnd_of(frame2);
+    if (attrs && owner_b) {
+      const float Z = 1.5f;
+      const float dpi_s = scale_of(owner_b);
+
+      // The clamp box is what a client lays content out against, and the client
+      // works in logical px that the host then multiplies by the zoom - so the
+      // box it may spend has to shrink when the owner zooms.
+      int cw0 = 0, ch0 = 0;
+      pu->get_clamp_size(sess, button2, &cw0, &ch0);
+      attrs->set_float(sess, frame2, NEUI_ATTR_UI_SCALE, Z);
+      pump_for(300);
+      int cw = 0, ch = 0;
+      pu->get_clamp_size(sess, button2, &cw, &ch);
+      std::printf("        clamp at 100%%=%dx%d, at 150%%=%dx%d\n",
+                  cw0, ch0, cw, ch);
+      check(cw < cw0 && ch < ch0,
+            "the clamp box shrinks when the owner is zoomed");
+      check(std::abs(cw - (int)(cw0 / Z)) <= 2,
+            "the clamp box is the work area divided by the zoom");
+
+      g_dismissals.clear();
+      check(pu->open(sess, detail, button2, 0, 0, NEUI_POPUP_BELOW),
+            "open() against the zoomed owner");
+      pump_for(300);
+      HWND zp = hwnd_of(detail);
+      check(zp != nullptr && IsWindowVisible(zp), "the zoomed popup is visible");
+      if (zp) {
+        RECT zr = rect_of(zp);
+        print_rect("zoomed popup", zr);
+        // The platform sizes the window as logical * dpi * zoom.
+        const int want_w = (int)(260 * Z * dpi_s + 0.5f);
+        const int want_h = (int)(150 * Z * dpi_s + 0.5f);
+        std::printf("        size got %ldx%ld want %dx%d\n",
+                    zr.right - zr.left, zr.bottom - zr.top, want_w, want_h);
+        check(std::abs((int)(zr.right - zr.left) - want_w) <= 3 &&
+              std::abs((int)(zr.bottom - zr.top) - want_h) <= 3,
+              "the zoomed popup window is logical size * zoom");
+
+        // THE placement assertion. button2 is at (16, 40) size 160x30 in frame2's
+        // client, logical - so on screen its bottom sits (40+30)*zoom*dpi below
+        // the client origin. A BELOW popup must start at or after that. With the
+        // zoom left out of the arithmetic the popup landed (zoom-1)*(40+30)
+        // logical px too high, i.e. partway UP its own anchor.
+        POINT corigin = { 0, 0 };
+        ClientToScreen(owner_b, &corigin);
+        const int anchor_bottom = corigin.y + (int)((40 + 30) * Z * dpi_s + 0.5f);
+        std::printf("        anchor bottom=%d popup top=%ld\n",
+                    anchor_bottom, zr.top);
+        check(zr.top >= anchor_bottom - 2,
+              "a BELOW popup starts at the zoomed anchor's bottom, not inside it");
+
+        check(std::abs(attrs->get_float(sess, detail, NEUI_ATTR_UI_SCALE, 1.0f) - Z)
+                < 0.001f,
+              "the popup inherited the owner's zoom");
+      }
+
+      // Finding 9: the inheritance used to be one-directional, with no writer that
+      // could ever put it back. Return the owner to 100 % and reopen: a stale 1.5
+      // would paint and hit-test at 1.5 while the window was sized at 1.0.
+      pu->close_all(sess);
+      pump_for(150);
+      attrs->set_float(sess, frame2, NEUI_ATTR_UI_SCALE, 1.0f);
+      pump_for(300);
+      check(pu->open(sess, detail, button2, 0, 0, NEUI_POPUP_BELOW),
+            "reopen against the un-zoomed owner");
+      pump_for(250);
+      check(std::abs(attrs->get_float(sess, detail, NEUI_ATTR_UI_SCALE, 1.0f) - 1.0f)
+              < 0.001f,
+            "the popup's inherited zoom went back to 1.0, not stale at 1.5");
+      if (HWND up = hwnd_of(detail)) {
+        RECT ur = rect_of(up);
+        const int want_w = (int)(260 * dpi_s + 0.5f);
+        std::printf("        un-zoomed size got %ldx%ld want %dx...\n",
+                    ur.right - ur.left, ur.bottom - ur.top, want_w);
+        check(std::abs((int)(ur.right - ur.left) - want_w) <= 3,
+              "the reopened popup is sized at 1.0, not at the stale zoom");
+      }
+      pu->close_all(sess);
+      pump_for(150);
+    }
+  }
+
   phase("11. LIFETIME: destroying the owner takes the popup with it");
   {
     g_dismissals.clear();

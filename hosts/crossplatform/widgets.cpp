@@ -337,6 +337,19 @@ namespace xpl_host
     // is open leaves a live borderless window floating over the DAW - owned by a
     // frame that no longer exists, with the outside-press watch still running.
     s->close_popup_surfaces_if_within(idx);
+    // Both closes above dispatch into client code - POPUP_DISMISSED is documented
+    // as the place to drop the state a popup was opened with - so re-validate,
+    // the same guard the focus and end_modal steps earlier in this function
+    // already carry. A nested w_destroy for this same slot has already run its
+    // own forget_dead_hover / tab reflow, so returning here loses nothing.
+    //
+    // NOTE this does not make the slot-REUSE case safe: a handler that destroys
+    // this widget and creates another lands the new one in this very slot, where
+    // exists(idx) is true again and nothing distinguishes it. That needs a
+    // generation counter and is the project-wide deferred limitation in
+    // docs/deferred-issues.md ("stale-after-slot-reuse not detected"), not
+    // something local to popups.
+    if (!s->_widgets.exists(idx)) return;
 
     destroy_recursive(s, idx, client_api, token);
 

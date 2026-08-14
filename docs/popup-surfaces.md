@@ -64,7 +64,36 @@ Consequences worth knowing:
    silently shrinking a surface would change a layout the client already
    committed to. `get_clamp_size` is how a client learns the box in advance.
 6. inherit the owner's `NEUI_ATTR_UI_SCALE`, or a 100 % popup appears over a
-   150 % editor.
+   150 % editor. Written **unconditionally**, including back down to 1.0 — this is
+   the only writer of that attr on a surface, so a guarded write left a popup
+   opened once against a zoomed editor stuck at that zoom for life.
+
+### The one coordinate space, and the zoom
+
+Everything in steps 3-5 happens in **unzoomed screen logical px** (screen physical
+÷ DPI). That is what `platform_client_to_screen` returns, what
+`platform_get_work_area` reports, and what `platform_show_popup_surface` takes for
+the **position** — while it takes the **size** unzoomed and applies the zoom
+itself. Two consequences that are easy to get wrong, and were:
+
+- **A widget's extent in this space is its logical extent times the zoom.** So
+  every extent the arithmetic compares against a screen coordinate — the anchor's
+  `aw`/`ah`, the popup's `pw`/`ph`, and the anchor-local `off_x`/`off_y` — must be
+  converted. Untouched, a 150 % editor placed its popup as though everything were
+  100 %: a `BELOW` popup landed partway *up* its own anchor, and the clamp
+  reserved room for a box `(zoom-1)*ph` shorter than the window then created, so
+  it hung off the bottom of the work area. The zoom is therefore read **before**
+  any placement arithmetic, not after it.
+- **`platform_client_to_screen` is asymmetric**: the zoom goes *in* (the client
+  point sits in a zoomed client) and only the DPI comes back *out* (frame
+  positions never scale, only sizes do). macOS (`frameZoom`) and Linux
+  (`window_scale` in, `screen_scale` out) always did this; win32 applied no zoom
+  at all, which understated every anchor offset by the zoom factor.
+
+`get_clamp_size` reports in the **client's** logical space — the work area divided
+by the owner's zoom — because a client sizes content in logical px that the host
+then multiplies by that zoom. Reporting the raw work area would have a client fill
+a box half again too big for it on a 150 % editor.
 
 There is deliberately **no screen-coordinate form** in the public API: neui's
 contract is logical px at 96 DPI and `UI_SCALE` is built on it, so absolute
@@ -113,7 +142,23 @@ The platform layer contributes only the presses our own windows never see:
 |---|---|---|
 | macOS | `addLocalMonitorForEventsMatchingMask` (in-process → the DAW's own views) + `NSApplicationDidResignActive` | complete, no grab |
 | X11 | `XGrabPointer` with `owner_events=True` | complete — that grab *is* the menu mechanism there and still delivers normally over our own windows |
-| win32 | our windows + `WM_ACTIVATEAPP` | **gap**: a press in the DAW's own UI outside our child HWND raises no activation change, because we never held activation to lose |
+| win32 | our windows + `WM_ACTIVATE` (another window of ours) + `WM_ACTIVATEAPP` (another app) | **gap**: a press in the DAW's own UI outside our child HWND raises no activation change, because we never held activation to lose |
+
+`WM_ACTIVATE` is needed on win32 *in addition to* `WM_ACTIVATEAPP`, which fires
+only for an application-level change: two frames in one process (two plugin
+editors in one DAW, or an app with two windows) swap activation without it, so a
+click into the second session's frame left the first session's popup floating.
+Handled on the **deactivation** side, which is local to the session that owns the
+popup and needs no cross-session walk. macOS gets this for free from its
+in-process `NSEvent` monitor and X11 from the grab.
+
+The X11 grab needs one more thing the other two do not: it is held on the
+**deepest popup's own window**, and X releases a grab when its grab window stops
+being viewable — which is exactly what unmapping a level does. So every close
+re-points the watch at whatever level is now deepest (`ps_resync_grab`), or the
+surviving levels of a cascade would be left with no outside-press watch at all.
+macOS's watch is session-scoped and idempotent and win32 has no grab, so both
+simply ignore the re-point.
 
 X11 needs one extra step the other two do not. With `owner_events=True` a press
 that landed outside *every* window of ours is reported against the **grab
@@ -251,6 +296,13 @@ handler had already destroyed.
 - `create_frame` folds the frame zoom into the create-time position, which is
   wrong for a screen coordinate - harmless only because the window is created
   unmapped and re-placed before the map.
+- **The embedded pump has to paint more than one window.** `pump_and_tick` is the
+  only loop that runs in a DAW, and a popup surface is a *second* `LinuxWindow` -
+  so painting just the frame's own window left a picker mapped as a permanently
+  blank rectangle. It now paints every window of **this session** that needs it,
+  deliberately not the unrestricted `flush_pending_paints()`: a DAW may host
+  several plugin instances, each with its own session, Display and pump, possibly
+  on its own thread, so one instance's tick must never paint another's.
 - `_NET_WORKAREA` for the work area (falls back to the whole screen); a
   per-monitor answer wants RandR and is deferred. The fallback is not exotic:
   WSLg's Weston publishes no `_NET_WORKAREA` at all.

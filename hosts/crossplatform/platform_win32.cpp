@@ -678,6 +678,31 @@ namespace xpl_host
       break;
     }
 
+    // Another window of OURS came forward. WM_ACTIVATEAPP does NOT fire for that
+    // - it is an application-level change and both windows belong to the same
+    // process - so without this a click into a second session's frame (two plugin
+    // editors in one DAW, or an app with two windows) left the first session's
+    // popup floating over it. macOS gets this from its in-process NSEvent monitor
+    // and X11 from the pointer grab; win32 has to be told. Distinct from the
+    // documented WM_ACTIVATEAPP gap, which is about another PROCESS's UI.
+    //
+    // The DEACTIVATION side is the one handled, because it is local to the session
+    // that owns the popup and needs no cross-session walk. A popup surface is
+    // WS_EX_NOACTIVATE and shown with SW_SHOWNOACTIVATE, so opening one moves no
+    // activation and this never fires for our own placement; popup_placing()
+    // covers the rest. Falls through to DefWindowProc - activation needs its
+    // default processing.
+    case WM_ACTIVATE: {
+      if (LOWORD(wParam) == WA_INACTIVE && !popup_placing()) {
+        if (auto* wud = get_wud(hwnd)) {
+          if (wud->session->popup_surface_open() &&
+              wud->session->popup_surface_depth(wud->widget_index) < 0)
+            wud->session->close_all_popup_surfaces(NEUI_POPUP_DISMISS_DEACTIVATED);
+        }
+      }
+      break;
+    }
+
     // The owner being dragged dismisses any open popup surface - what every OS
     // menu does; re-placing one mid-drag is worse than closing it. Skipped for
     // the popup's own windows (they move because WE moved them).
@@ -2462,10 +2487,26 @@ namespace xpl_host
     if (sx) *sx = lx;
     if (sy) *sy = ly;
     if (!native_handle) return;
-    float scale = platform_get_scale_factor(native_handle);
+    HWND hwnd = (HWND)native_handle;
+    float scale = platform_get_scale_factor(native_handle);   // DPI only
     if (!(scale > 0.0f)) scale = 1.0f;
-    POINT p = { (LONG)((float)lx * scale), (LONG)((float)ly * scale) };
-    if (!ClientToScreen((HWND)native_handle, &p)) return;
+    // (lx, ly) is UNZOOMED logical px inside a client that is painted at the
+    // frame's zoom, so its physical offset is lx * dpi * zoom. Screen space itself
+    // is unzoomed - frame POSITIONS never scale by the zoom, only sizes do - so
+    // the zoom goes in and only the DPI comes back out. That asymmetry is what
+    // macOS and Linux already do (frameZoom / window_scale in, points /
+    // screen_scale out); win32 applied no zoom at all, which understated every
+    // anchor offset by the zoom factor and put a popup partway up its own anchor
+    // on a zoomed editor.
+    float zoom = 1.0f;
+    if (auto* wud = get_wud(hwnd)) {
+      if (auto* fwd = wud->session->get_widget(wud->widget_index))
+        zoom = fwd->ui_scale();
+    }
+    if (!(zoom > 0.0f)) zoom = 1.0f;
+    POINT p = { (LONG)((float)lx * scale * zoom),
+                (LONG)((float)ly * scale * zoom) };
+    if (!ClientToScreen(hwnd, &p)) return;
     if (sx) *sx = (int)((float)p.x / scale);
     if (sy) *sy = (int)((float)p.y / scale);
   }

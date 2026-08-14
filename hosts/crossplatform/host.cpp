@@ -5646,6 +5646,17 @@ namespace xpl_host
 
     int wx = 0, wy = 0, ww = 0, wh = 0;
     platform_get_work_area(_widgets[root].native_handle, &wx, &wy, &ww, &wh);
+    // The work area comes back in UNZOOMED screen logical px, but a client sizes
+    // its surface in logical px that the host then multiplies by the owner's zoom
+    // - so on a 150 % editor a popup built to fill this box would come out half
+    // again too big and get clamped. Report the box the client can actually
+    // spend. (Same space as the in-frame branch above, which uses fw.width /
+    // fw.height - widget geometry, logical at every zoom.)
+    const float zoom = _widgets[root].ui_scale();
+    if (zoom > 0.0f && zoom != 1.0f) {
+      ww = static_cast<int>(static_cast<float>(ww) / zoom);
+      wh = static_cast<int>(static_cast<float>(wh) / zoom);
+    }
     if (out_w) *out_w = ww;
     if (out_h) *out_h = wh;
   }
@@ -5705,22 +5716,43 @@ namespace xpl_host
     int sx = ax, sy = ay;
     platform_client_to_screen(anchor_native, ax, ay, &sx, &sy);
 
+    // The owner's zoom, read BEFORE any placement arithmetic. It used to be read
+    // after all of it, which is what made this whole block wrong at zoom != 1.
+    //
+    // Screen coordinates here are UNZOOMED logical px (screen physical / DPI):
+    // that is what platform_client_to_screen returns, what platform_get_work_area
+    // reports, and what platform_show_popup_surface takes for the POSITION -
+    // while it takes the SIZE unzoomed and applies the zoom itself. So a widget's
+    // on-screen extent in this space is its logical extent times the zoom, and
+    // every extent compared against a screen coordinate below has to be
+    // converted. Left unconverted, a 150 % editor placed its popup as though
+    // everything were 100 %: a BELOW popup landed partway up its own anchor, and
+    // the clamp reserved room for a box (zoom-1)*ph shorter than the window that
+    // was then created, so it hung off the bottom of the work area.
+    const float owner_zoom = _widgets[root].ui_scale();
+    const auto to_screen = [owner_zoom](int v) {
+      return static_cast<int>(v * owner_zoom + (v < 0 ? -0.5f : 0.5f));
+    };
     const int pw = ps->width;
     const int ph = ps->height;
+    const int aws = to_screen(aw), ahs = to_screen(ah);   // anchor, on screen
+    const int pws = to_screen(pw), phs = to_screen(ph);   // popup, on screen
+    // The offsets are documented as anchor-LOCAL logical px, so they zoom too.
+    const int oxs = to_screen(off_x), oys = to_screen(off_y);
     int px = sx, py = sy;
     switch (side) {
-    case NEUI_POPUP_ABOVE: px = sx + off_x;      py = sy - ph + off_y;  break;
-    case NEUI_POPUP_RIGHT: px = sx + aw + off_x; py = sy + off_y;       break;
-    case NEUI_POPUP_LEFT:  px = sx - pw + off_x; py = sy + off_y;       break;
+    case NEUI_POPUP_ABOVE: px = sx + oxs;       py = sy - phs + oys;  break;
+    case NEUI_POPUP_RIGHT: px = sx + aws + oxs; py = sy + oys;        break;
+    case NEUI_POPUP_LEFT:  px = sx - pws + oxs; py = sy + oys;        break;
     case NEUI_POPUP_AT_POINTER: {
       int cx = sx, cy = sy;
       platform_get_pointer_pos(&cx, &cy);
-      px = cx + off_x;
-      py = cy + off_y;
+      px = cx + oxs;
+      py = cy + oys;
       break;
     }
     case NEUI_POPUP_BELOW:
-    default:               px = sx + off_x;      py = sy + ah + off_y;  break;
+    default:               px = sx + oxs;       py = sy + ahs + oys;  break;
     }
 
     // Clamp box. Desktop placement buys a much bigger box, not an unbounded one:
@@ -5734,16 +5766,16 @@ namespace xpl_host
       // other does - the drop-list / submenu behaviour, on all four sides.
       switch (side) {
       case NEUI_POPUP_BELOW:
-        if (py + ph > wy + wh && (sy - ph + off_y) >= wy) py = sy - ph + off_y;
+        if (py + phs > wy + wh && (sy - phs + oys) >= wy) py = sy - phs + oys;
         break;
       case NEUI_POPUP_ABOVE:
-        if (py < wy && (sy + ah + off_y) + ph <= wy + wh) py = sy + ah + off_y;
+        if (py < wy && (sy + ahs + oys) + phs <= wy + wh) py = sy + ahs + oys;
         break;
       case NEUI_POPUP_RIGHT:
-        if (px + pw > wx + ww && (sx - pw + off_x) >= wx) px = sx - pw + off_x;
+        if (px + pws > wx + ww && (sx - pws + oxs) >= wx) px = sx - pws + oxs;
         break;
       case NEUI_POPUP_LEFT:
-        if (px < wx && (sx + aw + off_x) + pw <= wx + ww) px = sx + aw + off_x;
+        if (px < wx && (sx + aws + oxs) + pws <= wx + ww) px = sx + aws + oxs;
         break;
       default: break;
       }
@@ -5751,16 +5783,20 @@ namespace xpl_host
       // surface would change the layout the client already committed to; the
       // clamp-size query is the honest way to tell it in advance, and a popup
       // bigger than the work area is a client that ignored the answer.
-      if (px + pw > wx + ww) px = wx + ww - pw;
-      if (py + ph > wy + wh) py = wy + wh - ph;
+      if (px + pws > wx + ww) px = wx + ww - pws;
+      if (py + phs > wy + wh) py = wy + wh - phs;
       if (px < wx) px = wx;
       if (py < wy) py = wy;
     }
 
     // Inherit the owner's zoom, or a 100 % popup appears over a 150 % editor.
-    const float owner_zoom = _widgets[root].ui_scale();
-    if (owner_zoom != 1.0f)
-      neui_detail::ensure_attrs(ps->attrs).set_float(NEUI_ATTR_UI_SCALE, owner_zoom);
+    // Written UNCONDITIONALLY: guarded by `if (owner_zoom != 1.0f)` this was
+    // one-directional, and line for line the only writer of the attr on a popup
+    // surface - nothing ever cleared it. So a surface opened once against a 150 %
+    // editor kept that zoom for the rest of its life: reopen it against a 100 %
+    // owner and paint_frame scaled by the stale 1.5 while the platform sized the
+    // window from the fresh 1.0, giving a clipped, misaligned popup.
+    neui_detail::ensure_attrs(ps->attrs).set_float(NEUI_ATTR_UI_SCALE, owner_zoom);
 
     ps->popup_owner  = root;
     ps->popup_anchor = anchor_idx;
@@ -5793,6 +5829,26 @@ namespace xpl_host
     return true;
   }
 
+  // Re-point the outside-press watch at whatever level is now deepest, or end it
+  // when the stack has emptied. Called after every close.
+  //
+  // X11 needs this and the other two do not. There the watch IS an
+  // XGrabPointer, held on the deepest popup's own window - and X releases a grab
+  // when its grab window stops being viewable, which is precisely what
+  // platform_hide_popup_surface does by unmapping. So closing one level of a
+  // cascade silently killed the watch for the levels that REMAIN, after which
+  // nothing dismissed at all: popup_press_landed_outside depends entirely on the
+  // grab redirecting foreign presses to us. macOS installs one session-scoped
+  // watch per stack (idempotent, so the re-point is free) and win32 has no grab
+  // to re-point, so this stays one rule instead of a platform special case.
+  void ps_resync_grab(Session* s)
+  {
+    if (s->_popup_surfaces.empty()) { platform_popup_grab_end(s); return; }
+    const uint32_t top = s->_popup_surfaces.back();
+    if (s->_widgets.exists(top))
+      platform_popup_grab_begin(s, s->_widgets[top].native_handle);
+  }
+
   void Session::close_popup_surface(uint32_t surface_idx, uint32_t reason)
   {
     const int d = popup_surface_depth(surface_idx);
@@ -5800,13 +5856,13 @@ namespace xpl_host
     while (_popup_surfaces.size() > static_cast<size_t>(d) + 1)
       ps_close_top(this, NEUI_POPUP_DISMISS_CASCADE);
     ps_close_top(this, reason);
-    if (_popup_surfaces.empty()) platform_popup_grab_end(this);
+    ps_resync_grab(this);
   }
 
   void Session::close_popup_surfaces_deeper_than(size_t depth, uint32_t reason)
   {
     while (_popup_surfaces.size() > depth) ps_close_top(this, reason);
-    if (_popup_surfaces.empty()) platform_popup_grab_end(this);
+    ps_resync_grab(this);
   }
 
   void Session::close_all_popup_surfaces(uint32_t reason)

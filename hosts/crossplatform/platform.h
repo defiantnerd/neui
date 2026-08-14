@@ -142,6 +142,18 @@ namespace xpl_host
   //
   // Shared rather than per-platform because all three desktop backings hit it
   // identically, and a second copy would drift the first time one was touched.
+  //
+  // PROCESS-GLOBAL, guarding state that is per-Session, and deliberately left
+  // that way: it is a depth counter around straight-line platform calls, so the
+  // only thing that could make it suppress the WRONG session's dismissal is a
+  // nested message pump running INSIDE a scope - re-entering another session's
+  // WM_MOVE / ConfigureNotify while the counter is up. None of the bracketed
+  // calls pumps today (create / SetWindowPos / ShowWindow / XMapWindow / XSync),
+  // and two plugin instances in one DAW are separate Sessions on the same thread,
+  // which is exactly the arrangement where a per-Session counter would matter. So
+  // if a bracketed call ever grows a nested pump - or a modal - this needs to
+  // become per-Session state rather than a static, and the symptom will be a
+  // popup that fails to dismiss when its owner is dragged.
   inline int& popup_placing_depth() { static int depth = 0; return depth; }
   inline bool popup_placing() { return popup_placing_depth() != 0; }
 

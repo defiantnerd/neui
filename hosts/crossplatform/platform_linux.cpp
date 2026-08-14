@@ -555,6 +555,24 @@ namespace
       if (g_windows.count(lw->win)) paint_window(lw);
   }
 
+  // flush_pending_paints restricted to ONE session's windows. The embedded pump
+  // needs this and cannot use the unrestricted form: a DAW may host several
+  // plugin instances, each with its own session, its own Display and its own
+  // pump - possibly on its own thread - so one instance's tick must never paint
+  // another instance's window.
+  void flush_pending_paints_for_session(Session* s)
+  {
+    if (!s) return;
+    // Snapshot first: a paint callback can create / destroy windows.
+    std::vector<LinuxWindow*> todo;
+    todo.reserve(g_windows.size());
+    for (auto& kv : g_windows)
+      if (kv.second->session == s && kv.second->needs_paint)
+        todo.push_back(kv.second);
+    for (auto* lw : todo)
+      if (g_windows.count(lw->win)) paint_window(lw);
+  }
+
   void tick_animations()
   {
     for (auto& kv : g_windows) {
@@ -836,6 +854,13 @@ namespace
     }
     if (be.button == 3) {
       if (s->tree_popup_take_release()) return;
+      // The popup-surface peer, which the right-button path was missing while
+      // BOTH its own press path and the other two platforms had it. Two costs,
+      // not one: the widget under a just-dismissed popup saw an RBUTTON_UP with
+      // no DOWN, and because popup_take_release() is button-agnostic the stale
+      // flag was then consumed by the next unrelated LEFT release - silently
+      // eating that click.
+      if (s->popup_take_release()) return;
       uint32_t hit = s->widget_at(lx, ly, lw->widget_index);
       if (hit == 0) return;
       auto* hw = s->get_widget(hit);
@@ -3166,8 +3191,17 @@ namespace
     // here - the DAW's cadence is the tick source.
     if (lw->session && client_timer_sessions().count(lw->session))
       lw->session->tick_client_timers();
-    if (lw->needs_paint) paint_window(lw);
-    XFlush(lw->dpy);
+    // Every window of THIS session that needs painting, not just this one. A
+    // popup surface is a second LinuxWindow, and in embedded mode this pump is
+    // the only thing that ever runs - every non-embedded loop calls
+    // flush_pending_paints, this called paint_window on one window - so a picker
+    // opened from a plugin editor mapped as a permanently blank rectangle.
+    const Window self_win = lw->win;
+    Session* const self_sess = lw->session;
+    flush_pending_paints_for_session(self_sess);
+    // A WIDGET_PAINT handler is client code and can destroy this frame, which in
+    // embedded mode closes the dedicated Display this was about to flush.
+    if (LinuxWindow* alive = find_window(self_win)) XFlush(alive->dpy);
   }
 
   void platform_destroy_window(WidgetData& wd)
