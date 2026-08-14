@@ -202,7 +202,24 @@ handler had already destroyed.
   wrong for a screen coordinate - harmless only because the window is created
   unmapped and re-placed before the map.
 - `_NET_WORKAREA` for the work area (falls back to the whole screen); a
-  per-monitor answer wants RandR and is deferred.
+  per-monitor answer wants RandR and is deferred. The fallback is not exotic:
+  WSLg's Weston publishes no `_NET_WORKAREA` at all.
+- **X11's PSEUDO focus events are not deactivations, and this cost a defect.**
+  X sends a `FocusOut` / `FocusIn` pair to the focused window around any
+  keyboard grab taken by *another* client - a window-manager keybinding, a
+  screen locker, another application opening its own menu - with
+  `mode == NotifyGrab` / `NotifyUngrab`. It also sends events whose `detail` is
+  `NotifyPointer` (the window is merely being tracked by the pointer) or
+  `NotifyInferior` (focus moved to a *descendant*, so it is still ours). Nobody
+  switched applications in any of those cases. `dispatch_x_event`'s `FocusOut`
+  branch acted on all of them, so an idle popup surface vanished a few seconds
+  after opening - reported as `DEACTIVATED` - whenever anything on the desktop
+  briefly grabbed the keyboard. `is_real_focus_change` now gates both `FocusIn`
+  and `FocusOut` on `mode ∈ {NotifyNormal, NotifyWhileGrabbed}` and
+  `detail ∉ {NotifyPointer, NotifyInferior}`. The bug predates popup surfaces:
+  the same branch closes menubar menus and tree popups and clears `_os_focused`
+  (the focus ring), so those were spuriously dropped too - popup surfaces are
+  simply the first thing that stays on screen long enough to notice.
 
 ## Per-platform status
 
@@ -210,22 +227,28 @@ handler had already destroyed.
 |---|---|---|---|
 | macOS (xpl) | **yes** | — | verified: `tests/popup_surface_smoke_macos.mm` + an interactive pass |
 | win32 (xpl) | **yes** | not yet | verified 2026-08-14: `tests/popup_surface_smoke_win32.cpp` (one defect found, below) |
-| Linux (xpl) | **yes**, UNVERIFIED | not yet | written, never compiled - see below |
+| Linux (xpl) | **yes** | not yet | verified 2026-08-14: `tests/popup_surface_smoke_linux.cpp` (one defect found, below) |
 | iOS / null | never | not yet | an AUv3 view has no top-level window to escape into |
 | native win32 / macOS hosts | n/a | n/a | `NEUI_API_POPUP` is xpl-only, like `_EMBED` / `_TIMER` / `_POINTER` / `_A11Y` |
 
-**The Linux backing has never been built or run.** It was written on macOS, where
-that platform does not compile, so it carries exactly the risk CLAUDE.md's
-cross-platform hygiene note describes: the first real evidence will be Linux CI.
-Treat it as unproven until then. Its shape mirrors macOS deliberately - same
-seams, same ordering, same session logic - so what is being risked is API
-details, not design.
+**Linux has now been built and run too** (2026-08-14, X.Org 24.1 under WSLg /
+Weston XWM). Like win32 it compiled warning-clean on the first attempt, and both
+of its check-first items came back clean:
 
-What to check first there:
+- the `XGrabPointer` **does** succeed after the map - asserted from a second X
+  connection, which is refused with `AlreadyGrabbed` while a popup is up and
+  gets `GrabSuccess` again once the stack closes. The `XSync` at the end of
+  `platform_show_popup_surface` is doing its job.
+- an `override_redirect` window **does not** steal the focus: the owner keeps
+  the input focus across the open, and the popup's window is never the focus
+  window.
 
-- **Linux** - that the `XGrabPointer` succeeds after the map (hence the `XSync`
-  in `platform_show_popup_surface`), and that a WM that ignores
-  `override_redirect` does not steal focus.
+Placement, sizing, the window-type hint, the cascade, deepest-first unwind,
+owner-moved dismissal, the input gate and the destroy path all held unchanged.
+But like win32 it shipped **one real defect**, and again it was in the half no
+amount of care on macOS could have caught: X11's pseudo-focus events were read as
+deactivations, so an idle popup dismissed itself a few seconds after opening. See
+the Linux notes above.
 
 **win32 was in the same position and has now been built and run** (2026-08-14).
 It compiled warning-clean at `/W4` on the first attempt and every placement,
@@ -271,3 +294,22 @@ moved". One phase drives a real outside press through the WndProc and asserts th
 widget underneath saw **no** click, which is the swallow proven end-to-end rather
 than at the gate. Built but not ctest-registered; run
 `tests/<config>/neui_popup_surface_smoke_win32.exe`.
+
+`tests/popup_surface_smoke_linux.cpp` — the third counterpart, same rule: it asks
+**X11** rather than neui, over a **second X connection**, which is what lets it
+act as a different X client. That the popup is a mapped `override_redirect`
+**direct child of the root window** (a window parented into the owner could not
+leave it and would not appear there at all), sized exactly as asked, carrying
+`_NET_WM_WINDOW_TYPE_POPUP_MENU`, with a rect that genuinely leaves the owner's;
+that its top-left really is the anchor's bottom-left plus the offset in root
+coordinates; the two check-first items (the pointer grab is held — the second
+connection is refused with `AlreadyGrabbed` — and the input focus never moves off
+the owner); that another client's **keyboard grab does not dismiss the stack**
+while a real focus change still does, which is the regression guard for the
+defect above; the cascade, its deepest-first unwind, and owner-moved dismissal;
+the gate, including the X11-only `popup_gate_press_outside` route that exists
+because `owner_events=True` reports an outside press against the grab window; and
+that destroying the owner leaves neither a window nor the **pointer grab** behind
+— a stranded grab on X11 means a desktop that no longer responds to the mouse.
+Needs a live display, so built but not ctest-registered; run
+`./tests/neui_popup_surface_smoke_linux`.

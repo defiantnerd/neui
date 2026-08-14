@@ -227,7 +227,22 @@ namespace
     unsigned int last_click_button  = 0;
   };
 
-  std::unordered_map<Window, LinuxWindow*> g_windows;
+  // Immortal (leaked) rather than a destructible global, for exactly the reason
+  // client_timer_sessions() below is: the `sessions` vector lives in host.cpp,
+  // so the relative static-destruction order across the two TUs is unspecified,
+  // and ~Session reaches THIS map through four of its six teardown steps -
+  // platform_timer_stop -> refresh_timer_arm -> any_window_animating iterates
+  // it, and end_relative_pointer / close_all_popup_surfaces / release_cursor all
+  // look windows up in it. When this TU's statics happen to go first, an
+  // application that simply returns from main() without calling
+  // api->destroy(session) segfaults in static destruction, after all of its own
+  // output has been written but while stdio buffers are still unflushed - so the
+  // crash also eats the log that would have explained it.
+  //
+  // A leaked map at exit costs nothing; a destroyed one is a crash. The
+  // reference form keeps every existing `g_windows` use site unchanged.
+  std::unordered_map<Window, LinuxWindow*>& g_windows =
+      *new std::unordered_map<Window, LinuxWindow*>();
 
   LinuxWindow* find_window(Window w)
   {
@@ -1626,6 +1641,27 @@ namespace
     }
   }
 
+  // True when a FocusIn / FocusOut reports an actual change of who holds the
+  // input focus, rather than one of X11's PSEUDO focus events.
+  //
+  // X sends a FocusOut/FocusIn pair around any keyboard grab taken by ANOTHER
+  // client (mode NotifyGrab / NotifyUngrab) - a window-manager keybinding, a
+  // screen locker, another application opening its own menu. Nobody switched
+  // applications, and the focus returns the moment the grab ends. It also sends
+  // events whose detail is NotifyPointer (the window is merely being tracked by
+  // the pointer) or NotifyInferior (focus moved to a DESCENDANT of this window,
+  // so it is still ours).
+  //
+  // Treating those as a deactivation closes every menu and popup surface for no
+  // reason: a popup would vanish seconds after opening because something,
+  // somewhere, briefly grabbed the keyboard. NotifyWhileGrabbed IS real - the
+  // focus genuinely moved, it just moved while a grab was active.
+  bool is_real_focus_change(const XFocusChangeEvent& fe)
+  {
+    return (fe.mode == NotifyNormal || fe.mode == NotifyWhileGrabbed) &&
+           fe.detail != NotifyPointer && fe.detail != NotifyInferior;
+  }
+
   void dispatch_x_event(XEvent& ev)
   {
     if (XFilterEvent(&ev, None)) return;   // let the IME consume composition keys
@@ -1731,8 +1767,12 @@ namespace
       case KeyPress:      dispatch_key_press(lw, ev.xkey);          break;
       case KeyRelease:    dispatch_key_release(lw, ev.xkey);        break;
 
-      case FocusIn:  s->_os_focused = true;  lw->needs_paint = true; break;
+      case FocusIn:
+        if (!is_real_focus_change(ev.xfocus)) break;
+        s->_os_focused = true;  lw->needs_paint = true; break;
       case FocusOut:
+        // A grab-induced or pointer-induced pseudo event is not a deactivation.
+        if (!is_real_focus_change(ev.xfocus)) break;
         s->_os_focused = false;
         // Both menu surfaces must go, and close_tree_popup explicitly: the popup
         // borrows _menu_path, so close_menubar_menu would CLEAR the path while

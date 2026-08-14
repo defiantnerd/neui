@@ -347,6 +347,21 @@ if(UNIX AND NOT APPLE)
   target_compile_features(neui_embed_smoke PRIVATE cxx_std_17)
   target_link_libraries(neui_embed_smoke PRIVATE neui neui-xplhost neui-backend-cairo)
 
+  # Popup-surface acceptance harness, X11. The counterpart to the win32 and
+  # macOS ones, and like them it realizes real windows and asks the PLATFORM
+  # (here: the X server, over a second connection) rather than asking neui to
+  # confirm its own bookkeeping. Needs a live X display, so it is built but NOT
+  # ctest-registered; run ./tests/neui_popup_surface_smoke_linux by hand.
+  find_package(Threads REQUIRED)
+  add_executable(neui_popup_surface_smoke_linux popup_surface_smoke_linux.cpp)
+  target_include_directories(neui_popup_surface_smoke_linux PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/hosts/crossplatform
+    ${PROJECT_SOURCE_DIR}/hosts/shared)
+  target_compile_features(neui_popup_surface_smoke_linux PRIVATE cxx_std_17)
+  target_link_libraries(neui_popup_surface_smoke_linux PRIVATE
+    neui neui-xplhost neui-backend-cairo X11 Threads::Threads)
+
   # Repaint benchmark, Linux/Cairo. Same source as the macOS build above - the
   # file is platform-neutral (it asks for neui.host.crossplatform and uses only
   # the public API). This is the backend where the answer could differ: Cairo is
