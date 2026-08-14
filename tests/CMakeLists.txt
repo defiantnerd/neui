@@ -296,6 +296,34 @@ if(WIN32)
   # needs to read names and values back out.
   target_link_libraries(neui_a11y_provider_smoke_win32 PRIVATE
     neui neui-xplhost neui-win32host ole32 oleaut32)
+
+  # Popup-surface harness - the counterpart to popup_surface_smoke_macos.mm, and
+  # NOT a port of it. The win32 backing shipped written but NEVER COMPILED, so a
+  # build only proves the API calls typecheck; this targets the half win32 writes
+  # for itself and asks WIN32 rather than neui. That the popup is a real
+  # top-level WS_POPUP whose rect leaves the owner, that GetWindow(GW_OWNER) is
+  # the owner's GA_ROOT (win32's -childWindows, and what buys z-order-follows-
+  # owner from the OS), that re-opening against a different frame really moves
+  # ownership through GWLP_HWNDPARENT (the one call with no macOS counterpart),
+  # and - the promise a DAW notices - that opening AND clicking the popup moves
+  # neither the foreground window nor the thread's focus. Plus the three WndProc
+  # branches only win32 has: WM_ACTIVATEAPP as the whole outside-press watch,
+  # WM_MOVE owner-dismissal, and the PopupPlacingScope that keeps placing a
+  # cascade level from reading as "the owner moved". Realizes real HWNDs and
+  # posts real input, so built but NOT ctest-registered; run
+  # tests/<config>/neui_popup_surface_smoke_win32.exe manually.
+  add_executable(neui_popup_surface_smoke_win32 popup_surface_smoke_win32.cpp)
+  target_include_directories(neui_popup_surface_smoke_win32 PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/hosts/crossplatform
+    ${PROJECT_SOURCE_DIR}/hosts/shared)
+  target_compile_features(neui_popup_surface_smoke_win32 PRIVATE cxx_std_17)
+  # neui-win32host is linked because neui_init() references its registration
+  # wrapper unconditionally once it is compiled in - the harness itself asks for
+  # neui.host.crossplatform explicitly (and asserts NEUI_API_POPUP is absent on
+  # the native host, which is the documented feature-detect trap).
+  target_link_libraries(neui_popup_surface_smoke_win32 PRIVATE
+    neui neui-xplhost neui-win32host)
 endif()
 
 # Linux-only: Cairo software backend offscreen smoke test. Unlike neui_tests

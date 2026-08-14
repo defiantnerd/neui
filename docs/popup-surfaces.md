@@ -172,6 +172,21 @@ handler had already destroyed.
   creation there is no `AdjustWindowRectExForDpi` round-trip on placement.
 - No `SetCapture`. `WM_ACTIVATEAPP` in the WndProc is the whole watch, with the
   documented gap above; `WM_MOVE` / `WM_SIZE` drive owner-moved dismissal.
+- **`WS_EX_NOACTIVATE` is not by itself enough, and this cost a defect.** That
+  style only stops Windows from activating a window that is *clicked*; it does
+  nothing about a programmatic `SetFocus`, and `SetFocus` on a top-level window
+  activates it as well. `XplWndProc`'s `WM_CREATE` gives every non-`WS_CHILD`
+  window the keyboard focus (so `WM_KEYDOWN` / `WM_CHAR` arrive), which meant a
+  popup surface took the foreground, the activation *and* the thread's focus away
+  from the editor the instant it opened - precisely the "the editor lost focus"
+  bug report the non-activating style exists to prevent. `WM_CREATE` now skips
+  the focus grab for a `WS_EX_NOACTIVATE` window. It tests the ex-style rather
+  than the widget type so any later non-activating window kind inherits it, and
+  the toast window is unaffected (it runs its own WndProc). The lesson
+  generalizes: on win32 the *style bits are not the promise*, so
+  `tests/popup_surface_smoke_win32.cpp` asserts the observable
+  `GetForegroundWindow` / `GetActiveWindow` / `GetFocus` around a real open and a
+  real click, not the styles alone.
 
 ### Linux (X11)
 
@@ -194,26 +209,34 @@ handler had already destroyed.
 | | desktop backing | in-frame backing | notes |
 |---|---|---|---|
 | macOS (xpl) | **yes** | — | verified: `tests/popup_surface_smoke_macos.mm` + an interactive pass |
-| win32 (xpl) | **yes**, UNVERIFIED | not yet | written, never compiled - see below |
+| win32 (xpl) | **yes** | not yet | verified 2026-08-14: `tests/popup_surface_smoke_win32.cpp` (one defect found, below) |
 | Linux (xpl) | **yes**, UNVERIFIED | not yet | written, never compiled - see below |
 | iOS / null | never | not yet | an AUv3 view has no top-level window to escape into |
 | native win32 / macOS hosts | n/a | n/a | `NEUI_API_POPUP` is xpl-only, like `_EMBED` / `_TIMER` / `_POINTER` / `_A11Y` |
 
-**The win32 and Linux backings have never been built or run.** They were written
-on macOS, where neither platform compiles, so they carry exactly the risk
-CLAUDE.md's cross-platform hygiene note describes: the first real evidence will
-be a Windows build and Linux CI. Treat them as unproven until then. Their shapes
-mirror macOS deliberately - same seams, same ordering, same session logic - so
-what is being risked is API details, not design.
+**The Linux backing has never been built or run.** It was written on macOS, where
+that platform does not compile, so it carries exactly the risk CLAUDE.md's
+cross-platform hygiene note describes: the first real evidence will be Linux CI.
+Treat it as unproven until then. Its shape mirrors macOS deliberately - same
+seams, same ordering, same session logic - so what is being risked is API
+details, not design.
 
-What to check first when they do build:
+What to check first there:
 
-- **win32** - that `WS_EX_NOACTIVATE` really keeps the editor's focus, that the
-  `GWLP_HWNDPARENT` re-own works when a surface is re-opened against a different
-  owner, and how bad the documented `WM_ACTIVATEAPP` gap feels in a real DAW.
 - **Linux** - that the `XGrabPointer` succeeds after the map (hence the `XSync`
   in `platform_show_popup_surface`), and that a WM that ignores
   `override_redirect` does not steal focus.
+
+**win32 was in the same position and has now been built and run** (2026-08-14).
+It compiled warning-clean at `/W4` on the first attempt and every placement,
+ownership, cascade, dismissal and gate claim held, so the design port was sound -
+but it shipped **one real defect**, and it was in the half no amount of care on
+macOS could have caught: the pre-existing `WM_CREATE` focus grab defeated
+`WS_EX_NOACTIVATE`, so opening a picker stole the editor's focus. See the win32
+notes above. Two of the three check-first items are answered - the
+`GWLP_HWNDPARENT` re-own works (asserted against a second frame), and
+`WS_EX_NOACTIVATE` keeps the editor's focus *now*. The third, how bad the
+`WM_ACTIVATEAPP` gap feels in a real DAW, still needs a plugin in a real host.
 
 Where `platform_supports_popup_surface()` is false, `open()` fails rather than
 half-working, and `get_clamp_size` reports the owner's client area. That is a
@@ -230,3 +253,21 @@ clamping + flip, cascade (flat ownership, deepest-first unwind), lifetime (owner
 destroy leaves no window), and the input gate driven through `Session` directly
 (synthetic HID events would need an unlocked screen and Accessibility
 permission).
+
+`tests/popup_surface_smoke_win32.cpp` — the counterpart, and **not** a port. The
+portable half is proven once on macOS and is the same code here, so this targets
+what win32 writes for itself and asks **win32** rather than neui: that the popup
+is a real top-level `WS_POPUP` (not a child HWND) whose rect leaves the owner,
+that `GetWindow(GW_OWNER)` is the owner's `GA_ROOT` (win32's `-childWindows`, and
+what buys z-order-follows-owner from the OS), that re-opening against a different
+frame really moves ownership through `GWLP_HWNDPARENT` — the one call with no
+macOS counterpart, since `addChildWindow:` is idempotent and this is a live
+re-parent — and that opening **and clicking** the popup moves neither the
+foreground window nor the thread's focus. Plus the three WndProc branches only
+win32 has: `WM_ACTIVATEAPP` as the whole outside-press watch (driven directly,
+both polarities — `TRUE` must *not* dismiss), `WM_MOVE` owner-dismissal, and the
+`PopupPlacingScope` that keeps placing a cascade level from reading as "the owner
+moved". One phase drives a real outside press through the WndProc and asserts the
+widget underneath saw **no** click, which is the swallow proven end-to-end rather
+than at the gate. Built but not ctest-registered; run
+`tests/<config>/neui_popup_surface_smoke_win32.exe`.

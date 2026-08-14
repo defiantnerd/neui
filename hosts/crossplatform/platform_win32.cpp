@@ -458,7 +458,19 @@ namespace xpl_host
       // plugin editor must not yank focus out of whatever the host had
       // focused. An embedded frame takes focus on click instead
       // (WM_LBUTTONDOWN below), matching the macOS embedded path.
-      if (!(static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)) & WS_CHILD))
+      //
+      // ...and NOT for a WS_EX_NOACTIVATE window - a popup surface. That style
+      // only stops Windows from activating a window when it is CLICKED; it does
+      // nothing about a programmatic SetFocus, and SetFocus on a top-level
+      // window also makes it the active one. So this line took the foreground,
+      // the activation and the thread's keyboard focus away from the editor the
+      // instant a picker opened, which is exactly the "editor appears to lose
+      // focus" bug the non-activating style exists to prevent. Testing the ex-
+      // style rather than the widget type keeps it right for any later
+      // non-activating window kind.
+      const DWORD cs_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+      const DWORD cs_ex    = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+      if (!(cs_style & WS_CHILD) && !(cs_ex & WS_EX_NOACTIVATE))
         SetFocus(hwnd);
       return 0;
     }
