@@ -623,6 +623,51 @@ int main()
           "the dismissing press did NOT also actuate the widget underneath");
   }
 
+  phase("2b. widgets->hide must not strand the input gate");
+  {
+    // w_show refuses a popup surface outright; w_hide used to run the generic
+    // frame-hide path, which only unmaps the window. The level stayed in
+    // _popup_surfaces with the gate still swallowing every press and hover in
+    // the session - an INVISIBLE session-wide modal grab from one client call,
+    // and on Linux with the XGrabPointer still held. The gate checks below are
+    // the ones that matter: "the window went away" was never the bug.
+    xpl_host::Session* s = xpl_host::session_by_id(sess.session);
+    g_dismissals.clear();
+    check(pu->open(sess, picker, button, 0, 2, NEUI_POPUP_BELOW),
+          "open before hiding the surface");
+    pump_for(200);
+    g_w->hide(sess, picker);
+    pump_for(200);
+    check(!pu->is_open(sess, picker), "hiding an open popup surface closes it");
+    check(g_dismissals.size() == 1, "hiding it reports exactly one dismissal");
+    if (s) {
+      check(!s->popup_surface_open(), "the stack is empty after the hide");
+      check(!s->popup_gate_press(slot_of(frame)),
+            "the input gate is inert again - no invisible modal grab left behind");
+      check(!s->popup_gate_hover(slot_of(frame)),
+            "hover under the hidden popup is no longer swallowed");
+    }
+    check(!IsWindowVisible(hwnd_of(picker)), "the popup window is hidden");
+
+    // Hiding the OWNER dismisses too - <neui/d/popup.h> lists "owner hidden"
+    // as a trigger, and the surface is its own root child so nothing else
+    // would catch it.
+    g_dismissals.clear();
+    check(pu->open(sess, picker, button, 0, 2, NEUI_POPUP_BELOW),
+          "reopen before hiding the owner");
+    pump_for(200);
+    g_w->hide(sess, frame);
+    pump_for(250);
+    check(!pu->is_open(sess, picker), "hiding the owner dismissed the popup");
+    check(g_dismissals.size() == 1 &&
+          g_dismissals[0].reason == NEUI_POPUP_DISMISS_OWNER_MOVED,
+          "hiding the owner reports OWNER_MOVED");
+    if (s) check(!s->popup_gate_press(slot_of(frame)),
+                 "the gate is inert after the owner was hidden");
+    g_w->show(sess, frame);   // restore for the phases below
+    pump_for(200);
+  }
+
   phase("11. LIFETIME: destroying the owner takes the popup with it");
   {
     g_dismissals.clear();

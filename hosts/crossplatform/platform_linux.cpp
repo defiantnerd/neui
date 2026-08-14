@@ -1711,6 +1711,15 @@ namespace
         if (!popup_placing() && s->popup_surface_open() &&
             s->popup_surface_depth(lw->widget_index) < 0)
           s->close_all_popup_surfaces(NEUI_POPUP_DISMISS_OWNER_MOVED);
+        // That dismissal dispatched POPUP_DISMISSED into client code, and the
+        // documented answer to that event is "drop the state you opened the
+        // popup with" - which routinely means destroying the owner frame.
+        // destroy_native then does `delete lw`, so every read below (starting
+        // with lw->widget_index) would be a use-after-free. Re-resolve from
+        // g_windows and bail if the window is gone: exactly what win32 does with
+        // get_wud(hwnd) after its own dismissal hooks.
+        lw = find_window(ev.xany.window);
+        if (!lw) return;
         uint32_t wphys = static_cast<uint32_t>(ev.xconfigure.width);
         uint32_t hphys = static_cast<uint32_t>(ev.xconfigure.height);
         s->resize_render_ctx(lw->widget_index, wphys, hphys);
@@ -1743,6 +1752,11 @@ namespace
             s->dispatch_event(&re);
           }
         }
+        // The RESIZE dispatch is client code too, and "the window was resized,
+        // tear this frame down" is an ordinary handler - so the same re-resolve
+        // applies before the last read of lw.
+        lw = find_window(ev.xany.window);
+        if (!lw) return;
         lw->needs_paint = true;
         break;
       }
@@ -1770,10 +1784,14 @@ namespace
       case FocusIn:
         if (!is_real_focus_change(ev.xfocus)) break;
         s->_os_focused = true;  lw->needs_paint = true; break;
-      case FocusOut:
+      case FocusOut: {
         // A grab-induced or pointer-induced pseudo event is not a deactivation.
         if (!is_real_focus_change(ev.xfocus)) break;
         s->_os_focused = false;
+        // Snapshot the frame slot BEFORE any of the three closes below: each one
+        // can dispatch into client code that destroys this frame, which frees
+        // this LinuxWindow - so lw must not be read again afterwards.
+        const uint32_t frame_idx = lw->widget_index;
         // Both menu surfaces must go, and close_tree_popup explicitly: the popup
         // borrows _menu_path, so close_menubar_menu would CLEAR the path while
         // leaving _tree_popup_active set - a popup with no cascade to build.
@@ -1782,10 +1800,14 @@ namespace
         // Same for a popup surface: focus leaving our frame means another
         // application came forward, and a menu does not survive that. Skipped
         // while WE are placing one (an override-redirect map can shuffle focus).
-        if (!popup_placing() && s->popup_surface_depth(lw->widget_index) < 0)
+        if (!popup_placing() && s->popup_surface_depth(frame_idx) < 0)
           s->close_all_popup_surfaces(NEUI_POPUP_DISMISS_DEACTIVATED);
+        // Re-resolve like ConfigureNotify does, for the one remaining read.
+        lw = find_window(ev.xany.window);
+        if (!lw) return;
         lw->needs_paint = true;
         break;
+      }
 
       case LeaveNotify:
         s->set_hovered(0);

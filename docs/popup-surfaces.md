@@ -119,7 +119,7 @@ Triggers: outside press; owner deactivated or another app activated; owner moved
 / resized (that is what OS menus do — following is not worth the machinery);
 owner hidden or destroyed; Escape; `close` / `close_all`.
 
-Two lifetime hazards the code exists to prevent:
+Four lifetime hazards the code exists to prevent:
 
 - **Destroying the owner.** The surface is its own root child, so the owner's
   subtree does not contain it. `close_popup_surfaces_if_within` therefore checks
@@ -128,6 +128,29 @@ Two lifetime hazards the code exists to prevent:
   the DAW belonging to a dead frame, with the outside-press watch still running.
 - **Session teardown.** `~Session` closes the stack and ends the watch, next to
   the relative-pointer and cursor releases, for the same reason they are there.
+- **`widgets->hide`.** `w_show` refuses a popup surface outright, but `w_hide`
+  must do the opposite of refuse: the generic frame-hide path only unmaps the
+  window, so without an explicit close the level stays in `_popup_surfaces` with
+  the input gate still swallowing every press and hover in the session — an
+  **invisible session-wide modal grab** from one client call, and on Linux with
+  the `XGrabPointer` still held. `w_hide` therefore closes the surface
+  (`DISMISS_CLIENT`) when the target *is* an open level, and runs
+  `close_popup_surfaces_if_within` otherwise so hiding the **owner** dismisses
+  too — which is what `<neui/d/popup.h>` and the trigger list above have always
+  promised. This is the same invisible-grab shape the tree-popup destroy path
+  guards against, one frame kind later.
+- **A platform layer must not touch its window struct after a dismissal.**
+  Closing dispatches `POPUP_DISMISSED` synchronously, and the documented client
+  response — drop the state the popup was opened with — routinely means
+  destroying the owner frame, which frees the per-window struct the dismissal
+  hook was called from. So every dismissal site **re-resolves** afterwards and
+  bails if the window is gone: win32 via `get_wud(hwnd)`, Linux via
+  `find_window(ev.xany.window)` in both `ConfigureNotify` and `FocusOut` (where
+  the frame slot is also snapshotted before the closes, since two menu closes run
+  first). The same applies to any *other* client dispatch in the same handler —
+  Linux's `ConfigureNotify` re-resolves a second time after its `RESIZE` dispatch.
+  macOS `setFrameSize:` (`platform_macos.mm:262-285`) has the same shape and has
+  not been audited for it.
 
 Closing pops the level from `_popup_surfaces` **before** any teardown or client
 dispatch, so the stack strictly shrinks and a client that closes another surface

@@ -472,6 +472,31 @@ namespace xpl_host
     if (!s) return;
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
+
+    // Popup surfaces, in BOTH directions - w_show refuses them outright (it has
+    // no position to show one at), but hide can do the right thing and has to.
+    // The generic platform_hide_window below only unmaps the window: the level
+    // stays in _popup_surfaces with the input gate still swallowing every press
+    // and hover in the session, and on Linux with the XGrabPointer still held.
+    // One client call would otherwise leave the whole session unresponsive with
+    // nothing visible to explain it - the same invisible-modal-grab shape the
+    // tree-popup destroy path guards against above.
+    //
+    // Hiding the OWNER dismisses as well: <neui/d/popup.h> and
+    // docs/popup-surfaces.md both list "owner hidden" as a dismissal trigger,
+    // and close_popup_surfaces_if_within is what consults the recorded owner /
+    // anchor - the surface is its own root child, so the owner's subtree does
+    // not contain it and a plain subtree walk would miss it.
+    if (s->popup_surface_open()) {
+      if (s->popup_surface_depth(idx) >= 0)
+        s->close_popup_surface(idx, NEUI_POPUP_DISMISS_CLIENT);
+      else
+        s->close_popup_surfaces_if_within(idx);
+      // Both routes dispatch POPUP_DISMISSED synchronously, so client code has
+      // run and may have destroyed the very widget being hidden.
+      if (!s->_widgets.exists(idx)) return;
+    }
+
     const bool hiding_frame = s->_widgets[idx].is_frame();
     {
       auto& wd = s->_widgets[idx];
