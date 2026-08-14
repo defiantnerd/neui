@@ -64,6 +64,7 @@ extern "C" {
     NEUI_EVENT_METRICS_CHANGED          = DEF_WIDGET_EVENT(0xA),// platform layout metrics changed (iOS Dynamic Type / rotation / safe-area)
     NEUI_EVENT_GESTURE_BEGIN            = DEF_WIDGET_EVENT(0xB),// user grabbed a value control (see neui_event_gesture_t)
     NEUI_EVENT_GESTURE_END              = DEF_WIDGET_EVENT(0xC),// user released it (always paired with a BEGIN)
+    NEUI_EVENT_POPUP_DISMISSED          = DEF_WIDGET_EVENT(0xD),// a NEUI_W_POPUPSURFACE closed (see neui_event_popup_t)
 
     NEUI_EVENT_TIMER                    = DEF_APP_EVENT(2),   // a NEUI_API_TIMER timer elapsed (session-scoped; see neui_event_timer_t)
 
@@ -438,6 +439,20 @@ extern "C" {
     neui_widget_t page;
   } neui_event_tab_t;
 
+  // A NEUI_W_POPUPSURFACE closed (NEUI_EVENT_POPUP_DISMISSED). `widget` is the
+  // popup surface; `reason` is a neui_popup_dismiss_reason_t (see
+  // <neui/d/popup.h>). Fired for every close - host-driven (outside press,
+  // deactivation, owner moved, Escape) and client-driven (popup->close) alike -
+  // so a client has exactly one place to drop the state it opened the popup
+  // with. Purely a notification: the close has already happened and cannot be
+  // vetoed, because a popup that could refuse to close is a window stuck over
+  // someone's DAW. When a cascade closes, the deepest level is reported first.
+  typedef struct neui_event_popup
+  {
+    neui_widget_t widget;
+    uint32_t      reason;
+  } neui_event_popup_t;
+
   // Forward-declarations for the curated paint surface. Clients that
   // handle NEUI_EVENT_WIDGET_PAINT include <neui/d/painter.h> (or just
   // <neui/neui.h>) to call painter_api->* functions on the handle.
@@ -507,6 +522,7 @@ extern "C" {
       neui_event_tab_t                tab;
       neui_event_metrics_t            metrics;
       neui_event_timer_t              timer;
+      neui_event_popup_t              popup;
     } data;
 
     // more event data can be added here

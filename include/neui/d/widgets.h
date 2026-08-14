@@ -232,6 +232,15 @@ typedef struct neui_widget_api {
 // a MENUBAR, but it is NOT a menu bar: it is never attached to the frame, never
 // reserves an in-frame band, and a frame may carry both.
 #define NEUI_W_POPUPMENU  "neui.std.popupmenu"
+// A frameless overlay surface that may leave its owner frame - the third FRAME
+// kind, after APPWINDOW and PLUGWINDOW. Created with parent = widget_none like
+// any other frame, filled with ordinary child widgets, and shown with
+// NEUI_API_POPUP::open (NOT widgets->show, which cannot know where to place it).
+// Where the platform has owned top-level windows the host backs it with a real
+// borderless non-activating window, so a 1030x970 picker opened from a 700x500
+// plugin editor hangs over the DAW instead of being clamped; elsewhere it falls
+// back to an in-frame overlay. See <neui/d/popup.h>.
+#define NEUI_W_POPUPSURFACE "neui.std.popupsurface"
 #define NEUI_W_IMAGE      "neui.std.image"
 #define NEUI_W_SLIDER     "neui.std.slider"
 #define NEUI_W_KNOB       "neui.std.knob"

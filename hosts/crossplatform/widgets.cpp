@@ -123,6 +123,8 @@ namespace xpl_host
         !strcmp(type, NEUI_W_PLUGWINDOW) ||
         !strcmp(type, NEUI_W_DIALOG))
       return std::make_unique<FrameWidget>();
+    if (!strcmp(type, NEUI_W_POPUPSURFACE))
+      return std::make_unique<PopupSurfaceWidget>();
     if (!strcmp(type, NEUI_W_LABEL))
       return std::make_unique<LabelWidget>();
     if (!strcmp(type, NEUI_W_SECTION))
@@ -329,6 +331,13 @@ namespace xpl_host
     // swallowing every click and hover in that frame for the rest of its life.
     s->close_tree_popup_if_within(idx);
 
+    // Same shape again for popup surfaces, but the reachability is the other way
+    // round: a surface is its own ROOT CHILD, so destroying the owner frame does
+    // NOT take it with it. Without this, closing a plugin editor while a picker
+    // is open leaves a live borderless window floating over the DAW - owned by a
+    // frame that no longer exists, with the outside-press watch still running.
+    s->close_popup_surfaces_if_within(idx);
+
     destroy_recursive(s, idx, client_api, token);
 
     // Destroying the widget under the pointer leaves _hovered_widget (and any
@@ -362,6 +371,12 @@ namespace xpl_host
     auto& wd = s->_widgets[idx];
 
     if (wd.is_frame()) {
+      // A popup surface is the one frame kind widget_show cannot realize: it has
+      // no position of its own until something anchors it, and showing it at
+      // wd.x/wd.y (which are SCREEN coordinates, and zero until placed) would put
+      // a borderless window in the corner of the display. NEUI_API_POPUP::open is
+      // the entry point; ignoring this call is the honest answer.
+      if (dynamic_cast<PopupSurfaceWidget*>(&wd)) return;
       if (!wd.native_handle) {
         if (wd.is_dialog()) {
           // Resolve owner HWND (if any) before creating the dialog HWND so
@@ -2364,6 +2379,74 @@ namespace xpl_host
     ptr_begin_relative,
     ptr_end_relative,
     ptr_is_relative,
+  };
+
+  // ---------------------------------------------------------------------------
+  // Popup API (NEUI_API_POPUP) - overlay surfaces that may leave their owner
+  // frame. Thin validation over Session::open_popup_surface and friends; the
+  // placement, cascade and dismissal policy are all in host.cpp, and the window
+  // itself is a platform seam.
+
+  static bool NEUI_ABI pop_open(neui_session_t session, neui_widget_t surface,
+                                neui_widget_t anchor, int x, int y, int side)
+  {
+    auto* s = get_session_for_widget(session, surface);
+    if (!s) return false;
+    // Both handles must belong to THIS session: a cross-session anchor would
+    // have the host resolve geometry in one widget tree and place a window from
+    // another. get_session_for_widget already rejected a foreign surface.
+    if (!get_session_for_widget(session, anchor)) return false;
+    return s->open_popup_surface(WidgetToIndex(surface), WidgetToIndex(anchor),
+                                 x, y, side);
+  }
+
+  static void NEUI_ABI pop_close(neui_session_t session, neui_widget_t surface)
+  {
+    auto* s = get_session_for_widget(session, surface);
+    if (!s) return;
+    s->close_popup_surface(WidgetToIndex(surface), NEUI_POPUP_DISMISS_CLIENT);
+  }
+
+  static void NEUI_ABI pop_close_all(neui_session_t session)
+  {
+    if (auto* s = get_session(session))
+      s->close_all_popup_surfaces(NEUI_POPUP_DISMISS_CLIENT);
+  }
+
+  static bool NEUI_ABI pop_is_open(neui_session_t session, neui_widget_t surface)
+  {
+    auto* s = get_session_for_widget(session, surface);
+    if (!s) return false;
+    return s->popup_surface_depth(WidgetToIndex(surface)) >= 0;
+  }
+
+  static void NEUI_ABI pop_get_clamp_size(neui_session_t session,
+                                          neui_widget_t anchor,
+                                          int* width, int* height)
+  {
+    if (width)  *width  = 0;
+    if (height) *height = 0;
+    auto* s = get_session_for_widget(session, anchor);
+    if (!s) return;
+    s->popup_clamp_size(WidgetToIndex(anchor), width, height);
+  }
+
+  static bool NEUI_ABI pop_escapes_frame(neui_session_t session,
+                                         neui_widget_t anchor)
+  {
+    auto* s = get_session_for_widget(session, anchor);
+    if (!s) return false;
+    return s->popup_escapes_frame(WidgetToIndex(anchor));
+  }
+
+  neui_popup_api_t popup_api = {
+    NEUI_VERSION,
+    pop_open,
+    pop_close,
+    pop_close_all,
+    pop_is_open,
+    pop_get_clamp_size,
+    pop_escapes_frame,
   };
 
   // ---------------------------------------------------------------------------

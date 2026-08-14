@@ -136,6 +136,42 @@ namespace xpl_host
   // No surface, no input: nothing to route.
   bool platform_supports_tree_popup() { return false; }
 
+  // Popup surfaces: no windows at all here, so the in-frame backing is the only
+  // possible one and every seam below is inert. The TYPE still exists and
+  // NEUI_API_POPUP still answers - see plans/popup-surface.md for why a client
+  // must never have to ask "does this platform have popups" and fork its UI.
+  bool platform_supports_popup_surface() { return false; }
+
+  void platform_get_work_area(void* /*near_native*/,
+                              int* x, int* y, int* w, int* h)
+  {
+    // A plausible box rather than zeros: the contract is that clamping never
+    // collapses to 0x0, even where there is no screen to measure.
+    if (x) *x = 0;
+    if (y) *y = 0;
+    if (w) *w = 1024;
+    if (h) *h = 768;
+  }
+
+  void platform_client_to_screen(void* /*native_handle*/, int lx, int ly,
+                                 int* sx, int* sy)
+  {
+    if (sx) *sx = lx;
+    if (sy) *sy = ly;
+  }
+
+  void platform_get_pointer_pos(int* sx, int* sy)
+  {
+    if (sx) *sx = 0;
+    if (sy) *sy = 0;
+  }
+
+  void platform_create_popup_surface(Session*, uint32_t, WidgetData&, void*) {}
+  void platform_show_popup_surface(void*, void*, int, int, int, int, float) {}
+  void platform_hide_popup_surface(void*, void*) {}
+  void platform_popup_grab_begin(Session*, void*) {}
+  void platform_popup_grab_end(Session*) {}
+
   void     platform_timer_start(Session*, uint32_t)                            {}
   void     platform_timer_stop(Session*)                                       {}
 

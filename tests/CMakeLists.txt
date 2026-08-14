@@ -201,6 +201,21 @@ if(APPLE AND NOT NEUI_IOS)
   target_link_libraries(neui_popup_tree_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
+  # Popup-surface harness (NEUI_W_POPUPSURFACE / NEUI_API_POPUP): the feature's
+  # whole claim is about a real OS window, so this asks AppKit rather than neui -
+  # that the panel's rect genuinely leaves the owner frame, that it is in the
+  # owner's -childWindows (z-order follows), that it can never become key, that
+  # placement stays inside the monitor work area and flips near the edge, that a
+  # cascade is flat-owned and unwinds deepest-first, and that destroying the owner
+  # (whose subtree does NOT contain the surface) leaves no window behind.
+  # Realizes real NSWindows, so built but NOT ctest-registered.
+  add_executable(neui_popup_surface_smoke_macos popup_surface_smoke_macos.mm)
+  target_include_directories(neui_popup_surface_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_popup_surface_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_popup_surface_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
   # File-dialog harness (NEUI_API_NOTIFY::open_file / save_file): asserts the
   # appended slots are wired on BOTH macOS hosts, that -1 (no dialog) stays
   # distinct from 0 (cancelled), that a cancelled panel delivers nothing, and
