@@ -51,6 +51,15 @@
 //                    through Session directly for the same reason the macOS
 //                    harness does: what is asserted is the DECISION, and no
 //                    client ever calls it - the platform layer does.
+//   9b. WHEEL      - the one gate branch driven through REAL events instead
+//                    (XSendEvent from the second connection, which grabs cannot
+//                    intercept), because what can break here is X11's routing
+//                    rather than the decision: a notch outside the stack must not
+//                    reach the widget underneath and must not DISMISS (a wheel is
+//                    a core ButtonPress on X11, so an ordering slip in
+//                    dispatch_button_press would send it through the press gate),
+//                    while a notch aimed at the popup must reach the popup - the
+//                    scrolling-SECTION idiom depends on it.
 //  10. LIFETIME    - destroying the OWNER must leave no window on the server.
 //                    The surface is its own root child, so the owner's subtree
 //                    does not contain it: without the explicit owner/anchor
@@ -106,6 +115,12 @@ neui_popup_api_t*  g_pu  = nullptr;
 struct Dismissal { uint32_t widget_id; uint32_t reason; };
 std::vector<Dismissal> g_dismissals;
 
+// Phase 9b: which widget a wheel notch actually landed on. The popup's own child
+// is named so "swallowed underneath" and "delivered inside" are counted apart.
+uint32_t g_popup_child_id = 0;
+int      g_wheels_under   = 0;
+int      g_wheels_in_popup = 0;
+
 bool NEUI_ABI onevent(void*, neui_event_t* ev)
 {
   if (ev->type == NEUI_EVENT_WIDGET_PAINT) {
@@ -119,6 +134,11 @@ bool NEUI_ABI onevent(void*, neui_event_t* ev)
   if (ev->type == NEUI_EVENT_POPUP_DISMISSED) {
     g_dismissals.push_back({ ev->data.popup.widget.id, ev->data.popup.reason });
     return true;
+  }
+  if (ev->type == NEUI_EVENT_MOUSE_WHEEL) {
+    if (ev->data.wheel.widget.id == g_popup_child_id) ++g_wheels_in_popup;
+    else                                              ++g_wheels_under;
+    return false;   // don't consume: nothing here should be masked by the harness
   }
   return false;
 }
@@ -294,6 +314,49 @@ Window find_window_by_name(Window w, const char* name, int depth = 0)
   return found;
 }
 
+// Post a real core wheel notch (X buttons 4/5) at (x, y) in `target`'s OWN
+// coordinates, over the SECOND connection - so it arrives as input from another X
+// client, the closest analogue of the win32 harness's PostMessageW. Two properties
+// make this the right tool here:
+//
+//   - XSendEvent bypasses grabs entirely, so it works while the host is holding
+//     its XGrabPointer, which is precisely when the gate is interesting;
+//   - it targets a WINDOW, which is the thing under test: X delivers a real wheel
+//     to whatever is under the pointer, so "outside the stack" and "inside the
+//     popup" are two different destination windows, not two coordinates.
+//
+// It exercises the LEGACY core path (`dispatch_button_press`, buttons 4-7). With
+// XI2 compiled in the host drops those buttons once it has seen a real XI2 scroll
+// on this server (`g_xi2_scroll_seen`), to avoid double-counting the same physical
+// notch. Nothing in this harness scrolls physically, so that stays false - and the
+// control check at the top of phase 9b is the guard: if someone brushes a trackpad
+// mid-run, it fails there instead of silently proving nothing.
+bool send_core_wheel(Window target, int x, int y, unsigned int button)
+{
+  if (!target) return false;
+  int rx = 0, ry = 0;
+  Window child = 0;
+  XTranslateCoordinates(g_xd, target, DefaultRootWindow(g_xd), x, y,
+                        &rx, &ry, &child);
+  XEvent ev{};
+  ev.type                = ButtonPress;
+  ev.xbutton.display     = g_xd;
+  ev.xbutton.window      = target;
+  ev.xbutton.root        = DefaultRootWindow(g_xd);
+  ev.xbutton.subwindow   = None;
+  ev.xbutton.time        = CurrentTime;
+  ev.xbutton.x           = x;
+  ev.xbutton.y           = y;
+  ev.xbutton.x_root      = rx;
+  ev.xbutton.y_root      = ry;
+  ev.xbutton.state       = 0;
+  ev.xbutton.button      = button;
+  ev.xbutton.same_screen = True;
+  const bool ok = XSendEvent(g_xd, target, False, ButtonPressMask, &ev) != 0;
+  XFlush(g_xd);
+  return ok;
+}
+
 bool window_rect(Window w, int* x, int* y, int* cw, int* ch)
 {
   XWindowAttributes a;
@@ -456,7 +519,9 @@ int main(int, char*[])
 
   neui_widget_t picker = g_w->create(g_sess, none, NEUI_W_POPUPSURFACE,
                                      0, 0, 640, 520, nullptr);
-  g_w->create(g_sess, picker, NEUI_W_CUSTOMDRAW, 0, 0, 640, 520, nullptr);
+  neui_widget_t picker_body = g_w->create(g_sess, picker, NEUI_W_CUSTOMDRAW,
+                                          0, 0, 640, 520, nullptr);
+  g_popup_child_id = picker_body.id;   // phase 9b counts wheels landing here
   neui_widget_t detail = g_w->create(g_sess, none, NEUI_W_POPUPSURFACE,
                                      0, 0, 260, 150, nullptr);
   g_w->create(g_sess, detail, NEUI_W_CUSTOMDRAW, 0, 0, 260, 150, nullptr);
@@ -700,6 +765,79 @@ int main(int, char*[])
       check(g_dismissals.size() == 1 &&
             g_dismissals[0].reason == NEUI_POPUP_DISMISS_ESCAPE,
             "...reporting ESCAPE");
+    }
+  }
+
+  // ---- 9b. WHEEL -----------------------------------------------------------
+  phase("9b. WHEEL - suppressed outside the stack, delivered inside it");
+  {
+    // Driven through REAL events rather than through Session, for the same reason
+    // the win32 harness does it that way: the gate's decision is portable and
+    // proven once on macOS, while what can break here is X11's own routing - and
+    // the two Linux wheel call sites are the kind of thing a Session-level check
+    // passes straight through while the bug is live.
+    //
+    // The Linux-specific hazard is the one asserted below the control: a wheel
+    // arrives as a core ButtonPress (buttons 4-7), and `dispatch_button_press`
+    // returns for those BEFORE reaching `popup_gate_press`. If that ordering ever
+    // inverted, a wheel notch anywhere would read as an outside press and DISMISS
+    // the stack - a picker that closes when the user scrolls the list under it.
+    const int anchor_x = (int)((16 + 160 / 2) * scale);   // the anchor's centre,
+    const int anchor_y = (int)((52 + 30 / 2) * scale);    // in owner-window px
+
+    // CONTROL: with nothing open, the same event must reach the widget under it.
+    // Everything below is a claim about suppression, which is meaningless unless
+    // delivery works on this server in the first place.
+    g_wheels_under = g_wheels_in_popup = 0;
+    check(send_core_wheel(owner_win, anchor_x, anchor_y, 5),
+          "XSendEvent accepted a core wheel notch on the owner");
+    pump_until([&]{ return g_wheels_under > 0; }, 2000);
+    std::printf("        control: wheels delivered with nothing open: %d\n",
+                g_wheels_under);
+    const bool control_ok = g_wheels_under > 0;
+    check(control_ok, "a wheel notch reaches the widget underneath when no popup is open");
+
+    if (control_ok) {
+      // SUPPRESSED. An ungated notch over a KNOB / SLIDER under the popup is not
+      // cosmetic: it fires the whole GESTURE_BEGIN / VALUE_CHANGED / GESTURE_END
+      // triple, which in a DAW is an automation write the user never saw.
+      g_dismissals.clear();
+      g_wheels_under = g_wheels_in_popup = 0;
+      check(g_pu->open(g_sess, picker, button, 0, 2, NEUI_POPUP_BELOW),
+            "reopened before the wheel checks");
+      pump_until([&]{ return g_pu->is_open(g_sess, picker); }, 4000);
+      send_core_wheel(owner_win, anchor_x, anchor_y, 5);
+      pump_for(250);
+      std::printf("        with a popup up, wheels delivered underneath: %d\n",
+                  g_wheels_under);
+      check(g_wheels_under == 0,
+            "a wheel outside the stack did not reach the widget underneath");
+      // Suppression, NOT dismissal - and this is the ordering guard described
+      // above, since a wheel routed through the press gate would close the stack.
+      check(g_pu->is_open(g_sess, picker), "a wheel outside does NOT dismiss");
+      check(g_dismissals.empty(), "...and reports no dismissal");
+
+      // DELIVERED. The other half, and the one the recommended idiom depends on:
+      // popup content in a scrolling SECTION has to be able to scroll. X delivers
+      // to the window under the pointer, so a wheel aimed at the popup arrives
+      // against the popup's own window and must pass the gate.
+      std::vector<WinInfo> live = new_popups(baseline);
+      check(live.size() == 1, "exactly one popup window to aim at");
+      if (live.size() == 1) {
+        g_wheels_under = g_wheels_in_popup = 0;
+        send_core_wheel(live[0].window, live[0].w / 2, live[0].h / 2, 5);
+        pump_until([&]{ return g_wheels_in_popup > 0; }, 2000);
+        std::printf("        wheels delivered INTO the popup: %d (underneath: %d)\n",
+                    g_wheels_in_popup, g_wheels_under);
+        check(g_wheels_in_popup > 0,
+              "a wheel over the popup reached the popup's own child, not swallowed");
+        check(g_wheels_under == 0,
+              "...and did not also reach the owner's widget");
+        check(g_pu->is_open(g_sess, picker),
+              "...and scrolling the popup did not dismiss it");
+      }
+      g_pu->close_all(g_sess);
+      pump_for(150);
     }
   }
 

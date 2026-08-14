@@ -446,9 +446,15 @@ foreground window nor the thread's focus. Plus the three WndProc branches only
 win32 has: `WM_ACTIVATEAPP` as the whole outside-press watch (driven directly,
 both polarities — `TRUE` must *not* dismiss), `WM_MOVE` owner-dismissal, and the
 `PopupPlacingScope` that keeps placing a cascade level from reading as "the owner
-moved". One phase drives a real outside press through the WndProc and asserts the
-widget underneath saw **no** click, which is the swallow proven end-to-end rather
-than at the gate. Built but not ctest-registered; run
+moved". Three phases drive **real posted messages** rather than the gate, because
+in each case the defect was a WndProc branch that never called the gate at all and
+a `Session`-level check would have passed while it was live: an outside press
+(asserting the widget underneath saw **no** click — the swallow end-to-end), a
+`WM_LBUTTONDBLCLK` (the OS gives the second press of a rapid pair its own message,
+which a gate on `WM_LBUTTONDOWN` alone never sees), and the wheel in **both**
+directions — a notch outside must not reach the widget underneath and must not
+dismiss, a notch over the popup must be forwarded *into* it by `WindowFromPoint`.
+Built but not ctest-registered; run
 `tests/<config>/neui_popup_surface_smoke_win32.exe`.
 
 `tests/popup_surface_smoke_linux.cpp` — the third counterpart, same rule: it asks
@@ -464,7 +470,13 @@ the owner); that another client's **keyboard grab does not dismiss the stack**
 while a real focus change still does, which is the regression guard for the
 defect above; the cascade, its deepest-first unwind, and owner-moved dismissal;
 the gate, including the X11-only `popup_gate_press_outside` route that exists
-because `owner_events=True` reports an outside press against the grab window; and
+because `owner_events=True` reports an outside press against the grab window; the
+**wheel** through real events (`XSendEvent` from that second connection, which a
+pointer grab cannot intercept — a control notch with nothing open proves delivery
+first, then a notch at the owner must neither reach the widget underneath nor
+dismiss, and a notch at the popup's window must reach the popup: on X11 a wheel is
+a core `ButtonPress`, so an ordering slip in `dispatch_button_press` would route it
+through the *press* gate and close the stack the user was scrolling); and
 that destroying the owner leaves neither a window nor the **pointer grab** behind
 — a stranded grab on X11 means a desktop that no longer responds to the mouse.
 Needs a live display, so built but not ctest-registered; run
