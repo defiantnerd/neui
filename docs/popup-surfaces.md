@@ -85,7 +85,23 @@ buying, so it lives in the session (`popup_gate_press` / `_hover` / `_key` /
 - hover outside the stack → swallowed, and `set_hovered(0)`. Without this,
   moving off the popup lights up every widget it passes, which is the one thing
   that reads as "not a menu".
+- wheel outside the stack → swallowed, and it never dismisses. A wheel is not in
+  the trigger list, and a stack that vanished on an accidental trackpad glide
+  would be worse than one that ignores it. The cost of *not* gating is more than
+  cosmetic: an ungated notch over a KNOB / SLIDER underneath fires the whole
+  `GESTURE_BEGIN` / `VALUE_CHANGED` / `GESTURE_END` triple, which in a DAW is an
+  automation write the user never saw. Inside the stack the wheel is ordinary —
+  that is what makes the recommended scrolling-`SECTION` idiom work.
 - Escape → close. That is the whole of v1's keyboard story.
+
+Each gate is one `Session` method rather than the predicate open-coded per
+platform, because the wheel alone has **four** entry points across three
+platforms (win32, macOS, and Linux twice — core Button 4-7 plus the XI2 smooth
+path). `popup_gate_press` also has to be called from every button-DOWN message a
+platform has, which on win32 means `WM_LBUTTONDBLCLK` as well as
+`WM_LBUTTONDOWN`: the OS gives the second press of a rapid pair its own message,
+so a popup opened on the click synthesised from the first release would otherwise
+see the next press bypass the gate entirely.
 
 Unlike `widget_set_owner`'s dialog modality, the owner window stays **enabled** —
 the press physically reaches us and the session decides it means "dismiss". That
@@ -195,6 +211,17 @@ handler had already destroyed.
   creation there is no `AdjustWindowRectExForDpi` round-trip on placement.
 - No `SetCapture`. `WM_ACTIVATEAPP` in the WndProc is the whole watch, with the
   documented gap above; `WM_MOVE` / `WM_SIZE` drive owner-moved dismissal.
+- **The wheel has to be routed by pointer position here, not by window.** win32
+  delivers `WM_MOUSEWHEEL` to the **focused** window, and a popup surface is
+  `WS_EX_NOACTIVATE` and never focused — so a wheel the user aimed at the popup
+  arrives at the *owner*. macOS and X11 both deliver to whatever is under the
+  pointer and need none of this. `WM_MOUSEWHEEL` therefore does a
+  `WindowFromPoint` and forwards to the popup when the pointer is over one,
+  swallowing otherwise; without the forward the recommended scrolling-`SECTION`
+  idiom could not scroll on win32 at all. Note `WindowFromPoint` can name **any**
+  window on the desktop including another process's, and `GWLP_USERDATA` on a
+  foreign window is whatever that app put there, so the class name is checked
+  before `get_wud()` is allowed to interpret it as ours.
 - **`WS_EX_NOACTIVATE` is not by itself enough, and this cost a defect.** That
   style only stops Windows from activating a window that is *clicked*; it does
   nothing about a programmatic `SetFocus`, and `SetFocus` on a top-level window

@@ -874,6 +874,10 @@ void wake_app_event_pump()
   // menu does. No scroll-the-menu behaviour yet - a cascade taller than the
   // frame clamps (see docs/deferred-issues.md).
   if (session->_tree_popup_active) return;
+  // Same for an open popup surface. AppKit delivers the wheel to the view under
+  // the POINTER, so a wheel over the popup arrives at the popup's own view and
+  // passes the gate - which is what lets popup content scroll.
+  if (session->popup_gate_wheel(widget_index)) return;
   NSPoint p = [self localPointForEvent:event];
   float lx = (float)p.x;
   float ly = (float)p.y;

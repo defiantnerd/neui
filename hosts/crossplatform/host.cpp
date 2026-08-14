@@ -5882,6 +5882,15 @@ namespace xpl_host
     return true;
   }
 
+  bool Session::popup_gate_wheel(uint32_t frame_idx)
+  {
+    if (_popup_surfaces.empty()) return false;
+    // Inside the stack the wheel is ordinary: that is what makes the recommended
+    // idiom work at all - popup content in a scrolling SECTION sized to
+    // get_clamp_size (see <neui/d/popup.h>).
+    return popup_surface_depth(frame_idx) < 0;
+  }
+
   bool Session::popup_gate_key(uint32_t keycode)
   {
     if (_popup_surfaces.empty()) return false;

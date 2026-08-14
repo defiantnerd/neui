@@ -646,6 +646,10 @@ namespace
     // menu does. No scroll-the-menu behaviour yet - a cascade taller than the
     // frame clamps (see docs/deferred-issues.md).
     if (s->_tree_popup_active) return;
+    // Same for an open popup surface. X delivers to the window under the pointer,
+    // so a wheel over the popup arrives against the popup's own window and passes
+    // the gate - which is what lets popup content scroll.
+    if (s->popup_gate_wheel(lw->widget_index)) return;
     float lx = static_cast<float>(be.x) / scale, ly = static_cast<float>(be.y) / scale;
     int  delta = 0;
     bool horizontal = false;
@@ -1482,6 +1486,10 @@ namespace
     using namespace neui_detail;
     const uint32_t mk = x11_buttonmap(state);
     Session* s = lw->session;
+    // The popup-surface gate, before the accumulators: a swallowed glide must not
+    // bank fractional deltas that would then fire as a jump once the popup closes.
+    // This is the XI2 smooth path, the second of Linux's two wheel entries.
+    if (s->popup_gate_wheel(lw->widget_index)) return;
     int vline = take_lines(lw->scroll_v_accum, dv);
     int hline = take_lines(lw->scroll_h_accum, dh);
 

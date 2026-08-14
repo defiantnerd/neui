@@ -1284,6 +1284,23 @@ namespace xpl_host
     // and across the owner lights up hover on every widget it passes, which is
     // the one thing that reads as "not a menu".
     bool popup_gate_hover(uint32_t frame_idx);
+    // Same for the wheel: true = swallow. A scrolling SECTION or GRID under an
+    // open popup must not scroll away beneath it, and on a KNOB / SLIDER the cost
+    // is worse than cosmetic - an ungated notch fires the whole
+    // GESTURE_BEGIN / VALUE_CHANGED / GESTURE_END triple, which in a DAW is an
+    // automation write the user never saw.
+    //
+    // Unlike the press gate this does NOT dismiss: a wheel is not in the
+    // documented trigger list (<neui/d/popup.h>), and a stack that vanished on an
+    // accidental trackpad glide would be worse than one that ignores it. And
+    // unlike the hover gate it leaves _hovered_widget alone, because a wheel does
+    // not move the pointer.
+    //
+    // One method rather than the predicate open-coded at each platform's wheel
+    // entry - there are four of them across three platforms (win32, macOS, and
+    // Linux twice for core Button 4-7 plus the XI2 smooth path), which is exactly
+    // the shape wheel_direction.h exists to stop repeating.
+    bool popup_gate_wheel(uint32_t frame_idx);
     // Escape dismisses. Not general keyboard support (arrows / type-ahead need
     // focus routed across two windows and are a separate wave) - but a popup a
     // user cannot close from the keyboard at all is a trap, and the owner already

@@ -115,7 +115,11 @@ std::vector<Dismissal> g_dismissals;
 // Clicks observed by the client, so "the dismissing press was swallowed" is an
 // observed fact rather than an inference from the gate's return value.
 int g_clicks_under = 0;
+int g_dblclicks_under = 0;
+int g_wheels_under = 0;
+int g_wheels_in_popup = 0;
 neui_widget_t g_anchor{};
+neui_widget_t g_popup_child{};
 
 bool NEUI_ABI onevent(void*, neui_event_t* ev)
 {
@@ -135,6 +139,15 @@ bool NEUI_ABI onevent(void*, neui_event_t* ev)
   if (ev->type == NEUI_EVENT_MOUSE_BUTTON_CLICK &&
       ev->data.mouse.widget.id == g_anchor.id)
     ++g_clicks_under;
+  if (ev->type == NEUI_EVENT_MOUSE_BUTTON_DBLCLICK &&
+      ev->data.mouse.widget.id == g_anchor.id)
+    ++g_dblclicks_under;
+  // Read data.WHEEL, never data.mouse, on a wheel event: the payloads overlap in
+  // the union and mouse.buttonmap sits at the same offset as wheel.delta.
+  if (ev->type == NEUI_EVENT_MOUSE_WHEEL) {
+    if (ev->data.wheel.widget.id == g_anchor.id)      ++g_wheels_under;
+    if (ev->data.wheel.widget.id == g_popup_child.id) ++g_wheels_in_popup;
+  }
   return false;
 }
 
@@ -257,7 +270,8 @@ int main()
 
   neui_widget_t picker = g_w->create(sess, widget_none, NEUI_W_POPUPSURFACE,
                                      0, 0, POP_W, POP_H, nullptr);
-  g_w->create(sess, picker, NEUI_W_CUSTOMDRAW, 0, 0, POP_W, POP_H, nullptr);
+  g_popup_child = g_w->create(sess, picker, NEUI_W_CUSTOMDRAW, 0, 0,
+                              POP_W, POP_H, nullptr);
   neui_widget_t detail = g_w->create(sess, widget_none, NEUI_W_POPUPSURFACE,
                                      0, 0, 260, 150, nullptr);
   g_w->create(sess, detail, NEUI_W_CUSTOMDRAW, 0, 0, 260, 150, nullptr);
@@ -621,6 +635,92 @@ int main()
                 g_clicks_under);
     check(g_clicks_under == 0,
           "the dismissing press did NOT also actuate the widget underneath");
+  }
+
+  phase("4c. DBLCLK and WHEEL must not bypass the gate");
+  {
+    // Two gate bypasses, both driven through real posted messages rather than
+    // through Session, because the whole defect in each case was a WndProc branch
+    // that never called the gate - a Session-level check would have passed while
+    // the bug was live.
+    g_clicks_under = 0;
+    g_dblclicks_under = 0;
+    g_wheels_under = 0;
+    check(pu->open(sess, picker, button, 0, 2, NEUI_POPUP_BELOW),
+          "open before the DBLCLK");
+    pump_for(200);
+
+    // The OS gives the second press of a rapid pair its own message. When a popup
+    // opens on the CLICK synthesised from UP(1), the next press arrives ONLY as
+    // WM_LBUTTONDBLCLK, so a gate on WM_LBUTTONDOWN alone never sees it.
+    const float s = scale_of(owner);
+    const int bx = (int)((16 + 160 / 2) * s), by = (int)((52 + 30 / 2) * s);
+    const LPARAM lp = MAKELPARAM(bx, by);
+    PostMessageW(owner, WM_LBUTTONDBLCLK, MK_LBUTTON, lp);
+    PostMessageW(owner, WM_LBUTTONUP, 0, lp);
+    pump_for(300);
+    check(!pu->is_open(sess, picker), "a DBLCLK outside dismissed the popup");
+    std::printf("        under the popup: dblclicks=%d clicks=%d\n",
+                g_dblclicks_under, g_clicks_under);
+    check(g_dblclicks_under == 0,
+          "the dismissing DBLCLK did not reach the widget underneath");
+    // The paired UP must be swallowed too, or the widget under the dismissed
+    // popup sees an UP with no DOWN and synthesises a CLICK.
+    check(g_clicks_under == 0,
+          "...and its release did not synthesise a CLICK there either");
+
+    // WHEEL. An ungated notch over a KNOB / SLIDER under the popup is not merely
+    // cosmetic: it fires the whole GESTURE_BEGIN / VALUE_CHANGED / GESTURE_END
+    // triple, which in a DAW is an automation write the user never saw.
+    g_wheels_under = 0;
+    check(pu->open(sess, picker, button, 0, 2, NEUI_POPUP_BELOW),
+          "reopen before the wheel");
+    pump_for(200);
+    // WM_MOUSEWHEEL carries SCREEN coordinates, unlike the button messages.
+    POINT wp = { bx, by };
+    ClientToScreen(owner, &wp);
+    PostMessageW(owner, WM_MOUSEWHEEL,
+                 MAKEWPARAM(0, WHEEL_DELTA), MAKELPARAM(wp.x, wp.y));
+    pump_for(250);
+    std::printf("        wheel events delivered underneath: %d\n", g_wheels_under);
+    check(g_wheels_under == 0,
+          "a wheel notch outside the popup did not reach the widget underneath");
+    // Suppression, not dismissal: a wheel is not a documented dismissal trigger,
+    // and a stack that vanished on an accidental trackpad glide would be worse.
+    check(pu->is_open(sess, picker), "a wheel does NOT dismiss the popup");
+
+    // ...and the other half of the win32 routing: a wheel the user aimed AT the
+    // popup must reach the popup, not be swallowed with everything else. win32
+    // delivers WM_MOUSEWHEEL to the focused window, which is never the popup, so
+    // this arrives at the owner and has to be forwarded by pointer position.
+    // Without that forward the recommended idiom - popup content in a scrolling
+    // SECTION - could not scroll on this platform at all.
+    g_wheels_in_popup = 0;
+    g_wheels_under = 0;
+    RECT ppr = rect_of(hwnd_of(picker));
+    POINT inside = { (ppr.left + ppr.right) / 2, (ppr.top + ppr.bottom) / 2 };
+    // Guard the assertion on the pointer-position lookup actually resolving to
+    // our popup: if another window covers it on this desktop, the forward cannot
+    // happen and the check would be reporting the desktop, not the code.
+    HWND under = WindowFromPoint(inside);
+    std::printf("        WindowFromPoint(popup centre)=%p popup=%p\n",
+                (void*)under, (void*)hwnd_of(picker));
+    if (under == hwnd_of(picker)) {
+      PostMessageW(owner, WM_MOUSEWHEEL,
+                   MAKEWPARAM(0, WHEEL_DELTA), MAKELPARAM(inside.x, inside.y));
+      pump_for(250);
+      std::printf("        wheel events delivered INTO the popup: %d\n",
+                  g_wheels_in_popup);
+      check(g_wheels_in_popup > 0,
+            "a wheel over the popup was forwarded to it, not swallowed");
+      check(g_wheels_under == 0, "...and did not also reach the owner's widget");
+    } else {
+      std::printf("        SKIPPED: the popup is not the window under that "
+                  "point on this desktop\n");
+    }
+
+    pu->close_all(sess);
+    pump_for(150);
   }
 
   phase("2b. widgets->hide must not strand the input gate");

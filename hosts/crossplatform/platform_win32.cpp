@@ -1043,6 +1043,17 @@ namespace xpl_host
           wud->session->handle_tree_popup_click(wud->widget_index, lx, ly))
         return 0;
 
+      // ...and the popup-surface gate for exactly the same reason, which win32
+      // needs stated separately because the OS gives the second press of a rapid
+      // pair its OWN message: when a popup opens on the CLICK synthesised from
+      // UP(1), the next press arrives here and ONLY here, so a gate on
+      // WM_LBUTTONDOWN alone never sees it. Without this the popup stays open
+      // while focus / pressed / DBLCLICK all land on the widget underneath, and
+      // because the swallow flag was never set the following UP synthesises a
+      // CLICK there too. macOS gates before its clickCount branch for this.
+      wud->session->popup_discard_pending_release();
+      if (wud->session->popup_gate_press(wud->widget_index)) return 0;
+
       uint32_t hit = wud->session->widget_at(lx, ly, wud->widget_index);
 
       // The OS replaces the second press of a rapid pair with DBLCLK (the
@@ -1196,6 +1207,38 @@ namespace xpl_host
       // menu does. No scroll-the-menu behaviour yet - a cascade taller than the
       // frame clamps (see docs/deferred-issues.md).
       if (wud->session->_tree_popup_active) return 0;
+
+      // A popup surface never holds focus (WS_EX_NOACTIVATE), and win32 delivers
+      // WM_MOUSEWHEEL to the FOCUSED window - so a wheel the user aimed at an
+      // open popup arrives HERE, at the owner, and would scroll whatever sits
+      // under the popup. macOS and X11 both deliver by pointer location and need
+      // none of this; win32 has to route by position itself.
+      if (wud->session->popup_surface_open()) {
+        const POINT sp = { mouse_x(lParam), mouse_y(lParam) };   // already screen
+        HWND under = WindowFromPoint(sp);
+        // WindowFromPoint can name ANY window on the desktop, including another
+        // process's, and GWLP_USERDATA on a foreign window is whatever that app
+        // put there - so the class name is checked before get_wud() is allowed to
+        // interpret it as ours.
+        if (under && under != hwnd) {
+          wchar_t cls[64] = {};
+          if (GetClassNameW(under, cls, 64) && wcscmp(cls, k_wndclass) == 0) {
+            if (auto* uwud = get_wud(under)) {
+              if (uwud->session == wud->session &&
+                  uwud->session->popup_surface_depth(uwud->widget_index) >= 0)
+                // Re-deliver to the popup rather than duplicating the whole wheel
+                // path against a second window. lParam stays in screen
+                // coordinates, so the receiving handler converts for itself, and
+                // there WindowFromPoint resolves to that same window - so this
+                // forwards at most once.
+                return SendMessageW(under, WM_MOUSEWHEEL, wParam, lParam);
+            }
+          }
+        }
+        // Not over a popup: the widgets under an open stack must stop behaving
+        // like a live UI.
+        if (wud->session->popup_gate_wheel(wud->widget_index)) return 0;
+      }
 
       // WM_MOUSEWHEEL gives screen coordinates - convert to client.
       POINT pt = { mouse_x(lParam), mouse_y(lParam) };
