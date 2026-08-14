@@ -347,6 +347,15 @@ if(UNIX AND NOT APPLE)
   target_compile_features(neui_embed_smoke PRIVATE cxx_std_17)
   target_link_libraries(neui_embed_smoke PRIVATE neui neui-xplhost neui-backend-cairo)
 
+  # XDND foreign drop target (pure Xlib, links no neui). The companion to
+  # neui_dnd_source_smoke's NEUI_DND_TARGET mode, which is the only way to run
+  # the FOREIGN half of platform_dnd_begin_drag - dropping onto our own pane
+  # short-circuits the wire protocol by design. Needs a live X display and two
+  # processes, so it is built but NOT ctest-registered; see the file header.
+  add_executable(neui_xdnd_probe_target xdnd_probe_target.cpp)
+  target_compile_features(neui_xdnd_probe_target PRIVATE cxx_std_17)
+  target_link_libraries(neui_xdnd_probe_target PRIVATE X11)
+
   # Popup-surface acceptance harness, X11. The counterpart to the win32 and
   # macOS ones, and like them it realizes real windows and asks the PLATFORM
   # (here: the X server, over a second connection) rather than asking neui to

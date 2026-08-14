@@ -76,6 +76,14 @@ static Window find_by_name(Display* d, Window r, Atom NN, Atom U8, const char* w
 
 static const char* g_warp_target = "neui dndsrc smoke";  // overridden in foreign mode
 
+// Foreign mode (NEUI_DND_TARGET): the drop target is ANOTHER application, so the
+// XDND wire protocol runs for real instead of Session::dispatch_dnd_* being
+// called directly. Our own client therefore never sees DND_ENTER - the enter is
+// an X message to somebody else - so g_entered can never become true and the
+// driver must not wait for it. It dwells over the target instead, long enough
+// for enter -> position -> status to round-trip, then releases.
+static bool g_foreign = false;
+
 // Background "mouse": warp over the target window centre (real motion -> the
 // drag grab), then synthesize a left-button release to the source frame window.
 //
@@ -150,7 +158,9 @@ static void drive_mouse()
   //  - the jiggle alternates two positions because X coalesces a warp to where
   //    the pointer already is into no motion event at all: after a previous run
   //    left the pointer on the pane, warping "to the centre" once is a no-op.
-  const auto move_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+  const auto move_deadline = std::chrono::steady_clock::now() +
+                             (g_foreign ? std::chrono::seconds(2)
+                                        : std::chrono::seconds(8));
   bool entered = false;
   while (std::chrono::steady_clock::now() < move_deadline) {
     XWindowAttributes a;
@@ -158,14 +168,14 @@ static void drive_mouse()
     int cx = 0, cy = 0; Window ch = 0;
     XTranslateCoordinates(d, w, root, a.width / 2, a.height / 2, &cx, &cy, &ch);
 
-    if ((entered = g_entered.load())) break;
+    if (!g_foreign && (entered = g_entered.load())) break;
     XWarpPointer(d, None, root, 0, 0, 0, 0, cx - 5, cy); XFlush(d);
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    if ((entered = g_entered.load())) break;
+    if (!g_foreign && (entered = g_entered.load())) break;
     XWarpPointer(d, None, root, 0, 0, 0, 0, cx,     cy); XFlush(d);
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
   }
-  if (!entered && !g_entered.load())
+  if (!g_foreign && !entered && !g_entered.load())
     printf("DRIVER: target never entered - releasing anyway\n");
 
   XWindowAttributes a; XGetWindowAttributes(d, w, &a);
@@ -204,6 +214,7 @@ int main()
     DND->set_accepted_formats(SESS, pane, mimes, 1);
   } else {
     g_warp_target = foreign;   // drag onto the external target instead
+    g_foreign     = true;
   }
   W->show(SESS, win);
 

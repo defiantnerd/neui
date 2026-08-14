@@ -23,3 +23,47 @@ Re-entry: `Session::_in_dnd_dispatch` blocks `begin_drag` calls made from inside
 
 Verification: `examples/dnd_example.cpp` (drop receiver) builds `neui_dnd_example.exe`. `examples/dnd_source_example.cpp` (source + receiver side-by-side) builds `neui_dnd_source_example.exe` - left pane initiates `begin_drag` past a 5 px threshold; right pane accepts the drop; status label reports `copy` / `move` / `link` / `cancelled`. Both internal drags and external drags to other apps work.
 
+
+**Automated Linux drag-source verification, and the half it used to miss.**
+`tests/dnd_source_smoke.cpp` (`neui_dnd_source_smoke`, built but not
+ctest-registered - needs a live display and it MOVES THE POINTER) drives
+`platform_dnd_begin_drag` end to end in one process. By default it drops onto its
+own pane, which exercises offered-atom build, the pointer grab, target find and
+the returned action - but **not the XDND wire protocol**, because for our own
+windows the drag spin calls `Session::dispatch_dnd_*` directly. That shortcut is
+deliberate (an X selection round-trip to ourselves would deadlock the blocking
+spin), and it means `XdndEnter` / `XdndPosition` / `XdndStatus` / `XdndDrop` /
+the `XdndSelection` transfer / `XdndFinished` - every byte neui puts on the wire
+for a drag onto another application - were executed by no test at all.
+
+Running them needs a second, genuinely foreign XDND client, which cannot be
+assumed present on a desktop, so one ships as a fixture:
+`tests/xdnd_probe_target.cpp` (`neui_xdnd_probe_target`, pure Xlib, links no
+neui). Two processes:
+
+```
+./tests/neui_xdnd_probe_target "xdnd probe target" 900 600 copy &
+NEUI_DND_TARGET="xdnd probe target" ./tests/neui_dnd_source_smoke
+```
+
+Both sides assert independently - the source checks the action it negotiated, the
+target checks that the messages and the payload actually arrived - and the
+target's last argument selects how it answers `XdndPosition`, which is what makes
+the assertions non-vacuous:
+
+| target answers | source returns | drop sent | shows |
+|---|---|---|---|
+| `copy` | `COPY` (1) | yes, payload exact | the full handshake works |
+| `move` | `MOVE` (2) | yes | the source reads the NEGOTIATED action rather than echoing the one it asked for |
+| `reject` | `NONE` (0) | **no** | a refusing target really is honoured - `XdndStatus` is parsed, not assumed |
+
+Verified 2026-08-14 on X.Org 24.1 under WSLg: `XdndEnter` announced version 5,
+80 `XdndPosition`/`XdndStatus` round trips, and the payload arrived byte-exact.
+Note the final action comes from `XdndFinished`'s `data.l[2]` when the target
+sets it (falling back to the last `XdndStatus`), which is correct - `Finished`
+reports the action actually performed, and a target that says one thing in
+`Status` and another in `Finished` is answered on `Finished`.
+
+`move` and `reject` make the SOURCE harness report failure, since it asserts
+COPY; they are hand-driven diagnostics and the line to read is
+`begin_drag returned action=N`.
