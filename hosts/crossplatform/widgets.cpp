@@ -123,6 +123,8 @@ namespace xpl_host
         !strcmp(type, NEUI_W_PLUGWINDOW) ||
         !strcmp(type, NEUI_W_DIALOG))
       return std::make_unique<FrameWidget>();
+    if (!strcmp(type, NEUI_W_POPUPSURFACE))
+      return std::make_unique<PopupSurfaceWidget>();
     if (!strcmp(type, NEUI_W_LABEL))
       return std::make_unique<LabelWidget>();
     if (!strcmp(type, NEUI_W_SECTION))
@@ -329,6 +331,26 @@ namespace xpl_host
     // swallowing every click and hover in that frame for the rest of its life.
     s->close_tree_popup_if_within(idx);
 
+    // Same shape again for popup surfaces, but the reachability is the other way
+    // round: a surface is its own ROOT CHILD, so destroying the owner frame does
+    // NOT take it with it. Without this, closing a plugin editor while a picker
+    // is open leaves a live borderless window floating over the DAW - owned by a
+    // frame that no longer exists, with the outside-press watch still running.
+    s->close_popup_surfaces_if_within(idx);
+    // Both closes above dispatch into client code - POPUP_DISMISSED is documented
+    // as the place to drop the state a popup was opened with - so re-validate,
+    // the same guard the focus and end_modal steps earlier in this function
+    // already carry. A nested w_destroy for this same slot has already run its
+    // own forget_dead_hover / tab reflow, so returning here loses nothing.
+    //
+    // NOTE this does not make the slot-REUSE case safe: a handler that destroys
+    // this widget and creates another lands the new one in this very slot, where
+    // exists(idx) is true again and nothing distinguishes it. That needs a
+    // generation counter and is the project-wide deferred limitation in
+    // docs/deferred-issues.md ("stale-after-slot-reuse not detected"), not
+    // something local to popups.
+    if (!s->_widgets.exists(idx)) return;
+
     destroy_recursive(s, idx, client_api, token);
 
     // Destroying the widget under the pointer leaves _hovered_widget (and any
@@ -362,6 +384,12 @@ namespace xpl_host
     auto& wd = s->_widgets[idx];
 
     if (wd.is_frame()) {
+      // A popup surface is the one frame kind widget_show cannot realize: it has
+      // no position of its own until something anchors it, and showing it at
+      // wd.x/wd.y (which are SCREEN coordinates, and zero until placed) would put
+      // a borderless window in the corner of the display. NEUI_API_POPUP::open is
+      // the entry point; ignoring this call is the honest answer.
+      if (dynamic_cast<PopupSurfaceWidget*>(&wd)) return;
       if (!wd.native_handle) {
         if (wd.is_dialog()) {
           // Resolve owner HWND (if any) before creating the dialog HWND so
@@ -457,6 +485,31 @@ namespace xpl_host
     if (!s) return;
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
+
+    // Popup surfaces, in BOTH directions - w_show refuses them outright (it has
+    // no position to show one at), but hide can do the right thing and has to.
+    // The generic platform_hide_window below only unmaps the window: the level
+    // stays in _popup_surfaces with the input gate still swallowing every press
+    // and hover in the session, and on Linux with the XGrabPointer still held.
+    // One client call would otherwise leave the whole session unresponsive with
+    // nothing visible to explain it - the same invisible-modal-grab shape the
+    // tree-popup destroy path guards against above.
+    //
+    // Hiding the OWNER dismisses as well: <neui/d/popup.h> and
+    // docs/popup-surfaces.md both list "owner hidden" as a dismissal trigger,
+    // and close_popup_surfaces_if_within is what consults the recorded owner /
+    // anchor - the surface is its own root child, so the owner's subtree does
+    // not contain it and a plain subtree walk would miss it.
+    if (s->popup_surface_open()) {
+      if (s->popup_surface_depth(idx) >= 0)
+        s->close_popup_surface(idx, NEUI_POPUP_DISMISS_CLIENT);
+      else
+        s->close_popup_surfaces_if_within(idx);
+      // Both routes dispatch POPUP_DISMISSED synchronously, so client code has
+      // run and may have destroyed the very widget being hidden.
+      if (!s->_widgets.exists(idx)) return;
+    }
+
     const bool hiding_frame = s->_widgets[idx].is_frame();
     {
       auto& wd = s->_widgets[idx];
@@ -2364,6 +2417,74 @@ namespace xpl_host
     ptr_begin_relative,
     ptr_end_relative,
     ptr_is_relative,
+  };
+
+  // ---------------------------------------------------------------------------
+  // Popup API (NEUI_API_POPUP) - overlay surfaces that may leave their owner
+  // frame. Thin validation over Session::open_popup_surface and friends; the
+  // placement, cascade and dismissal policy are all in host.cpp, and the window
+  // itself is a platform seam.
+
+  static bool NEUI_ABI pop_open(neui_session_t session, neui_widget_t surface,
+                                neui_widget_t anchor, int x, int y, int side)
+  {
+    auto* s = get_session_for_widget(session, surface);
+    if (!s) return false;
+    // Both handles must belong to THIS session: a cross-session anchor would
+    // have the host resolve geometry in one widget tree and place a window from
+    // another. get_session_for_widget already rejected a foreign surface.
+    if (!get_session_for_widget(session, anchor)) return false;
+    return s->open_popup_surface(WidgetToIndex(surface), WidgetToIndex(anchor),
+                                 x, y, side);
+  }
+
+  static void NEUI_ABI pop_close(neui_session_t session, neui_widget_t surface)
+  {
+    auto* s = get_session_for_widget(session, surface);
+    if (!s) return;
+    s->close_popup_surface(WidgetToIndex(surface), NEUI_POPUP_DISMISS_CLIENT);
+  }
+
+  static void NEUI_ABI pop_close_all(neui_session_t session)
+  {
+    if (auto* s = get_session(session))
+      s->close_all_popup_surfaces(NEUI_POPUP_DISMISS_CLIENT);
+  }
+
+  static bool NEUI_ABI pop_is_open(neui_session_t session, neui_widget_t surface)
+  {
+    auto* s = get_session_for_widget(session, surface);
+    if (!s) return false;
+    return s->popup_surface_depth(WidgetToIndex(surface)) >= 0;
+  }
+
+  static void NEUI_ABI pop_get_clamp_size(neui_session_t session,
+                                          neui_widget_t anchor,
+                                          int* width, int* height)
+  {
+    if (width)  *width  = 0;
+    if (height) *height = 0;
+    auto* s = get_session_for_widget(session, anchor);
+    if (!s) return;
+    s->popup_clamp_size(WidgetToIndex(anchor), width, height);
+  }
+
+  static bool NEUI_ABI pop_escapes_frame(neui_session_t session,
+                                         neui_widget_t anchor)
+  {
+    auto* s = get_session_for_widget(session, anchor);
+    if (!s) return false;
+    return s->popup_escapes_frame(WidgetToIndex(anchor));
+  }
+
+  neui_popup_api_t popup_api = {
+    NEUI_VERSION,
+    pop_open,
+    pop_close,
+    pop_close_all,
+    pop_is_open,
+    pop_get_clamp_size,
+    pop_escapes_frame,
   };
 
   // ---------------------------------------------------------------------------

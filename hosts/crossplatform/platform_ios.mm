@@ -2450,6 +2450,45 @@ namespace xpl_host
   // the right answer here, not a port of the pointer-shaped hit-testing.
   bool platform_supports_tree_popup() { return false; }
 
+  // Popup surfaces: an AUv3 view lives inside the host app's own view hierarchy,
+  // so there is no owned top-level window to escape into - the in-frame backing
+  // is not a fallback here but the only correct answer. The type and
+  // NEUI_API_POPUP still exist, and get_clamp_size reports the frame, which is
+  // exactly the fact a client needs to lay out a browser instead of a wall of
+  // rows (docs/popup-surfaces.md).
+  bool platform_supports_popup_surface() { return false; }
+
+  void platform_get_work_area(void* /*near_native*/,
+                              int* x, int* y, int* w, int* h)
+  {
+    CGRect b = UIScreen.mainScreen.bounds;
+    if (x) *x = 0;
+    if (y) *y = 0;
+    if (w) *w = (int)b.size.width;
+    if (h) *h = (int)b.size.height;
+  }
+
+  void platform_client_to_screen(void* /*native_handle*/, int lx, int ly,
+                                 int* sx, int* sy)
+  {
+    if (sx) *sx = lx;
+    if (sy) *sy = ly;
+  }
+
+  void platform_get_pointer_pos(int* sx, int* sy)
+  {
+    // Touch, not a pointer - there is no position to report between taps, and
+    // NEUI_POPUP_AT_POINTER is meaningless here.
+    if (sx) *sx = 0;
+    if (sy) *sy = 0;
+  }
+
+  void platform_create_popup_surface(Session*, uint32_t, WidgetData&, void*) {}
+  void platform_show_popup_surface(void*, void*, int, int, int, int, float) {}
+  void platform_hide_popup_surface(void*, void*) {}
+  void platform_popup_grab_begin(Session*, void*) {}
+  void platform_popup_grab_end(Session*) {}
+
   void platform_timer_start(Session* session, uint32_t interval_ms)
   {
     if (!session || interval_ms == 0) return;

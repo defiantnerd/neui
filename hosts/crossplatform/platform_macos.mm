@@ -20,6 +20,7 @@
 #import <objc/runtime.h>
 
 #include <cstring>
+#include <cmath>
 
 #include "host.h"
 #include "platform.h"
@@ -142,6 +143,8 @@ void wake_app_event_pump()
 }
 - (void)toastStart;
 - (void)toastStop;
+- (BOOL)isPopupSurfaceView;
+- (float)frameZoom;
 - (void)seedReportedSize:(int)w height:(int)h;
 - (void)beginSelfResize:(int)w height:(int)h;
 - (void)endSelfResize;
@@ -153,6 +156,17 @@ void wake_app_event_pump()
 {
   _reported_w = w;
   _reported_h = h;
+}
+
+// True when this view is the content view of a NEUI_W_POPUPSURFACE frame. Two
+// things key off it: the tracking-area mode (a non-activating panel is never the
+// key window) and the dismiss-on-owner-moved hooks, which must not fire for the
+// popup's own geometry.
+- (BOOL)isPopupSurfaceView
+{
+  if (!session) return NO;
+  xpl_host::WidgetData* wd = session->get_widget(widget_index);
+  return wd && dynamic_cast<xpl_host::PopupSurfaceWidget*>(wd) != nullptr;
 }
 
 - (void)beginSelfResize:(int)w height:(int)h
@@ -250,6 +264,25 @@ void wake_app_event_pump()
   wd->width  = w_log;
   wd->height = h_log;
 
+  // An owner being resized dismisses any open popup surface. A picker positioned
+  // against the old geometry is wrong the moment the window changes shape, and
+  // re-placing it mid-resize is worse than closing it - which is what every OS
+  // menu does. Skipped for the popup's own views and for our own placement.
+  if (!xpl_host::popup_placing() && session->popup_surface_open() &&
+      ![self isPopupSurfaceView]) {
+    session->close_all_popup_surfaces(NEUI_POPUP_DISMISS_OWNER_MOVED);
+    // That dispatched POPUP_DISMISSED synchronously, and the documented client
+    // response - drop the state the popup was opened with - routinely means
+    // destroying the owner frame, which frees the WidgetData resolved above. So
+    // re-resolve before touching it again, exactly as the win32 (get_wud) and
+    // Linux (find_window) dismissal sites do; a frame that is gone has no RESIZE
+    // left to report. Without this the dispatch below reads wd->widget_id out of
+    // freed memory - invisible under the normal allocator, which is why the
+    // harness phase covering it runs under Guard Malloc.
+    wd = session->get_widget(widget_index);
+    if (!wd) return;
+  }
+
   // Report the height BELOW any in-frame menubar band so client layout matches
   // the other hosts. 0 on macOS (the menubar is the system menu bar), but
   // routing through the accessor keeps the three xpl platforms identical.
@@ -291,6 +324,12 @@ void wake_app_event_pump()
     [self removeTrackingArea:_tracking_area];
     _tracking_area = nil;
   }
+  // A popup surface's panel is deliberately NON-ACTIVATING, so it never becomes
+  // the key window - and NSTrackingActiveInKeyWindow would then deliver no
+  // mouseMoved: / mouseEntered: / mouseExited: to it at all, leaving a menu with
+  // no row highlighting and no way to clear one. This is the enter/leave cost of
+  // not taking a pointer capture: with real windows per level, each one has to do
+  // its own tracking. ActiveAlways is what makes hover work inside a popup.
   NSTrackingAreaOptions opts =
       NSTrackingMouseEnteredAndExited
     | NSTrackingMouseMoved
@@ -300,7 +339,8 @@ void wake_app_event_pump()
     // reverted before it is seen. Without this option -cursorUpdate: is never
     // called at all (it is opt-in per tracking area, not a free NSView hook).
     | NSTrackingCursorUpdate
-    | NSTrackingActiveInKeyWindow
+    | ([self isPopupSurfaceView] ? NSTrackingActiveAlways
+                                 : NSTrackingActiveInKeyWindow)
     | NSTrackingInVisibleRect;
   _tracking_area = [[NSTrackingArea alloc] initWithRect:self.bounds
                                                  options:opts
@@ -469,6 +509,11 @@ void wake_app_event_pump()
     // Not consumed (the popup belongs to another frame and has now dismissed):
     // fall through so this frame still gets the click.
   }
+  // Popup surfaces, checked before the clickCount branch for the same reason the
+  // tree popup is: a double-click on the owner while a picker is open must
+  // dismiss it, not bypass it and deliver a DBLCLICK underneath.
+  session->popup_discard_pending_release();
+  if (session->popup_gate_press(widget_index)) return;
   // clickCount == 2 -> DBLCLICK; clickCount >= 3 not modeled.
   if (event.clickCount == 2) {
     [self dispatchMouseEventForType:NEUI_EVENT_MOUSE_BUTTON_DBLCLICK event:event];
@@ -499,6 +544,12 @@ void wake_app_event_pump()
 - (BOOL)overlayHandledMove:(NSEvent*)event
 {
   if (!session) return NO;
+  // While a popup surface is open, the widgets UNDER it must stop behaving like
+  // a live UI: without this, moving off the popup and across the owner lights up
+  // hover on every button on the way, which is the one thing that reads as "not
+  // a menu". This is the suppression an OS pointer capture would have bought,
+  // done portably (see Session::popup_gate_hover).
+  if (session->popup_gate_hover(widget_index)) return YES;
   NSPoint p = [self localPointForEvent:event];
   if (session->_tree_popup_active &&
       session->handle_tree_popup_hover(widget_index, (float)p.x, (float)p.y))
@@ -529,6 +580,10 @@ void wake_app_event_pump()
   // DOWN and synthesises a CLICK - i.e. picking a context-menu row would also
   // actuate the button beneath it.
   if (session->tree_popup_take_release()) return;
+  // Same for a press the popup gate swallowed: without this the widget under the
+  // just-dismissed popup gets an UP with no DOWN and synthesises a CLICK - i.e.
+  // clicking outside a picker would also actuate whatever was beneath it.
+  if (session->popup_take_release()) return;
   // End a combo overlay scrollbar drag if one was active (win32 parity).
   if (session->_combo_sb_dragging) {
     session->_combo_sb_dragging = false;
@@ -569,6 +624,8 @@ void wake_app_event_pump()
 - (void)rightMouseDown:(NSEvent*)event
 {
   if (!session) return;
+  session->popup_discard_pending_release();
+  if (session->popup_gate_press(widget_index)) return;
   session->tree_popup_discard_pending_release();
   // A right-click while a tree popup is open goes to it rather than opening a
   // second menu on top: it picks the row under the cursor, descends a cascade,
@@ -592,6 +649,7 @@ void wake_app_event_pump()
 {
   if (!session) return;
   if (session->tree_popup_take_release()) return;
+  if (session->popup_take_release()) return;
   NSPoint p = [self localPointForEvent:event];
   float lx = (float)p.x;
   float ly = (float)p.y;
@@ -827,6 +885,10 @@ void wake_app_event_pump()
   // menu does. No scroll-the-menu behaviour yet - a cascade taller than the
   // frame clamps (see docs/deferred-issues.md).
   if (session->_tree_popup_active) return;
+  // Same for an open popup surface. AppKit delivers the wheel to the view under
+  // the POINTER, so a wheel over the popup arrives at the popup's own view and
+  // passes the gate - which is what lets popup content scroll.
+  if (session->popup_gate_wheel(widget_index)) return;
   NSPoint p = [self localPointForEvent:event];
   float lx = (float)p.x;
   float ly = (float)p.y;
@@ -998,6 +1060,15 @@ void wake_app_event_pump()
 
   // Esc dismisses an open tree popup, before anything else can claim the key.
   if (session->handle_tree_popup_key(keycode)) return;
+
+  // ...and an open popup-surface stack, for the same reason and ahead of the
+  // same competition. Note the key arrives HERE, at the owner: a popup surface
+  // never takes activation (inside a DAW that would read as the plugin editor
+  // losing focus), so it is not first responder and cannot be sent keys
+  // directly. Escape is the whole of v1's keyboard story - arrows and type-ahead
+  // need focus routed across two windows and are a separate wave - but a popup a
+  // user cannot close from the keyboard at all is a trap.
+  if (session->popup_gate_key(keycode)) return;
 
   // Tab cycles logical focus inside our hand-rolled Tab traversal - same as
   // the win32 path. Consume here; the focus_next path doesn't fire KEYDOWN.
@@ -1444,6 +1515,34 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
   return allow ? YES : NO;
 }
 
+// An owner being dragged dismisses any open popup surface - the other half of
+// the resize hook in NEUIView::setFrameSize:. A frame move produces no view
+// notification at all, so it has to be caught here.
+//
+// Guarded twice: not while WE are placing a popup (AppKit posts this for the
+// panel we just moved, which would dismiss the level below a cascade), and not
+// for a window that is itself a popup level.
+- (void)windowDidMove:(NSNotification*)note
+{
+  (void)note;
+  if (!session || xpl_host::popup_placing()) return;
+  if (!session->popup_surface_open()) return;
+  if (session->popup_surface_depth(widget_index) >= 0) return;
+  session->close_all_popup_surfaces(NEUI_POPUP_DISMISS_OWNER_MOVED);
+}
+
+// The owner losing key status dismisses too. NSApplicationDidResignActive (in
+// platform_popup_grab_begin) covers another APPLICATION coming forward; this
+// covers another window of OURS becoming key, which raises no app-level change.
+- (void)windowDidResignKey:(NSNotification*)note
+{
+  (void)note;
+  if (!session || xpl_host::popup_placing()) return;
+  if (!session->popup_surface_open()) return;
+  if (session->popup_surface_depth(widget_index) >= 0) return;
+  session->close_all_popup_surfaces(NEUI_POPUP_DISMISS_DEACTIVATED);
+}
+
 - (void)windowWillClose:(NSNotification*)note
 {
   (void)note;
@@ -1833,6 +1932,251 @@ namespace xpl_host
         if (d) d->sheet_owner = native_window(owner_native);
       }
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Popup surfaces (NEUI_W_POPUPSURFACE). macOS is the reference platform for
+  // the desktop backing, and the easy one for once: the outside-press watch is
+  // complete with no pointer grab at all (see platform_popup_grab_begin).
+
+  bool platform_supports_popup_surface() { return true; }
+
+  void platform_get_work_area(void* near_native, int* x, int* y, int* w, int* h)
+  {
+    NSScreen* scr = nil;
+    if (NSWindow* win = native_window(near_native)) scr = win.screen;
+    if (!scr) scr = NSScreen.mainScreen;
+    // visibleFrame already excludes the menu bar and the Dock, which is exactly
+    // "work area". It is in the GLOBAL screen space, so a frame on a second
+    // monitor clamps to THAT monitor - which is why this seam returns a rect with
+    // an origin rather than a size.
+    NSRect vf = scr.visibleFrame;
+    const CGFloat main_h = NSScreen.mainScreen.frame.size.height;
+    if (x) *x = (int)llround(vf.origin.x);
+    // Cocoa is Y-up from the main screen's bottom-left; every neui coordinate is
+    // Y-down from its top-left (see logical_window_rect_macos).
+    if (y) *y = (int)llround(main_h - vf.origin.y - vf.size.height);
+    if (w) *w = (int)llround(vf.size.width);
+    if (h) *h = (int)llround(vf.size.height);
+  }
+
+  void platform_client_to_screen(void* native_handle, int lx, int ly,
+                                 int* sx, int* sy)
+  {
+    if (sx) *sx = lx;
+    if (sy) *sy = ly;
+    NSView* v = frame_content_view(native_handle);
+    if (!v || !v.window) return;
+    // The view's coordinate space is ZOOMED points; (lx, ly) is logical px at
+    // any zoom, so multiply going in. Screen space itself is unzoomed points -
+    // frame POSITIONS are never scaled by the zoom, only sizes are.
+    CGFloat z = 1.0;
+    if ([v isKindOfClass:[NEUIView class]]) z = (CGFloat)[(NEUIView*)v frameZoom];
+    if (!(z > 0.0)) z = 1.0;
+    NSPoint wp = [v convertPoint:NSMakePoint(lx * z, ly * z) toView:nil];
+    NSRect  sr = [v.window convertRectToScreen:NSMakeRect(wp.x, wp.y, 0, 0)];
+    const CGFloat main_h = NSScreen.mainScreen.frame.size.height;
+    if (sx) *sx = (int)llround(sr.origin.x);
+    if (sy) *sy = (int)llround(main_h - sr.origin.y);
+  }
+
+  void platform_get_pointer_pos(int* sx, int* sy)
+  {
+    NSPoint p = NSEvent.mouseLocation;
+    const CGFloat main_h = NSScreen.mainScreen.frame.size.height;
+    if (sx) *sx = (int)llround(p.x);
+    if (sy) *sy = (int)llround(main_h - p.y);
+  }
+
+  void platform_create_popup_surface(Session* session, uint32_t widget_index,
+                                     WidgetData& wd, void* owner_native)
+  {
+    (void)owner_native;   // the owner relationship is (re)established on show
+    xpl_host::PopupPlacingScope placing;
+
+    // wd.x / wd.y are SCREEN coordinates here (Session::open_popup_surface has
+    // already placed and clamped them) - the one frame kind whose position is
+    // not parent-relative.
+    const float wz = wd.ui_scale();
+    NSRect r = logical_window_rect(wd.x, wd.y,
+                                   (int)(wd.width  * wz + 0.5f),
+                                   (int)(wd.height * wz + 0.5f));
+    // NonactivatingPanel is the load-bearing bit: the panel takes mouse input
+    // WITHOUT the app or the owner losing focus. Inside a DAW that matters more
+    // than anywhere else - a plugin editor that appears to lose focus every time
+    // the user opens a picker is a bug report about the host, not about us.
+    NSPanel* panel = [[NSPanel alloc]
+      initWithContentRect:r
+                styleMask:(NSWindowStyleMaskBorderless |
+                           NSWindowStyleMaskNonactivatingPanel)
+                  backing:NSBackingStoreBuffered
+                    defer:NO];
+    // Dismissal is ours to decide (the session gate and the watch below), so do
+    // NOT let AppKit hide the panel on deactivation behind our back: we would
+    // keep a stack entry for a window the user can no longer see or dismiss.
+    [panel setHidesOnDeactivate:NO];
+    [panel setBecomesKeyOnlyIfNeeded:YES];
+    // Above a modal session, so a picker opened from a modal dialog is usable.
+    [panel setWorksWhenModal:YES];
+    [panel setLevel:NSPopUpMenuWindowLevel];
+    // Shadowed like every other menu / popover on the platform.
+    [panel setHasShadow:YES];
+
+    install_view_and_context(session, widget_index, wd, panel,
+                             /*is_appwindow*/false);
+  }
+
+  void platform_show_popup_surface(void* popup_native, void* owner_native,
+                                   int sx, int sy, int w, int h, float zoom)
+  {
+    NSWindow* panel = native_window(popup_native);
+    if (!panel) return;
+    xpl_host::PopupPlacingScope placing;
+    if (!(zoom > 0.0f)) zoom = 1.0f;
+    const int zw = (int)((float)w * zoom + 0.5f);
+    const int zh = (int)((float)h * zoom + 0.5f);
+
+    // Borderless: content rect == frame rect, so no frameRectForContentRect:
+    // round-trip is needed (unlike platform_set_window_pos, which has chrome to
+    // account for).
+    NEUIView* nv = nil;
+    if (NSView* cv = [panel contentView])
+      if ([cv isKindOfClass:[NEUIView class]]) nv = (NEUIView*)cv;
+    [nv beginSelfResize:w height:h];
+    [panel setFrame:logical_window_rect(sx, sy, zw, zh) display:NO];
+    [nv endSelfResize];
+
+    // THE owner relationship. addChildWindow: is what makes the popup travel
+    // with the editor: it is ordered above the parent and follows it in the
+    // window list, so clicking away to another app and back leaves the popup in
+    // front instead of stranded behind - which is precisely the failure a client
+    // cannot fix for itself (issue #23).
+    //
+    // Re-established on every show because the owner can differ between opens.
+    //
+    // NOTE for the embedded case: native_window(owner_native) is the DAW's
+    // window, which we did not create. This mutates its child-window list. It is
+    // the documented best-effort part of the feature - a host that runs plugin
+    // UIs out of process cannot be made to cooperate at all, and one that
+    // manages its own child windows aggressively may fight us.
+    NSWindow* owner = native_window(owner_native);
+    if (owner && panel.parentWindow != owner) {
+      if (panel.parentWindow) [panel.parentWindow removeChildWindow:panel];
+      [owner addChildWindow:panel ordered:NSWindowAbove];
+    }
+    // orderFront, never makeKeyAndOrderFront: taking key status is the one thing
+    // this window must never do.
+    [panel orderFront:nil];
+  }
+
+  void platform_hide_popup_surface(void* popup_native, void* owner_native)
+  {
+    (void)owner_native;
+    NSWindow* panel = native_window(popup_native);
+    if (!panel) return;
+    xpl_host::PopupPlacingScope placing;
+    // Detach before ordering out: a child window left attached to a live parent
+    // is re-ordered (and re-shown) with it.
+    if (panel.parentWindow) [panel.parentWindow removeChildWindow:panel];
+    [panel orderOut:nil];
+  }
+
+  // The outside-press watch. Deliberately NOT a pointer grab: what a capture
+  // really buys is suppression of the UI underneath, and Session::popup_gate_*
+  // does that portably. What is left is only the presses our own windows will
+  // never see, and on macOS those are covered exactly:
+  //
+  //   - a press into a FOREIGN window of the same process (the DAW's own UI) ->
+  //     the local monitor below sees it before the window does;
+  //   - a press into another APPLICATION -> we deactivate, and
+  //     NSApplicationDidResignActive fires.
+  //
+  // Mouse-down masks need no Accessibility permission (only keyboard ones do),
+  // which is why this is clean here and a documented gap on win32.
+  namespace {
+
+  struct PopupWatch {
+    id monitor  = nil;
+    id observer = nil;
+  };
+
+  std::unordered_map<Session*, PopupWatch>& popup_watches()
+  {
+    static std::unordered_map<Session*, PopupWatch> m;
+    return m;
+  }
+
+  // True when `event` landed inside one of this session's own neui views.
+  //
+  // Testing the view rather than the WINDOW is what makes the embedded case
+  // work: an embedded frame shares the DAW's NSWindow, so "is this our window"
+  // would answer yes for a click on the DAW's transport and never dismiss.
+  bool mac_press_in_session_view(Session* s, NSEvent* event)
+  {
+    if (!s || !event) return false;
+    NSWindow* ew = event.window;
+    if (!ew) return false;   // menu-tracking / system event: treat as foreign
+    for (uint32_t idx = s->_widgets.child(0); idx != 0;
+         idx = s->_widgets.next(idx))
+    {
+      if (!s->_widgets.exists(idx)) continue;
+      WidgetData& wd = s->_widgets[idx];
+      if (!wd.is_frame() || !wd.native_handle || !wd.visible) continue;
+      NSView* v = frame_content_view(wd.native_handle);
+      if (!v || v.window != ew || v.hidden) continue;
+      NSPoint p = [v convertPoint:event.locationInWindow fromView:nil];
+      if (NSPointInRect(p, v.bounds)) return true;
+    }
+    return false;
+  }
+
+  } // namespace
+
+  void platform_popup_grab_begin(Session* session, void* /*popup_native*/)
+  {
+    if (!session) return;
+    PopupWatch& w = popup_watches()[session];
+    // Idempotent per session: a whole cascade shares ONE watch, because
+    // dismissal is a decision about the stack rather than about a level.
+    if (w.monitor || w.observer) return;
+
+    Session* s = session;
+    w.monitor = [NSEvent addLocalMonitorForEventsMatchingMask:
+                   (NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown |
+                    NSEventMaskOtherMouseDown)
+                 handler:^NSEvent*(NSEvent* e) {
+      // Only presses we would otherwise never hear about. A press into one of
+      // OUR views is left to the session gate, which dismisses AND swallows it -
+      // dismissing here first would let that same press act on the widget
+      // underneath the popup.
+      if (!mac_press_in_session_view(s, e))
+        s->close_all_popup_surfaces(NEUI_POPUP_DISMISS_OUTSIDE_PRESS);
+      // Never consume: a foreign window must still get its click.
+      return e;
+    }];
+
+    w.observer = [[NSNotificationCenter defaultCenter]
+      addObserverForName:NSApplicationDidResignActiveNotification
+                  object:nil
+                   queue:nil
+              usingBlock:^(NSNotification* /*note*/) {
+      s->close_all_popup_surfaces(NEUI_POPUP_DISMISS_DEACTIVATED);
+    }];
+  }
+
+  void platform_popup_grab_end(Session* session)
+  {
+    if (!session) return;
+    auto& map = popup_watches();
+    auto it = map.find(session);
+    if (it == map.end()) return;
+    PopupWatch w = it->second;
+    // Erase BEFORE unregistering: this runs from inside the monitor's own block
+    // on the ordinary path (a press dismisses the last level, which ends the
+    // watch), so the entry must already be gone if anything re-enters.
+    map.erase(it);
+    if (w.monitor)  [NSEvent removeMonitor:w.monitor];
+    if (w.observer) [[NSNotificationCenter defaultCenter] removeObserver:w.observer];
   }
 
   void platform_destroy_window(WidgetData& wd)

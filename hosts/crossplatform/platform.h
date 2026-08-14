@@ -120,6 +120,133 @@ namespace xpl_host
   void platform_set_window_pos(void* native_handle,
                                 int x, int y, int w, int h, uint32_t dpi);
 
+  // -------------------------------------------------------------------------
+  // Popup surfaces (NEUI_W_POPUPSURFACE / NEUI_API_POPUP).
+  //
+  // The platform contributes four things and nothing else: the window, the box
+  // to clamp into, the two coordinate conversions, and the notification that a
+  // press landed somewhere we do not own. Placement arithmetic, the cascade, the
+  // input gate and dismissal policy are all portable (Session::open_popup_surface
+  // and friends).
+
+  // Non-zero while the platform layer is itself creating or placing a
+  // popup-surface window. Bracket every such call with PopupPlacingScope below.
+  //
+  // A popup surface dismisses when its owner moves or resizes - that is what OS
+  // menus do, and re-placing one mid-drag is worse than closing it. The hooks
+  // that implement it (WM_MOVE / WM_SIZE, windowDidMove:, ConfigureNotify)
+  // cannot tell a user dragging the window apart from OUR OWN geometry calls,
+  // and every platform posts those for the very window being placed. Without the
+  // bracket, opening a cascade level dismisses the level underneath it - which
+  // is not a theoretical race: it is the first thing a two-level menu does.
+  //
+  // Shared rather than per-platform because all three desktop backings hit it
+  // identically, and a second copy would drift the first time one was touched.
+  //
+  // PROCESS-GLOBAL, guarding state that is per-Session, and deliberately left
+  // that way: it is a depth counter around straight-line platform calls, so the
+  // only thing that could make it suppress the WRONG session's dismissal is a
+  // nested message pump running INSIDE a scope - re-entering another session's
+  // WM_MOVE / ConfigureNotify while the counter is up. None of the bracketed
+  // calls pumps today (create / SetWindowPos / ShowWindow / XMapWindow / XSync),
+  // and two plugin instances in one DAW are separate Sessions on the same thread,
+  // which is exactly the arrangement where a per-Session counter would matter. So
+  // if a bracketed call ever grows a nested pump - or a modal - this needs to
+  // become per-Session state rather than a static, and the symptom will be a
+  // popup that fails to dismiss when its owner is dragged.
+  inline int& popup_placing_depth() { static int depth = 0; return depth; }
+  inline bool popup_placing() { return popup_placing_depth() != 0; }
+
+  struct PopupPlacingScope {
+    PopupPlacingScope()  { ++popup_placing_depth(); }
+    ~PopupPlacingScope() { --popup_placing_depth(); }
+    PopupPlacingScope(const PopupPlacingScope&)            = delete;
+    PopupPlacingScope& operator=(const PopupPlacingScope&) = delete;
+  };
+
+  // True when this platform can give a popup surface its own OS window, so it
+  // may extend past the owner frame. False = the in-frame backing is used and a
+  // popup is clamped to the owner's client area (iOS / WASM / LVGL / null).
+  // Mirrors platform_supports_tree_popup / _relative_pointer / _ui_scale.
+  bool platform_supports_popup_surface();
+
+  // The usable screen area (excluding taskbar / dock / menu bar) of the monitor
+  // that `near_native` is on, in LOGICAL px, as SCREEN coordinates.
+  //
+  // Returns a rect WITH AN ORIGIN, not a size: a frame on a second monitor must
+  // clamp to that monitor's work area, and its origin is not (0, 0). The
+  // in-frame popup paths get away with an origin-anchored box because they clamp
+  // to a client rect; a desktop popup cannot.
+  //
+  // near_native may be nullptr (falls back to the primary monitor). Out-pointers
+  // must all be non-null. A platform with no screen concept reports a plausible
+  // fallback rather than zeros, so clamping never collapses to a 0x0 box.
+  void platform_get_work_area(void* near_native,
+                              int* x, int* y, int* w, int* h);
+
+  // Convert a point in a frame's CLIENT area (logical px, origin at the client
+  // top-left - the same space widget abs_x/abs_y live in) to SCREEN coordinates
+  // in logical px. Used to turn an anchor rectangle into a popup position.
+  // No-op leaving *sx/*sy at the input values when the handle is null.
+  void platform_client_to_screen(void* native_handle, int lx, int ly,
+                                 int* sx, int* sy);
+
+  // Current pointer position in SCREEN coordinates, logical px. Backs
+  // NEUI_POPUP_AT_POINTER - a context menu opens where the cursor is, and the
+  // press that opened it may already be over by the time open() runs.
+  void platform_get_pointer_pos(int* sx, int* sy);
+
+  // Create the native window for a popup surface: borderless, NON-ACTIVATING
+  // (the owner must not lose focus - inside a DAW that would look to the host
+  // like the plugin editor being deactivated), and owned by `owner_native` for
+  // z-order so it travels with the editor instead of being stranded behind it.
+  //
+  // wd.x / wd.y are SCREEN coordinates in logical px (already placed and clamped
+  // by Session::open_popup_surface), unlike every other frame kind where they
+  // are parent-relative. Sets wd.native_handle / wd.render_ctx / wd.dpi like the
+  // other create_* seams. Must NOT count toward the appwindow quit threshold.
+  //
+  // `owner_native` is the ROOT ancestor's handle, which for an embedded plugin
+  // is the DAW's window - not ours. A cascade is FLAT: every level is owned by
+  // that same root, never by the level above it (deep owner chains buy nothing
+  // where they work and are one more thing for a host to break where they do
+  // not). May be nullptr, in which case the window is simply unowned.
+  //
+  // No-op on a platform without the desktop backing; callers must check
+  // wd.native_handle afterwards.
+  void platform_create_popup_surface(Session* session, uint32_t widget_index,
+                                     WidgetData& wd, void* owner_native);
+
+  // Show / hide an already-created popup-surface window at a screen position
+  // (logical px). Separate from platform_show_window + platform_set_window_pos
+  // because a popup is re-shown against a possibly DIFFERENT owner each time it
+  // opens, and the owner relationship, the ordering and the non-activating
+  // presentation have to be (re-)established atomically with the placement.
+  // `zoom` is the owner's NEUI_ATTR_UI_SCALE, already inherited by the surface.
+  void platform_show_popup_surface(void* popup_native, void* owner_native,
+                                   int sx, int sy, int w, int h, float zoom);
+  void platform_hide_popup_surface(void* popup_native, void* owner_native);
+
+  // Begin / end watching for a press that neui's own windows will never see -
+  // one that lands in a foreign window of the same process (the DAW's own UI) or
+  // in another application. The platform calls
+  // Session::close_all_popup_surfaces(NEUI_POPUP_DISMISS_OUTSIDE_PRESS) or
+  // ..._DEACTIVATED when it sees one.
+  //
+  // Deliberately NOT a pointer capture. Capture's real product is suppression of
+  // the UI underneath, and that is handled portably by the session gate; what is
+  // left is only this notification. Per platform: macOS an NSEvent local monitor
+  // plus NSApplicationDidResignActive (complete coverage, no grab); X11 an
+  // XGrabPointer with owner_events=True, which IS the menu mechanism there and
+  // still delivers normally over our own windows; win32 our own windows plus
+  // WM_ACTIVATEAPP, which leaves one documented gap - a press in the DAW's own UI
+  // outside our child HWND is never seen, because we hold no activation to lose.
+  //
+  // begin is idempotent per session; end must be safe to call when no watch is
+  // active. Both must be robust to the owner window dying first.
+  void platform_popup_grab_begin(Session* session, void* popup_native);
+  void platform_popup_grab_end(Session* session);
+
   // Post an asynchronous close request to a native window.
   void platform_post_close(void* native_handle);
 

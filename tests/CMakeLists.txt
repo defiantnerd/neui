@@ -201,6 +201,21 @@ if(APPLE AND NOT NEUI_IOS)
   target_link_libraries(neui_popup_tree_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
+  # Popup-surface harness (NEUI_W_POPUPSURFACE / NEUI_API_POPUP): the feature's
+  # whole claim is about a real OS window, so this asks AppKit rather than neui -
+  # that the panel's rect genuinely leaves the owner frame, that it is in the
+  # owner's -childWindows (z-order follows), that it can never become key, that
+  # placement stays inside the monitor work area and flips near the edge, that a
+  # cascade is flat-owned and unwinds deepest-first, and that destroying the owner
+  # (whose subtree does NOT contain the surface) leaves no window behind.
+  # Realizes real NSWindows, so built but NOT ctest-registered.
+  add_executable(neui_popup_surface_smoke_macos popup_surface_smoke_macos.mm)
+  target_include_directories(neui_popup_surface_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_popup_surface_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_popup_surface_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
   # File-dialog harness (NEUI_API_NOTIFY::open_file / save_file): asserts the
   # appended slots are wired on BOTH macOS hosts, that -1 (no dialog) stays
   # distinct from 0 (cancelled), that a cancelled panel delivers nothing, and
@@ -281,6 +296,34 @@ if(WIN32)
   # needs to read names and values back out.
   target_link_libraries(neui_a11y_provider_smoke_win32 PRIVATE
     neui neui-xplhost neui-win32host ole32 oleaut32)
+
+  # Popup-surface harness - the counterpart to popup_surface_smoke_macos.mm, and
+  # NOT a port of it. The win32 backing shipped written but NEVER COMPILED, so a
+  # build only proves the API calls typecheck; this targets the half win32 writes
+  # for itself and asks WIN32 rather than neui. That the popup is a real
+  # top-level WS_POPUP whose rect leaves the owner, that GetWindow(GW_OWNER) is
+  # the owner's GA_ROOT (win32's -childWindows, and what buys z-order-follows-
+  # owner from the OS), that re-opening against a different frame really moves
+  # ownership through GWLP_HWNDPARENT (the one call with no macOS counterpart),
+  # and - the promise a DAW notices - that opening AND clicking the popup moves
+  # neither the foreground window nor the thread's focus. Plus the three WndProc
+  # branches only win32 has: WM_ACTIVATEAPP as the whole outside-press watch,
+  # WM_MOVE owner-dismissal, and the PopupPlacingScope that keeps placing a
+  # cascade level from reading as "the owner moved". Realizes real HWNDs and
+  # posts real input, so built but NOT ctest-registered; run
+  # tests/<config>/neui_popup_surface_smoke_win32.exe manually.
+  add_executable(neui_popup_surface_smoke_win32 popup_surface_smoke_win32.cpp)
+  target_include_directories(neui_popup_surface_smoke_win32 PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/hosts/crossplatform
+    ${PROJECT_SOURCE_DIR}/hosts/shared)
+  target_compile_features(neui_popup_surface_smoke_win32 PRIVATE cxx_std_17)
+  # neui-win32host is linked because neui_init() references its registration
+  # wrapper unconditionally once it is compiled in - the harness itself asks for
+  # neui.host.crossplatform explicitly (and asserts NEUI_API_POPUP is absent on
+  # the native host, which is the documented feature-detect trap).
+  target_link_libraries(neui_popup_surface_smoke_win32 PRIVATE
+    neui neui-xplhost neui-win32host)
 endif()
 
 # Linux-only: Cairo software backend offscreen smoke test. Unlike neui_tests
@@ -303,6 +346,30 @@ if(UNIX AND NOT APPLE)
     ${PROJECT_SOURCE_DIR}/hosts/shared)
   target_compile_features(neui_embed_smoke PRIVATE cxx_std_17)
   target_link_libraries(neui_embed_smoke PRIVATE neui neui-xplhost neui-backend-cairo)
+
+  # XDND foreign drop target (pure Xlib, links no neui). The companion to
+  # neui_dnd_source_smoke's NEUI_DND_TARGET mode, which is the only way to run
+  # the FOREIGN half of platform_dnd_begin_drag - dropping onto our own pane
+  # short-circuits the wire protocol by design. Needs a live X display and two
+  # processes, so it is built but NOT ctest-registered; see the file header.
+  add_executable(neui_xdnd_probe_target xdnd_probe_target.cpp)
+  target_compile_features(neui_xdnd_probe_target PRIVATE cxx_std_17)
+  target_link_libraries(neui_xdnd_probe_target PRIVATE X11)
+
+  # Popup-surface acceptance harness, X11. The counterpart to the win32 and
+  # macOS ones, and like them it realizes real windows and asks the PLATFORM
+  # (here: the X server, over a second connection) rather than asking neui to
+  # confirm its own bookkeeping. Needs a live X display, so it is built but NOT
+  # ctest-registered; run ./tests/neui_popup_surface_smoke_linux by hand.
+  find_package(Threads REQUIRED)
+  add_executable(neui_popup_surface_smoke_linux popup_surface_smoke_linux.cpp)
+  target_include_directories(neui_popup_surface_smoke_linux PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/hosts/crossplatform
+    ${PROJECT_SOURCE_DIR}/hosts/shared)
+  target_compile_features(neui_popup_surface_smoke_linux PRIVATE cxx_std_17)
+  target_link_libraries(neui_popup_surface_smoke_linux PRIVATE
+    neui neui-xplhost neui-backend-cairo X11 Threads::Threads)
 
   # Repaint benchmark, Linux/Cairo. Same source as the macOS build above - the
   # file is platform-neutral (it asks for neui.host.crossplatform and uses only

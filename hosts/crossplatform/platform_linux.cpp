@@ -227,7 +227,22 @@ namespace
     unsigned int last_click_button  = 0;
   };
 
-  std::unordered_map<Window, LinuxWindow*> g_windows;
+  // Immortal (leaked) rather than a destructible global, for exactly the reason
+  // client_timer_sessions() below is: the `sessions` vector lives in host.cpp,
+  // so the relative static-destruction order across the two TUs is unspecified,
+  // and ~Session reaches THIS map through four of its six teardown steps -
+  // platform_timer_stop -> refresh_timer_arm -> any_window_animating iterates
+  // it, and end_relative_pointer / close_all_popup_surfaces / release_cursor all
+  // look windows up in it. When this TU's statics happen to go first, an
+  // application that simply returns from main() without calling
+  // api->destroy(session) segfaults in static destruction, after all of its own
+  // output has been written but while stdio buffers are still unflushed - so the
+  // crash also eats the log that would have explained it.
+  //
+  // A leaked map at exit costs nothing; a destroyed one is a crash. The
+  // reference form keeps every existing `g_windows` use site unchanged.
+  std::unordered_map<Window, LinuxWindow*>& g_windows =
+      *new std::unordered_map<Window, LinuxWindow*>();
 
   LinuxWindow* find_window(Window w)
   {
@@ -540,6 +555,24 @@ namespace
       if (g_windows.count(lw->win)) paint_window(lw);
   }
 
+  // flush_pending_paints restricted to ONE session's windows. The embedded pump
+  // needs this and cannot use the unrestricted form: a DAW may host several
+  // plugin instances, each with its own session, its own Display and its own
+  // pump - possibly on its own thread - so one instance's tick must never paint
+  // another instance's window.
+  void flush_pending_paints_for_session(Session* s)
+  {
+    if (!s) return;
+    // Snapshot first: a paint callback can create / destroy windows.
+    std::vector<LinuxWindow*> todo;
+    todo.reserve(g_windows.size());
+    for (auto& kv : g_windows)
+      if (kv.second->session == s && kv.second->needs_paint)
+        todo.push_back(kv.second);
+    for (auto* lw : todo)
+      if (g_windows.count(lw->win)) paint_window(lw);
+  }
+
   void tick_animations()
   {
     for (auto& kv : g_windows) {
@@ -631,6 +664,10 @@ namespace
     // menu does. No scroll-the-menu behaviour yet - a cascade taller than the
     // frame clamps (see docs/deferred-issues.md).
     if (s->_tree_popup_active) return;
+    // Same for an open popup surface. X delivers to the window under the pointer,
+    // so a wheel over the popup arrives against the popup's own window and passes
+    // the gate - which is what lets popup content scroll.
+    if (s->popup_gate_wheel(lw->widget_index)) return;
     float lx = static_cast<float>(be.x) / scale, ly = static_cast<float>(be.y) / scale;
     int  delta = 0;
     bool horizontal = false;
@@ -660,6 +697,25 @@ namespace
     s->dispatch_wheel_event(hit, &ev);   // bubbles to scrolling ancestors
   }
 
+  // True when a press reported against THIS window actually landed outside it.
+  //
+  // Only ever true for a popup-surface window, and only because of the pointer
+  // grab: with owner_events=True a press over one of our own windows is
+  // delivered to that window normally, while a press over anything else - the
+  // desktop, another application, another window of the DAW's - is reported
+  // against the GRAB window (this popup) with coordinates outside its bounds.
+  // That is precisely the press no other mechanism would tell us about.
+  bool popup_press_landed_outside(Session* s, LinuxWindow* lw, float lx, float ly)
+  {
+    if (!s->popup_surface_open()) return false;
+    if (s->popup_surface_depth(lw->widget_index) < 0) return false;
+    auto* wd = s->get_widget(lw->widget_index);
+    if (!wd) return false;
+    return lx < 0.0f || ly < 0.0f ||
+           lx >= static_cast<float>(wd->width) ||
+           ly >= static_cast<float>(wd->height);
+  }
+
   void dispatch_button_press(LinuxWindow* lw, XButtonEvent& be)
   {
     Session* s = lw->session;
@@ -686,6 +742,13 @@ namespace
       s->tree_popup_discard_pending_release();
       if (s->_tree_popup_active && s->handle_tree_popup_click(lw->widget_index, lx, ly))
         return;   // release swallowed via Session::tree_popup_take_release below
+      // A press outside an open popup-surface stack dismisses it and is
+      // SWALLOWED - it must not also actuate the widget underneath. With the
+      // pointer grab below, a press anywhere on the screen arrives here.
+      s->popup_discard_pending_release();
+      if (popup_press_landed_outside(s, lw, lx, ly) &&
+          s->popup_gate_press_outside()) return;
+      if (s->popup_gate_press(lw->widget_index)) return;
       if (s->_popup_active) { s->handle_popup_click(lx, ly); return; }
       if (s->handle_toast_click(lw->widget_index, lx, ly)) return;
       if (s->handle_combo_click(lx, ly)) return;
@@ -746,6 +809,10 @@ namespace
       s->tree_popup_discard_pending_release();
       if (s->_tree_popup_active && s->handle_tree_popup_click(lw->widget_index, lx, ly))
         return;   // release swallowed via Session::tree_popup_take_release below
+      s->popup_discard_pending_release();
+      if (popup_press_landed_outside(s, lw, lx, ly) &&
+          s->popup_gate_press_outside()) return;
+      if (s->popup_gate_press(lw->widget_index)) return;
       if (s->_popup_active) { s->handle_popup_click(lx, ly); return; }
       if (s->_menu_open) { s->close_menubar_menu(); return; }
       uint32_t hit = s->widget_at(lx, ly, lw->widget_index);
@@ -764,6 +831,7 @@ namespace
       // A press the tree popup consumed owns its release too, or the widget
       // under the dismissed menu sees an UP with no DOWN (and a CLICK).
       if (s->tree_popup_take_release()) return;
+      if (s->popup_take_release()) return;
       if (lw->swallow_release) { lw->swallow_release = false; return; }
       if (s->_combo_sb_dragging) { s->_combo_sb_dragging = false; return; }
       uint32_t hit     = s->widget_at(lx, ly, lw->widget_index);
@@ -786,6 +854,13 @@ namespace
     }
     if (be.button == 3) {
       if (s->tree_popup_take_release()) return;
+      // The popup-surface peer, which the right-button path was missing while
+      // BOTH its own press path and the other two platforms had it. Two costs,
+      // not one: the widget under a just-dismissed popup saw an RBUTTON_UP with
+      // no DOWN, and because popup_take_release() is button-agnostic the stale
+      // flag was then consumed by the next unrelated LEFT release - silently
+      // eating that click.
+      if (s->popup_take_release()) return;
       uint32_t hit = s->widget_at(lx, ly, lw->widget_index);
       if (hit == 0) return;
       auto* hw = s->get_widget(hit);
@@ -880,6 +955,12 @@ namespace
       return;
     }
 
+    // A popup surface open over this frame suppresses hover in everything under
+    // it. The pointer grab delivers motion normally over our own windows
+    // (owner_events=True), so a popup's own rows still highlight - this only
+    // silences the widgets underneath.
+    if (lw->session->popup_gate_hover(lw->widget_index)) return;
+
     float scale = window_scale(lw);
     do_motion(lw, static_cast<float>(me.x) / scale, static_cast<float>(me.y) / scale, me.state);
   }
@@ -903,6 +984,9 @@ namespace
 
     // Esc dismisses an open tree popup, before anything else claims the key.
     if (s->handle_tree_popup_key(keycode)) return;
+    // ...and an open popup-surface stack. The key arrives at the OWNER: a popup
+    // surface is override-redirect and never takes the input focus.
+    if (s->popup_gate_key(keycode)) return;
 
     // Tab cycles logical focus (hand-rolled traversal, like win32/macOS).
     if (keycode == NEUI_KEY_TAB) {
@@ -1427,6 +1511,10 @@ namespace
     using namespace neui_detail;
     const uint32_t mk = x11_buttonmap(state);
     Session* s = lw->session;
+    // The popup-surface gate, before the accumulators: a swallowed glide must not
+    // bank fractional deltas that would then fire as a jump once the popup closes.
+    // This is the XI2 smooth path, the second of Linux's two wheel entries.
+    if (s->popup_gate_wheel(lw->widget_index)) return;
     int vline = take_lines(lw->scroll_v_accum, dv);
     int hline = take_lines(lw->scroll_h_accum, dh);
 
@@ -1586,6 +1674,27 @@ namespace
     }
   }
 
+  // True when a FocusIn / FocusOut reports an actual change of who holds the
+  // input focus, rather than one of X11's PSEUDO focus events.
+  //
+  // X sends a FocusOut/FocusIn pair around any keyboard grab taken by ANOTHER
+  // client (mode NotifyGrab / NotifyUngrab) - a window-manager keybinding, a
+  // screen locker, another application opening its own menu. Nobody switched
+  // applications, and the focus returns the moment the grab ends. It also sends
+  // events whose detail is NotifyPointer (the window is merely being tracked by
+  // the pointer) or NotifyInferior (focus moved to a DESCENDANT of this window,
+  // so it is still ours).
+  //
+  // Treating those as a deactivation closes every menu and popup surface for no
+  // reason: a popup would vanish seconds after opening because something,
+  // somewhere, briefly grabbed the keyboard. NotifyWhileGrabbed IS real - the
+  // focus genuinely moved, it just moved while a grab was active.
+  bool is_real_focus_change(const XFocusChangeEvent& fe)
+  {
+    return (fe.mode == NotifyNormal || fe.mode == NotifyWhileGrabbed) &&
+           fe.detail != NotifyPointer && fe.detail != NotifyInferior;
+  }
+
   void dispatch_x_event(XEvent& ev)
   {
     if (XFilterEvent(&ev, None)) return;   // let the IME consume composition keys
@@ -1629,6 +1738,21 @@ namespace
         break;
 
       case ConfigureNotify: {
+        // The owner being moved or resized dismisses any open popup surface -
+        // what every OS menu does. Skipped for the popup's own windows, which
+        // are configured because WE placed them.
+        if (!popup_placing() && s->popup_surface_open() &&
+            s->popup_surface_depth(lw->widget_index) < 0)
+          s->close_all_popup_surfaces(NEUI_POPUP_DISMISS_OWNER_MOVED);
+        // That dismissal dispatched POPUP_DISMISSED into client code, and the
+        // documented answer to that event is "drop the state you opened the
+        // popup with" - which routinely means destroying the owner frame.
+        // destroy_native then does `delete lw`, so every read below (starting
+        // with lw->widget_index) would be a use-after-free. Re-resolve from
+        // g_windows and bail if the window is gone: exactly what win32 does with
+        // get_wud(hwnd) after its own dismissal hooks.
+        lw = find_window(ev.xany.window);
+        if (!lw) return;
         uint32_t wphys = static_cast<uint32_t>(ev.xconfigure.width);
         uint32_t hphys = static_cast<uint32_t>(ev.xconfigure.height);
         s->resize_render_ctx(lw->widget_index, wphys, hphys);
@@ -1661,6 +1785,11 @@ namespace
             s->dispatch_event(&re);
           }
         }
+        // The RESIZE dispatch is client code too, and "the window was resized,
+        // tear this frame down" is an ordinary handler - so the same re-resolve
+        // applies before the last read of lw.
+        lw = find_window(ev.xany.window);
+        if (!lw) return;
         lw->needs_paint = true;
         break;
       }
@@ -1685,16 +1814,33 @@ namespace
       case KeyPress:      dispatch_key_press(lw, ev.xkey);          break;
       case KeyRelease:    dispatch_key_release(lw, ev.xkey);        break;
 
-      case FocusIn:  s->_os_focused = true;  lw->needs_paint = true; break;
-      case FocusOut:
+      case FocusIn:
+        if (!is_real_focus_change(ev.xfocus)) break;
+        s->_os_focused = true;  lw->needs_paint = true; break;
+      case FocusOut: {
+        // A grab-induced or pointer-induced pseudo event is not a deactivation.
+        if (!is_real_focus_change(ev.xfocus)) break;
         s->_os_focused = false;
+        // Snapshot the frame slot BEFORE any of the three closes below: each one
+        // can dispatch into client code that destroys this frame, which frees
+        // this LinuxWindow - so lw must not be read again afterwards.
+        const uint32_t frame_idx = lw->widget_index;
         // Both menu surfaces must go, and close_tree_popup explicitly: the popup
         // borrows _menu_path, so close_menubar_menu would CLEAR the path while
         // leaving _tree_popup_active set - a popup with no cascade to build.
         s->close_menubar_menu();
         s->close_tree_popup();
+        // Same for a popup surface: focus leaving our frame means another
+        // application came forward, and a menu does not survive that. Skipped
+        // while WE are placing one (an override-redirect map can shuffle focus).
+        if (!popup_placing() && s->popup_surface_depth(frame_idx) < 0)
+          s->close_all_popup_surfaces(NEUI_POPUP_DISMISS_DEACTIVATED);
+        // Re-resolve like ConfigureNotify does, for the one remaining read.
+        lw = find_window(ev.xany.window);
+        if (!lw) return;
         lw->needs_paint = true;
         break;
+      }
 
       case LeaveNotify:
         s->set_hovered(0);
@@ -3045,8 +3191,17 @@ namespace
     // here - the DAW's cadence is the tick source.
     if (lw->session && client_timer_sessions().count(lw->session))
       lw->session->tick_client_timers();
-    if (lw->needs_paint) paint_window(lw);
-    XFlush(lw->dpy);
+    // Every window of THIS session that needs painting, not just this one. A
+    // popup surface is a second LinuxWindow, and in embedded mode this pump is
+    // the only thing that ever runs - every non-embedded loop calls
+    // flush_pending_paints, this called paint_window on one window - so a picker
+    // opened from a plugin editor mapped as a permanently blank rectangle.
+    const Window self_win = lw->win;
+    Session* const self_sess = lw->session;
+    flush_pending_paints_for_session(self_sess);
+    // A WIDGET_PAINT handler is client code and can destroy this frame, which in
+    // embedded mode closes the dedicated Display this was about to flush.
+    if (LinuxWindow* alive = find_window(self_win)) XFlush(alive->dpy);
   }
 
   void platform_destroy_window(WidgetData& wd)
@@ -3656,6 +3811,210 @@ namespace
   // linux: window_scale folds the zoom into every conversion.
   bool platform_supports_ui_scale() { return true; }
   bool platform_supports_tree_popup() { return true; }
+
+  // -------------------------------------------------------------------------
+  // Popup surfaces (NEUI_W_POPUPSURFACE) - the desktop backing.
+
+  bool platform_supports_popup_surface() { return true; }
+
+  // The scale a screen-coordinate conversion uses. Screen POSITIONS are in
+  // unzoomed logical px (only sizes carry the frame zoom), so this is the
+  // display DPI ratio alone - deliberately not window_scale(), which folds the
+  // zoom in.
+  static float screen_scale()
+  {
+    if (!g_display) return 1.0f;
+    float s = static_cast<float>(query_display_dpi(g_display)) / 96.0f;
+    return (s > 0.0f) ? s : 1.0f;
+  }
+
+  void platform_get_work_area(void* /*near_native*/,
+                              int* x, int* y, int* w, int* h)
+  {
+    if (x) *x = 0;
+    if (y) *y = 0;
+    if (w) *w = 1024;
+    if (h) *h = 768;
+    if (!g_display) return;
+    const int screen = DefaultScreen(g_display);
+    const float sc   = screen_scale();
+
+    // _NET_WORKAREA first: it is the screen minus panel struts, which is what a
+    // menu must stay inside. Falls back to the whole screen on a WM that does
+    // not publish it (and on a multi-head setup, where the property describes
+    // the union rather than one monitor - a per-monitor answer wants RandR and
+    // is deferred).
+    Atom wa = XInternAtom(g_display, "_NET_WORKAREA", True);
+    if (wa != None) {
+      Atom actual_type = None;
+      int actual_format = 0;
+      unsigned long nitems = 0, bytes_after = 0;
+      unsigned char* data = nullptr;
+      if (XGetWindowProperty(g_display, RootWindow(g_display, screen), wa,
+                             0, 4, False, XA_CARDINAL, &actual_type,
+                             &actual_format, &nitems, &bytes_after,
+                             &data) == Success && data) {
+        if (actual_format == 32 && nitems >= 4) {
+          const long* v = reinterpret_cast<const long*>(data);
+          if (x) *x = static_cast<int>(static_cast<float>(v[0]) / sc);
+          if (y) *y = static_cast<int>(static_cast<float>(v[1]) / sc);
+          if (w) *w = static_cast<int>(static_cast<float>(v[2]) / sc);
+          if (h) *h = static_cast<int>(static_cast<float>(v[3]) / sc);
+          XFree(data);
+          return;
+        }
+        XFree(data);
+      }
+    }
+    if (w) *w = static_cast<int>(static_cast<float>(DisplayWidth(g_display, screen))  / sc);
+    if (h) *h = static_cast<int>(static_cast<float>(DisplayHeight(g_display, screen)) / sc);
+  }
+
+  void platform_client_to_screen(void* native_handle, int lx, int ly,
+                                 int* sx, int* sy)
+  {
+    if (sx) *sx = lx;
+    if (sy) *sy = ly;
+    auto* lw = static_cast<LinuxWindow*>(native_handle);
+    if (!lw || !lw->dpy || !lw->win) return;
+    // Into the window's own physical space (which DOES carry the zoom), then out
+    // to root, then back to unzoomed logical.
+    const float wsc = window_scale(lw);
+    int child_x = 0, child_y = 0;
+    Window child = 0;
+    if (!XTranslateCoordinates(lw->dpy, lw->win,
+                               DefaultRootWindow(lw->dpy),
+                               static_cast<int>(static_cast<float>(lx) * wsc + 0.5f),
+                               static_cast<int>(static_cast<float>(ly) * wsc + 0.5f),
+                               &child_x, &child_y, &child))
+      return;
+    const float ssc = screen_scale();
+    if (sx) *sx = static_cast<int>(static_cast<float>(child_x) / ssc);
+    if (sy) *sy = static_cast<int>(static_cast<float>(child_y) / ssc);
+  }
+
+  void platform_get_pointer_pos(int* sx, int* sy)
+  {
+    if (sx) *sx = 0;
+    if (sy) *sy = 0;
+    if (!g_display) return;
+    Window root_ret = 0, child_ret = 0;
+    int rx = 0, ry = 0, wx = 0, wy = 0;
+    unsigned int mask = 0;
+    const int screen = DefaultScreen(g_display);
+    if (!XQueryPointer(g_display, RootWindow(g_display, screen),
+                       &root_ret, &child_ret, &rx, &ry, &wx, &wy, &mask))
+      return;
+    const float sc = screen_scale();
+    if (sx) *sx = static_cast<int>(static_cast<float>(rx) / sc);
+    if (sy) *sy = static_cast<int>(static_cast<float>(ry) / sc);
+  }
+
+  void platform_create_popup_surface(Session* session, uint32_t widget_index,
+                                     WidgetData& wd, void* /*owner_native*/)
+  {
+    PopupPlacingScope placing;
+    // Borderless + no quit-count + no owner: create_frame gives all of that.
+    // The override-redirect flag and the window-type hint are applied below,
+    // because they are the two things no other frame kind wants.
+    //
+    // create_frame folds the frame ZOOM into the create-time position, which is
+    // wrong for a popup (wd.x/wd.y are screen coordinates, and screen positions
+    // never carry the zoom - only sizes do). Harmless here because the window is
+    // created UNMAPPED and platform_show_popup_surface re-places it before the
+    // map, which is the only placement the user ever sees.
+    create_frame(session, widget_index, wd, /*borderless*/true,
+                 /*is_appwindow*/false, /*owner*/nullptr, /*embed*/0);
+
+    auto* lw = static_cast<LinuxWindow*>(wd.native_handle);
+    if (!lw || !lw->dpy || !lw->win) return;
+
+    // OVERRIDE-REDIRECT is the load-bearing one: it takes the window manager out
+    // of decoration, focus and stacking entirely, which is how every X11 menu is
+    // built. Without it the WM may give the popup focus (deactivating the
+    // editor), reparent it, or animate it.
+    XSetWindowAttributes swa;
+    std::memset(&swa, 0, sizeof(swa));
+    swa.override_redirect = True;
+    XChangeWindowAttributes(lw->dpy, lw->win, CWOverrideRedirect, &swa);
+
+    // Advisory for compositors (shadow / no animation); harmless where ignored.
+    Atom wt  = XInternAtom(lw->dpy, "_NET_WM_WINDOW_TYPE", False);
+    Atom pop = XInternAtom(lw->dpy, "_NET_WM_WINDOW_TYPE_POPUP_MENU", False);
+    if (wt != None && pop != None)
+      XChangeProperty(lw->dpy, lw->win, wt, XA_ATOM, 32, PropModeReplace,
+                      reinterpret_cast<unsigned char*>(&pop), 1);
+  }
+
+  void platform_show_popup_surface(void* popup_native, void* /*owner_native*/,
+                                   int sx, int sy, int w, int h, float zoom)
+  {
+    auto* lw = static_cast<LinuxWindow*>(popup_native);
+    if (!lw || !lw->dpy || !lw->win) return;
+    PopupPlacingScope placing;
+    if (!(zoom > 0.0f)) zoom = 1.0f;
+
+    // Position in screen space (no zoom), size in the window's own space (zoom).
+    const float ssc = screen_scale();
+    const int x_phys = static_cast<int>(static_cast<float>(sx) * ssc + 0.5f);
+    const int y_phys = static_cast<int>(static_cast<float>(sy) * ssc + 0.5f);
+    int w_phys = static_cast<int>(static_cast<float>(w) * ssc * zoom + 0.5f);
+    int h_phys = static_cast<int>(static_cast<float>(h) * ssc * zoom + 0.5f);
+    if (w_phys < 1) w_phys = 1;
+    if (h_phys < 1) h_phys = 1;
+
+    // Tell the ConfigureNotify handler this size is ours, so it snaps rather
+    // than deriving a drifted logical size back out of it.
+    lw->expect_w = w;
+    lw->expect_h = h;
+    XMoveResizeWindow(lw->dpy, lw->win, x_phys, y_phys,
+                      static_cast<unsigned int>(w_phys),
+                      static_cast<unsigned int>(h_phys));
+    XMapRaised(lw->dpy, lw->win);
+    lw->needs_paint = true;
+    // XSync, not XFlush: platform_popup_grab_begin runs straight after this and
+    // XGrabPointer fails with GrabNotViewable if the map has not been processed
+    // yet. A flush only pushes the request out; this waits for it to land.
+    XSync(lw->dpy, False);
+  }
+
+  void platform_hide_popup_surface(void* popup_native, void* /*owner_native*/)
+  {
+    auto* lw = static_cast<LinuxWindow*>(popup_native);
+    if (!lw || !lw->dpy || !lw->win) return;
+    PopupPlacingScope placing;
+    XUnmapWindow(lw->dpy, lw->win);
+    XFlush(lw->dpy);
+  }
+
+  // The outside-press watch. An XGrabPointer with owner_events=True IS the menu
+  // mechanism on X11, and it has none of the properties that make win32's
+  // SetCapture the wrong tool: events over OUR OWN windows are still delivered
+  // to the window they would normally go to, so hover and clicks inside the
+  // popup work untouched, and only events outside our client are redirected to
+  // the grab window - which is exactly the notification the session gate needs.
+  //
+  // GrabModeAsync on both so the pointer and keyboard are never frozen if we
+  // are slow; a failed grab is not fatal (the popup then behaves like a plain
+  // window and is still dismissed by any press that reaches our frames).
+  void platform_popup_grab_begin(Session* session, void* popup_native)
+  {
+    (void)session;
+    auto* lw = static_cast<LinuxWindow*>(popup_native);
+    if (!lw || !lw->dpy || !lw->win) return;
+    XGrabPointer(lw->dpy, lw->win, True,
+                 ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+                 GrabModeAsync, GrabModeAsync,
+                 None, None, CurrentTime);
+    XFlush(lw->dpy);
+  }
+
+  void platform_popup_grab_end(Session* /*session*/)
+  {
+    if (!g_display) return;
+    XUngrabPointer(g_display, CurrentTime);
+    XFlush(g_display);
+  }
 
   void platform_timer_start(Session* session, uint32_t interval_ms)
   {

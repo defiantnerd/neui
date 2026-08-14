@@ -24,6 +24,16 @@ root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 targets = sorted(
     glob.glob(os.path.join(root, 'tests', 'test_*.cpp')) +
     glob.glob(os.path.join(root, 'tests', '*.h')) +
+    # The Linux-ONLY harnesses. They are the worst case for this check, not an
+    # afterthought: they are compiled by exactly one toolchain, on the one
+    # platform with no local build in this repo, and they are not
+    # ctest-registered - so a missing <cstring> in one of them surfaces as a CI
+    # failure and nowhere else. Everything a *_linux.cpp harness needs plus the
+    # named non-suffixed ones (Linux-gated in tests/CMakeLists.txt).
+    glob.glob(os.path.join(root, 'tests', '*_linux.cpp')) +
+    [os.path.join(root, 'tests', f) for f in
+     ('embed_smoke.cpp', 'dnd_source_smoke.cpp', 'cairo_smoke.cpp',
+      'xdnd_probe_target.cpp', 'repaint_bench.cpp')] +
     glob.glob(os.path.join(root, 'hosts', 'shared', '*.h')) +
     glob.glob(os.path.join(root, 'src', '*.cpp')) +
     glob.glob(os.path.join(root, 'src', '*.h')) +

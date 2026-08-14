@@ -32,6 +32,7 @@
 #include "d/embed.h"
 #include "d/timer.h"
 #include "d/pointer.h"
+#include "d/popup.h"
 #include "d/a11y.h"
 
 #ifdef __cplusplus

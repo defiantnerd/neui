@@ -374,6 +374,51 @@ namespace xpl_host
     ToastState toast;
   };
 
+  // NEUI_W_POPUPSURFACE - a frameless overlay that may leave its owner frame.
+  //
+  // Deliberately a FRAME KIND rather than a child widget, and that is the whole
+  // design: a frame already owns a coordinate origin, a render context and the
+  // root of a child subtree, so the two possible backings differ only in whether
+  // this widget carries a native_handle.
+  //
+  //   desktop backing  - native_handle from platform_create_popup_surface: an
+  //                      owned, borderless, non-activating platform window that
+  //                      may extend past the owner (win32 / macOS / X11).
+  //   in-frame backing  - no native_handle: the owner's paint_frame composites
+  //                      this subtree into the owner's surface, clipped to its
+  //                      client rect (iOS / WASM / LVGL / null - and not written
+  //                      yet, see plans/popup-surface.md).
+  //
+  // Either way the SAME paint walk and the SAME hit-test walk run over the
+  // children, so a GRID or a scrolling SECTION inside a popup behaves
+  // identically under both - which the previous popup code (a bespoke paint pass
+  // in paint_popup_menu / paint_tree_popup) could never do, and which is why a
+  // client had to hand-roll menu rows into a CUSTOMDRAW to get a popup outside
+  // the frame.
+  //
+  // Unlike the other frame kinds this one is NOT shown by widget_show (which has
+  // no idea where to put it) - NEUI_API_POPUP::open places and shows it. The
+  // stack of open surfaces lives on the Session; see _popup_surfaces.
+  class PopupSurfaceWidget : public FrameWidget {
+  public:
+    // The frame that owns this surface for z-order / activation / dismissal, and
+    // the widget it was anchored to, as recorded at open time. Both are tree
+    // slots in the SAME session; 0 when closed.
+    //
+    // owner_index (on the base) is deliberately NOT reused for this: it carries
+    // DIALOG modality semantics (widget_set_owner gates on is_dialog, and a
+    // modal owner is input-BLOCKED), which is the opposite of what a popup
+    // wants - a press on the owner must dismiss the popup, not be swallowed by
+    // a disabled window.
+    uint32_t popup_owner  = 0;
+    uint32_t popup_anchor = 0;
+    // Placement recorded from open(), so a re-place (owner moved, zoom changed)
+    // can redo the same arithmetic without the client asking again.
+    int  popup_side    = 0;    // neui_popup_side_t
+    int  popup_off_x   = 0;    // logical px in the anchor's local space
+    int  popup_off_y   = 0;
+  };
+
   // Structural / display-only widgets - no extra fields, use base paint
   class LabelWidget     : public WidgetData {};
   class ButtonWidget    : public WidgetData {
@@ -1178,6 +1223,103 @@ namespace xpl_host
     // stuck, and (on KNOB / SLIDER) a GESTURE_BEGIN with no GESTURE_END.
     void tree_popup_discard_pending_release() { _tree_popup_swallow_release = false; }
 
+    // ---- Popup surfaces (NEUI_W_POPUPSURFACE / NEUI_API_POPUP) ---------------
+    // See PopupSurfaceWidget for why this is a frame kind. Everything below is
+    // portable: the platform layer contributes the window, the work area and the
+    // outside-press notification, and nothing else.
+
+    // Place + show `surface_idx` anchored to `anchor_idx` + (off_x, off_y) in the
+    // anchor's local logical px, on `side` (neui_popup_side_t). Re-places an
+    // already-open surface. False = nothing shown (bad widget, no frame, empty).
+    bool open_popup_surface(uint32_t surface_idx, uint32_t anchor_idx,
+                            int off_x, int off_y, int side);
+    // Close `surface_idx` and every level opened above it, reporting `reason`
+    // (neui_popup_dismiss_reason_t) for it and CASCADE for the deeper levels.
+    void close_popup_surface(uint32_t surface_idx, uint32_t reason);
+    void close_all_popup_surfaces(uint32_t reason);
+    // Close every level deeper than `depth` (0 = keep only the first level).
+    void close_popup_surfaces_deeper_than(size_t depth, uint32_t reason);
+    // Close any surface whose SURFACE, ANCHOR or OWNER is inside the subtree
+    // being destroyed. Called from widget_destroy BEFORE the subtree goes, and
+    // it has to check all three: a popup surface is its own root child, so the
+    // owner frame's subtree does not contain it, and destroying the editor while
+    // a picker is open would otherwise leave a live window over the DAW with a
+    // dead owner - plus a grab still swallowing every click.
+    void close_popup_surfaces_if_within(uint32_t subtree_root);
+
+    bool popup_surface_open() const { return !_popup_surfaces.empty(); }
+    // Depth of `frame_idx` in the open stack, or -1 when it is not a level of it.
+    int  popup_surface_depth(uint32_t frame_idx) const;
+
+    // The input gate. While a stack is open, the widgets UNDER it must stop
+    // behaving like a live UI - and that suppression, not event delivery, is what
+    // an OS pointer capture was ever buying. Doing it here instead means one
+    // portable code path shared by both backings, and it leaves the owner window
+    // ENABLED (a press reaches us and is interpreted, rather than being swallowed
+    // by a disabled window the way a modal dialog's owner is).
+    //
+    // Call from a platform button-DOWN path with the frame the press arrived at,
+    // BEFORE normal hit-testing. Returns true when the press was consumed:
+    //   - frame is not part of the stack -> close everything, swallow. The press
+    //     that dismisses is not also delivered to what is underneath, matching
+    //     every OS menu; one click must not both close a picker and move a knob.
+    //   - frame is a SHALLOWER level than the deepest -> close the deeper levels
+    //     and return false, so the press still reaches that level's widgets
+    //     (clicking a parent menu row while a submenu is open re-targets).
+    //   - frame is the deepest level -> false, ordinary dispatch.
+    bool popup_gate_press(uint32_t frame_idx);
+    // The same decision as popup_gate_press's "outside" branch, for a backing
+    // that cannot make it from the window identity alone.
+    //
+    // X11 needs this: an XGrabPointer with owner_events=True reports a press
+    // that landed outside EVERY window of ours against the GRAB window - which
+    // is the popup itself - with coordinates outside that window's bounds. Left
+    // to popup_gate_press, that press reads as "inside the stack" and nothing
+    // ever dismisses, which is the exact opposite of what the grab is for.
+    // The platform decides outside-ness from the coordinates; the dismissal and
+    // the release-swallow bookkeeping stay here, shared.
+    bool popup_gate_press_outside();
+
+    // Same for hover / move: true = swallow. Without this, moving off the popup
+    // and across the owner lights up hover on every widget it passes, which is
+    // the one thing that reads as "not a menu".
+    bool popup_gate_hover(uint32_t frame_idx);
+    // Same for the wheel: true = swallow. A scrolling SECTION or GRID under an
+    // open popup must not scroll away beneath it, and on a KNOB / SLIDER the cost
+    // is worse than cosmetic - an ungated notch fires the whole
+    // GESTURE_BEGIN / VALUE_CHANGED / GESTURE_END triple, which in a DAW is an
+    // automation write the user never saw.
+    //
+    // Unlike the press gate this does NOT dismiss: a wheel is not in the
+    // documented trigger list (<neui/d/popup.h>), and a stack that vanished on an
+    // accidental trackpad glide would be worse than one that ignores it. And
+    // unlike the hover gate it leaves _hovered_widget alone, because a wheel does
+    // not move the pointer.
+    //
+    // One method rather than the predicate open-coded at each platform's wheel
+    // entry - there are four of them across three platforms (win32, macOS, and
+    // Linux twice for core Button 4-7 plus the XI2 smooth path), which is exactly
+    // the shape wheel_direction.h exists to stop repeating.
+    bool popup_gate_wheel(uint32_t frame_idx);
+    // Escape dismisses. Not general keyboard support (arrows / type-ahead need
+    // focus routed across two windows and are a separate wave) - but a popup a
+    // user cannot close from the keyboard at all is a trap, and the owner already
+    // holds key focus, so this costs nothing.
+    bool popup_gate_key(uint32_t keycode);
+    // The button-UP peer of popup_gate_press, same contract and same reason as
+    // tree_popup_take_release: a swallowed press must swallow its own release or
+    // the widget under the dismissed popup sees an UP with no DOWN and
+    // synthesises a CLICK.
+    bool popup_take_release();
+    void popup_discard_pending_release() { _popup_surface_swallow_release = false; }
+
+    // The box a popup anchored to `anchor_idx` will be clamped to, logical px.
+    // Desktop backing = the work area of the monitor the owner is on; in-frame
+    // backing = the owner's client area. (0, 0) for a bad anchor.
+    void popup_clamp_size(uint32_t anchor_idx, int* out_w, int* out_h);
+    // True when such a popup gets its own OS window (and so may leave the frame).
+    bool popup_escapes_frame(uint32_t anchor_idx);
+
     // Update the hovered widget, firing mouse enter/leave events.
     void set_hovered(uint32_t new_idx);
 
@@ -1592,6 +1734,26 @@ namespace xpl_host
     int                   _tree_popup_y      = 0;
     // Set when a press was consumed by the popup; see tree_popup_take_release.
     bool                  _tree_popup_swallow_release = false;
+
+    // Open popup surfaces (NEUI_W_POPUPSURFACE), outermost level first. Tree
+    // slots of the PopupSurfaceWidget frames; the owner / anchor / placement for
+    // each level live on the widget itself.
+    //
+    // A vector rather than a single slot because a cascade is the normal case (a
+    // menu opening a submenu opening a colour picker), and the whole cascade
+    // shares ONE dismissal decision: a press outside closes all of it, a press on
+    // level N closes everything deeper. A client cannot coordinate that across
+    // several surfaces, so the host owns it.
+    std::vector<uint32_t> _popup_surfaces;
+    // Set when popup_gate_press swallowed a press; consumed by popup_take_release.
+    //
+    // (No re-entrancy flag guards the close path, deliberately: closing a level
+    // POPS IT FROM THIS VECTOR BEFORE any teardown or client dispatch, so the
+    // stack strictly shrinks and a client that closes another surface from its
+    // NEUI_EVENT_POPUP_DISMISSED handler simply pops more. A blocking guard would
+    // have been worse than nothing - re-entering from a handler that DESTROYS
+    // widgets would then leave a level in the stack naming a dead one.)
+    bool                  _popup_surface_swallow_release = false;
 
     // Overlay scrollbar drag state (managed by handle_combo_click / handle_combo_scroll_drag).
     bool     _combo_sb_dragging       = false;

@@ -121,6 +121,7 @@ namespace xpl_host
   extern neui_embed_api_t     embed_api;
   extern neui_timer_api_t     timer_api;
   extern neui_pointer_api_t   pointer_api;
+  extern neui_popup_api_t     popup_api;
   extern neui_a11y_api_t      a11y_api;
 
   // Resolve a Session* from a 1-based session id (the upper 16 bits of a
@@ -183,6 +184,7 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_EMBED))     return &embed_api;
     if (!strcmp(iface, NEUI_API_TIMER))     return &timer_api;
     if (!strcmp(iface, NEUI_API_POINTER))   return &pointer_api;
+    if (!strcmp(iface, NEUI_API_POPUP))     return &popup_api;
     if (!strcmp(iface, NEUI_API_A11Y))      return &a11y_api;
     return nullptr;
   }
@@ -286,6 +288,13 @@ namespace xpl_host
     // the pointer and re-associates it with the device; skipping it would leave
     // the whole machine with a cursor that does not follow the mouse.
     end_relative_pointer();
+
+    // Close any open popup surface. Same class of leak as the two above and worse
+    // to look at: a borderless desktop window with no owner left alive, plus an
+    // outside-press watch holding this Session pointer. The widget tree is torn
+    // down below without walking the popup stack, so this has to happen here.
+    close_all_popup_surfaces(NEUI_POPUP_DISMISS_OWNER_MOVED);
+    platform_popup_grab_end(this);
 
     // Hand the cursor back to the OS. A hidden pointer (NEUI_CURSOR_NONE)
     // outlives the session that hid it, and on macOS hide/unhide is a balanced
@@ -5510,6 +5519,446 @@ namespace xpl_host
   {
     if (!_tree_popup_swallow_release) return false;
     _tree_popup_swallow_release = false;
+    return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Popup surfaces (NEUI_W_POPUPSURFACE / NEUI_API_POPUP).
+  //
+  // Everything here is portable. The platform layer supplies the window, the
+  // work area, the two coordinate conversions and the outside-press watch; the
+  // placement arithmetic, the cascade, the input gate and the dismissal policy
+  // live in this file so both backings and all platforms share one copy.
+
+  namespace {
+
+  // The frame a popup cascade ultimately hangs off: walk out of any popup levels
+  // until a real window frame is reached. Ownership is FLAT - every level is
+  // owned by this frame, never by the level above it - so this is also the
+  // handle every level's window is created against.
+  uint32_t ps_root_owner(Session* s, uint32_t frame_idx)
+  {
+    // Bounded rather than while(true): popup_owner is written only by
+    // open_popup_surface, but a cycle here would hang the UI thread, and the
+    // cost of not trusting it is one int.
+    for (int guard = 0; guard < 64; ++guard) {
+      if (frame_idx == 0 || !s->_widgets.exists(frame_idx)) return 0;
+      auto* ps = dynamic_cast<PopupSurfaceWidget*>(&s->_widgets[frame_idx]);
+      if (!ps) return frame_idx;
+      frame_idx = ps->popup_owner;
+    }
+    return 0;
+  }
+
+  // The frame containing `widget_idx`, or the widget itself when it IS a frame.
+  uint32_t ps_frame_of_or_self(Session* s, uint32_t widget_idx)
+  {
+    uint32_t idx = widget_idx;
+    while (idx != 0 && s->_widgets.exists(idx) && !s->_widgets[idx].is_frame())
+      idx = s->_widgets.get_parent(idx);
+    return (idx != 0 && s->_widgets.exists(idx)) ? idx : 0;
+  }
+
+  // Pop the deepest open level and tear it down, reporting `reason`.
+  //
+  // Order matters: the level is removed from the stack FIRST, so every observer
+  // that runs afterwards (the focus / hover / press cleanups, and the client's
+  // NEUI_EVENT_POPUP_DISMISSED handler) sees a consistent stack and may itself
+  // close or destroy things without corrupting the walk.
+  void ps_close_top(Session* s, uint32_t reason)
+  {
+    if (s->_popup_surfaces.empty()) return;
+    const uint32_t idx = s->_popup_surfaces.back();
+    s->_popup_surfaces.pop_back();
+
+    uint32_t owner_idx = 0;
+    uint32_t widget_id = 0;
+    if (s->_widgets.exists(idx)) {
+      auto& wd  = s->_widgets[idx];
+      widget_id = wd.widget_id;
+      auto* ps  = dynamic_cast<PopupSurfaceWidget*>(&wd);
+      if (ps) owner_idx = ps->popup_owner;
+
+      void* owner_native = nullptr;
+      if (owner_idx != 0 && s->_widgets.exists(owner_idx))
+        owner_native = s->_widgets[owner_idx].native_handle;
+      if (wd.native_handle)
+        platform_hide_popup_surface(wd.native_handle, owner_native);
+      wd.visible = false;
+      if (ps) ps->popup_anchor = 0;
+
+      // A popup is a frame, so focus / hover / press can all be pointing INSIDE
+      // it when it closes, and no leave event arrives for a surface that simply
+      // stops existing on screen. Left alone, focus would sit on a control in a
+      // hidden window (a dead keyboard) and a cursor="none" widget would leave
+      // the pointer hidden process-wide.
+      if (s->_focused_widget != 0 && s->is_in_subtree(s->_focused_widget, idx))
+        s->focus_leave_subtree(idx, /*try_next*/false);
+      if (s->_hovered_widget != 0 && s->is_in_subtree(s->_hovered_widget, idx))
+        s->set_hovered(0);
+      if (s->_pressed_widget != 0 && s->is_in_subtree(s->_pressed_widget, idx))
+        s->set_pressed(0);
+    }
+
+    // Repaint the owner. Load-bearing for the in-frame backing (the popup was
+    // pixels in the owner's surface); harmless for the desktop one.
+    if (owner_idx != 0 && s->_widgets.exists(owner_idx)) {
+      if (void* native = s->_widgets[owner_idx].native_handle)
+        platform_invalidate(native);
+    }
+
+    if (widget_id != 0) {
+      neui_event_t ev = {};
+      ev.type              = NEUI_EVENT_POPUP_DISMISSED;
+      ev.data.popup.widget = { widget_id };
+      ev.data.popup.reason = reason;
+      s->dispatch_event(&ev);
+    }
+  }
+
+  } // namespace
+
+  int Session::popup_surface_depth(uint32_t frame_idx) const
+  {
+    if (frame_idx == 0) return -1;
+    for (size_t i = 0; i < _popup_surfaces.size(); ++i)
+      if (_popup_surfaces[i] == frame_idx) return static_cast<int>(i);
+    return -1;
+  }
+
+  void Session::popup_clamp_size(uint32_t anchor_idx, int* out_w, int* out_h)
+  {
+    if (out_w) *out_w = 0;
+    if (out_h) *out_h = 0;
+    uint32_t frame_idx = ps_frame_of_or_self(this, anchor_idx);
+    if (frame_idx == 0) return;
+    uint32_t root = ps_root_owner(this, frame_idx);
+    if (root == 0 || !_widgets.exists(root)) return;
+
+    if (!platform_supports_popup_surface()) {
+      // In-frame backing: the box is the owner's client area, menubar band
+      // excluded - the same rect a client lays its own children out against.
+      const auto& fw = _widgets[root];
+      if (out_w) *out_w = fw.width;
+      if (out_h) *out_h = fw.height - frame_top_inset(root);
+      return;
+    }
+
+    int wx = 0, wy = 0, ww = 0, wh = 0;
+    platform_get_work_area(_widgets[root].native_handle, &wx, &wy, &ww, &wh);
+    // The work area comes back in UNZOOMED screen logical px, but a client sizes
+    // its surface in logical px that the host then multiplies by the owner's zoom
+    // - so on a 150 % editor a popup built to fill this box would come out half
+    // again too big and get clamped. Report the box the client can actually
+    // spend. (Same space as the in-frame branch above, which uses fw.width /
+    // fw.height - widget geometry, logical at every zoom.)
+    const float zoom = _widgets[root].ui_scale();
+    if (zoom > 0.0f && zoom != 1.0f) {
+      ww = static_cast<int>(static_cast<float>(ww) / zoom);
+      wh = static_cast<int>(static_cast<float>(wh) / zoom);
+    }
+    if (out_w) *out_w = ww;
+    if (out_h) *out_h = wh;
+  }
+
+  bool Session::popup_escapes_frame(uint32_t anchor_idx)
+  {
+    if (!platform_supports_popup_surface()) return false;
+    return ps_frame_of_or_self(this, anchor_idx) != 0;
+  }
+
+  bool Session::open_popup_surface(uint32_t surface_idx, uint32_t anchor_idx,
+                                   int off_x, int off_y, int side)
+  {
+    if (!_widgets.exists(surface_idx) || !_widgets.exists(anchor_idx)) return false;
+    auto* ps = dynamic_cast<PopupSurfaceWidget*>(&_widgets[surface_idx]);
+    if (!ps) return false;
+    // A zero-sized surface would be an invisible box that swallows the next
+    // click - the same reason an empty tree popup refuses to open.
+    if (ps->width <= 0 || ps->height <= 0) return false;
+    // A surface cannot anchor to itself or to anything inside itself: the
+    // resulting cascade would own its own owner.
+    if (anchor_idx == surface_idx || is_in_subtree(anchor_idx, surface_idx))
+      return false;
+
+    const uint32_t anchor_frame = ps_frame_of_or_self(this, anchor_idx);
+    if (anchor_frame == 0) return false;
+    const uint32_t root = ps_root_owner(this, anchor_frame);
+    if (root == 0 || !_widgets.exists(root)) return false;
+    void* owner_native = _widgets[root].native_handle;
+    // Nothing to hang off yet. Anchoring to a frame that has not been realized
+    // would place the popup from uninitialised geometry.
+    if (!owner_native) return false;
+    void* anchor_native = _widgets[anchor_frame].native_handle;
+    if (!anchor_native) return false;
+
+    // The anchor rectangle, in its own frame's client coordinates. abs_x/abs_y
+    // are a by-product of the paint walk, so a popup opened before the anchor's
+    // frame has ever painted (or after a tree change) needs them recomputed.
+    ensure_abs_positions(anchor_frame);
+    int ax = 0, ay = 0, aw = 0, ah = 0;
+    {
+      const auto& awd = _widgets[anchor_idx];
+      if (anchor_idx == anchor_frame) {
+        ax = 0;
+        ay = frame_top_inset(anchor_frame);
+        aw = awd.width;
+        ah = awd.height - ay;
+      } else {
+        ax = awd.abs_x;
+        ay = awd.abs_y;
+        aw = awd.width;
+        ah = awd.height;
+      }
+    }
+
+    // Anchor origin in screen coordinates (logical px).
+    int sx = ax, sy = ay;
+    platform_client_to_screen(anchor_native, ax, ay, &sx, &sy);
+
+    // The owner's zoom, read BEFORE any placement arithmetic. It used to be read
+    // after all of it, which is what made this whole block wrong at zoom != 1.
+    //
+    // Screen coordinates here are UNZOOMED logical px (screen physical / DPI):
+    // that is what platform_client_to_screen returns, what platform_get_work_area
+    // reports, and what platform_show_popup_surface takes for the POSITION -
+    // while it takes the SIZE unzoomed and applies the zoom itself. So a widget's
+    // on-screen extent in this space is its logical extent times the zoom, and
+    // every extent compared against a screen coordinate below has to be
+    // converted. Left unconverted, a 150 % editor placed its popup as though
+    // everything were 100 %: a BELOW popup landed partway up its own anchor, and
+    // the clamp reserved room for a box (zoom-1)*ph shorter than the window that
+    // was then created, so it hung off the bottom of the work area.
+    const float owner_zoom = _widgets[root].ui_scale();
+    const auto to_screen = [owner_zoom](int v) {
+      return static_cast<int>(v * owner_zoom + (v < 0 ? -0.5f : 0.5f));
+    };
+    const int pw = ps->width;
+    const int ph = ps->height;
+    const int aws = to_screen(aw), ahs = to_screen(ah);   // anchor, on screen
+    const int pws = to_screen(pw), phs = to_screen(ph);   // popup, on screen
+    // The offsets are documented as anchor-LOCAL logical px, so they zoom too.
+    const int oxs = to_screen(off_x), oys = to_screen(off_y);
+    int px = sx, py = sy;
+    switch (side) {
+    case NEUI_POPUP_ABOVE: px = sx + oxs;       py = sy - phs + oys;  break;
+    case NEUI_POPUP_RIGHT: px = sx + aws + oxs; py = sy + oys;        break;
+    case NEUI_POPUP_LEFT:  px = sx - pws + oxs; py = sy + oys;        break;
+    case NEUI_POPUP_AT_POINTER: {
+      int cx = sx, cy = sy;
+      platform_get_pointer_pos(&cx, &cy);
+      px = cx + oxs;
+      py = cy + oys;
+      break;
+    }
+    case NEUI_POPUP_BELOW:
+    default:               px = sx + oxs;       py = sy + ahs + oys;  break;
+    }
+
+    // Clamp box. Desktop placement buys a much bigger box, not an unbounded one:
+    // a tall menu on a 1080p display with a DAW docked at the bottom can still
+    // hit the work-area edge, which is exactly why NEUI_API_POPUP::get_clamp_size
+    // exists for the client to size content against.
+    int wx = 0, wy = 0, ww = 0, wh = 0;
+    platform_get_work_area(owner_native, &wx, &wy, &ww, &wh);
+    if (ww > 0 && wh > 0) {
+      // Flip to the opposite side when the preferred one does not fit and the
+      // other does - the drop-list / submenu behaviour, on all four sides.
+      switch (side) {
+      case NEUI_POPUP_BELOW:
+        if (py + phs > wy + wh && (sy - phs + oys) >= wy) py = sy - phs + oys;
+        break;
+      case NEUI_POPUP_ABOVE:
+        if (py < wy && (sy + ahs + oys) + phs <= wy + wh) py = sy + ahs + oys;
+        break;
+      case NEUI_POPUP_RIGHT:
+        if (px + pws > wx + ww && (sx - pws + oxs) >= wx) px = sx - pws + oxs;
+        break;
+      case NEUI_POPUP_LEFT:
+        if (px < wx && (sx + aws + oxs) + pws <= wx + ww) px = sx + aws + oxs;
+        break;
+      default: break;
+      }
+      // Then clamp the POSITION only - never the size. Silently shrinking a
+      // surface would change the layout the client already committed to; the
+      // clamp-size query is the honest way to tell it in advance, and a popup
+      // bigger than the work area is a client that ignored the answer.
+      if (px + pws > wx + ww) px = wx + ww - pws;
+      if (py + phs > wy + wh) py = wy + wh - phs;
+      if (px < wx) px = wx;
+      if (py < wy) py = wy;
+    }
+
+    // Inherit the owner's zoom, or a 100 % popup appears over a 150 % editor.
+    // Written UNCONDITIONALLY: guarded by `if (owner_zoom != 1.0f)` this was
+    // one-directional, and line for line the only writer of the attr on a popup
+    // surface - nothing ever cleared it. So a surface opened once against a 150 %
+    // editor kept that zoom for the rest of its life: reopen it against a 100 %
+    // owner and paint_frame scaled by the stale 1.5 while the platform sized the
+    // window from the fresh 1.0, giving a clipped, misaligned popup.
+    neui_detail::ensure_attrs(ps->attrs).set_float(NEUI_ATTR_UI_SCALE, owner_zoom);
+
+    ps->popup_owner  = root;
+    ps->popup_anchor = anchor_idx;
+    ps->popup_side   = side;
+    ps->popup_off_x  = off_x;
+    ps->popup_off_y  = off_y;
+    // A popup surface stores SCREEN coordinates in x/y - it is the one frame kind
+    // whose position is not parent-relative, because it has no parent to be
+    // relative to and the platform needs screen placement.
+    ps->x = px;
+    ps->y = py;
+
+    if (!ps->native_handle)
+      platform_create_popup_surface(this, surface_idx, *ps, owner_native);
+    if (!ps->native_handle) return false;   // no desktop backing on this platform
+
+    ps->visible = true;
+    mark_layout_dirty(surface_idx);
+    // Pushed BEFORE the window is shown, so anything the platform's show path
+    // wakes up (macOS posts windowDidMove: / setFrameSize: for the panel being
+    // placed) already sees this level as part of the stack rather than as a
+    // foreign frame whose movement should dismiss the level below it.
+    if (popup_surface_depth(surface_idx) < 0)
+      _popup_surfaces.push_back(surface_idx);
+    platform_show_popup_surface(ps->native_handle, owner_native,
+                                px, py, pw, ph, owner_zoom);
+    // Idempotent per session - a cascade shares ONE watch, since dismissal is a
+    // decision about the whole stack rather than about any single level.
+    platform_popup_grab_begin(this, ps->native_handle);
+    return true;
+  }
+
+  // Re-point the outside-press watch at whatever level is now deepest, or end it
+  // when the stack has emptied. Called after every close.
+  //
+  // X11 needs this and the other two do not. There the watch IS an
+  // XGrabPointer, held on the deepest popup's own window - and X releases a grab
+  // when its grab window stops being viewable, which is precisely what
+  // platform_hide_popup_surface does by unmapping. So closing one level of a
+  // cascade silently killed the watch for the levels that REMAIN, after which
+  // nothing dismissed at all: popup_press_landed_outside depends entirely on the
+  // grab redirecting foreign presses to us. macOS installs one session-scoped
+  // watch per stack (idempotent, so the re-point is free) and win32 has no grab
+  // to re-point, so this stays one rule instead of a platform special case.
+  void ps_resync_grab(Session* s)
+  {
+    if (s->_popup_surfaces.empty()) { platform_popup_grab_end(s); return; }
+    const uint32_t top = s->_popup_surfaces.back();
+    if (s->_widgets.exists(top))
+      platform_popup_grab_begin(s, s->_widgets[top].native_handle);
+  }
+
+  void Session::close_popup_surface(uint32_t surface_idx, uint32_t reason)
+  {
+    const int d = popup_surface_depth(surface_idx);
+    if (d < 0) return;
+    while (_popup_surfaces.size() > static_cast<size_t>(d) + 1)
+      ps_close_top(this, NEUI_POPUP_DISMISS_CASCADE);
+    ps_close_top(this, reason);
+    ps_resync_grab(this);
+  }
+
+  void Session::close_popup_surfaces_deeper_than(size_t depth, uint32_t reason)
+  {
+    while (_popup_surfaces.size() > depth) ps_close_top(this, reason);
+    ps_resync_grab(this);
+  }
+
+  void Session::close_all_popup_surfaces(uint32_t reason)
+  {
+    close_popup_surfaces_deeper_than(0, reason);
+  }
+
+  void Session::close_popup_surfaces_if_within(uint32_t subtree_root)
+  {
+    if (_popup_surfaces.empty() || subtree_root == 0) return;
+    // Copy first: closing one level cascades and mutates the stack.
+    const std::vector<uint32_t> open = _popup_surfaces;
+    for (uint32_t idx : open) {
+      if (popup_surface_depth(idx) < 0) continue;   // already gone with a cascade
+      bool hit = (idx == subtree_root) || is_in_subtree(idx, subtree_root);
+      if (!hit && _widgets.exists(idx)) {
+        // The surface is its own root child, so the OWNER frame's subtree does
+        // not contain it - destroying the editor while a picker is open has to be
+        // caught through the recorded owner / anchor instead, or a live window is
+        // left over the DAW with a dead owner and a watch still running.
+        if (auto* ps = dynamic_cast<PopupSurfaceWidget*>(&_widgets[idx])) {
+          for (uint32_t probe : { ps->popup_anchor, ps->popup_owner }) {
+            if (probe == 0) continue;
+            if (probe == subtree_root || is_in_subtree(probe, subtree_root)) {
+              hit = true;
+              break;
+            }
+          }
+        }
+      }
+      if (hit) close_popup_surface(idx, NEUI_POPUP_DISMISS_OWNER_MOVED);
+    }
+  }
+
+  bool Session::popup_gate_press(uint32_t frame_idx)
+  {
+    if (_popup_surfaces.empty()) return false;
+    const int d = popup_surface_depth(frame_idx);
+    if (d < 0) {
+      // Outside the whole stack: dismiss and SWALLOW. The press that closes a
+      // popup must not also act on what is underneath - one click closing a
+      // picker and moving a parameter is the failure this prevents, and it is
+      // what every OS menu and drop-list does.
+      close_all_popup_surfaces(NEUI_POPUP_DISMISS_OUTSIDE_PRESS);
+      _popup_surface_swallow_release = true;
+      return true;
+    }
+    // On a shallower level: close what is deeper and let the press through, so
+    // clicking a parent row while a submenu is open re-targets rather than
+    // needing two clicks.
+    if (static_cast<size_t>(d) + 1 < _popup_surfaces.size())
+      close_popup_surfaces_deeper_than(static_cast<size_t>(d) + 1,
+                                       NEUI_POPUP_DISMISS_OUTSIDE_PRESS);
+    return false;
+  }
+
+  bool Session::popup_gate_press_outside()
+  {
+    if (_popup_surfaces.empty()) return false;
+    close_all_popup_surfaces(NEUI_POPUP_DISMISS_OUTSIDE_PRESS);
+    _popup_surface_swallow_release = true;
+    return true;
+  }
+
+  bool Session::popup_gate_hover(uint32_t frame_idx)
+  {
+    if (_popup_surfaces.empty()) return false;
+    if (popup_surface_depth(frame_idx) >= 0) return false;
+    // Suppression, not delivery, is what an OS pointer capture was ever buying:
+    // without this, moving off the popup and across the owner lights up hover on
+    // every widget on the way, which is the one thing that reads as "not a menu".
+    if (_hovered_widget != 0) set_hovered(0);
+    return true;
+  }
+
+  bool Session::popup_gate_wheel(uint32_t frame_idx)
+  {
+    if (_popup_surfaces.empty()) return false;
+    // Inside the stack the wheel is ordinary: that is what makes the recommended
+    // idiom work at all - popup content in a scrolling SECTION sized to
+    // get_clamp_size (see <neui/d/popup.h>).
+    return popup_surface_depth(frame_idx) < 0;
+  }
+
+  bool Session::popup_gate_key(uint32_t keycode)
+  {
+    if (_popup_surfaces.empty()) return false;
+    if (keycode != NEUI_KEY_ESCAPE) return false;
+    close_all_popup_surfaces(NEUI_POPUP_DISMISS_ESCAPE);
+    return true;
+  }
+
+  bool Session::popup_take_release()
+  {
+    if (!_popup_surface_swallow_release) return false;
+    _popup_surface_swallow_release = false;
     return true;
   }
 
