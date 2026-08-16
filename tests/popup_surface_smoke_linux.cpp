@@ -823,9 +823,14 @@ int main(int, char*[])
             "...and so does Shift-Tab");
       s->set_focus(0);
 
+      // ESCAPE ALWAYS BELONGS TO THE HOST - handled before the dispatch, so no
+      // KEYDOWN is delivered for it and there is no opt-out. It follows from the
+      // no-veto rule in <neui/d/popup.h>: a client that swallowed Escape would
+      // leave an override-redirect window stuck over the desktop.
       g_keys.clear();
       check(s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_ESCAPE, 0),
             "Escape is consumed");
+      check(g_keys.empty(), "Escape is never dispatched to the client");
       check(!s->popup_surface_open(), "Escape dismisses the stack");
       check(g_dismissals.size() == 1 &&
             g_dismissals[0].reason == NEUI_POPUP_DISMISS_ESCAPE,

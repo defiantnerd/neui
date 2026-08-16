@@ -81,9 +81,16 @@ neui_widget_t g_pick_edit{};
 struct Dismissal { uint32_t widget_id; uint32_t reason; };
 std::vector<Dismissal> g_dismissals;
 
-// Keys the gate RETARGETED onto a surface (phase 9).
+// Keys the gate RETARGETED onto a surface (phase 7).
 struct KeyHit { uint32_t widget_id; uint32_t type; uint32_t keycode; };
 std::vector<KeyHit> g_keys;
+
+// Declared-navigation observations (phase 7): the index moves the host reported,
+// the items it committed, and a switch that makes the client CLAIM the Down key
+// so the per-keystroke override can be asserted.
+std::vector<int>      g_nav_index_events;
+std::vector<uint32_t> g_nav_selected;
+bool                  g_nav_eat_down = false;
 
 // Phase 8 arms this with the owner frame, so the dismissal handler destroys it
 // from inside the platform's dismissal hook - the documented client response, and
@@ -106,7 +113,21 @@ bool NEUI_ABI onevent(void*, neui_event_t* ev)
       ev->type == NEUI_EVENT_KEYCHAR) {
     g_keys.push_back({ ev->data.key.widget.id, (uint32_t)ev->type,
                        ev->data.key.keycode });
-    return false;   // not consumed - the gate swallows either way
+    // true = "the client handled it", which is the documented way to take a key
+    // away from the host's own navigation. Armed only for the override check.
+    if (g_nav_eat_down && ev->type == NEUI_EVENT_KEYDOWN &&
+        ev->data.key.keycode == NEUI_KEY_DOWN)
+      return true;
+    return false;   // declined - the gate swallows it either way
+  }
+  if (ev->type == NEUI_EVENT_ATTR_CHANGED &&
+      std::strcmp(ev->data.attr.attr_key, NEUI_ATTR_NAV_INDEX) == 0) {
+    g_nav_index_events.push_back((int)ev->data.attr.value);
+    return true;
+  }
+  if (ev->type == NEUI_EVENT_ITEM_SELECTED) {
+    g_nav_selected.push_back(ev->data.item.index);
+    return true;
   }
   if (ev->type == NEUI_EVENT_POPUP_DISMISSED) {
     g_dismissals.push_back({ ev->data.popup.widget.id, ev->data.popup.reason });
@@ -473,9 +494,97 @@ int main(int, char*[])
         s->set_focus(0);
 
         // Escape closes everything, and still does so from outside the stack.
+        // DECLARED NAVIGATION. The arithmetic is Tier-1 (test_popup_nav.cpp);
+        // what is asserted here is the LIVE half - reading the declaration off a
+        // real surface, writing the index back, the two events, and the override.
+        // Asserted on macOS only: none of it is platform-specific (it is pure
+        // Session), the same reason the win32 harness does not re-prove the
+        // placement arithmetic.
+        {
+          auto* at = (neui_attr_api_t*) host->get_interface(sess, NEUI_API_ATTRS);
+          check(at != nullptr, "NEUI_API_ATTRS missing");
+          // Undeclared: the key reaches the client and the host walks nothing.
+          g_keys.clear();
+          g_nav_index_events.clear();
+          s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_DOWN, 0);
+          check(g_keys.size() == 1, "an undeclared surface still gets the key");
+          check(g_nav_index_events.empty(),
+                "...but the host navigates nothing without a declared count");
+
+          at->set_int(sess, g_picker, NEUI_ATTR_NAV_COUNT, 5);
+          g_nav_index_events.clear();
+          s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_DOWN, 0);
+          check(at->get_int(sess, g_picker, NEUI_ATTR_NAV_INDEX, -99) == 0,
+                "Down from nothing selects the first item");
+          check(g_nav_index_events.size() == 1 && g_nav_index_events[0] == 0,
+                "...and reports it as ATTR_CHANGED on the surface");
+          s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_END, 0);
+          check(at->get_int(sess, g_picker, NEUI_ATTR_NAV_INDEX, -99) == 4,
+                "End jumps to the last item");
+          s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_DOWN, 0);
+          check(at->get_int(sess, g_picker, NEUI_ATTR_NAV_INDEX, -99) == 0,
+                "Down from the last wraps, the menu default");
+
+          g_nav_selected.clear();
+          // A client-written index is not echoed back as an event - only the
+          // host's own moves are, or a client that syncs on hover would loop.
+          g_nav_index_events.clear();
+          at->set_int(sess, g_picker, NEUI_ATTR_NAV_INDEX, 3);
+          check(g_nav_index_events.empty(),
+                "a client-written index fires no ATTR_CHANGED");
+          s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_RETURN, 0);
+          check(g_nav_selected.size() == 1 && g_nav_selected[0] == 3,
+                "Enter commits the current item as ITEM_SELECTED");
+
+          // THE OVERRIDE, which is per KEYSTROKE rather than per popup: the
+          // client's handler returned true for Down (see onevent), so the host
+          // must not also walk it - while Up, which it declined, still navigates.
+          g_nav_eat_down = true;
+          at->set_int(sess, g_picker, NEUI_ATTR_NAV_INDEX, 2);
+          g_nav_index_events.clear();
+          s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_DOWN, 0);
+          check(at->get_int(sess, g_picker, NEUI_ATTR_NAV_INDEX, -99) == 2,
+                "a key the client consumed is not navigated by the host");
+          check(g_nav_index_events.empty(), "...and reports nothing");
+          s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_UP, 0);
+          check(at->get_int(sess, g_picker, NEUI_ATTR_NAV_INDEX, -99) == 1,
+                "...while a key it declined still gets the host default");
+          g_nav_eat_down = false;
+
+          // A live count that shrinks under a filter must not leave the walk
+          // stepping from an index the client is no longer drawing.
+          at->set_int(sess, g_picker, NEUI_ATTR_NAV_COUNT, 2);
+          at->set_int(sess, g_picker, NEUI_ATTR_NAV_INDEX, 4);
+          s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_DOWN, 0);
+          check(at->get_int(sess, g_picker, NEUI_ATTR_NAV_INDEX, -99) == 0,
+                "a stale index past a shrunken count re-enters from the top");
+
+          // Focus inside the popup turns the whole thing off - a text field's
+          // arrows belong to the text field.
+          s->set_focus(slot_of(g_pick_edit));
+          at->set_int(sess, g_picker, NEUI_ATTR_NAV_INDEX, 1);
+          check(!s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_DOWN, 0),
+                "with focus inside the popup the gate still stands aside");
+          check(at->get_int(sess, g_picker, NEUI_ATTR_NAV_INDEX, -99) == 1,
+                "...so the host does not navigate over a focused text field");
+          s->set_focus(0);
+          at->set_int(sess, g_picker, NEUI_ATTR_NAV_COUNT, 0);   // undeclare
+        }
+
+        // ESCAPE ALWAYS BELONGS TO THE HOST. Not a default the client can take
+        // over: it is handled before the dispatch, so no KEYDOWN is delivered for
+        // it at all, and neither a client that claims every key nor focus sitting
+        // inside the surface changes that. The rule follows from the no-veto rule
+        // in <neui/d/popup.h> - a client that swallowed Escape would leave a
+        // window stuck over the DAW - so it is asserted, not just documented.
+        s->set_focus(slot_of(g_pick_edit));   // focus INSIDE the popup
+        g_nav_eat_down = true;                // ...and a client claiming keys
         g_keys.clear();
         check(s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_ESCAPE, 0),
               "Escape must be consumed");
+        check(g_keys.empty(),
+              "Escape must never be dispatched to the client");
+        g_nav_eat_down = false;
         check(!s->popup_surface_open(), "Escape must dismiss the stack");
         check(g_dismissals.size() == 1 &&
               g_dismissals[0].reason == NEUI_POPUP_DISMISS_ESCAPE,

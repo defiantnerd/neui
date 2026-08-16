@@ -155,7 +155,13 @@ buying, so it lives in the session (`popup_gate_press` / `_hover` / `_wheel` /
   automation write the user never saw. Inside the stack the wheel is ordinary —
   that is what makes the recommended scrolling-`SECTION` idiom work.
 - keys are **retargeted, not passed through** — the keyboard half of the same
-  promise. Escape (on KEYDOWN) closes the stack. Otherwise: if focus is already
+  promise. Escape (on KEYDOWN) closes the stack, and **Escape is never the
+  client's** - it is handled before the dispatch, so no `KEYDOWN` is delivered for
+  it, there is no opt-out, and focus inside the popup does not change it. That
+  follows from the no-veto rule above rather than being a separate policy: a
+  client that swallowed Escape would strand a window over the DAW, which is worse
+  than the thing an override would buy (cancelling an edit in a popup's text
+  field, which needs another key or an on-screen Cancel). Otherwise: if focus is already
   inside the deepest level, the gate gets out of the way, because
   `_focused_widget` is a **session** index and every platform's key dispatch
   reads it without asking which frame it belongs to — so the ordinary path
@@ -170,6 +176,21 @@ buying, so it lives in the session (`popup_gate_press` / `_hover` / `_wheel` /
   a message — win32 `WM_CHAR`, AppKit `interpretKeyEvents:` → `insertText:`,
   X11's `Xutf8LookupString` tail — and IME composition is refused into a diverted
   target for the same reason (`popup_diverts_keys`).
+- the client gets each retargeted key **first**, and returning `true` from
+  `onevent` means it handled it — the same two-tier contract as mouse events. The
+  host's own navigation (below) runs only on the keys the client declined, so the
+  override is per **keystroke** rather than per popup, and no opt-out flag exists
+  because this already is one.
+- **declared navigation.** Where the host cannot know the content, the client
+  declares it: `NEUI_ATTR_NAV_COUNT` / `_INDEX` / `_PAGE` / `_WRAP` say how many
+  items there are and which is current, and the host owns arrows / Home / End /
+  PageUp / PageDown / Enter over that declaration while the client keeps painting
+  from the index. A host move writes the index and reports `ATTR_CHANGED`; Enter
+  fires `ITEM_SELECTED`. Unset (count 0) means the host walks nothing, so this
+  costs a popup that does its own thing exactly nothing. The arithmetic —
+  wrap-vs-clamp, paging that never wraps, the "nothing selected yet" state, a
+  live count that shrinks under a filter — is in `hosts/shared/popup_nav.h` and
+  Tier-1 tested; only the reading, writing and reporting needs a session.
 - Tab traversal follows the open stack. A surface is a **root child**, so the
   owner's tab-stop walk cannot reach it, and the frame that delivered the key is
   always the owner (the popup never takes OS focus) — so `focus_next` overrides

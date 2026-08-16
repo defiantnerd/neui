@@ -1332,6 +1332,13 @@ namespace xpl_host
     // keystrokes and cannot route through the gate, yet must not compose into the
     // field under an open popup either.
     bool popup_diverts_keys() const;
+    // The host's own arrow / Home / End / Page / Enter walk over the item list a
+    // client DECLARES on the surface (NEUI_ATTR_NAV_COUNT / _INDEX / _PAGE /
+    // _WRAP). Runs only after the client's own handler declined the key, so it
+    // is a default rather than a policy - see popup_gate_key. Inert unless a
+    // count is declared, which is what keeps it out of the way of every popup
+    // that does its own thing. Arithmetic in hosts/shared/popup_nav.h.
+    void popup_navigate(uint32_t surface_idx, uint32_t keycode);
     // The button-UP peer of popup_gate_press, same contract and same reason as
     // tree_popup_take_release: a swallowed press must swallow its own release or
     // the widget under the dismissed popup sees an UP with no DOWN and

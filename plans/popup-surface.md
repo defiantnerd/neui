@@ -41,7 +41,7 @@ What it needs, all of it portable (no new platform seams):
 Worth doing on iOS specifically: an AUv3 view has no window to escape into, so
 in-frame is not a degradation there, it is the only shape available.
 
-## 2. Keyboard beyond Escape — **delivery shipped, interpretation open**
+## 2. Keyboard beyond Escape — **shipped, except type-ahead**
 
 Response to [#25](https://github.com/defiantnerd/neui/issues/25). Shipped
 2026-08-16: the key gate is a **retarget** rather than a pass-through
@@ -66,13 +66,42 @@ The cost the plan understated is that the CHARACTER paths are not unified: win32
 keydown gate, so the leak had to be closed three times — plus IME composition,
 which is not a keystroke at all and needs the predicate directly.
 
+**Host-side navigation followed** (same day), once the question "navigate
+*what*?" had an answer. The host cannot see inside a `NEUI_W_CUSTOMDRAW`, so the
+client DECLARES a list instead — `NEUI_ATTR_NAV_COUNT` / `_INDEX` / `_PAGE` /
+`_WRAP` — and the host owns arrows / Home / End / Page / Enter over the
+declaration while the client keeps painting from the index. That is the smallest
+thing that serves a client-drawn menu without the host pretending to understand
+the content. The override needed no new API: the client gets each key first and
+`true` means it handled it, the same two-tier contract as mouse events, which
+also makes the opt-out per keystroke rather than per popup. Arithmetic in
+`hosts/shared/popup_nav.h`, Tier-1 tested; the live half (attrs, events,
+override) is asserted in the macOS harness, since none of it is platform-specific.
+
+**Escape always belongs to the host — decided, not deferred** (2026-08-16). It
+closes the stack before the client sees it: no `KEYDOWN` is dispatched for it, no
+opt-out attribute exists, and focus inside the popup does not change it. The cost
+is real and accepted — a popup carrying an editable field cannot use Escape to
+cancel the edit first, and must use a different key or an on-screen Cancel. The
+reason is the rule already written into `<neui/d/popup.h>`: a dismissal cannot be
+vetoed, because a popup that can refuse to close is a window stuck over someone's
+DAW. A client that swallowed Escape by mistake would produce exactly that, and no
+amount of opt-in ceremony makes that failure less bad than the inconvenience it
+buys. Asserted in the macOS harness both ways (client claiming keys, and focus
+inside the surface).
+
 Still open:
 
-- **Host-side interpretation.** No built-in arrow / Home / End / type-ahead walk
-  over popup content. For a client-drawn body the host cannot know what a "row"
-  is, so this only becomes meaningful when the built-ins move onto the primitive
-  (§4) — `handle_menubar_key` is the walk to generalise, and re-pointing combo
-  drop-lists would be its first real consumer.
+- **Type-ahead.** The declaration carries a count and no item TEXT, so there is
+  nothing to match a prefix against. It needs a per-row names channel — the
+  `NEUI_API_*_CLIENT` pattern (`_MENU_CLIENT` / `_GRID_CLIENT`) is the shape:
+  `item_text(session, surface, index, buf, buflen)`, called only while a
+  type-ahead buffer is live. Deliberately not guessed at here; the a11y
+  declarations are per-WIDGET and so cannot supply per-row names.
+- **The built-ins still have their own walk.** `popup_tree_menu` navigates
+  through `handle_menubar_key` over `_menu_path`; a surface navigates through the
+  declared list. Re-pointing the built-ins onto the primitive (§4) is where those
+  two converge, and combo drop-lists remain the natural first candidate.
 - **Getting focus in.** Nothing focuses a popup when it opens and no key moves
   focus into one; Tab only cycles once focus is already inside. Whether `open()`
   should auto-focus the first tab stop wants a flag rather than a default — a

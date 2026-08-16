@@ -9,6 +9,7 @@
 #include "../shared/dnd_dispatch.h"
 #include "../shared/widget_paint_knob.h"
 #include "../shared/wheel_direction.h"
+#include "../shared/popup_nav.h"
 #include "../shared/widget_paint_section.h"
 #include "../shared/widget_paint_tabview.h"
 #include "../shared/widget_tabview_host.h"
@@ -6000,10 +6001,70 @@ namespace xpl_host
     neui_event_t ev = {};
     ev.type     = type;
     ev.data.key = { { widget_id }, keycode, modifiers };
-    // The handler may close this level or destroy the surface outright, so
-    // nothing below may touch `top` again - return the constant, not a re-read.
-    dispatch_event(&ev);
+    // THE CLIENT GETS THE KEY FIRST, and `true` means it handled it - the same
+    // two-tier contract as mouse events, so a client that draws its own menu
+    // takes over per KEYSTROKE rather than per popup (arrows for itself, Home /
+    // End left to the host, if that is what it wants). No opt-out flag exists
+    // because this already is the opt-out.
+    const bool client_took_it = dispatch_event(&ev);
+
+    // The handler may have closed this level, opened a deeper one, or destroyed
+    // the surface outright, so `top` is re-validated rather than trusted: it has
+    // to still exist AND still be the deepest level before the host navigates
+    // anything on it.
+    if (!client_took_it && type == NEUI_EVENT_KEYDOWN &&
+        !_popup_surfaces.empty() && _popup_surfaces.back() == top &&
+        _widgets.exists(top))
+      popup_navigate(top, keycode);
     return true;
+  }
+
+  // The host's own navigation over a client-DECLARED item list (NEUI_ATTR_NAV_*).
+  // The arithmetic is in hosts/shared/popup_nav.h, Tier-1 tested; this is the
+  // part that needs a live session - reading the declaration, writing the index
+  // back, and telling the client what happened.
+  void Session::popup_navigate(uint32_t surface_idx, uint32_t keycode)
+  {
+    auto& wd = _widgets[surface_idx];
+    const neui_detail::AttrBag* bag = wd.attrs.get();
+    if (!bag) return;
+
+    neui_detail::PopupNav nav;
+    nav.count = bag->get_int(NEUI_ATTR_NAV_COUNT, 0);
+    if (nav.count <= 0) return;          // nothing declared: not ours to walk
+    nav.index = bag->get_int(NEUI_ATTR_NAV_INDEX, -1);
+    nav.page  = bag->get_int(NEUI_ATTR_NAV_PAGE, 10);
+    nav.wrap  = bag->get_int(NEUI_ATTR_NAV_WRAP, 1) != 0;
+
+    const neui_detail::PopupNavResult r = neui_detail::popup_nav_key(nav, keycode);
+    if (!r.handled) return;
+
+    const uint32_t widget_id = wd.widget_id;
+
+    if (r.changed) {
+      // Written back BEFORE either event, so a handler that reads the attribute
+      // (or repaints synchronously) sees the value the event is announcing.
+      neui_detail::ensure_attrs(wd.attrs).set_int(NEUI_ATTR_NAV_INDEX, r.index);
+      if (wd.native_handle) platform_invalidate(wd.native_handle);
+
+      neui_event_t ev = {};
+      ev.type            = NEUI_EVENT_ATTR_CHANGED;
+      ev.data.attr.widget   = { widget_id };
+      ev.data.attr.attr_key = NEUI_ATTR_NAV_INDEX;
+      ev.data.attr.value    = static_cast<float>(r.index);
+      dispatch_event(&ev);
+      // The handler may have destroyed the surface; there is nothing left to do
+      // on this key either way, since activate and changed are never both set.
+      return;
+    }
+
+    if (r.activate) {
+      neui_event_t ev = {};
+      ev.type             = NEUI_EVENT_ITEM_SELECTED;
+      ev.data.item.widget = { widget_id };
+      ev.data.item.index  = static_cast<uint32_t>(r.index);
+      dispatch_event(&ev);
+    }
   }
 
   bool Session::popup_take_release()

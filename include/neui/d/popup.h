@@ -68,6 +68,11 @@ extern "C" {
 // focus), so keys arrive at the OWNER's window - the host then retargets them:
 //
 //   - Escape closes the whole stack (reported as NEUI_POPUP_DISMISS_ESCAPE).
+//     ESCAPE IS NEVER YOURS: no KEYDOWN is delivered for it, there is no opt-out,
+//     and focus inside the popup does not change it. That is the no-veto rule
+//     above, not a separate policy - a client that swallowed Escape would leave a
+//     window stuck over the DAW. A popup with an editable field needs another key
+//     or an on-screen Cancel to abandon an edit.
 //   - With focus INSIDE the deepest open surface, keys route to the focused
 //     widget exactly as they would in any frame. A NEUI_W_INPUTBOX inside a
 //     popup is focusable by click, and typing into it works.
@@ -78,11 +83,31 @@ extern "C" {
 // In every case the key is SWALLOWED - it never reaches the widgets under an
 // open popup, the same rule the dismissing press follows.
 //
-// What the host does NOT do: interpret arrows / Home / End / type-ahead over
-// your content, focus the popup when it opens (call widgets->set_focus if you
-// want that), or move focus into a popup from the owner. Tab cycles the popup's
-// own tab stops once focus is already inside it. Press-drag-release from the
-// anchor into the popup is not supported either - click, then click.
+// THE CLIENT ALWAYS GETS THE KEY FIRST. Returning true from onevent means "I
+// handled it" and the host does nothing further with that keystroke - the same
+// two-tier contract as mouse events. That is the opt-out, and it is per KEY:
+// take the arrows for yourself and leave Home / End to the host if you like.
+//
+// NAVIGATION THE HOST CAN RUN FOR YOU. Since it cannot see inside a
+// NEUI_W_CUSTOMDRAW, declare the list instead - NEUI_ATTR_NAV_COUNT and
+// NEUI_ATTR_NAV_INDEX (plus _PAGE / _WRAP) on the surface - and the host owns
+// arrows / Home / End / PageUp / PageDown / Enter over it while you keep
+// painting from the index:
+//
+//   attrs->set_int(sess, surface, NEUI_ATTR_NAV_COUNT, row_count);
+//   // ... the user presses Down ...
+//   // -> NEUI_EVENT_ATTR_CHANGED { surface, NEUI_ATTR_NAV_INDEX, 3 }  repaint
+//   // ... the user presses Enter ...
+//   // -> NEUI_EVENT_ITEM_SELECTED { surface, 3 }
+//
+// Leave NEUI_ATTR_NAV_COUNT unset (the default) and the host walks nothing at
+// all - you just get the keys. See <neui/d/attrs.h> for the exact semantics.
+//
+// What the host still does NOT do: type-ahead (it has no item TEXT - only a
+// count), focus the popup when it opens (call widgets->set_focus if you want
+// that), or move focus into a popup from the owner. Tab cycles the popup's own
+// tab stops once focus is already inside it. Press-drag-release from the anchor
+// into the popup is not supported either - click, then click.
 
 #define NEUI_API_POPUP "com.defiantnerd.neui.extension.popup/0"
 
