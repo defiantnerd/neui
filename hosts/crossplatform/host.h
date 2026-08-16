@@ -1301,11 +1301,37 @@ namespace xpl_host
     // Linux twice for core Button 4-7 plus the XI2 smooth path), which is exactly
     // the shape wheel_direction.h exists to stop repeating.
     bool popup_gate_wheel(uint32_t frame_idx);
-    // Escape dismisses. Not general keyboard support (arrows / type-ahead need
-    // focus routed across two windows and are a separate wave) - but a popup a
-    // user cannot close from the keyboard at all is a trap, and the owner already
-    // holds key focus, so this costs nothing.
-    bool popup_gate_key(uint32_t keycode);
+    // Keyboard, for an open stack. true = consumed; the caller must not run its
+    // normal routing. Called for KEYDOWN / KEYUP / KEYCHAR (for KEYCHAR,
+    // `keycode` is the codepoint, matching every platform's char dispatch).
+    //
+    // The key arrives at the OWNER's window - a popup surface never takes
+    // activation (inside a DAW that would read as the plugin editor losing
+    // focus), so it is not first responder / focused HWND / X focus owner and
+    // cannot be sent keys directly. This gate is therefore a RETARGET, not a
+    // pass-through, and it makes the same promise for the keyboard that
+    // popup_gate_press makes for the mouse: while a popup is open, input must not
+    // reach the widgets underneath it. It used to fall through for everything but
+    // Escape, so typing with a menu open edited the text field behind it.
+    //
+    // Three outcomes, in order:
+    //   - Escape (KEYDOWN only): close the whole stack, consume.
+    //   - focus already inside the DEEPEST level: return false and get out of the
+    //     way. _focused_widget is a SESSION index and every platform's key
+    //     dispatch reads it without asking which frame it belongs to, so the
+    //     ordinary path already delivers into the popup - an INPUTBOX inside one
+    //     really does type, non-key window and all.
+    //   - anything else: deliver the key to the deepest SURFACE (so a
+    //     client-drawn menu can implement its own navigation) and consume.
+    bool popup_gate_key(neui_event_type_t type, uint32_t keycode,
+                        uint32_t modifiers);
+    // True when an open stack is taking keys away from the owner - i.e. a popup
+    // is open and focus is not inside its deepest level. The predicate behind the
+    // gate's third case, exposed because the platform layers' TEXT INPUT paths
+    // (win32 IME composition, AppKit's insertText: / setMarkedText:) are not
+    // keystrokes and cannot route through the gate, yet must not compose into the
+    // field under an open popup either.
+    bool popup_diverts_keys() const;
     // The button-UP peer of popup_gate_press, same contract and same reason as
     // tree_popup_take_release: a swallowed press must swallow its own release or
     // the widget under the dismissed popup sees an UP with no DOWN and

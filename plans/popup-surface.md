@@ -41,15 +41,48 @@ What it needs, all of it portable (no new platform seams):
 Worth doing on iOS specifically: an AUv3 view has no window to escape into, so
 in-frame is not a degradation there, it is the only shape available.
 
-## 2. Keyboard beyond Escape
+## 2. Keyboard beyond Escape — **delivery shipped, interpretation open**
 
-Arrows, Home/End, type-ahead and Enter-to-commit. The popup must not take
-activation, so keys arrive at the **owner's** window and have to be routed into the
-deepest level — mostly bookkeeping now that the popup is a frame in the same
-session with a stack. The genuinely hard part is only the embedded case, where the
-DAW owns keyboard focus and plugin key handling is host-dependent already. A
-*preset browser* without type-ahead will read as broken, so this is the wave that
-decides whether the primitive covers the second half of #23's use case.
+Response to [#25](https://github.com/defiantnerd/neui/issues/25). Shipped
+2026-08-16: the key gate is a **retarget** rather than a pass-through
+(`Session::popup_gate_key` / `popup_diverts_keys`), and `focus_next` overrides its
+frame hint with the deepest open level. Mechanisms in `docs/popup-surfaces.md`,
+client contract in `<neui/d/popup.h>`.
+
+Two things that wave got right and one it got wrong. Right: the routing really was
+bookkeeping, and the *hard* half named in #25 — a focusable `INPUTBOX` inside a
+non-activating window — turned out to need no work at all. `_focused_widget` is a
+**session** index and every platform's key dispatch reads it without a frame
+check, so a click already focused the widget inside the popup and typing already
+landed there; verified end-to-end on macOS before anything was written. Wrong: the
+plan framed the gap as *missing navigation*, when the fall-through was an active
+**input leak** — with a popup open, an arrow key operated the last-focused control
+in the editor and typing edited the text field behind it. The mouse had had that
+promise since v1 (`popup_gate_press` swallows); the keyboard simply never got it.
+
+The cost the plan understated is that the CHARACTER paths are not unified: win32
+`WM_CHAR`, AppKit `interpretKeyEvents:` → `insertText:` and X11's
+`Xutf8LookupString` tail are three different shapes and none of them passes the
+keydown gate, so the leak had to be closed three times — plus IME composition,
+which is not a keystroke at all and needs the predicate directly.
+
+Still open:
+
+- **Host-side interpretation.** No built-in arrow / Home / End / type-ahead walk
+  over popup content. For a client-drawn body the host cannot know what a "row"
+  is, so this only becomes meaningful when the built-ins move onto the primitive
+  (§4) — `handle_menubar_key` is the walk to generalise, and re-pointing combo
+  drop-lists would be its first real consumer.
+- **Getting focus in.** Nothing focuses a popup when it opens and no key moves
+  focus into one; Tab only cycles once focus is already inside. Whether `open()`
+  should auto-focus the first tab stop wants a flag rather than a default — a
+  menu wants it, a tooltip does not.
+- **The embedded case**, which was always the genuinely hard part: the DAW owns
+  keyboard focus and plugin key handling is host-dependent. Unverified in a real
+  host.
+- **Verified on macOS only.** The gate decision is asserted in all three
+  harnesses, but the end-to-end path (real click → focus in popup → real key at
+  the owner → text in the popup's field) has only been run on macOS.
 
 ## 3. Accessibility
 

@@ -28,8 +28,11 @@
 //   7. THE GATE   - the suppression that replaces an OS pointer capture: a press
 //                   outside the stack dismisses AND is swallowed, a press on a
 //                   shallower level closes only the deeper ones, hover and the
-//                   wheel are suppressed in the owner but not in the popup, and
-//                   Escape closes.
+//                   wheel are suppressed in the owner but not in the popup,
+//                   Escape closes, and a key is RETARGETED onto the deepest
+//                   surface rather than falling through to the owner (with focus
+//                   already inside the popup the gate stands aside instead) -
+//                   plus Tab traversal staying inside the open level.
 //   8. RE-ENTRANCY - destroying the OWNER from the dismissal handler, while the
 //                   platform hook that dispatched it is still holding a pointer
 //                   into that frame. Only fails under Guard Malloc - see the
@@ -71,9 +74,16 @@ void check(bool ok, const char* what)
 
 neui_widget_t g_picker{};
 neui_widget_t g_detail{};
+// A real tab stop inside the picker - phase 7's key / traversal checks need a
+// focusable widget in the popup, not just the painted body.
+neui_widget_t g_pick_edit{};
 
 struct Dismissal { uint32_t widget_id; uint32_t reason; };
 std::vector<Dismissal> g_dismissals;
+
+// Keys the gate RETARGETED onto a surface (phase 9).
+struct KeyHit { uint32_t widget_id; uint32_t type; uint32_t keycode; };
+std::vector<KeyHit> g_keys;
 
 // Phase 8 arms this with the owner frame, so the dismissal handler destroys it
 // from inside the platform's dismissal hook - the documented client response, and
@@ -91,6 +101,12 @@ bool NEUI_ABI onevent(void*, neui_event_t* ev)
                                           ev->data.paint.height,
                                           0xFF203040u);
     return true;
+  }
+  if (ev->type == NEUI_EVENT_KEYDOWN || ev->type == NEUI_EVENT_KEYUP ||
+      ev->type == NEUI_EVENT_KEYCHAR) {
+    g_keys.push_back({ ev->data.key.widget.id, (uint32_t)ev->type,
+                       ev->data.key.keycode });
+    return false;   // not consumed - the gate swallows either way
   }
   if (ev->type == NEUI_EVENT_POPUP_DISMISSED) {
     g_dismissals.push_back({ ev->data.popup.widget.id, ev->data.popup.reason });
@@ -177,6 +193,9 @@ int main(int, char*[])
     g_picker = w->create(sess, none, NEUI_W_POPUPSURFACE, 0, 0,
                          POP_W, POP_H, nullptr);
     w->create(sess, g_picker, NEUI_W_CUSTOMDRAW, 0, 0, POP_W, POP_H, nullptr);
+    // Created AFTER the body so get_first_child (the cascade anchor below) still
+    // resolves to the painted body.
+    g_pick_edit = w->create(sess, g_picker, NEUI_W_INPUTBOX, 20, 300, 200, 24, nullptr);
     g_detail = w->create(sess, none, NEUI_W_POPUPSURFACE, 0, 0, 260, 150, nullptr);
     w->create(sess, g_detail, NEUI_W_CUSTOMDRAW, 0, 0, 260, 150, nullptr);
 
@@ -344,7 +363,9 @@ int main(int, char*[])
         check(!s->popup_gate_press(frame_slot), "gate must be inert when closed");
         check(!s->popup_gate_hover(frame_slot), "hover gate must be inert when closed");
         check(!s->popup_gate_wheel(frame_slot), "wheel gate must be inert when closed");
-        check(!s->popup_gate_key(NEUI_KEY_ESCAPE), "Escape must pass through when closed");
+        check(!s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_ESCAPE, 0),
+              "Escape must pass through when closed");
+        check(!s->popup_diverts_keys(), "keys must not divert when closed");
 
         // One level open.
         g_dismissals.clear();
@@ -404,10 +425,57 @@ int main(int, char*[])
               "a press on the deepest level is ordinary dispatch");
         check(s->popup_surface_open(), "...and must not dismiss it");
 
-        // Escape closes everything; any other key passes through.
+        // Keys. The rule is a RETARGET, not a pass-through: while a popup is
+        // open, a keystroke must never reach the widgets underneath - the same
+        // promise the press gate makes, and the one that used to be broken (with
+        // a menu open, typing edited the text field behind it).
         g_dismissals.clear();
-        check(!s->popup_gate_key(NEUI_KEY_TAB), "only Escape is consumed");
-        check(s->popup_gate_key(NEUI_KEY_ESCAPE), "Escape must be consumed");
+        g_keys.clear();
+        check(s->popup_diverts_keys(),
+              "with focus outside the stack, keys must divert");
+        check(s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_TAB, 0),
+              "a key must not fall through to the owner");
+        check(g_keys.size() == 1 && g_keys[0].widget_id == g_picker.id &&
+              g_keys[0].keycode == NEUI_KEY_TAB,
+              "the key should be delivered to the deepest surface");
+        // A key that mapped to no keycode is still swallowed, but reports
+        // nothing - there is no meaningful event to hand a client.
+        g_keys.clear();
+        check(s->popup_gate_key(NEUI_EVENT_KEYDOWN, 0, 0),
+              "an unmapped key must still be swallowed");
+        check(g_keys.empty(), "...and must not be reported");
+
+        // Focus already INSIDE the deepest level: the gate gets out of the way.
+        // _focused_widget is a session index and every platform's key dispatch
+        // reads it without asking which frame it belongs to, so the ordinary path
+        // already delivers into the popup - a text field in one really does type.
+        g_keys.clear();
+        s->set_focus(slot_of(g_pick_edit));
+        check(!s->popup_diverts_keys(),
+              "focus inside the deepest level must not divert");
+        check(!s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_TAB, 0),
+              "with focus inside the popup the gate must pass the key through");
+        check(g_keys.empty(), "...and must not synthesise a delivery of its own");
+
+        // Tab traversal follows the open popup. The surface is a ROOT CHILD, so
+        // the owner's tab-stop walk cannot reach it, and the frame that DELIVERED
+        // the key is always the owner (a popup never takes OS focus) - so Tab used
+        // to jump out of the picker into the editor behind it. Which stop it lands
+        // on is the traversal's business; that it stays in the popup is the claim.
+        s->focus_next(true, frame_slot);
+        check(s->_focused_widget != 0 &&
+              s->is_in_subtree(s->_focused_widget, picker_slot),
+              "Tab must stay inside the open popup");
+        s->focus_next(false, frame_slot);
+        check(s->_focused_widget != 0 &&
+              s->is_in_subtree(s->_focused_widget, picker_slot),
+              "...and so must Shift-Tab");
+        s->set_focus(0);
+
+        // Escape closes everything, and still does so from outside the stack.
+        g_keys.clear();
+        check(s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_ESCAPE, 0),
+              "Escape must be consumed");
         check(!s->popup_surface_open(), "Escape must dismiss the stack");
         check(g_dismissals.size() == 1 &&
               g_dismissals[0].reason == NEUI_POPUP_DISMISS_ESCAPE,

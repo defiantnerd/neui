@@ -154,7 +154,27 @@ buying, so it lives in the session (`popup_gate_press` / `_hover` / `_wheel` /
   `GESTURE_BEGIN` / `VALUE_CHANGED` / `GESTURE_END` triple, which in a DAW is an
   automation write the user never saw. Inside the stack the wheel is ordinary —
   that is what makes the recommended scrolling-`SECTION` idiom work.
-- Escape → close. That is the whole of v1's keyboard story.
+- keys are **retargeted, not passed through** — the keyboard half of the same
+  promise. Escape (on KEYDOWN) closes the stack. Otherwise: if focus is already
+  inside the deepest level, the gate gets out of the way, because
+  `_focused_widget` is a **session** index and every platform's key dispatch
+  reads it without asking which frame it belongs to — so the ordinary path
+  already delivers into the popup, and an `INPUTBOX` inside one really does type
+  even though its window can never be key. If focus is anywhere else, the key is
+  delivered to the deepest **surface widget** (`KEYDOWN` / `KEYUP` / `KEYCHAR`,
+  so a client-drawn menu can navigate itself) and **swallowed either way**. That
+  last part is the fix: everything but Escape used to fall through, so with a
+  menu open an arrow key operated the last-focused control in the editor and
+  *typing edited the text field behind it*. The character paths are gated
+  separately from the keydown paths on every platform, because none of them share
+  a message — win32 `WM_CHAR`, AppKit `interpretKeyEvents:` → `insertText:`,
+  X11's `Xutf8LookupString` tail — and IME composition is refused into a diverted
+  target for the same reason (`popup_diverts_keys`).
+- Tab traversal follows the open stack. A surface is a **root child**, so the
+  owner's tab-stop walk cannot reach it, and the frame that delivered the key is
+  always the owner (the popup never takes OS focus) — so `focus_next` overrides
+  its frame hint with the deepest level while a stack is open. Without that, Tab
+  inside an open picker jumped out to the first control of the editor behind it.
 
 Each gate is one `Session` method rather than the predicate open-coded per
 platform, because the wheel alone has **four** entry points across three

@@ -63,12 +63,26 @@ extern "C" {
 // act on the widget underneath. This matches every OS menu and drop-list, and
 // it is what stops one click from both closing a picker and moving a parameter.
 //
-// v1 IS MOUSE-DRIVEN. Escape closes, but arrow-key navigation and type-ahead
-// are not wired yet: the surface deliberately does not take activation (a DAW
-// must not see its editor lose focus), so keys arrive at the owner's window and
-// have to be routed across two windows. That is a separate wave. Press-drag-
-// release from the anchor into the popup is likewise not supported - click,
-// then click.
+// KEYS REACH THE POPUP, BUT NOTHING INTERPRETS THEM FOR YOU. The surface
+// deliberately never takes activation (a DAW must not see its editor lose
+// focus), so keys arrive at the OWNER's window - the host then retargets them:
+//
+//   - Escape closes the whole stack (reported as NEUI_POPUP_DISMISS_ESCAPE).
+//   - With focus INSIDE the deepest open surface, keys route to the focused
+//     widget exactly as they would in any frame. A NEUI_W_INPUTBOX inside a
+//     popup is focusable by click, and typing into it works.
+//   - With focus anywhere else, NEUI_EVENT_KEYDOWN / _KEYUP / _KEYCHAR are
+//     delivered with `.widget` set to the deepest SURFACE itself, so a
+//     client-drawn menu or browser can implement its own navigation.
+//
+// In every case the key is SWALLOWED - it never reaches the widgets under an
+// open popup, the same rule the dismissing press follows.
+//
+// What the host does NOT do: interpret arrows / Home / End / type-ahead over
+// your content, focus the popup when it opens (call widgets->set_focus if you
+// want that), or move focus into a popup from the owner. Tab cycles the popup's
+// own tab stops once focus is already inside it. Press-drag-release from the
+// anchor into the popup is not supported either - click, then click.
 
 #define NEUI_API_POPUP "com.defiantnerd.neui.extension.popup/0"
 
