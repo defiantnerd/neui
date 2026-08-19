@@ -2717,23 +2717,65 @@ static float neui_snap_to_steps(float v, int steps)
 // by create_inputbox / create_multiline) and fires NEUI_EVENT_WIDGET_UPDATED.
 
 namespace macos_host {
-  // Helper used by the delegate to dispatch a WIDGET_UPDATED event without
-  // duplicating the (session_id<<16 | tree_idx) decoding.
-  static void dispatch_widget_updated(uint32_t widget_id)
+  // Resolve a widget_id to its Session + WidgetData for the text delegate,
+  // sharing the (session_id<<16 | tree_idx) decoding. Returns null unless the
+  // widget exists and opted into events.
+  static WidgetData* emitting_widget(uint32_t widget_id, Session** out_session)
   {
     uint32_t session_id = (widget_id >> 16) & 0xffff;
     uint32_t idx        = widget_id & 0xffff;
-    if (session_id == 0) return;
+    if (session_id == 0) return nullptr;
     size_t sess_idx = static_cast<size_t>(session_id) - 1;
-    if (sess_idx >= sessions.size()) return;
+    if (sess_idx >= sessions.size()) return nullptr;
     auto& sp = sessions[sess_idx];
-    if (!sp) return;
+    if (!sp) return nullptr;
     auto* sess = sp.get();
-    if (!sess->_widgets.exists(idx)) return;
+    if (!sess->_widgets.exists(idx)) return nullptr;
     auto& wd = sess->_widgets[idx];
-    if (!wd.emit_events) return;
+    if (!wd.emit_events) return nullptr;
+    if (out_session) *out_session = sess;
+    return &wd;
+  }
+
+  // Helper used by the delegate to dispatch a WIDGET_UPDATED event without
+  // duplicating the widget lookup.
+  static void dispatch_widget_updated(uint32_t widget_id)
+  {
+    Session* sess = nullptr;
+    if (!emitting_widget(widget_id, &sess)) return;
     neui_event_t ev = {};
     ev.type = NEUI_EVENT_WIDGET_UPDATED;
+    sess->dispatch_event(&ev);
+  }
+
+  // End of an edit session in a native text control. AppKit reports how the
+  // edit ended (NSTextMovement in the notification's userInfo), which is the
+  // only place the Return key is observable for an NSTextField / NSTextView:
+  // unlike a CUSTOMDRAW, a native editor consumes keyDown: itself, so the
+  // keyDown: path in NEUINativePaintedView never sees it.
+  //
+  // Mirrors what the win32 host's ChildSubclassProc already delivers for the
+  // same interactions, so clients need no per-host special-casing:
+  //   Return  -> NEUI_EVENT_KEYDOWN with NEUI_KEY_RETURN (win32: WM_KEYDOWN)
+  //   other   -> NEUI_EVENT_WIDGET_FOCUS, focused = false (win32: WM_KILLFOCUS)
+  // Tab movements report as a focus loss, which is what they are.
+  static void dispatch_text_end_editing(uint32_t widget_id, NSNotification* note)
+  {
+    Session* sess = nullptr;
+    WidgetData* wd = emitting_widget(widget_id, &sess);
+    if (!wd) return;
+    NSNumber* mv = [note.userInfo objectForKey:@"NSTextMovement"];
+    neui_event_t ev = {};
+    if (mv && [mv integerValue] == NSTextMovementReturn) {
+      ev.type               = NEUI_EVENT_KEYDOWN;
+      ev.data.key.widget    = { wd->widget_id };
+      ev.data.key.keycode   = NEUI_KEY_RETURN;
+      ev.data.key.modifiers = 0;
+    } else {
+      ev.type               = NEUI_EVENT_WIDGET_FOCUS;
+      ev.data.focus.widget  = { wd->widget_id };
+      ev.data.focus.focused = false;
+    }
     sess->dispatch_event(&ev);
   }
 }
@@ -3182,6 +3224,14 @@ namespace macos_host {
   macos_host::dispatch_widget_updated((uint32_t)f.tag);
 }
 
+// NSTextField finished editing - Return, Tab, or focus moving elsewhere.
+- (void)controlTextDidEndEditing:(NSNotification*)notification
+{
+  NSTextField* f = (NSTextField*)notification.object;
+  if (![f isKindOfClass:[NSTextField class]]) return;
+  macos_host::dispatch_text_end_editing((uint32_t)f.tag, notification);
+}
+
 // NSTextView change notification. The widget_id is stashed in the
 // TextView's identifier (since NSTextView doesn't have a tag).
 - (void)textDidChange:(NSNotification*)notification
@@ -3192,6 +3242,17 @@ namespace macos_host {
   if (!idstr) return;
   uint32_t widget_id = (uint32_t)[idstr longLongValue];
   macos_host::dispatch_widget_updated(widget_id);
+}
+
+// NSTextView finished editing. Return inserts a newline in a multiline editor
+// rather than ending the edit, so in practice this reports the focus loss.
+- (void)textDidEndEditing:(NSNotification*)notification
+{
+  NSTextView* tv = (NSTextView*)notification.object;
+  if (![tv isKindOfClass:[NSTextView class]]) return;
+  NSString* idstr = tv.identifier;
+  if (!idstr) return;
+  macos_host::dispatch_text_end_editing((uint32_t)[idstr longLongValue], notification);
 }
 
 @end
