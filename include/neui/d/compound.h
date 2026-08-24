@@ -341,6 +341,12 @@ extern "C" {
     //     "width"     int     px (NEUI_COMPOUND_FILL = match widget width)
     //     "height"    int     px (NEUI_COMPOUND_FILL = match widget height)
     //     "alpha"     float   0..1 opacity; 0 short-circuits the layer
+    //     "<prop>.step" float quantisation of the binding on <prop> (e.g.
+    //                         "width.step"): the attribute value is snapped to
+    //                         the nearest multiple of this before scale/offset,
+    //                         so a bound bar / arc / rotation moves in steps.
+    //                         0 (default) = smooth. Independent of call order -
+    //                         it may be set before or after the bind.
     //     "show_when" int     bitmask of NEUI_LAYER_STATE_* flags; 0 (default)
     //                         = visible always; non-zero = visible only when
     //                         (current_state & show_when) != 0.
@@ -366,6 +372,9 @@ extern "C" {
     //   effective = scale * x + offset
     // is computed and applied to the property. Int-typed properties
     // (offset_x, width, color, align_*) are rounded to nearest.
+    //
+    // Set "<prop>.step" (see the prop list above) to quantise x before that
+    // map, which steps the property without quantising the attribute itself.
     //
     // Replaces any previous static value or binding on the same prop.
     void (NEUI_ABI *bind)(neui_session_t session, neui_asset_t asset,
