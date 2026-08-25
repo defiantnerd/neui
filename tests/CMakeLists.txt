@@ -20,6 +20,7 @@ add_executable(neui_tests
   test_clipboard_item.cpp
   test_asset_font.cpp
   test_asset_filmstrip.cpp
+  test_resource_provider.cpp
   test_image_filter.cpp
   test_filter_graph.cpp
   test_backend_util.cpp

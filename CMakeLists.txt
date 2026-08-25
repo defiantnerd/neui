@@ -19,6 +19,14 @@ option(NEUI_BUILD_TESTS    "Build the neui unit tests"       ${NEUI_IS_TOP_LEVEL
 # don't break the build - the project's documented default); CI turns it ON
 # (-DNEUI_WERROR=ON) so a new warning fails the build on every host.
 option(NEUI_WERROR         "Treat compiler warnings as errors" OFF)
+# EXPERIMENTAL LVGL host (docs/host-lvgl.md; design record + measurements in
+# plans/lvgl-host-approach-c.md): a rendering backend + xpl platform layer that
+# draw through LVGL. OFF by default - existing builds are unaffected, and this is
+# not for product work: several host features are stubbed and the remaining work
+# is paused until real target hardware is available. When ON, LVGL is fetched
+# from git (see backends/lvgl/). Windows-only; configuration FAILS on other
+# platforms (no silent fallback).
+option(NEUI_WITH_LVGL      "EXPERIMENTAL: build the LVGL host + backend (see docs/host-lvgl.md)" OFF)
 
 # iOS is an APPLE platform too, so it must be detected distinctly from macOS:
 # the CoreGraphics backend is shared (gated on APPLE), but the AppKit macOS
@@ -138,6 +146,20 @@ if(NEUI_IOS)
 endif()
 if(UNIX AND NOT APPLE)
   add_subdirectory("backends/cairo")
+endif()
+# LVGL backend + platform prototype - gated; FetchContent of LVGL lives in the
+# subdirectory. Must fail hard on platforms that can't run the LVGL host.
+if(NEUI_WITH_LVGL)
+  if(NOT WIN32)
+    message(FATAL_ERROR
+      "NEUI_WITH_LVGL is currently supported only on Windows (it uses LVGL's "
+      "native Windows display driver, LV_USE_WINDOWS). This platform cannot "
+      "run the LVGL host - configure with -DNEUI_WITH_LVGL=OFF.")
+  endif()
+  message(STATUS
+    "neui: EXPERIMENTAL LVGL host enabled - prototype only, several host "
+    "features are stubbed. See docs/host-lvgl.md.")
+  add_subdirectory("backends/lvgl")
 endif()
 add_subdirectory("backends/null")
 add_subdirectory("hosts/crossplatform")
@@ -442,6 +464,35 @@ if(APPLE)
   target_link_libraries(neui_overlay_example PRIVATE neui-macoshost)
 endif()
 
+# Client resource provider example (NEUI_API_RESOURCE_CLIENT). The client builds
+# a BMP in memory at startup and hands the bytes to the host on demand, so the
+# image resolves under a name that exists nowhere on disk. WIN32 subsystem like
+# the other GUI examples - the native Win32 host's window/pump lives behind
+# WinMain, so a console-subsystem build never gets a frame.
+if(MSVC)
+  add_executable(neui_resource_client_example WIN32
+    examples/resource_client_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_resource_client_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_resource_client_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_resource_client_example WIN32
+    examples/resource_client_example.cpp)
+elseif(APPLE)
+  add_executable(neui_resource_client_example MACOSX_BUNDLE
+    examples/resource_client_example.cpp)
+else()
+  add_executable(neui_resource_client_example examples/resource_client_example.cpp)
+endif()
+target_link_libraries(neui_resource_client_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_resource_client_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_resource_client_example PRIVATE neui-macoshost)
+endif()
+
 # Arc example. Value-driven arc / ring / pie compound layers
 # (NEUI_COMPOUND_LAYER_ARC) - ring, elliptical ring, filled wedge, and a
 # center-polarity bipolar arc, each bound to NEUI_PARAM_VALUE.
@@ -630,6 +681,23 @@ if(WIN32)
 endif()
 if(APPLE)
   target_link_libraries(neui_tabview_example PRIVATE neui-macoshost)
+endif()
+
+# LVGL host prototype example (plans/lvgl-host-approach-c.md): the knob-heavy
+# measurement screen for the Milestone 3 FPS/CPU evaluation. Console app so
+# LVGL's perf monitor (LOG_MODE) prints sysmon lines to stdout. Pinned to the
+# crossplatform host, which this build pairs with the LVGL platform+backend.
+if(NEUI_WITH_LVGL)
+  add_executable(neui_lvgl_example examples/lvgl_example.cpp)
+  target_link_libraries(neui_lvgl_example PRIVATE neui neui-xplhost)
+  if(WIN32)
+    target_link_libraries(neui_lvgl_example PRIVATE neui-win32host)
+  endif()
+  # The IMAGE-widget check loads myimage.png from next to the executable.
+  add_custom_command(TARGET neui_lvgl_example POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/myimage.png"
+            "$<TARGET_FILE_DIR:neui_lvgl_example>/myimage.png")
 endif()
 
 # Minimal README example - input + button + label echo. Pure C; mirrors the

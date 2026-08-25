@@ -54,6 +54,17 @@ namespace ios_host
         _client->get_interface(token, NEUI_API_WIDGETS));
       _grid_client = static_cast<neui_grid_client_t*>(
         _client->get_interface(token, NEUI_API_GRID_CLIENT));
+
+      // Opt-in client resource provider: asked for image / font / component /
+      // sidecar bytes before this host tries the bundle or the disk.
+      _resource_client = static_cast<neui_resource_client_t*>(
+        _client->get_interface(token, NEUI_API_RESOURCE_CLIENT));
+      if (_resource_client) {
+        neui_detail::ResourceProvider provider;
+        provider.client = _resource_client;
+        provider.token  = token;
+        _asset_manager.set_resource_provider(provider);
+      }
     }
   }
 

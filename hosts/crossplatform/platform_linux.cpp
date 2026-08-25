@@ -33,7 +33,7 @@
 // This TU emits the single stb_image implementation for the Linux host.
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO_DEPRECATED
-#include "../shared/linux/image_loader_linux.h"
+#include "../shared/image_loader_stb.h"
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -2258,11 +2258,17 @@ namespace
   uint8_t* platform_load_image(const char* path,
                                 uint32_t* width_out, uint32_t* height_out)
   {
-    return neui_detail::load_image_bgra8_linux(path, width_out, height_out);
+    return neui_detail::load_image_bgra8_stb(path, width_out, height_out);
+  }
+  uint8_t* platform_load_image_bytes(const uint8_t* data, size_t len,
+                                      uint32_t* width_out, uint32_t* height_out)
+  {
+    return neui_detail::load_image_bgra8_stb_memory(data, len,
+                                                    width_out, height_out);
   }
   void platform_free_image(uint8_t* pixels)
   {
-    neui_detail::free_image_bgra8_linux(pixels);
+    neui_detail::free_image_bgra8_stb(pixels);
   }
 
   // ---- Clipboard: X11 CLIPBOARD selection (hosts/shared/linux). -------------

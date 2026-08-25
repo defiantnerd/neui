@@ -9,7 +9,6 @@
 
 #import <AppKit/AppKit.h>
 
-#include <fstream>
 #include <string>
 #include "host.h"
 #include "checkbox_image.h"
@@ -2417,6 +2416,22 @@ namespace macos_host
     for (auto a : built.owned_assets) a_destroy(session, a);
   }
 
+  // ComponentApis::bitmap_from_name - see component_loader.h. A layer asset named
+  // in a component document reaches the client resource provider as the raw
+  // "assets" entry plus that document's base_dir, which the public path-taking
+  // create_from_file cannot express; the store joins them for its own filesystem
+  // fallback.
+  static neui_asset_t component_bitmap_from_name(void* user, const char* name,
+                                                 const char* base_dir)
+  {
+    auto* s = static_cast<Session*>(user);
+    if (!s || !name) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_from_file(
+        name, best_asset_scale_macos(), base_dir);
+    if (slot == 0) return asset_none;
+    return pack_asset_macos(s->session_id(), slot);
+  }
+
   static neui_asset_t NEUI_ABI a_create_component_from_string(
       neui_session_t session, const char* json, uint32_t len,
       const neui_component_env_t* env)
@@ -2427,6 +2442,8 @@ namespace macos_host
     apis.asset    = &asset_api;
     apis.compound = &compound_api;
     apis.behavior = &behavior_api;
+    apis.bitmap_from_name = component_bitmap_from_name;
+    apis.user             = s;
     neui_detail::BuiltComponent built =
         neui_detail::build_component(session, json, len, env, apis);
     if (!built.ok) { release_built_component_macos(session, built); return asset_none; }
@@ -2441,10 +2458,11 @@ namespace macos_host
   {
     auto* s = get_session(session);
     if (!s || !path_utf8) return asset_none;
-    std::ifstream in(path_utf8, std::ios::binary);
-    if (!in) return asset_none;
-    std::string data((std::istreambuf_iterator<char>(in)),
-                     std::istreambuf_iterator<char>());
+    // Client resource provider first, then the file (shared read-or-ask helper).
+    std::string data;
+    if (!s->_asset_manager.resource_provider().read_bytes(
+            NEUI_RESOURCE_KIND_COMPONENT, path_utf8, data))
+      return asset_none;
     neui_component_env_t local{};
     const neui_component_env_t* use_env = env;
     static thread_local std::string base_keep;
