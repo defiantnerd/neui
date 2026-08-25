@@ -786,6 +786,7 @@ namespace neui_d2d_backend
 
     HWND hwnd = reinterpret_cast<HWND>(native_handle);
     UINT dpi  = GetDpiForWindow(hwnd);
+    if (dpi == 0) dpi = 96;   // failure -> 1:1; SetDpi(0, 0) is invalid
 
     auto* ctx  = new D2DContext();
     ctx->hwnd   = hwnd;
