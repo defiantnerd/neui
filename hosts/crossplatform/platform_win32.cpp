@@ -79,8 +79,12 @@ namespace xpl_host
   static inline int mouse_y(LPARAM lp) { return static_cast<int>(static_cast<short>(HIWORD(lp))); }
 
   // Convert a physical pixel coordinate to logical (96 DPI baseline).
+  // dpi == 0 is normalised to 96: GetDpiForWindow returns 0 on failure, and a
+  // frame's dpi is only populated once its HWND exists - neither may divide
+  // by zero.
   static inline float phys_to_log(int phys, uint32_t dpi)
   {
+    if (dpi == 0) dpi = 96;
     return static_cast<float>(phys) * 96.0f / static_cast<float>(dpi);
   }
 
@@ -391,8 +395,22 @@ namespace xpl_host
       auto* wud = get_wud(hwnd);
       if (wud) {
         auto* wd = wud->session->get_widget(wud->widget_index);
-        if (wd && wd->type && !strcmp(wd->type, NEUI_W_APPWINDOW))
-          ++g_appwindow_count;
+        if (wd) {
+          // Stash the HWND's real per-monitor DPI here, BEFORE the
+          // creation-time WM_SIZE arrives (CreateWindowExW sends WM_CREATE
+          // first, then WM_SIZE, all before it returns). That handler converts
+          // the physical client size to logical with wd->dpi - with dpi still
+          // at its 96 default the conversion is an identity and the client
+          // would see the first NEUI_EVENT_RESIZE in PHYSICAL px (940x400
+          // reported as 1410x600 at 150%). create_native_window refines this
+          // to the same value right after CreateWindowExW returns; this is the
+          // assignment the early messages need. Mirrors the win32 native
+          // host's WM_CREATE (hosts/win32/window.cpp).
+          UINT hwnd_dpi = GetDpiForWindow(hwnd);
+          wd->dpi = hwnd_dpi ? hwnd_dpi : 96;
+          if (wd->type && !strcmp(wd->type, NEUI_W_APPWINDOW))
+            ++g_appwindow_count;
+        }
       }
       // Give this window Win32 keyboard focus so WM_KEYDOWN/WM_CHAR arrive
       // here. NOT for a DAW-embedded frame (WS_CHILD): merely opening a
@@ -579,8 +597,15 @@ namespace xpl_host
 
         auto* fwd = wud->session->get_widget(wud->widget_index);
         if (fwd) {
-          int w_log = static_cast<int>(phys_to_log(static_cast<int>(w_phys), fwd->dpi));
-          int h_log = static_cast<int>(phys_to_log(static_cast<int>(h_phys), fwd->dpi));
+          // WM_CREATE seeded fwd->dpi before the first WM_SIZE; fall back to
+          // the live HWND in case this frame was never routed through there.
+          UINT dpi = fwd->dpi ? fwd->dpi : GetDpiForWindow(hwnd);
+          if (dpi == 0) dpi = 96;
+          // MulDiv (round-to-nearest) is the exact inverse of the
+          // MulDiv(logical, dpi, 96) used when sizing the window; truncating
+          // here loses a pixel (logical 941 -> 1176 phys -> 940 at 125%).
+          int w_log = MulDiv(static_cast<int>(w_phys), 96, static_cast<int>(dpi));
+          int h_log = MulDiv(static_cast<int>(h_phys), 96, static_cast<int>(dpi));
           fwd->width  = w_log;
           fwd->height = h_log;
 
@@ -1376,19 +1401,35 @@ namespace xpl_host
   {
     if (!native_handle) return 1.0f;
     UINT dpi = GetDpiForWindow(static_cast<HWND>(native_handle));
+    if (dpi == 0) dpi = 96;   // GetDpiForWindow failed - report 1:1, not 0
     return static_cast<float>(dpi) / 96.0f;
   }
 
   // Helper: create a HWND and attach a D2D render context to wd.
-  // Logical coordinates in wd are converted to physical pixels using the
-  // system DPI before the window exists, then refined to per-monitor DPI after.
+  // Logical coordinates in wd are converted to physical pixels using the best
+  // pre-creation DPI estimate, then refined to per-monitor DPI after.
   static void create_native_window(Session* session, uint32_t widget_index,
                                     WidgetData& wd, DWORD style, DWORD ex_style,
                                     HWND owner_hwnd = nullptr)
   {
-    // Use system DPI as the best estimate of the target monitor's DPI before
-    // the window is created. The actual per-monitor DPI is read back afterwards.
-    UINT sys_dpi = GetDpiForSystem();
+    // Best estimate of the target monitor's DPI before the window exists. An
+    // embedded frame's parent and a dialog's owner are already on the target
+    // monitor, so their DPI is exact and lands the window at the right scale
+    // on the first try (no post-creation correction round-trip); otherwise
+    // fall back to the system DPI. The actual per-monitor DPI is read back
+    // afterwards.
+    UINT create_dpi = 0;
+    if (wd.embed_parent)
+      create_dpi = GetDpiForWindow(reinterpret_cast<HWND>(wd.embed_parent));
+    else if (owner_hwnd)
+      create_dpi = GetDpiForWindow(owner_hwnd);
+    if (create_dpi == 0) create_dpi = GetDpiForSystem();
+    if (create_dpi == 0) create_dpi = 96;
+    // Seed wd.dpi so the messages CreateWindowExW sends before it returns see
+    // a real DPI. WM_GETMINMAXINFO in particular arrives before WM_NCCREATE -
+    // ahead of any chance to read GetDpiForWindow - and would otherwise scale
+    // NEUI_ATTR_MIN_/MAX_ tracking sizes as if the frame were at 96 DPI.
+    wd.dpi = create_dpi;
 
     // neui's create() width/height specify the CLIENT (content) area - the same
     // contract as the win32 native host (hosts/win32/widgets.cpp) and macOS
@@ -1416,7 +1457,7 @@ namespace xpl_host
       AdjustWindowRectExForDpi(&wr, style, has_menu ? TRUE : FALSE, ex_style, dpi);
       return SIZE{ wr.right - wr.left, wr.bottom - wr.top };
     };
-    SIZE outer = outer_for_dpi(sys_dpi);
+    SIZE outer = outer_for_dpi(create_dpi);
 
     auto* wud = new WindowUserData{ session, widget_index };
 
@@ -1425,8 +1466,8 @@ namespace xpl_host
       k_wndclass,
       L"",
       style,
-      MulDiv(wd.x,      sys_dpi, 96),
-      MulDiv(wd.y,      sys_dpi, 96),
+      MulDiv(wd.x,      create_dpi, 96),
+      MulDiv(wd.y,      create_dpi, 96),
       outer.cx,
       outer.cy,
       owner_hwnd,
@@ -1438,17 +1479,21 @@ namespace xpl_host
     if (!hwnd) { delete wud; return; }
 
     // Read back the actual per-monitor DPI now that the window has a monitor.
-    wd.dpi           = GetDpiForWindow(hwnd);
+    // GetDpiForWindow returns 0 on failure - keep the seeded estimate then, so
+    // no coordinate conversion ever divides by zero.
+    UINT actual_dpi  = GetDpiForWindow(hwnd);
+    wd.dpi           = actual_dpi ? actual_dpi : create_dpi;
     wd.native_handle = hwnd;
 
-    // If the window's actual monitor DPI differs from GetDpiForSystem() (e.g.
-    // the primary is at 100% but the window opened on a 150% secondary, or
-    // vice versa), our initial CreateWindowExW used the wrong scaling. The
-    // D2D render target uses the per-window DPI for widget coordinates, so a
-    // mismatch leaves the outer window sized at one scale and the widget
-    // coordinate space at another - visible as margins that don't match
-    // left/top. Resize using the actual window DPI to keep both in sync.
-    if (wd.dpi != sys_dpi && wd.dpi != 0) {
+    // If the window's actual monitor DPI differs from the pre-creation
+    // estimate (e.g. the primary is at 100% but the window opened on a 150%
+    // secondary, or vice versa), our initial CreateWindowExW used the wrong
+    // scaling. The D2D render target uses the per-window DPI for widget
+    // coordinates, so a mismatch leaves the outer window sized at one scale
+    // and the widget coordinate space at another - visible as margins that
+    // don't match left/top. Resize using the actual window DPI to keep both
+    // in sync.
+    if (wd.dpi != create_dpi) {
       SIZE outer2 = outer_for_dpi(wd.dpi);
       SetWindowPos(hwnd, nullptr, 0, 0,
                    outer2.cx, outer2.cy,

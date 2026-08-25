@@ -887,6 +887,8 @@ namespace xpl_host
   {
     auto* wd = get_widget(widget_index);
     if (!wd) return;
+    // Never store 0 - every physical <-> logical conversion divides by it.
+    if (new_dpi == 0) new_dpi = 96;
     wd->dpi = new_dpi;
     if (wd->render_ctx && _backend)
       _backend->update_dpi(wd->render_ctx, new_dpi);
