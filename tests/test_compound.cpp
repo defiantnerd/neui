@@ -145,6 +145,60 @@ TEST_CASE("eval_binding_float: scale*x + offset over the attr value")
   CHECK_APPROX(eval_binding_float(bi, &ibag), 6.0);
 }
 
+TEST_CASE("eval_binding_float: step quantises the attr value before the map")
+{
+  AttrBag bag;
+  CompoundBinding b;
+  b.attr_key = "v";
+  b.scale = 100.0f;
+  b.offset = 10.0f;
+  b.step = 0.25f;
+
+  bag.set_float("v", 0.0f);
+  CHECK_APPROX(eval_binding_float(b, &bag), 10.0);    // 0 -> 0
+  bag.set_float("v", 0.12f);
+  CHECK_APPROX(eval_binding_float(b, &bag), 10.0);    // rounds down to 0
+  bag.set_float("v", 0.13f);
+  CHECK_APPROX(eval_binding_float(b, &bag), 35.0);    // rounds up to 0.25
+  bag.set_float("v", 0.6f);
+  CHECK_APPROX(eval_binding_float(b, &bag), 60.0);    // 0.5
+  bag.set_float("v", 1.0f);
+  CHECK_APPROX(eval_binding_float(b, &bag), 110.0);   // reaches the full range
+
+  // step 0 is the default and must leave the value alone.
+  b.step = 0.0f;
+  bag.set_float("v", 0.13f);
+  CHECK_APPROX(eval_binding_float(b, &bag), 23.0);
+}
+
+TEST_CASE("apply_set_float: \"<prop>.step\" quantises that prop's binding, either order")
+{
+  AttrBag bag;
+  bag.set_float("v", 0.6f);
+
+  // Step after the bind.
+  CompoundLayer L;
+  apply_bind(L, "width", "v", 100.0f, 0.0f);
+  CHECK(apply_set_float(L, "width.step", 0.25f));
+  CHECK_APPROX(L.bindings.at("width").step, 0.25);
+  CHECK_EQ(effective_int(L, "width", 0, &bag), 50);        // 0.5 * 100
+
+  // Step before the bind - and surviving a re-bind, since the reveal path in a
+  // component document may set them in either order.
+  CompoundLayer M;
+  CHECK(apply_set_float(M, "height.step", 0.25f));
+  CHECK(M.bindings.find("height") == M.bindings.end());    // no phantom binding
+  CHECK_EQ(effective_int(M, "height", 7, &bag), 7);        // still the static value
+  apply_bind(M, "height", "v", 100.0f, 0.0f);
+  CHECK_EQ(effective_int(M, "height", 7, &bag), 50);
+  apply_bind(M, "height", "v", 200.0f, 0.0f);
+  CHECK_EQ(effective_int(M, "height", 7, &bag), 100);      // step kept across the re-bind
+
+  // A negative or zero step clears it.
+  CHECK(apply_set_float(M, "height.step", 0.0f));
+  CHECK_EQ(effective_int(M, "height", 7, &bag), 120);      // 0.6 * 200, unquantised
+}
+
 TEST_CASE("effective_int/float: static value unless a binding overrides")
 {
   AttrBag bag;

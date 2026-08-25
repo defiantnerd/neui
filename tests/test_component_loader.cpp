@@ -583,6 +583,34 @@ TEST_CASE("component_loader: a group layer nests children via add_child_layer")
   CHECK(g_layers[2].parent == 0);
 }
 
+TEST_CASE("component_loader: a stepped bind travels as the \"<prop>.step\" prop")
+{
+  // A value-driven clip window (a group whose width is bound) that snaps in
+  // eight steps - the shape asvglib's `reveal:` class emits.
+  const char* json = R"json({
+    "size": [220, 150],
+    "layers": [
+      { "kind": "group", "z": 0, "anchor": ["top_left","top_left"], "size": "fill",
+        "bind": { "width": { "attr": "neui.param.value", "scale": 140, "offset": 60,
+                             "step": 0.125 } },
+        "layers": [ { "kind": "rect", "z": 0, "fill_color": "#FF7CF29C" } ] },
+      { "kind": "group", "z": 1, "anchor": ["top_left","top_left"], "size": "fill",
+        "bind": { "width": { "attr": "neui.param.value", "scale": 188, "offset": 16 } },
+        "layers": [ { "kind": "rect", "z": 0, "fill_color": "#FFEDF2F7" } ] }
+    ]
+  })json";
+  run_loader(json);
+
+  REQUIRE(g_layers.size() == 4);
+  REQUIRE(g_layers[0].binds.count("width") == 1);
+  CHECK(g_layers[0].binds.at("width").attr == "neui.param.value");
+  CHECK_APPROX(g_layers[0].binds.at("width").scale, 140.0);
+  CHECK_APPROX(g_layers[0].flts.at("width.step"), 0.125);
+  // A smooth bind must not carry the prop at all - the default has to stay off.
+  REQUIRE(g_layers[2].binds.count("width") == 1);
+  CHECK(g_layers[2].flts.count("width.step") == 0);
+}
+
 TEST_CASE("build_component: arc layer props + value binding")
 {
   const char* json = R"json({
@@ -1011,6 +1039,39 @@ TEST_CASE("serialize_component: nests a group's children under a layers array")
 // load (target_y was previously absent from the string-prop table, so it was
 // silently dropped at load while serialize still emitted it - a lossy
 // round-trip for any biaxial component).
+TEST_CASE("serialize_component: round-trips a stepped binding")
+{
+  // A stepped bind has to survive emit -> load, or a saved component loses the
+  // quantisation it was authored with.
+  CompoundAsset ca;
+  uint32_t g = compound_add_layer(ca, NEUI_COMPOUND_LAYER_GROUP, 0);
+  compound_get_layer(ca, g)->width  = NEUI_COMPOUND_FILL;
+  compound_get_layer(ca, g)->height = NEUI_COMPOUND_FILL;
+  apply_bind(*compound_get_layer(ca, g), "width", "neui.param.value", 140.0f, 60.0f);
+  apply_set_float(*compound_get_layer(ca, g), "width.step", 0.125f);
+  uint32_t c0 = compound_add_child_layer(ca, g, NEUI_COMPOUND_LAYER_RECT, 0);
+  apply_set_int(*compound_get_layer(ca, c0), "fill_color",
+                static_cast<int>(static_cast<uint32_t>(0xFF7CF29Cu)));
+
+  BehaviorAsset ba;
+  std::string nm = "seg";
+  std::vector<std::pair<std::string, std::string>> an;
+  std::vector<std::pair<uint32_t, std::string>>    hn;
+  ComponentSerializeInput in;
+  in.name = &nm; in.width = 220.0f; in.height = 150.0f;
+  in.asset_names = &an; in.asset_handle_names = &hn;
+  in.compound = &ca; in.behavior = &ba;
+
+  std::string json = serialize_component(in, 0);
+  CHECK(json.find("\"step\"") != std::string::npos);
+
+  run_loader(json);
+  REQUIRE(g_layers.size() == 2);
+  REQUIRE(g_layers[0].binds.count("width") == 1);
+  CHECK_APPROX(g_layers[0].binds.at("width").offset, 60.0);
+  CHECK_APPROX(g_layers[0].flts.at("width.step"), 0.125);
+}
+
 TEST_CASE("component_loader: drag_biaxial target_y survives load + round-trip")
 {
   const char* kBiaxial = R"json({

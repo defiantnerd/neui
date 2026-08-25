@@ -715,11 +715,17 @@ namespace neui_detail
             if (bkv.first == "asset") {
               apis.compound->bind_asset(session, cs, layer, "asset", attr->c_str());
             } else {
-              double scale = 1.0, offset = 0.0;
+              double scale = 1.0, offset = 0.0, step = 0.0;
               as_num(obj_get(*bo, "scale"),  scale);
               as_num(obj_get(*bo, "offset"), offset);
               apis.compound->bind(session, cs, layer, bkv.first.c_str(), attr->c_str(),
                                   static_cast<float>(scale), static_cast<float>(offset));
+              // Optional quantisation of the bound value, carried as the
+              // "<prop>.step" float prop (no bind-with-step in the vtable).
+              if (as_num(obj_get(*bo, "step"), step) && step > 0.0)
+                apis.compound->set_float(session, cs, layer,
+                                         (bkv.first + ".step").c_str(),
+                                         static_cast<float>(step));
             }
           }
         }
@@ -1048,6 +1054,7 @@ namespace neui_detail
             if (!b.is_asset) {
               one.emplace_back("scale", njson_num(b.scale));
               one.emplace_back("offset", njson_num(b.offset));
+              if (b.step > 0.0f) one.emplace_back("step", njson_num(b.step));
             }
             bo.emplace_back(k, njson_obj(std::move(one)));
           }

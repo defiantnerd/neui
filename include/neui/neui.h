@@ -30,6 +30,7 @@
 #include "d/tabs.h"
 #include "d/notify.h"
 #include "d/metrics.h"
+#include "d/embed.h"
 
 #ifdef __cplusplus
 extern "C" {

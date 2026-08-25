@@ -1904,11 +1904,11 @@ namespace
   void platform_create_plugwindow(Session* session, uint32_t widget_index,
                                    WidgetData& wd)
   {
-    // wd.embed_parent_xid (set via platform_set_embed_parent) selects the
+    // wd.embed_parent (set via platform_set_embed_parent) selects the
     // foreign-parent embedded path; 0 = borderless standalone top-level.
     create_frame(session, widget_index, wd, /*borderless*/true,
                  /*is_appwindow*/false, /*owner*/nullptr,
-                 wd.embed_parent_xid);
+                 static_cast<unsigned long>(wd.embed_parent));
   }
 
   void platform_create_dialog(Session* session, uint32_t widget_index,
@@ -1922,11 +1922,12 @@ namespace
   // ---- DAW-embedding seams (Linux-only). ------------------------------------
 
   void platform_set_embed_parent(Session* session, uint32_t widget_index,
-                                 unsigned long parent_xid)
+                                 void* native_parent)
   {
     if (!session) return;
     auto* wd = session->get_widget(widget_index);
-    if (wd) wd->embed_parent_xid = parent_xid;
+    // The DAW-provided X11 Window id travels cast through void*.
+    if (wd) wd->embed_parent = reinterpret_cast<uintptr_t>(native_parent);
   }
 
   int platform_embed_event_fd(void* native_handle)

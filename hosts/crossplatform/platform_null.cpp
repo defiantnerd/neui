@@ -54,6 +54,17 @@ namespace xpl_host
   bool platform_pump_once() { return true; }
   bool platform_run_modal_until(bool* /*keep_running*/) { return true; }
 
+  // DAW-embedding seams - no native windows, so nothing to embed into.
+  void platform_set_embed_parent(Session* session, uint32_t widget_index,
+                                 void* native_parent)
+  {
+    if (!session) return;
+    auto* wd = session->get_widget(widget_index);
+    if (wd) wd->embed_parent = reinterpret_cast<uintptr_t>(native_parent);
+  }
+  int  platform_embed_event_fd(void* /*native_handle*/) { return -1; }
+  void platform_embed_pump_and_tick(void* /*native_handle*/) {}
+
   // Menu bar - all no-ops on non-Windows platforms.
   bool  platform_menubar_in_frame()                                                     { return false; }
   int   platform_frame_extra_top_inset(void* /*nh*/, bool /*has_menubar*/)              { return 0; }

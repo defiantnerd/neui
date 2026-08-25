@@ -19,7 +19,7 @@ This includes using fonts, colors and sizes that are defined from the target sys
 * linux (implemented, X11 + Cairo via the crossplatform host)
 * iOS / iPadOS (implemented, native UIKit host + crossplatform host)
 * crossplatform for all of the above
-* embedded (DAW plugin windows, X11 host run-loop integration on linux)
+* embedded (DAW plugin windows via `NEUI_API_EMBED` on windows / macOS / linux, incl. X11 host run-loop integration)
 * bare-metal / MCU panels via LVGL (**experimental** prototype, opt-in and Windows-hosted for now; work resumes when target hardware is available - see `docs/host-lvgl.md`)
 
 ## how to use

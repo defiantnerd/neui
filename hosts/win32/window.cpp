@@ -55,6 +55,7 @@ namespace win32_host
   // Defined in widgets.cpp. Declared here so ChildSubclassProc can reset
   // a slider's value on double-click.
   void widget_reset_to_default_w32(WidgetData& wd);
+  void widget_emit_gesture_w32(WidgetData& wd, bool begin);
 
   // Defined in widgets.cpp. Declared here so PaintedWndProc can repaint
   // a CUSTOMDRAW widget when hover / press transitions affect its compound
@@ -364,6 +365,13 @@ namespace win32_host
       }
       if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
       return 0;
+    case WM_CAPTURECHANGED:
+      // Capture stolen mid-drag (Alt-Tab, modal popup) - forward so a
+      // value drag in flight ends its gesture instead of dangling. Also
+      // arrives synchronously from the ReleaseCapture above; the handlers'
+      // dragging guards make that a no-op double-fire.
+      if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
+      return 0;
     case WM_MOUSEMOVE:
       if (wd && !wd->hovered) {
         TRACKMOUSEEVENT tme = {};
@@ -622,6 +630,27 @@ namespace win32_host
     // sending; the codes that don't update first are TB_THUMBPOSITION
     // and TB_THUMBTRACK, where HIWORD(wParam) carries the new value.
     WORD code = LOWORD(wParam);
+
+    // Gesture bracketing: the trackbar's notification stream is exactly a
+    // gesture - the first non-ENDTRACK code (thumb grab, channel page,
+    // arrow key) opens it. The begin fires BEFORE the value write below so
+    // every VALUE_CHANGED of the interaction lands inside the pair.
+    if (code != TB_ENDTRACK && !child->slider_gesture_active) {
+      child->slider_gesture_active = true;
+      widget_emit_gesture_w32(*child, true);
+    }
+    // ...and it must close on this notification unless a mouse-driven drag
+    // can still continue the stream. comctl32 holds the capture for the
+    // whole of a thumb drag / channel click-hold, so capture == "more
+    // notifications are coming, keep the gesture open"; without capture
+    // (wheel, arrow keys) each notification is a self-contained edit.
+    // Closing eagerly matters because not every stream ends in TB_ENDTRACK -
+    // a wheel notch over a focused trackbar emits TB_THUMBPOSITION alone,
+    // which would otherwise dangle the begin until some later, unrelated
+    // TB_ENDTRACK closed it, handing the client mismatched brackets across
+    // two interactions (and wedging host automation on a dangling beginEdit).
+    bool close_gesture = (code == TB_ENDTRACK) || (GetCapture() != ctrl);
+
     LRESULT pos;
     if (code == TB_THUMBPOSITION || code == TB_THUMBTRACK)
       pos = HIWORD(wParam);
@@ -665,6 +694,11 @@ namespace win32_host
       ev.data.value.widget = wid;
       ev.data.value.value  = v;
       sess->dispatch_event(&ev);
+    }
+
+    if (close_gesture && child->slider_gesture_active) {
+      child->slider_gesture_active = false;
+      widget_emit_gesture_w32(*child, false);
     }
     return true;
   }

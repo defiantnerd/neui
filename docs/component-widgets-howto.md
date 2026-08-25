@@ -74,6 +74,13 @@ same loop at step 2 (it invalidates and repaints), so code and user input drive
 the visual identically. The only difference: a user-driven write fires
 `NEUI_EVENT_ATTR_CHANGED`; a programmatic `attrs->set_*` stays silent.
 
+User-driven writes are additionally bracketed by `NEUI_EVENT_GESTURE_BEGIN` /
+`_END` (`{ widget, attr_key, value }`) so a client can forward host-automation
+begin/end edits (VST3 `beginEdit`/`endEdit`, CLAP gestures): a `DRAG_*` handler
+pairs grab..release (a BIAXIAL drag fires one pair per target), while WHEEL /
+KEY_STEP / CLICK_* / CONTEXT_RESET fire an implicit begin+change+end triple
+only when the value actually moved.
+
 ---
 
 ## Three ways to build one

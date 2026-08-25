@@ -2243,6 +2243,22 @@ namespace xpl_host
   // No nested pump on iOS - modals use UIKit presentation, not a blocking loop.
   bool platform_run_modal_until(bool* /*keep_running*/) { return true; }
 
+  // DAW-embedding seams (NEUI_API_EMBED). Not supported on iOS yet - an AUv3
+  // app-extension embeds through UIKit view-controller containment, a
+  // different mechanism from the desktop parent-handle model. The parent is
+  // stored (harmless; the frame create path ignores it) so set_parent's
+  // validation contract matches the other platforms; fd / pump are inert,
+  // same as win32 / macOS where the host's own loop services the frame.
+  void platform_set_embed_parent(Session* session, uint32_t widget_index,
+                                 void* native_parent)
+  {
+    if (!session) return;
+    auto* wd = session->get_widget(widget_index);
+    if (wd) wd->embed_parent = reinterpret_cast<uintptr_t>(native_parent);
+  }
+  int  platform_embed_event_fd(void* /*native_handle*/) { return -1; }
+  void platform_embed_pump_and_tick(void* /*native_handle*/) {}
+
   // -------------------------------------------------------------------------
   // Menu bar.
   //

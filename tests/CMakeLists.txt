@@ -50,6 +50,34 @@ endif()
 
 add_test(NAME neui_tests COMMAND neui_tests)
 
+# macOS-only: DAW-embedding harness (fake host NSWindow + NSView slot,
+# embeds a PLUGWINDOW via NEUI_API_EMBED). Needs a GUI session, so it is
+# built but NOT registered with ctest; run
+# ./tests/<config>/neui_embed_smoke_macos manually.
+if(APPLE AND NOT NEUI_IOS)
+  add_executable(neui_embed_smoke_macos embed_smoke_macos.mm)
+  target_include_directories(neui_embed_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_embed_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_embed_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+endif()
+
+# Windows-only: DAW-embedding harness (fake host HWND slot, embeds a
+# PLUGWINDOW via NEUI_API_EMBED and drives it from the fake DAW's own message
+# pump). Also guards issue #29 - the first NEUI_EVENT_RESIZE must be in
+# logical pixels. Needs a GUI session and only differs from an identity check
+# on a scaled display, so it is built but NOT registered with ctest; run
+# ./tests/<config>/neui_embed_smoke_win32 manually.
+if(WIN32)
+  add_executable(neui_embed_smoke_win32 embed_smoke_win32.cpp)
+  target_include_directories(neui_embed_smoke_win32 PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_embed_smoke_win32 PRIVATE cxx_std_17)
+  target_link_libraries(neui_embed_smoke_win32 PRIVATE
+    neui neui-xplhost neui-win32host)
+endif()
+
 # Linux-only: Cairo software backend offscreen smoke test. Unlike neui_tests
 # this links a real backend (neui-backend-cairo), so it is gated to the
 # platforms where that backend is built.
