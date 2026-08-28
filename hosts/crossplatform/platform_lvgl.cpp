@@ -1437,9 +1437,19 @@ namespace xpl_host
     g_retired_windows.push_back(w);
   }
 
-  void platform_set_embed_parent(Session*, uint32_t, unsigned long) {}
-  int  platform_embed_event_fd(void*) { return -1; }
-  void platform_embed_pump_and_tick(void*) {}
+  // DAW-embedding seams - LVGL owns the whole display, so there is no foreign
+  // native parent to embed into. The setter still records the value (as the
+  // null host does) so the public NEUI_API_EMBED state round-trips; nothing
+  // ever acts on it, and platform_create_plugwindow ignores wd.embed_parent.
+  void platform_set_embed_parent(Session* session, uint32_t widget_index,
+                                 void* native_parent)
+  {
+    if (!session) return;
+    auto* wd = session->get_widget(widget_index);
+    if (wd) wd->embed_parent = reinterpret_cast<uintptr_t>(native_parent);
+  }
+  int  platform_embed_event_fd(void* /*native_handle*/) { return -1; }
+  void platform_embed_pump_and_tick(void* /*native_handle*/) {}
 
   void platform_destroy_window(WidgetData& wd)
   {

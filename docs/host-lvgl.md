@@ -57,6 +57,9 @@ scope):
   own display driver, which an embedded target does anyway.
 - Dialogs are resizable; overlay changes (combo drop, popup menu, toast) still invalidate the whole
   frame.
+- DAW embedding (`NEUI_API_EMBED`): the seams are present so the host links and the API round-trips,
+  but LVGL owns the whole display - there is no foreign native parent, so `set_parent` is recorded
+  and ignored, `event_fd` is -1, and `pump_and_tick` is a no-op.
 
 **Known cost to be aware of on 565 targets**: LVGL's software vector path renders ThorVG only into
 ARGB8888/XRGB8888, so on RGB565 every vector task round-trips through a temporary full-framebuffer
