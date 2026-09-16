@@ -2929,6 +2929,34 @@ namespace win32_host
       );
       // w.hwnd is set by AppWindowProc WM_NCCREATE; children created in WM_CREATE
       if (w.hwnd) {
+        // The outer size above came from GetDpiForSystem(), which is only an
+        // estimate of where the frame will land: it may open on a monitor at a
+        // different scale (a 150% primary with a 100% secondary, or a remote
+        // session whose desktop DPI differs from the console's). Read the real
+        // per-monitor DPI back now that the HWND exists and, if it disagrees,
+        // redo the client -> outer conversion at that DPI.
+        //
+        // Without this the client area is wrong by the ratio of the two: a
+        // 940x400 request lands as a 1416x617 client when the system DPI is 144
+        // and the monitor is 96. WM_DPICHANGED does not cover it - that fires
+        // when a window MOVES between monitors, not when it is born on one that
+        // disagrees with the system DPI. Before ShowWindow so the correction is
+        // not visible as a resize flash. The crossplatform host does the same
+        // read-back in create_native_window.
+        UINT actual_dpi = GetDpiForWindow(w.hwnd);
+        if (actual_dpi && actual_dpi != initial_dpi) {
+          bool menu_row = false;
+          for (uint32_t ci = _widgets.child(index); ci != 0; ci = _widgets.next(ci))
+            if (_widgets.exists(ci) && _widgets[ci].hmenu != nullptr) { menu_row = true; break; }
+          RECT fix = { 0, 0,
+                       LogicalToPhysical(w.width,  actual_dpi),
+                       LogicalToPhysical(w.height, actual_dpi) };
+          AdjustWindowRectExForDpi(&fix, style, menu_row ? TRUE : FALSE, ex_style, actual_dpi);
+          SetWindowPos(w.hwnd, nullptr, 0, 0,
+                       fix.right - fix.left, fix.bottom - fix.top,
+                       SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+
         if (!is_plug) ApplyText(w.hwnd, w.text);
         // Apply any icon attribute set before show.
         if (w.attrs) {
