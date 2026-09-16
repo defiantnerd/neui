@@ -251,6 +251,12 @@ namespace xpl_host
   static WidgetData* focused_text_widget(Session* sess)
   {
     if (!sess) return nullptr;
+    // No composition target while a popup surface is diverting keys: the
+    // WM_IME_* messages arrive at the OWNER's HWND, so without this an IME would
+    // compose into the field behind an open menu - the same leak the WM_CHAR gate
+    // closes for plain typing. Every caller already handles nullptr by falling
+    // through to DefWindowProcW.
+    if (sess->popup_diverts_keys()) return nullptr;
     uint32_t fw = sess->_focused_widget;
     if (fw == 0 || !sess->_widgets.exists(fw)) return nullptr;
     return &sess->_widgets[fw];
@@ -1480,8 +1486,11 @@ namespace xpl_host
       if (wud->session->handle_tree_popup_key(static_cast<uint32_t>(wParam)))
         return 0;
       // ...and an open popup-surface stack. The key arrives at the OWNER: a
-      // popup surface is WS_EX_NOACTIVATE and never holds focus.
-      if (wud->session->popup_gate_key(static_cast<uint32_t>(wParam)))
+      // popup surface is WS_EX_NOACTIVATE and never holds focus. The gate
+      // retargets it - see Session::popup_gate_key.
+      if (wud->session->popup_gate_key(NEUI_EVENT_KEYDOWN,
+                                       static_cast<uint32_t>(wParam),
+                                       build_modifiers()))
         return 0;
       // Popup menu absorbs Esc / Enter / Space / arrow keys.
       if (wud->session->_popup_active &&
@@ -1502,6 +1511,12 @@ namespace xpl_host
     case WM_KEYUP: {
       auto* wud = get_wud(hwnd);
       if (!wud) break;
+      // The release peer of the KEYDOWN gate: a press the popup swallowed must
+      // not have its release land on the widget underneath.
+      if (wud->session->popup_gate_key(NEUI_EVENT_KEYUP,
+                                       static_cast<uint32_t>(wParam),
+                                       build_modifiers()))
+        return 0;
       dispatch_key_to_focused(wud->session, NEUI_EVENT_KEYUP,
                                static_cast<uint32_t>(wParam));
       break;
@@ -1537,6 +1552,14 @@ namespace xpl_host
         codepoint = static_cast<uint32_t>(ch);
       }
 
+      // Text aimed at the owner is DIVERTED while a popup surface is open and
+      // focus is outside it: the stack gets it as type-ahead, the widget
+      // underneath must not. WM_CHAR is a message of its own, so the WM_KEYDOWN
+      // gate above never sees it - this is the path that let typing edit the
+      // field behind an open menu.
+      if (wud->session->popup_gate_key(NEUI_EVENT_KEYCHAR, codepoint,
+                                       build_modifiers()))
+        return 0;
       dispatch_key_to_focused(wud->session, NEUI_EVENT_KEYCHAR, codepoint);
       break;
     }

@@ -985,8 +985,11 @@ namespace
     // Esc dismisses an open tree popup, before anything else claims the key.
     if (s->handle_tree_popup_key(keycode)) return;
     // ...and an open popup-surface stack. The key arrives at the OWNER: a popup
-    // surface is override-redirect and never takes the input focus.
-    if (s->popup_gate_key(keycode)) return;
+    // surface is override-redirect and never takes the input focus. The gate
+    // retargets it - see Session::popup_gate_key. Returning here also skips the
+    // KEYCHAR tail below, which is what keeps a swallowed press from still
+    // inserting its character underneath.
+    if (s->popup_gate_key(NEUI_EVENT_KEYDOWN, keycode, mods)) return;
 
     // Tab cycles logical focus (hand-rolled traversal, like win32/macOS).
     if (keycode == NEUI_KEY_TAB) {
@@ -1023,6 +1026,11 @@ namespace
     // KEYCHAR for printable input. Skip when Ctrl is held (command shortcuts
     // were already routed via on_keydown above), matching macOS.
     if (mods & NEUI_KMOD_CTRL) return;
+    // The gate above already returned for a diverted key, so reaching here
+    // normally means the stack is not diverting - except when a client handler
+    // OPENED a popup on this very keystroke, in which case its character must not
+    // also land in the owner behind the popup that just appeared.
+    if (s->popup_diverts_keys()) return;
     bool have_chars = (status == XLookupChars || status == XLookupBoth) ||
                       (!lw->ic && n > 0);
     if (!have_chars) return;
@@ -1057,6 +1065,9 @@ namespace
     uint32_t keycode = neui_detail::x11_keysym_to_neui(ks);
     if (keycode == 0) return;
     uint32_t mods = neui_detail::x11_modifiers_to_neui(ke.state);
+    // The release peer of the KEYDOWN gate: a press the popup swallowed must not
+    // have its release land on the widget underneath.
+    if (s->popup_gate_key(NEUI_EVENT_KEYUP, keycode, mods)) return;
     uint32_t fw = s->_focused_widget;
     if (fw == 0 || !s->_widgets.exists(fw)) return;
     auto& wd = s->_widgets[fw];

@@ -9,6 +9,7 @@
 #include "../shared/dnd_dispatch.h"
 #include "../shared/widget_paint_knob.h"
 #include "../shared/wheel_direction.h"
+#include "../shared/popup_nav.h"
 #include "../shared/widget_paint_section.h"
 #include "../shared/widget_paint_tabview.h"
 #include "../shared/widget_tabview_host.h"
@@ -3065,7 +3066,20 @@ namespace xpl_host
     // what makes "Tab at a freshly-opened second window" focus that window's
     // first control instead of some other frame's.
     uint32_t frame = 0;
-    if (frame_hint != 0 && _widgets.exists(frame_hint) &&
+    // An OPEN POPUP SURFACE owns the traversal, ahead of the hint. It is a frame
+    // the user is inside, but it is a ROOT CHILD - so the owner's tab-stop walk
+    // cannot reach it (collect_tab_stops never leaves the frame it is given) -
+    // and `frame_hint` is always the owner, because a popup never takes OS
+    // keyboard focus and so is never the surface that delivered the key. That is
+    // the one case where the per-frame rule above, which exists to keep logical
+    // focus and OS focus in the same window, produces the wrong answer: the two
+    // are SUPPOSED to disagree here. Left alone, Tab inside an open picker jumped
+    // out to the first control of the editor behind it.
+    if (!_popup_surfaces.empty()) {
+      const uint32_t top = _popup_surfaces.back();
+      if (_widgets.exists(top)) frame = top;
+    }
+    if (frame == 0 && frame_hint != 0 && _widgets.exists(frame_hint) &&
         _widgets[frame_hint].is_frame())
       frame = frame_hint;
     if (frame == 0) frame = frame_of(_focused_widget);
@@ -5947,12 +5961,110 @@ namespace xpl_host
     return popup_surface_depth(frame_idx) < 0;
   }
 
-  bool Session::popup_gate_key(uint32_t keycode)
+  bool Session::popup_diverts_keys() const
   {
     if (_popup_surfaces.empty()) return false;
-    if (keycode != NEUI_KEY_ESCAPE) return false;
-    close_all_popup_surfaces(NEUI_POPUP_DISMISS_ESCAPE);
+    const uint32_t top = _popup_surfaces.back();
+    if (!_widgets.exists(top)) return false;
+    // Focus inside the deepest level: the ordinary routing is already correct,
+    // and the popup is not diverting anything.
+    if (_focused_widget != 0 && is_in_subtree(_focused_widget, top)) return false;
     return true;
+  }
+
+  bool Session::popup_gate_key(neui_event_type_t type, uint32_t keycode,
+                               uint32_t modifiers)
+  {
+    if (_popup_surfaces.empty()) return false;
+
+    // Escape closes the whole stack. KEYDOWN only, because NEUI_KEY_ESCAPE is
+    // 0x1B - which is also the CHARACTER win32 hands us in the WM_CHAR that
+    // follows, and one press reporting two dismissals for a stack that is already
+    // gone is a client-visible lie.
+    if (type == NEUI_EVENT_KEYDOWN && keycode == NEUI_KEY_ESCAPE) {
+      close_all_popup_surfaces(NEUI_POPUP_DISMISS_ESCAPE);
+      return true;
+    }
+
+    if (!popup_diverts_keys()) return false;
+
+    // Focus is somewhere the user is not looking. SWALLOW - that is the whole
+    // point - and deliver to the surface so a client-drawn menu can navigate
+    // itself.
+    //
+    // A key that mapped to no neui keycode (a dead key, an IME intermediate)
+    // still has to be swallowed, but there is nothing meaningful to report.
+    if (keycode == 0) return true;
+
+    const uint32_t top = _popup_surfaces.back();
+    const uint32_t widget_id = _widgets[top].widget_id;
+    neui_event_t ev = {};
+    ev.type     = type;
+    ev.data.key = { { widget_id }, keycode, modifiers };
+    // THE CLIENT GETS THE KEY FIRST, and `true` means it handled it - the same
+    // two-tier contract as mouse events, so a client that draws its own menu
+    // takes over per KEYSTROKE rather than per popup (arrows for itself, Home /
+    // End left to the host, if that is what it wants). No opt-out flag exists
+    // because this already is the opt-out.
+    const bool client_took_it = dispatch_event(&ev);
+
+    // The handler may have closed this level, opened a deeper one, or destroyed
+    // the surface outright, so `top` is re-validated rather than trusted: it has
+    // to still exist AND still be the deepest level before the host navigates
+    // anything on it.
+    if (!client_took_it && type == NEUI_EVENT_KEYDOWN &&
+        !_popup_surfaces.empty() && _popup_surfaces.back() == top &&
+        _widgets.exists(top))
+      popup_navigate(top, keycode);
+    return true;
+  }
+
+  // The host's own navigation over a client-DECLARED item list (NEUI_ATTR_NAV_*).
+  // The arithmetic is in hosts/shared/popup_nav.h, Tier-1 tested; this is the
+  // part that needs a live session - reading the declaration, writing the index
+  // back, and telling the client what happened.
+  void Session::popup_navigate(uint32_t surface_idx, uint32_t keycode)
+  {
+    auto& wd = _widgets[surface_idx];
+    const neui_detail::AttrBag* bag = wd.attrs.get();
+    if (!bag) return;
+
+    neui_detail::PopupNav nav;
+    nav.count = bag->get_int(NEUI_ATTR_NAV_COUNT, 0);
+    if (nav.count <= 0) return;          // nothing declared: not ours to walk
+    nav.index = bag->get_int(NEUI_ATTR_NAV_INDEX, -1);
+    nav.page  = bag->get_int(NEUI_ATTR_NAV_PAGE, 10);
+    nav.wrap  = bag->get_int(NEUI_ATTR_NAV_WRAP, 1) != 0;
+
+    const neui_detail::PopupNavResult r = neui_detail::popup_nav_key(nav, keycode);
+    if (!r.handled) return;
+
+    const uint32_t widget_id = wd.widget_id;
+
+    if (r.changed) {
+      // Written back BEFORE either event, so a handler that reads the attribute
+      // (or repaints synchronously) sees the value the event is announcing.
+      neui_detail::ensure_attrs(wd.attrs).set_int(NEUI_ATTR_NAV_INDEX, r.index);
+      if (wd.native_handle) platform_invalidate(wd.native_handle);
+
+      neui_event_t ev = {};
+      ev.type            = NEUI_EVENT_ATTR_CHANGED;
+      ev.data.attr.widget   = { widget_id };
+      ev.data.attr.attr_key = NEUI_ATTR_NAV_INDEX;
+      ev.data.attr.value    = static_cast<float>(r.index);
+      dispatch_event(&ev);
+      // The handler may have destroyed the surface; there is nothing left to do
+      // on this key either way, since activate and changed are never both set.
+      return;
+    }
+
+    if (r.activate) {
+      neui_event_t ev = {};
+      ev.type             = NEUI_EVENT_ITEM_SELECTED;
+      ev.data.item.widget = { widget_id };
+      ev.data.item.index  = static_cast<uint32_t>(r.index);
+      dispatch_event(&ev);
+    }
   }
 
   bool Session::popup_take_release()

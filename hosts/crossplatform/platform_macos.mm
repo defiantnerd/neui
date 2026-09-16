@@ -1065,10 +1065,8 @@ void wake_app_event_pump()
   // same competition. Note the key arrives HERE, at the owner: a popup surface
   // never takes activation (inside a DAW that would read as the plugin editor
   // losing focus), so it is not first responder and cannot be sent keys
-  // directly. Escape is the whole of v1's keyboard story - arrows and type-ahead
-  // need focus routed across two windows and are a separate wave - but a popup a
-  // user cannot close from the keyboard at all is a trap.
-  if (session->popup_gate_key(keycode)) return;
+  // directly. The gate retargets it - see Session::popup_gate_key.
+  if (session->popup_gate_key(NEUI_EVENT_KEYDOWN, keycode, mods)) return;
 
   // Tab cycles logical focus inside our hand-rolled Tab traversal - same as
   // the win32 path. Consume here; the focus_next path doesn't fire KEYDOWN.
@@ -1115,6 +1113,9 @@ void wake_app_event_pump()
   if (keycode == 0) return;
 
   uint32_t mods = mac_modifiers_to_neui(event.modifierFlags);
+  // The release peer of the KEYDOWN gate: a press that the popup swallowed must
+  // not have its release land on the widget underneath.
+  if (session->popup_gate_key(NEUI_EVENT_KEYUP, keycode, mods)) return;
   uint32_t fw = session->_focused_widget;
   if (fw == 0 || !session->_widgets.exists(fw)) return;
   auto& wd = session->_widgets[fw];
@@ -1243,9 +1244,16 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
 
   // Plain typing - fire one KEYCHAR per Unicode codepoint, with the same
   // dispatch_event -> on_keychar two-stage routing as keyDown:.
-  uint32_t fw = session->_focused_widget;
-  if (fw == 0 || !session->_widgets.exists(fw)) return;
-  auto& wd = session->_widgets[fw];
+  //
+  // Text is DIVERTED while a popup surface is open and focus is outside it: the
+  // stack gets it (a client's type-ahead) and the widget underneath must not.
+  // This is the path that let typing edit the field behind an open menu - the
+  // characters never pass keyDown:'s gate, they arrive here through
+  // interpretKeyEvents:. Tested before the focused-widget lookup, because in that
+  // case the focused widget is precisely the one that must not see the text.
+  const bool divert = session->popup_diverts_keys();
+  const uint32_t fw = session->_focused_widget;
+  if (!divert && (fw == 0 || !session->_widgets.exists(fw))) return;
 
   for (NSUInteger i = 0; i < s.length; ) {
     uint32_t cp = (uint32_t)[s characterAtIndex:i];
@@ -1262,6 +1270,13 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
     if (!is_printable_codepoint(cp)) continue;
 
     uint32_t mods = mac_modifiers_to_neui(NSEvent.modifierFlags);
+    if (session->popup_gate_key(NEUI_EVENT_KEYCHAR, cp, mods)) continue;
+
+    // Re-resolved per codepoint rather than once before the loop: a client
+    // handler on the previous one may have destroyed widgets, and the slot table
+    // can reallocate under a held reference.
+    if (fw == 0 || !session->_widgets.exists(fw)) return;
+    auto& wd = session->_widgets[fw];
     bool client_consumed = false;
     if (wd.emit_events) {
       neui_event_t ev = {};
@@ -1299,6 +1314,12 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
 
   auto* wd = [self focusedWidget];
   if (!wd) return;
+
+  // Refuse to START composing into the widget under an open popup - the same
+  // diversion the plain-typing path makes. An in-flight composition is left
+  // alone: it began before the popup opened and still has to unwind through its
+  // own COMP_RESULT / COMP_END.
+  if (!_composing && session->popup_diverts_keys()) return;
 
   if (!_composing) {
     // First setMarkedText: in this composition - snapshot pre-state.

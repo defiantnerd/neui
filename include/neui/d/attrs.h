@@ -490,6 +490,44 @@ extern "C" {
 // band behind the chips. Live.
 #define NEUI_ATTR_TAB_STRIP_BG_COLOR "neui.attr.tab_strip_bg_color"
 
+// ---- Declared keyboard navigation (NEUI_W_POPUPSURFACE) -----------------
+//
+// A popup surface is usually painted by the client, so the host has no rows to
+// walk - it cannot know what a "menu item" is inside a NEUI_W_CUSTOMDRAW. These
+// four attributes are how a client DECLARES a list without handing over its
+// data: say how many items there are and which one is current, and the host owns
+// the arrow arithmetic while the client keeps painting from the index.
+//
+// Only the DEEPEST open surface navigates, only while focus is outside it (a
+// focused widget inside the popup keeps its own arrows - a text field must), and
+// the client always gets the key first: return true from onevent and the host
+// stays out of that keystroke entirely. See <neui/d/popup.h>.
+
+// int: how many navigable items the client is drawing in this surface.
+// Applies to POPUPSURFACE. 0 (default) = no host navigation at all; the surface
+// just receives the keys. Live - a filtered list may re-declare it per keystroke;
+// the host clamps NEUI_ATTR_NAV_INDEX into the new range on the next key.
+#define NEUI_ATTR_NAV_COUNT "neui.attr.nav_count"
+
+// int: the current item, [0, NEUI_ATTR_NAV_COUNT - 1], or -1 for "none"
+// (the default, so a freshly opened menu highlights nothing until the first
+// arrow). The host writes this as the user navigates and reports the change as
+// NEUI_EVENT_ATTR_CHANGED on the surface; the client may also set it directly
+// (to follow the mouse, or to restore a remembered row), which does NOT fire the
+// event. This is the one piece of state shared between the two, and the client
+// paints from it.
+#define NEUI_ATTR_NAV_INDEX "neui.attr.nav_index"
+
+// int: how far PageUp / PageDown move. Applies to POPUPSURFACE.
+// 0 / unset = 10. Paging always CLAMPS at the ends, even when wrapping is on -
+// a page step that wrapped would be disorienting rather than useful.
+#define NEUI_ATTR_NAV_PAGE "neui.attr.nav_page"
+
+// int: 1 (default) = Up from the first item goes to the last and Down from the
+// last goes to the first, the menu convention. 0 = clamp at both ends, which is
+// what a scrolling browser list usually wants. Applies to POPUPSURFACE.
+#define NEUI_ATTR_NAV_WRAP "neui.attr.nav_wrap"
+
 // ---- Live parameter slots (drive rendering of SLIDER, KNOB, future
 // value-bearing widgets). Float, normalized to [0..1]; out-of-range
 // values are clamped on set. Programmatic set does NOT fire

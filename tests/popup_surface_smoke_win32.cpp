@@ -50,9 +50,12 @@
 //                    message is the only notification we get for a press we do
 //                    not own, so a typo in that WndProc branch would mean a
 //                    picker that never closes when the user clicks the DAW.
-//  10. THE GATE    - the suppression that replaces an OS pointer capture,
-//                    driven through Session (no client ever calls it - the
-//                    platform layer does, from five sites in platform_win32.cpp).
+//  10. THE GATE    - the suppression that replaces an OS pointer capture, plus
+//                    the keyboard half of it (a key is retargeted onto the
+//                    deepest surface instead of falling through to the owner,
+//                    and Tab stays inside the open level), driven through
+//                    Session (no client ever calls it - the platform layer does,
+//                    from eight sites in platform_win32.cpp).
 //  11. LIFETIME    - closing hides the HWND; destroying the OWNER destroys the
 //                    popup window. The surface is its own root child, so the
 //                    owner's subtree does not contain it: without the explicit
@@ -120,6 +123,13 @@ int g_wheels_under = 0;
 int g_wheels_in_popup = 0;
 neui_widget_t g_anchor{};
 neui_widget_t g_popup_child{};
+// A real tab stop inside the picker - the key / traversal checks in phase 10
+// need a focusable widget in the popup, not just the painted body.
+neui_widget_t g_popup_edit{};
+
+// Keys the gate RETARGETED onto a surface.
+struct KeyHit { uint32_t widget_id; uint32_t type; uint32_t keycode; };
+std::vector<KeyHit> g_keys;
 
 bool NEUI_ABI onevent(void*, neui_event_t* ev)
 {
@@ -135,6 +145,12 @@ bool NEUI_ABI onevent(void*, neui_event_t* ev)
   if (ev->type == NEUI_EVENT_POPUP_DISMISSED) {
     g_dismissals.push_back({ ev->data.popup.widget.id, ev->data.popup.reason });
     return true;
+  }
+  if (ev->type == NEUI_EVENT_KEYDOWN || ev->type == NEUI_EVENT_KEYUP ||
+      ev->type == NEUI_EVENT_KEYCHAR) {
+    g_keys.push_back({ ev->data.key.widget.id,
+                       static_cast<uint32_t>(ev->type), ev->data.key.keycode });
+    return false;   // not consumed - the gate swallows either way
   }
   if (ev->type == NEUI_EVENT_MOUSE_BUTTON_CLICK &&
       ev->data.mouse.widget.id == g_anchor.id)
@@ -272,6 +288,9 @@ int main()
                                      0, 0, POP_W, POP_H, nullptr);
   g_popup_child = g_w->create(sess, picker, NEUI_W_CUSTOMDRAW, 0, 0,
                               POP_W, POP_H, nullptr);
+  // After the body, so get_first_child (the cascade anchor) still resolves to it.
+  g_popup_edit = g_w->create(sess, picker, NEUI_W_INPUTBOX, 20, 300, 200, 24,
+                             nullptr);
   neui_widget_t detail = g_w->create(sess, widget_none, NEUI_W_POPUPSURFACE,
                                      0, 0, 260, 150, nullptr);
   g_w->create(sess, detail, NEUI_W_CUSTOMDRAW, 0, 0, 260, 150, nullptr);
@@ -560,7 +579,9 @@ int main()
       // app using neui pays for this feature.
       check(!s->popup_gate_press(frame_slot), "gate inert when nothing is open");
       check(!s->popup_gate_hover(frame_slot), "hover gate inert when nothing is open");
-      check(!s->popup_gate_key(NEUI_KEY_ESCAPE), "Escape passes through when closed");
+      check(!s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_ESCAPE, 0),
+            "Escape passes through when closed");
+      check(!s->popup_diverts_keys(), "keys do not divert when closed");
 
       g_dismissals.clear();
       pu->open(sess, picker, button, 0, 2, NEUI_POPUP_BELOW);
@@ -602,10 +623,56 @@ int main()
             "a press on the deepest level is ordinary dispatch");
       check(s->popup_surface_open(), "...and does not dismiss it");
 
-      // Escape closes everything; any other key passes through.
+      // Keys. The rule is a RETARGET, not a pass-through: while a popup is open a
+      // keystroke must never reach the widgets underneath - the same promise the
+      // press gate makes, and the one that used to be broken (with a menu open,
+      // typing edited the text field behind it).
       g_dismissals.clear();
-      check(!s->popup_gate_key(NEUI_KEY_TAB), "only Escape is consumed");
-      check(s->popup_gate_key(NEUI_KEY_ESCAPE), "Escape is consumed");
+      g_keys.clear();
+      check(s->popup_diverts_keys(), "with focus outside the stack, keys divert");
+      check(s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_TAB, 0),
+            "a key does not fall through to the owner");
+      check(g_keys.size() == 1 && g_keys[0].widget_id == picker.id &&
+            g_keys[0].keycode == NEUI_KEY_TAB,
+            "the key is delivered to the deepest surface");
+      // A key that mapped to no keycode is still swallowed, but reports nothing.
+      g_keys.clear();
+      check(s->popup_gate_key(NEUI_EVENT_KEYDOWN, 0, 0),
+            "an unmapped key is still swallowed");
+      check(g_keys.empty(), "...and is not reported");
+
+      // Focus already INSIDE the deepest level: the gate gets out of the way.
+      // _focused_widget is a session index and WM_KEYDOWN / WM_CHAR dispatch read
+      // it without asking which frame it belongs to, so the ordinary path already
+      // delivers into the popup even though the panel is WS_EX_NOACTIVATE.
+      g_keys.clear();
+      s->set_focus(slot_of(g_popup_edit));
+      check(!s->popup_diverts_keys(), "focus inside the deepest level does not divert");
+      check(!s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_TAB, 0),
+            "with focus inside the popup the gate passes the key through");
+      check(g_keys.empty(), "...and synthesises no delivery of its own");
+
+      // Tab traversal follows the open popup: the surface is a ROOT CHILD the
+      // owner's tab-stop walk cannot reach, and the frame that DELIVERED the key
+      // is always the owner, so Tab used to jump out into the editor behind it.
+      s->focus_next(true, frame_slot);
+      check(s->_focused_widget != 0 &&
+            s->is_in_subtree(s->_focused_widget, picker_slot),
+            "Tab stays inside the open popup");
+      s->focus_next(false, frame_slot);
+      check(s->_focused_widget != 0 &&
+            s->is_in_subtree(s->_focused_widget, picker_slot),
+            "...and so does Shift-Tab");
+      s->set_focus(0);
+
+      // ESCAPE ALWAYS BELONGS TO THE HOST - handled before the dispatch, so no
+      // KEYDOWN is delivered for it and there is no opt-out. It follows from the
+      // no-veto rule in <neui/d/popup.h>: a client that swallowed Escape would
+      // leave a window stuck over the DAW.
+      g_keys.clear();
+      check(s->popup_gate_key(NEUI_EVENT_KEYDOWN, NEUI_KEY_ESCAPE, 0),
+            "Escape is consumed");
+      check(g_keys.empty(), "Escape is never dispatched to the client");
       check(!s->popup_surface_open(), "Escape dismisses the stack");
       check(g_dismissals.size() == 1 &&
             g_dismissals[0].reason == NEUI_POPUP_DISMISS_ESCAPE,
