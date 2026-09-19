@@ -2,7 +2,7 @@
 
 ## Attribute API
 
-`NEUI_API_ATTRS`. String-keyed bag per widget (`std::unique_ptr<AttrBag>` on `WidgetData`, lazy). API: `set_int`/`get_int(default)`, `set_float`/`get_float(default)`, `set_string`/`get_string`, `has`, `remove`. Type-strict: wrong-kind returns the default. Well-known keys are debug-asserted to match their documented kind at set time via `k_well_known_attrs` (`hosts/shared/attrs.h`); release silently stores the wrong kind so reads keep returning the default. **A new `NEUI_ATTR_*` / `NEUI_PARAM_*` macro needs a matching row in `k_well_known_attrs`.** Session-level: `set_session_int`/`get_session_int`. `NEUI_ATTR_THEME_MODE` is the only session key with behaviour today.
+`NEUI_API_ATTRS`. String-keyed bag per widget (`std::unique_ptr<AttrBag>` on `WidgetData`, lazy). API: `set_int`/`get_int(default)`, `set_float`/`get_float(default)`, `set_string`/`get_string`, `has`, `remove`. Type-strict: wrong-kind returns the default. Well-known keys are debug-asserted to match their documented kind at set time via `k_well_known_attrs` (`hosts/shared/attrs.h`); release silently stores the wrong kind so reads keep returning the default. **A new `NEUI_ATTR_*` / `NEUI_PARAM_*` macro needs a matching row in `k_well_known_attrs`.** Session-level: `set_session_int`/`get_session_int`. Two session keys have behaviour today: `NEUI_ATTR_THEME_MODE`, and `NEUI_IOS_CHECKBOX_STYLE` (`neui.ios.checkbox_style`, read once at checkbox creation by the native iOS host).
 
 **Well-known keys** (all `neui.attr.<name>`; macros `NEUI_ATTR_*`):
 
@@ -46,7 +46,7 @@
 | `grid.scroll_mode` | int | GRID | Wheel kinetics. `NEUI_GRID_SCROLL_PLATFORM=0` (default - macOS = smooth, Win32/null = stepped), `_STEPPED=1` (row-quantized, hard-clamp), `_SMOOTH=2` (pixel-precise + rubber-band + 60 Hz spring-back). Live. Superseded by `scroll_kinetics` when both are set; kept as a GRID-only back-compat alias. |
 | `scroll_kinetics` | int | SECTION, GRID | Generic wheel-kinetics selector. `NEUI_SCROLL_KINETICS_PLATFORM=0` (default - macOS = smooth, Win32/null = stepped), `_STEPPED=1` (hard-clamp, no rubber-band, no momentum), `_SMOOTH=2` (rubber-band + 60 Hz spring-back). Numeric values match `NEUI_GRID_SCROLL_*`. On SECTION, STEPPED resyncs the kinetics integrator (via `section_scroll_step_px`) so a later flip to SMOOTH starts cleanly. On GRID this attr takes precedence over `grid.scroll_mode` when both are set. Live. |
 
-Namespace `neui.attr.*` reserved; clients use their own. Host-specific reserved: `neui.win32.*`, `neui.macos.*`, `neui.linux.*`. Unknown keys stored but inert.
+Namespace `neui.attr.*` reserved; clients use their own. Host-specific reserved: `neui.win32.*`, `neui.macos.*`, `neui.linux.*`, `neui.ios.*`. Unknown keys stored but inert. `neui.ios.*` keys are session-level and exempt from `k_well_known_attrs`; the rest of the iOS-specific surface is an interface, not attributes - `NEUI_API_IOS` (`d/ios.h`), see `docs/host-ios.md`.
 
 ## Scroll API
 

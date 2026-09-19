@@ -84,8 +84,9 @@
 //     unchanged - hover only fires for a pointing device, never for a finger,
 //     so the "no hover on touch" divergence holds (a finger never sets hovered).
 //
-// DnD stays a null no-op stub for a later phase; the native iOS host is still a
-// stub (see plan step 7).
+// DnD and the native iOS host were both stubs while this layer was being
+// built; both are IMPLEMENTED now (hosts/ios/, hosts/shared/ios/dnd_ios.h).
+// See docs/host-ios.md.
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>   // CACurrentMediaTime for platform_now_ms
@@ -116,6 +117,7 @@
 #include "../shared/ios/dnd_ios.h"
 #include "../shared/dnd_modifier_suggest.h"
 #include "../shared/metrics.h"
+#include "../shared/ios/ios_api.h"   // NEUI_API_IOS: shared vtable + per-host seams
 
 // ---------------------------------------------------------------------------
 // Forward declarations.
@@ -1782,6 +1784,48 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer*)other
   return [self.view isKindOfClass:[NEUIView class]] ? (NEUIView*)self.view : nil;
 }
 
+// ---- NEUI_API_IOS chrome ---------------------------------------------------
+// Twin of the native host's overrides (hosts/ios/window.mm). The client's
+// settings live in the shared iOS state table (hosts/shared/ios/ios_api.h)
+// keyed by this frame's widget id, so both iOS hosts read the same state
+// through the same accessor. No entry means the client never asked for
+// anything, and each override falls through to super.
+- (const neui_detail::IosFrameState*)neuiIosState
+{
+  if (!session || !session->_widgets.exists(widget_index)) return nullptr;
+  return neui_detail::ios_frame_state_if_present(
+      neui_widget_t{ session->_widgets[widget_index].widget_id });
+}
+- (UIStatusBarStyle)preferredStatusBarStyle
+{
+  const neui_detail::IosFrameState* st = [self neuiIosState];
+  return st ? neui_detail::ios_uikit_status_bar_style(st->status_style)
+            : [super preferredStatusBarStyle];
+}
+- (BOOL)prefersStatusBarHidden
+{
+  const neui_detail::IosFrameState* st = [self neuiIosState];
+  return st ? (st->status_hidden ? YES : NO) : [super prefersStatusBarHidden];
+}
+- (BOOL)prefersHomeIndicatorAutoHidden
+{
+  const neui_detail::IosFrameState* st = [self neuiIosState];
+  return st ? (st->home_indicator_auto_hidden ? YES : NO)
+            : [super prefersHomeIndicatorAutoHidden];
+}
+- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures
+{
+  const neui_detail::IosFrameState* st = [self neuiIosState];
+  return st ? neui_detail::ios_uikit_rect_edge(st->deferring_edges)
+            : [super preferredScreenEdgesDeferringSystemGestures];
+}
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations
+{
+  const neui_detail::IosFrameState* st = [self neuiIosState];
+  return st ? neui_detail::ios_uikit_orientation_mask(st->supported_orientations)
+            : [super supportedInterfaceOrientations];
+}
+
 - (void)reportResizeIfChanged
 {
   if (!session || !session->_widgets.exists(widget_index)) return;
@@ -1812,6 +1856,11 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer*)other
   // rotation + when the notch/status-bar inset first resolves, so notify the
   // client that the metrics changed too (alongside RESIZE).
   dispatch_metrics_changed_xpl_ios(session, widget_index);
+  // A rotation settles here too. Told from the layout pass rather than from
+  // UIDevice orientation notifications: no accelerometer, and this is the
+  // INTERFACE orientation, which is what NEUI_API_IOS reports. Only broadcasts
+  // on a real change.
+  neui_detail::ios_note_orientation_changed(self);
   // A bounds change can be a full-screen <-> windowed transition (entering/
   // leaving Stage Manager / Split View), which flips the hamburger-visibility
   // rule on iPad 26+. Re-evaluate so the hamburger appears when going full-screen
@@ -1982,21 +2031,24 @@ int metrics_measure_text_xpl_ios(neui_session_t /*session*/, const char* text,
   return (int)(sz.width + 0.5f);
 }
 
-void metrics_safe_area_xpl_ios(neui_session_t session, neui_widget_t frame,
+// Returns true only when this host owns `frame` - the shared seam tries each
+// installed host in turn, so "not mine" must be distinguishable from "mine, and
+// the insets are zero".
+bool metrics_safe_area_xpl_ios(neui_session_t session, neui_widget_t frame,
                                int* left, int* top, int* right, int* bottom)
 {
+  xpl_host::Session* s = xpl_host::session_by_id(session.session);
+  if (!s) return false;
+  uint32_t idx = frame.id & 0xffff;
+  if (!s->_widgets.exists(idx)) return false;
+  auto& fw = s->_widgets[idx];
+  if (!fw.is_frame()) return false;
+  NEUIView* view = neui_view_for_window(fw.native_handle);
+  if (!view) return false;
   if (left)   *left   = 0;
   if (top)    *top    = 0;
   if (right)  *right  = 0;
   if (bottom) *bottom = 0;
-  xpl_host::Session* s = xpl_host::session_by_id(session.session);
-  if (!s) return;
-  uint32_t idx = frame.id & 0xffff;
-  if (!s->_widgets.exists(idx)) return;
-  auto& fw = s->_widgets[idx];
-  if (!fw.is_frame()) return;
-  NEUIView* view = neui_view_for_window(fw.native_handle);
-  if (!view) return;
   if (@available(iOS 11.0, *)) {
     UIEdgeInsets ins = view.safeAreaInsets;
     if (left)   *left   = (int)(ins.left + 0.5);
@@ -2006,6 +2058,7 @@ void metrics_safe_area_xpl_ios(neui_session_t session, neui_widget_t frame,
     // matches the content rect get_client_rect / frame_top_inset report.
     if (top) *top = s->frame_top_inset(idx);
   }
+  return true;
 }
 
 // Build the UIWindow + NEUIViewController + NEUIView triad, wire the render
@@ -2075,6 +2128,68 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // Lifecycle / window management.
 
+  // ---- NEUI_API_IOS seams --------------------------------------------------
+  // Twins of the native host's (hosts/ios/window.mm). Only the frame lookup and
+  // the registry walk differ; everything the interface actually does is shared.
+
+  // frame widget -> its root UIViewController. The shared implementation's
+  // default finds the key window's root, which is right only while one frame is
+  // up; this resolves the exact frame.
+  static UIViewController* ios_frame_controller_xpl(neui_session_t session,
+                                                    neui_widget_t frame)
+  {
+    Session* s = session_by_id(session.session & 0xffff);
+    if (!s) return nil;
+    const uint32_t idx = frame.id & 0xffff;
+    if (!s->_widgets.exists(idx)) return nil;
+    WidgetData& fw = s->_widgets[idx];
+    if (!fw.isroot || !fw.native_handle) return nil;
+    UIWindow* w = (__bridge UIWindow*)fw.native_handle;
+    return w.rootViewController;
+  }
+
+  // Deliver NEUI_EVENT_IOS_ENVIRONMENT_CHANGED to every live frame of every live
+  // session. Only a host knows its own registries, which is why this is a seam
+  // rather than shared code.
+  static void ios_broadcast_env_xpl(uint32_t changed)
+  {
+    const uint32_t n = session_count();
+    for (uint32_t i = 1; i <= n; ++i) {
+      Session* s = session_by_id(i);
+      if (!s) continue;
+      for (uint32_t w : s->_widgets.release_order()) {
+        if (w == 0 || !s->_widgets.exists(w)) continue;
+        WidgetData& wd = s->_widgets[w];
+        if (!wd.isroot) continue;
+        neui_event_t ev = {};
+        ev.type                 = NEUI_EVENT_IOS_ENVIRONMENT_CHANGED;
+        ev.data.ios_env.widget  = { wd.widget_id };
+        ev.data.ios_env.changed = changed;
+        s->dispatch_event(&ev);
+      }
+    }
+  }
+
+  // Repaint after a forced appearance change, so painted widgets follow the
+  // native controls instead of keeping the old palette. Every widget here is
+  // painted into the frame's single view, so invalidating the frames is enough.
+  static void ios_theme_refresh_xpl()
+  {
+    neui_detail::refresh_theme_palette_ios();
+    const uint32_t n = session_count();
+    for (uint32_t i = 1; i <= n; ++i) {
+      Session* s = session_by_id(i);
+      if (!s) continue;
+      for (uint32_t w : s->_widgets.release_order()) {
+        if (w == 0 || !s->_widgets.exists(w)) continue;
+        WidgetData& wd = s->_widgets[w];
+        if (!wd.isroot || !wd.native_handle) continue;
+        if (NEUIView* v = neui_view_for_window(wd.native_handle))
+          [v setNeedsDisplay];
+      }
+    }
+  }
+
   void platform_init()
   {
     // UIApplicationMain owns app bootstrap on iOS; nothing to register here.
@@ -2097,8 +2212,35 @@ namespace xpl_host
     // Install the iOS-real NEUI_API_METRICS seams (UIFont measurement + the
     // frame view's safeAreaInsets) into the shared vtable. Desktop platforms
     // leave the shared desktop defaults in place.
-    neui_detail::metrics_measure_seam()   = &metrics_measure_text_xpl_ios;
-    neui_detail::metrics_safe_area_seam() = &metrics_safe_area_xpl_ios;
+    // ADD, not assign - see the seam note in hosts/shared/metrics.h.
+    neui_detail::metrics_add_measure_seam(&metrics_measure_text_xpl_ios);
+    neui_detail::metrics_add_safe_area_seam(&metrics_safe_area_xpl_ios);
+
+    // NEUI_API_IOS: the frame -> UIViewController lookup, the environment-event
+    // broadcast, and the repaint used after a forced appearance change. The
+    // interface itself is not built here - platform_ios_api() installs its
+    // observers on the first get_interface hit, so a client that never asks for
+    // it pays nothing.
+    // ADD, not assign: the native iOS host may be linked into the same binary
+    // and registers BEFORE this one, so assigning would silently discard its
+    // implementations and leave a native-host client with a dead interface.
+    neui_detail::ios_add_frame_controller_seam(&ios_frame_controller_xpl);
+    neui_detail::ios_add_broadcast_env_seam(&ios_broadcast_env_xpl);
+    neui_detail::ios_add_theme_refresh_seam(&ios_theme_refresh_xpl);
+  }
+
+  // ---- NEUI_API_IOS entry points ------------------------------------------
+  // Declared in platform.h behind NEUI_PLATFORM_IOS; host.cpp is plain C++ and
+  // reaches the ObjC++ implementation only through these.
+
+  void* platform_ios_api()
+  {
+    return neui_detail::ios_api();
+  }
+
+  void platform_ios_session_shutdown(uint32_t session_id)
+  {
+    neui_detail::ios_session_shutdown(neui_session_t{ session_id });
   }
 
   neui_render_backend_t* platform_get_backend()
@@ -2145,6 +2287,9 @@ namespace xpl_host
 
   void platform_destroy_window(WidgetData& wd)
   {
+    // Drop any NEUI_API_IOS chrome recorded for this frame first: widget ids are
+    // recycled, and a new frame must not inherit the old one's status bar.
+    neui_detail::ios_frame_forget(neui_widget_t{ wd.widget_id });
     if (!wd.native_handle) return;
 
     // Tear down the render context before the view goes away.

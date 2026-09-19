@@ -36,6 +36,11 @@ elseif(NEUI_IOS)
   # platform layer instead of the AppKit one. This branch MUST come before the
   # generic APPLE branch since iOS also matches APPLE.
   target_sources(neui-xplhost PRIVATE platform_ios.mm)
+  # host.cpp is compiled on every platform, so the NEUI_API_IOS lines in its
+  # get_interface / ~Session need a gate. NEUI_IOS is a CMake variable only -
+  # there is no NEUI_IOS preprocessor define - so mint one here, mirroring
+  # NEUI_PLATFORM_LVGL above.
+  target_compile_definitions(neui-xplhost PRIVATE NEUI_PLATFORM_IOS=1)
   set_source_files_properties(platform_ios.mm PROPERTIES
     COMPILE_FLAGS "-fobjc-arc"
   )

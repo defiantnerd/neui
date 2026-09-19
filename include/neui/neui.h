@@ -31,6 +31,7 @@
 #include "d/notify.h"
 #include "d/metrics.h"
 #include "d/embed.h"
+#include "d/ios.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,7 +49,7 @@ extern "C" {
   // Single startup entry point - clients call this once before
   // neui_get_api() and don't need to know which host static libs the
   // current platform produced. Registration order is native-first
-  // (win32 / macos) then xpl, so neui_get_api(NULL) returns the native
+  // (win32 / macos / ios) then xpl, so neui_get_api(NULL) returns the native
   // host where one exists. See also: neui_register / neui_get_api.
   void neui_init(void);
 

@@ -2,11 +2,11 @@
 
 // Native iOS host (neui.host.ios) - UIKit.
 //
-// MILESTONE 7. The native counterpart to hosts/macos/host.h, trimmed to the
-// agreed v1 core subset (LABEL / BUTTON / INPUTBOX / MULTILINE / CHECKBOX /
-// CHECKBOX3 / SLIDER / IMAGE / SECTION / CUSTOMDRAW + APPWINDOW / DIALOG /
-// MENUBAR). GRID / TREEVIEW / COMBOBOX / LISTBOX / TABVIEW / DnD are phase-2
-// stubs (see the TODO(ios phase 2) markers in widgets.mm / window.mm).
+// The native counterpart to hosts/macos/host.h. GRID / TREEVIEW / COMBOBOX /
+// LISTBOX / TABVIEW / DnD were phase-2 stubs while this host was being built;
+// they are all IMPLEMENTED now and exercised by examples/ios. Reader-facing
+// overview of this host, the xpl one, and what each already handles:
+// docs/host-ios.md.
 //
 // Structure mirrors the macOS native host: Session + WidgetData + a slot-reused
 // session registry. Native-handle fields are void* so this header is includable

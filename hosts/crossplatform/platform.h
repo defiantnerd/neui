@@ -416,4 +416,21 @@ namespace xpl_host
   void platform_retained_tree_changed(Session* session, uint32_t widget_index);
 #endif
 
+#if defined(NEUI_PLATFORM_IOS)
+  // -------------------------------------------------------------------------
+  // NEUI_API_IOS seams (include/neui/d/ios.h). Implemented in platform_ios.mm.
+  //
+  // host.cpp is compiled for every platform and is plain C++, so it can neither
+  // include the ObjC++ implementation header nor name its types. These three
+  // entry points are the whole surface it needs, and they exist only on iOS.
+
+  // The NEUI_API_IOS vtable, as an opaque pointer for get_interface to return.
+  // Installs the environment observers on the first call.
+  void* platform_ios_api();
+
+  // Drop a session's idle-timer hold and restore any brightness it changed.
+  // Called from ~Session.
+  void platform_ios_session_shutdown(uint32_t session_id);
+#endif
+
 } // namespace xpl_host

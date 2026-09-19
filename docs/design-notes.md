@@ -140,6 +140,16 @@ verbatim text remains in git history** if the complete narrative is ever needed.
 - **Classic core-button scroll stays active and is suppressed only after the first real XI2 scroll arrives** (`g_xi2_scroll_seen`) - servers/XWayland without scroll valuators degrade cleanly to stepped scroll and never double-count. The same flag flips the PLATFORM kinetics default to SMOOTH on Linux, so the default is data-driven by actual device capability rather than hardcoded per-OS.
 - **Reused the existing host-neutral kinetics math** (`scroll_kinetics.h` / `grid_model.h` / `widget_section_scroll.h`) and the existing `dispatch_wheel_event` ancestor-routing - the Linux job was only feeding pixel-precise deltas and extending the existing 16 ms timerfd heartbeat to step active grid/section bounces.
 
+## iOS host extension (`NEUI_API_IOS`)
+
+- **An interface, not more `neui.ios.*` session keys**: `NEUI_IOS_CHECKBOX_STYLE` stays - a write-once creation-time rendering choice is what a session attribute is for. It does not generalise: `set_session_int` is int-only (no float for brightness), carries no frame argument, cannot express an action like firing a haptic, and reads back what the client wrote rather than what the device holds.
+- **Safe-area insets deliberately left out**: already portable via `NEUI_API_METRICS`, already real on both iOS hosts, and an Android host can implement the same seam from `WindowInsets`. Mirroring them into an iOS-shaped API would make a portable concept look platform-specific.
+- **One event with a bitmask, not eight event types**: orientation, power, thermal, battery, accessibility and keyboard change independently and rarely, so the client re-reads what it cares about. Its own event category keeps iOS-only events filterable; Dynamic Type stayed on `METRICS_CHANGED` where clients already handle it.
+- **Shared implementation + per-host seams**: UIKit's globals are identical on both iOS hosts, which differ only in resolving a frame to its `UIViewController` and in walking their own registry - the same shape `hosts/shared/metrics.h` uses. Frame chrome lives in a shared table keyed by widget id rather than in two different `WidgetData` structs.
+- **Seams are registries, not slots**: `neui_init()` registers the native host then xpl, so an assigned slot always ends up holding xpl's, and for a native-host client it fails silently. This bit `NEUI_API_METRICS` too - `safe_area_insets` measured zeros in `examples/ios`, masked because `get_client_rect` computes its top inset directly. Both now ADD; the frame lookups try each until one claims the frame.
+- **Never handed out inert**: the xpl host returns `NEUI_API_EMBED` on iOS although embedding is unsupported there, so a NULL check passes on a dead capability. `NEUI_API_IOS` implements every method and reports failure in the return value instead.
+- **Costs stated at the call site**: the first battery query turns on `batteryMonitoringEnabled` for the process; `set_screen_brightness` writes a system-wide setting, so the host restores it on session teardown. The idle-timer hold is refcounted per session for the same reason.
+
 ## Crossplatform host (early sketch)
 
 *This was an early design sketch, superseded by the shipped xpl host - it captured initial intent, not the final implementation. Retained here only for the founding premises.*
