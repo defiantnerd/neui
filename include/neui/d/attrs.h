@@ -27,6 +27,10 @@ extern "C" {
 //   neui.win32.*  - reserved, host-specific (Win32)
 //   neui.macos.*  - reserved, host-specific (macOS)
 //   neui.linux.*  - reserved, host-specific (Linux)
+//   neui.ios.*    - reserved, host-specific (iOS) - SESSION keys, set via
+//                   set_session_int; see NEUI_IOS_CHECKBOX_STYLE below. For
+//                   anything beyond a creation-time rendering choice, iOS has
+//                   a proper interface instead: NEUI_API_IOS (d/ios.h).
 
 #define NEUI_API_ATTRS "com.defiantnerd.neui.extension.attrs/0"
 
@@ -421,6 +425,12 @@ enum {
 // Set via attrs->set_session_int (NOT a per-widget neui.attr.* well-known key,
 // so it needs no k_well_known_attrs row). Only the native iOS host
 // (neui.host.ios) reads it; every other host stores it inertly.
+//
+// NOTE: this is the only knob of its kind. The rest of the iOS-specific
+// surface - idle timer, screen-edge gestures, status bar, orientation,
+// accessibility, battery / thermal, haptics, keyboard inset - is a vtable,
+// NEUI_API_IOS in <neui/d/ios.h>, because a session int cannot carry a float,
+// an action, or a per-frame argument.
 //
 // int: rendering style for a 2-state NEUI_W_CHECKBOX on the native iOS host.
 // Read ONCE at checkbox creation - changing it afterwards only affects

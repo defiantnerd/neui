@@ -177,6 +177,12 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_NOTIFY))    return &notify_api;
     if (!strcmp(iface, NEUI_API_METRICS))   return &neui_detail::k_metrics_api;
     if (!strcmp(iface, NEUI_API_EMBED))     return &embed_api;
+#if defined(NEUI_PLATFORM_IOS)
+    // iOS host specialities. Exposed only when this host is built on its UIKit
+    // platform layer; every other build returns NULL, which is the contract
+    // d/ios.h asks clients to feature-detect on.
+    if (!strcmp(iface, NEUI_API_IOS))       return platform_ios_api();
+#endif
     return nullptr;
   }
 
@@ -291,6 +297,11 @@ namespace xpl_host
     auto* cur = neui_detail::active_palette_override_ptr();
     if (cur == &_effective_palette || cur == &_frozen_palette)
       neui_detail::set_active_palette_override(nullptr);
+#if defined(NEUI_PLATFORM_IOS)
+    // Drops this session's idle-timer hold and restores any brightness it
+    // changed - the promises d/ios.h makes about both are kept here.
+    platform_ios_session_shutdown(_session_id);
+#endif
   }
 
   void Session::recompute_effective_palette()

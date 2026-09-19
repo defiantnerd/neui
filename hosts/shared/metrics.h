@@ -2,6 +2,7 @@
 
 #include <neui/d/metrics.h>
 #include <cstddef>
+#include <vector>
 
 #include "widget_font.h"          // painted_ui_scale() / scaled_painted_metric()
 #include "scrollbar.h"            // SCROLLBAR_W
@@ -19,9 +20,9 @@
 // and the frame's safe-area insets (the view's safeAreaInsets on iOS). The
 // desktop hosts have no such surface, so the shared vtable carries a desktop
 // DEFAULT for each (a font-metric-based width estimate, and zero insets) and
-// exposes a function-pointer seam the iOS hosts overwrite at registration with
-// the real implementation. Desktop hosts touch nothing - they just return the
-// shared vtable.
+// exposes a seam each iOS host ADDS its real implementation to at
+// registration. Desktop hosts touch nothing - they just return the shared
+// vtable. The seams are lists, not single slots; see the note on them below.
 
 namespace neui_detail
 {
@@ -64,10 +65,8 @@ namespace neui_detail
   }
 
   // Desktop default safe-area: no insets (desktop chrome lives outside the
-  // client area). The iOS override returns the frame view's safeAreaInsets.
-  inline void metrics_safe_area_default(neui_session_t /*session*/,
-                                        neui_widget_t /*frame*/,
-                                        int* left, int* top, int* right, int* bottom)
+  // client area).
+  inline void metrics_safe_area_default(int* left, int* top, int* right, int* bottom)
   {
     if (left)   *left   = 0;
     if (top)    *top    = 0;
@@ -75,18 +74,46 @@ namespace neui_detail
     if (bottom) *bottom = 0;
   }
 
-  using metrics_measure_fn   = int  (*)(neui_session_t, const char*, const char*, float, int);
-  using metrics_safe_area_fn = void (*)(neui_session_t, neui_widget_t, int*, int*, int*, int*);
+  // The seams are REGISTRIES, not single slots. Two hosts for the same platform
+  // can be linked into one binary (both iOS hosts are, in examples/ios), and
+  // neui_init() registers the native one BEFORE xpl, so an assigned slot would
+  // always end up holding xpl's - and for a native-host client the frame would
+  // resolve to nothing and safe_area_insets would silently report zeros.
+  // Each host ADDS instead: measure_text takes the first installed (the iOS
+  // implementations are equivalent), and safe_area tries each until one claims
+  // the frame. add() ignores a pointer it already holds, so a repeated
+  // register_host() stays idempotent.
+  using metrics_measure_fn = int (*)(neui_session_t, const char*, const char*, float, int);
+  // Returns true when this host owns `frame` and filled the outputs.
+  using metrics_safe_area_fn = bool (*)(neui_session_t, neui_widget_t, int*, int*, int*, int*);
 
-  inline metrics_measure_fn&   metrics_measure_seam()
+  template <typename Fn>
+  inline void metrics_seam_add(std::vector<Fn>& list, Fn fn)
   {
-    static metrics_measure_fn fn = &metrics_measure_text_default;
-    return fn;
+    if (!fn) return;
+    for (Fn existing : list)
+      if (existing == fn) return;
+    list.push_back(fn);
   }
-  inline metrics_safe_area_fn& metrics_safe_area_seam()
+
+  inline std::vector<metrics_measure_fn>& metrics_measure_seams()
   {
-    static metrics_safe_area_fn fn = &metrics_safe_area_default;
-    return fn;
+    static std::vector<metrics_measure_fn> v;
+    return v;
+  }
+  inline std::vector<metrics_safe_area_fn>& metrics_safe_area_seams()
+  {
+    static std::vector<metrics_safe_area_fn> v;
+    return v;
+  }
+
+  inline void metrics_add_measure_seam(metrics_measure_fn fn)
+  {
+    metrics_seam_add(metrics_measure_seams(), fn);
+  }
+  inline void metrics_add_safe_area_seam(metrics_safe_area_fn fn)
+  {
+    metrics_seam_add(metrics_safe_area_seams(), fn);
   }
 
   // ---------------------------------------------------------------------------
@@ -129,13 +156,18 @@ namespace neui_detail
   inline int metrics_measure_text(neui_session_t session, const char* text,
                                   const char* family, float size_px, int weight)
   {
-    return metrics_measure_seam()(session, text, family, size_px, weight);
+    auto& seams = metrics_measure_seams();
+    if (!seams.empty())
+      return seams.front()(session, text, family, size_px, weight);
+    return metrics_measure_text_default(session, text, family, size_px, weight);
   }
 
   inline void metrics_safe_area(neui_session_t session, neui_widget_t frame,
                                 int* left, int* top, int* right, int* bottom)
   {
-    metrics_safe_area_seam()(session, frame, left, top, right, bottom);
+    for (metrics_safe_area_fn fn : metrics_safe_area_seams())
+      if (fn(session, frame, left, top, right, bottom)) return;
+    metrics_safe_area_default(left, top, right, bottom);
   }
 
   // The shared vtable. One definition shared by every host (header-only inline).

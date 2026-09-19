@@ -27,6 +27,8 @@ add_executable(neui_tests
   test_tabview.cpp
   test_mujson.cpp
   test_component_loader.cpp
+  test_metrics.cpp
+  test_ios_api.cpp
   # mujson lives in the core lib, but the suite links no library, so its TU is
   # compiled directly into the test executable (same pattern as the *.cpp above).
   ${PROJECT_SOURCE_DIR}/src/mujson.cpp)
@@ -46,6 +48,19 @@ if(NEUI_IOS)
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_GUI_IDENTIFIER "org.neui.tests"
     XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "org.neui.tests")
+
+  # NEUI_API_IOS (include/neui/d/ios.h) is UIKit, so its implementation can only
+  # be exercised on iOS. The suite has a plain main(), not UIApplicationMain, so
+  # these cover the process-global queries and the session/frame bookkeeping -
+  # everything that needs a window is exercised by examples/ios instead. This
+  # is the one Tier-1 TU that links a framework; the rest still link nothing.
+  target_sources(neui_tests PRIVATE test_ios_api_device.mm)
+  set_source_files_properties(test_ios_api_device.mm PROPERTIES
+    COMPILE_FLAGS "-fobjc-arc")
+  target_link_libraries(neui_tests PRIVATE
+    "-framework UIKit"
+    "-framework Foundation"
+    "-framework CoreGraphics")
 endif()
 
 add_test(NAME neui_tests COMMAND neui_tests)
