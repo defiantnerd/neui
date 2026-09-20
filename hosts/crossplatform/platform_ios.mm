@@ -1750,6 +1750,13 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer*)other
   // still re-fires RESIZE - the usable client rect changed even though the
   // frame size didn't, so the client must re-lay-out below the new inset.
   int                _last_top_inset;
+  // The other three safe-area edges. They are not folded into the client rect,
+  // so they raise METRICS_CHANGED on their own rather than RESIZE - but they do
+  // move, and a client laying out inside the safe area has no other way to hear
+  // about it.
+  int                _last_left;
+  int                _last_right;
+  int                _last_bottom;
 }
 @end
 
@@ -1836,25 +1843,54 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer*)other
   // The effective top inset (status-bar/notch safe area + hamburger band when
   // a menubar exists) feeds widget_client_rect; track it alongside the bounds.
   int top_inset = session->frame_top_inset(widget_index);
-  if (w == _last_w && h == _last_h && top_inset == _last_top_inset) return;
+  // And the other three edges, read off the same view metrics_safe_area_xpl_ios
+  // reads so the gate and the answer cannot drift apart. Gating on the top alone
+  // swallowed a side- or bottom-only resolve entirely: the client was never
+  // told, and went on laying out to insets that had moved. In landscape those
+  // are the edges that matter - the rounded corners and the camera housing down
+  // the sides, the home indicator along the bottom.
+  int left = 0, right = 0, bottom = 0;
+  if (@available(iOS 11.0, *)) {
+    NEUIView* view = [self neuiView];
+    if (view) {
+      UIEdgeInsets ins = view.safeAreaInsets;
+      left   = (int)(ins.left + 0.5);
+      right  = (int)(ins.right + 0.5);
+      bottom = (int)(ins.bottom + 0.5);
+    }
+  }
+  // The top inset is folded into the rect get_client_rect reports, so a change
+  // to it is a resize as far as a client is concerned even when the bounds held
+  // still. The other three are not, so they raise METRICS_CHANGED alone.
+  const bool client_rect_changed =
+      (w != _last_w || h != _last_h || top_inset != _last_top_inset);
+  const bool edges_changed =
+      (left != _last_left || right != _last_right || bottom != _last_bottom);
+  if (!client_rect_changed && !edges_changed) return;
   _last_w = w;
   _last_h = h;
   _last_top_inset = top_inset;
+  _last_left = left;
+  _last_right = right;
+  _last_bottom = bottom;
 
   auto& wd = session->_widgets[widget_index];
-  wd.width  = w;
-  wd.height = h;
-  session->resize_render_ctx(widget_index, (uint32_t)w, (uint32_t)h);
+  if (client_rect_changed) {
+    wd.width  = w;
+    wd.height = h;
+    session->resize_render_ctx(widget_index, (uint32_t)w, (uint32_t)h);
 
-  neui_event_t ev = {};
-  ev.type               = NEUI_EVENT_RESIZE;
-  ev.data.resize.widget = { wd.widget_id };
-  ev.data.resize.width  = w;
-  ev.data.resize.height = h;
-  session->dispatch_event(&ev);
+    neui_event_t ev = {};
+    ev.type               = NEUI_EVENT_RESIZE;
+    ev.data.resize.widget = { wd.widget_id };
+    ev.data.resize.width  = w;
+    ev.data.resize.height = h;
+    session->dispatch_event(&ev);
+  }
   // The safe-area insets (and thus safe_area_insets / get_client_rect) change on
-  // rotation + when the notch/status-bar inset first resolves, so notify the
-  // client that the metrics changed too (alongside RESIZE).
+  // rotation, when the notch/status-bar inset first resolves, and when any of
+  // the other three edges moves. This fires for all of them - alongside RESIZE
+  // where the client rect moved too, on its own where only an edge did.
   dispatch_metrics_changed_xpl_ios(session, widget_index);
   // A rotation settles here too. Told from the layout pass rather than from
   // UIDevice orientation notifications: no accelerometer, and this is the
@@ -1904,8 +1940,9 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer*)other
 // A safe-area change (status bar appearing, the first inset resolve after the
 // window binds to its scene, or rotation revealing a notch on a new edge) does
 // not change the view bounds, so reportResizeIfChanged would otherwise stay
-// silent. The inset feeds widget_client_rect + the hamburger band position, so
-// re-fire RESIZE (now inset-aware) and re-layout the button.
+// silent. The top inset feeds widget_client_rect + the hamburger band position,
+// so re-fire RESIZE for that one; a move on any of the other three edges raises
+// METRICS_CHANGED instead. Either way the button is re-laid-out.
 - (void)viewSafeAreaInsetsDidChange
 {
   [super viewSafeAreaInsetsDidChange];

@@ -1546,6 +1546,11 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer*)other
   uint32_t           widget_index;
 @private
   int _last_w, _last_h, _last_inset;
+  // The other three safe-area edges. They do not move the client rect the way
+  // the top inset does, so they drive METRICS_CHANGED on their own rather than
+  // RESIZE - but they do move, and a client laying out inside the safe area has
+  // no other way to hear about it.
+  int _last_left, _last_right, _last_bottom;
 }
 @end
 
@@ -1628,21 +1633,47 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer*)other
   int w = (int)sz.width, h = (int)sz.height;
   if (w <= 0 || h <= 0) return;
   int inset = ios_host::frame_top_inset_ios(session, widget_index);
-  if (w == _last_w && h == _last_h && inset == _last_inset) return;
+  // And the other three edges, read off the same view metrics_safe_area_ios
+  // reads so the gate and the answer cannot drift apart. Gating on the top
+  // alone swallowed a side- or bottom-only resolve entirely: the client was
+  // never told, and went on laying out to insets that had moved. In landscape
+  // those are the edges that matter - the rounded corners and the camera
+  // housing down the sides, the home indicator along the bottom.
+  int left = 0, right = 0, bottom = 0;
+  if (@available(iOS 11.0, *)) {
+    NEUINativeIOSContentView* cv = [self contentView];
+    if (cv) {
+      UIEdgeInsets ins = cv.safeAreaInsets;
+      left   = (int)(ins.left + 0.5);
+      right  = (int)(ins.right + 0.5);
+      bottom = (int)(ins.bottom + 0.5);
+    }
+  }
+  // The top inset is folded into the rect get_client_rect reports, so a change
+  // to it is a resize as far as a client is concerned even when the bounds held
+  // still. The other three are not, so they raise METRICS_CHANGED alone.
+  const bool client_rect_changed = (w != _last_w || h != _last_h || inset != _last_inset);
+  const bool edges_changed =
+      (left != _last_left || right != _last_right || bottom != _last_bottom);
+  if (!client_rect_changed && !edges_changed) return;
   _last_w = w; _last_h = h; _last_inset = inset;
+  _last_left = left; _last_right = right; _last_bottom = bottom;
   auto& wd = session->_widgets[widget_index];
-  wd.width = w; wd.height = h;
-  auto* backend = neui_cg_backend::get_backend();
-  if (backend && backend->resize && wd.render_ctx)
-    backend->resize(wd.render_ctx, (uint32_t)w, (uint32_t)h);
-  neui_event_t ev = {};
-  ev.type = NEUI_EVENT_RESIZE;
-  ev.data.resize.widget = { wd.widget_id };
-  ev.data.resize.width = w; ev.data.resize.height = h;
-  session->dispatch_event(&ev);
+  if (client_rect_changed) {
+    wd.width = w; wd.height = h;
+    auto* backend = neui_cg_backend::get_backend();
+    if (backend && backend->resize && wd.render_ctx)
+      backend->resize(wd.render_ctx, (uint32_t)w, (uint32_t)h);
+    neui_event_t ev = {};
+    ev.type = NEUI_EVENT_RESIZE;
+    ev.data.resize.widget = { wd.widget_id };
+    ev.data.resize.width = w; ev.data.resize.height = h;
+    session->dispatch_event(&ev);
+  }
   // The safe-area insets (and thus safe_area_insets / get_client_rect) change on
-  // rotation + when the notch/status-bar inset first resolves, so notify the
-  // client that the metrics changed too (alongside RESIZE).
+  // rotation, when the notch/status-bar inset first resolves, and when any of
+  // the other three edges moves. This fires for all of them - alongside RESIZE
+  // where the client rect moved too, on its own where only an edge did.
   ios_host::dispatch_metrics_changed_ios(session, widget_index);
   // A rotation settles here too. Told from the layout pass rather than from
   // UIDevice orientation notifications: no accelerometer, and this is the
