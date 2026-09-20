@@ -32,7 +32,9 @@ backend separately as `wd.dpi = 96 * screen.scale`.
   present). *Left, right and bottom are reported but not subtracted — do that yourself.*
 - **Dynamic Type** — `metrics->ui_scale` and every `NEUI_METRIC_*` are already scaled, and an
   explicit `NEUI_ATTR_FONT_SIZE` is routed through `UIFontMetrics`. **Do not scale again.**
-- **`NEUI_EVENT_METRICS_CHANGED`** on Dynamic Type, rotation and safe-area change.
+- **`NEUI_EVENT_METRICS_CHANGED`** on Dynamic Type, rotation and safe-area change — a change
+  confined to the left, right or bottom inset moves no bounds and raises no `RESIZE`, so this
+  is the only notice a client laying out inside the safe area gets.
 - **Dark mode** via `NEUI_ATTR_FOLLOW_SYSTEM_THEME`; `@2x`/`@3x` asset selection.
 
 ### Not available here
