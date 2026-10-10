@@ -1148,8 +1148,10 @@ namespace xpl_host
       }
       if (wParam == XPL_ANIM_TIMER_ID) {
         auto* awud = get_wud(hwnd);
-        if (awud && awud->session) awud->session->animation_tick(awud->widget_index);
-        else KillTimer(hwnd, XPL_ANIM_TIMER_ID);
+        if (awud && awud->session)  // continue at the interval it asks for; 0 stops
+          platform_set_animation_timer(hwnd, awud->session->animation_tick(awud->widget_index));
+        else
+          KillTimer(hwnd, XPL_ANIM_TIMER_ID);
         return 0;
       }
       // Scrolling-SECTION spring-back tick - same shape as the grid timer

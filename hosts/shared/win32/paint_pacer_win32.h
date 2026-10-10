@@ -105,12 +105,15 @@ namespace neui_detail
           } else {
             CombineRgn(p.held, p.held, rgn, RGN_OR);
           }
+          if (rgn) DeleteObject(rgn);
+          ValidateRgn(hwnd, nullptr);
+          return true;
         }
-        if (rgn) DeleteObject(rgn);
-        ValidateRgn(hwnd, nullptr);
-        return true;
+        DeleteObject(rgn);
       }
-      // No timer or no region: paint now rather than lose the frame.
+      // No timer, no region object, or an empty update region (an internal
+      // paint request, which has nothing to keep): paint now rather than
+      // lose the frame.
     }
     pace_unhold(p, hwnd);
     p.start = now;

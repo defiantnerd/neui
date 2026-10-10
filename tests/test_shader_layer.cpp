@@ -34,7 +34,7 @@ struct Upload {
 struct FakeBackend {
   std::map<uintptr_t, Upload> live;   // handle -> upload
   uintptr_t next = 0x1000;
-  int creates = 0, destroys = 0, draws = 0;
+  int creates = 0, destroys = 0, draws = 0, ctx_destroys = 0;
   void* last_bmp = nullptr;
   float last_dst[4] = { 0, 0, 0, 0 };
   float m[6] = { 1, 0, 0, 1, 0, 0 };  // device transform
@@ -79,6 +79,11 @@ void NEUI_ABI fb_get_device_transform(neui_render_ctx_t, float m[6])
   std::memcpy(m, g_fb->m, sizeof g_fb->m);
 }
 uint32_t NEUI_ABI fb_generation(neui_render_ctx_t) { return g_fb->generation; }
+neui_render_ctx_t NEUI_ABI fb_create_offscreen(uint32_t, uint32_t, float)
+{
+  return reinterpret_cast<neui_render_ctx_t>(uintptr_t(0xC0));
+}
+void NEUI_ABI fb_destroy_context(neui_render_ctx_t) { ++g_fb->ctx_destroys; }
 float NEUI_ABI fb_scale(neui_render_ctx_t) { return g_fb->m[0]; }
 
 // ---- A store, a session and a painter ---------------------------------------
@@ -135,6 +140,8 @@ struct Fixture {
     t.get_device_transform = fb_get_device_transform;
     t.get_context_generation = fb_generation;
     t.get_scale_factor = fb_scale;
+    t.create_offscreen_context = fb_create_offscreen;
+    t.destroy_context = fb_destroy_context;
   }
   ~Fixture()
   {
@@ -568,6 +575,27 @@ TEST_CASE("shader cache: released with the context, the shader and the store")
   CHECK_EQ(fx.fb.live.size(), 0u);
   CHECK_EQ(cache.size(), 0u);
   CHECK_EQ(cache.bytes(), 0u);
+}
+
+TEST_CASE("shader cache: a SURFACE's uploads go with its context")
+{
+  // A shader drawn while painting into a surface uploads into the surface's
+  // ctx; destroying the surface must free that upload, or a later ctx at the
+  // same address would be served the dead handle.
+  Fixture fx;
+  const neui_asset_t sh = fx.create(k_disc);
+  const uint32_t surf = fx.store.allocate_surface(32, 32, 1.0f, &fx.fb.table);
+  REQUIRE(surf != 0);
+  neui_painter p = fx.painter(fx.store.get_slot(surf)->surface_ctx);
+  REQUIRE(shader_paint(&p, fx.shader(sh), fx.store.shader_cache(), 0, 0, 16, 16, 1, 0, nullptr));
+  CHECK_EQ(fx.fb.live.size(), 1u);
+  fx.store.release_slot(surf, &fx.fb.table);
+  CHECK_EQ(fx.fb.ctx_destroys, 1);
+  CHECK_EQ(fx.fb.live.size(), 0u);
+  CHECK_EQ(fx.store.shader_cache().size(), 1u);  // the image stays for other ctxs
+  neui_painter q = fx.painter(fx.store.get_slot(fx.store.allocate_surface(32, 32, 1.0f, &fx.fb.table))->surface_ctx);
+  REQUIRE(shader_paint(&q, fx.shader(sh), fx.store.shader_cache(), 0, 0, 16, 16, 1, 0, nullptr));
+  CHECK_EQ(fx.fb.creates, 2);  // the same ctx address uploads afresh
 }
 
 // ---- The compound layer ------------------------------------------------------------

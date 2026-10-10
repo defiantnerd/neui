@@ -181,6 +181,23 @@ TEST_CASE("anim clock: a late paint resets the misses")
   CHECK_EQ(c.size(), 1u);
 }
 
+TEST_CASE("anim clock: a destroyed owner's widgets go, and the time follows the clock")
+{
+  g_now = 0;
+  AnimClock c(&fake_now);
+  paint(c, 1, 7);
+  paint(c, 2, 8);
+  g_now = 40 * k_ms;
+  CHECK_EQ(tick(c).size(), 2u);
+  c.forget_owner(7);
+  CHECK_FALSE(c.has_owner(7));
+  CHECK(c.has_owner(8));
+  c.forget_owner(8);
+  CHECK(c.empty());
+  g_now = 900 * k_ms;  // nothing ticks any more
+  CHECK_APPROX(paint(c, 3, 9), 0.9);  // not the 40 ms frame
+}
+
 TEST_CASE("anim clock: re-marking a widget moves it to its new owner")
 {
   g_now = 0;

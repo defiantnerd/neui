@@ -133,6 +133,7 @@ namespace xpl_host
       platform_dnd_unregister_window(wd->native_handle);
       platform_destroy_window(*wd);
       wd->native_handle = nullptr;
+      s->anim_clock().forget_owner(idx);  // the frame's animating widgets
     }
 
     // Let the widget class clean up its own resources (e.g. MenubarWidget tears

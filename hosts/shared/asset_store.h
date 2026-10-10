@@ -834,11 +834,16 @@ namespace neui_detail
         for (auto& [ctx, cached] : entry->bitmaps)
           if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
       }
+      entry->bitmaps.clear();
       // A COMPOUND's QR layers hold uploads of their own symbol bitmaps.
       if (entry->compound) compound_release_bitmaps(*entry->compound, backend);
       // A SHADER's rendered images (and their uploads) go with it.
       if (entry->shader) _shader_cache.release_uid(entry->shader->uid, backend);
       if (entry->surface_ctx && backend && backend->destroy_context) {
+        // Whatever was uploaded while painting into the surface (other
+        // assets' bitmaps, QR symbols, shader images) goes with its ctx; a
+        // later ctx at the same address must not be served those handles.
+        release_context(entry->surface_ctx, backend);
         backend->destroy_context(entry->surface_ctx);
         entry->surface_ctx = nullptr;
       }

@@ -1122,6 +1122,8 @@ namespace win32_host
     case WM_DESTROY:
       {
         if (wd) wd->anim_timer_ms = 0;  // the timer dies with the HWND
+        if (wd && wd->session)            // and the frame's animating widgets go
+          wd->session->_asset_manager.shader_cache().clock().forget_owner(wd->index);
         if (wd && wd->type && !strcmp(wd->type, NEUI_W_APPWINDOW)) {
           --g_appwindow_count;
           if (g_appwindow_count <= 0) {

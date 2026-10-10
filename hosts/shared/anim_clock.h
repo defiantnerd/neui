@@ -151,6 +151,15 @@ namespace neui_detail
     bool reduced_motion() const { return _reduced; }
     bool running() const { return !_paused && !_reduced; }
 
+    // The owner is gone (its window was destroyed): its widgets go too, so
+    // the clock does not keep a stale frame time for them.
+    void forget_owner(uint32_t owner)
+    {
+      _entries.erase(std::remove_if(_entries.begin(), _entries.end(),
+                                    [owner](const Entry& e) { return e.owner == owner; }),
+                     _entries.end());
+    }
+
     // The marked widgets, as (widget, owner).
     template <typename F>
     void for_each(F&& f) const
