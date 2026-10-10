@@ -2646,7 +2646,8 @@ namespace xpl_host
     auto* ca = resolve_compound(session, asset, s);
     if (!ca) return;
     if (neui_detail::compound_layer_asset_slot(layer) != (asset.id & 0xffff)) return;
-    neui_detail::compound_remove_layer(*ca, neui_detail::compound_layer_slot(layer));
+    neui_detail::compound_remove_layer(*ca, neui_detail::compound_layer_slot(layer),
+                                       s->_backend);
     invalidate_widgets_using(s, asset.id & 0xffff);
   }
 
@@ -2655,7 +2656,7 @@ namespace xpl_host
     Session* s = nullptr;
     auto* ca = resolve_compound(session, asset, s);
     if (!ca) return;
-    neui_detail::compound_clear(*ca);
+    neui_detail::compound_clear(*ca, s->_backend);
     invalidate_widgets_using(s, asset.id & 0xffff);
   }
 

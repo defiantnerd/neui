@@ -342,23 +342,52 @@ namespace neui_detail
     return compound_add_layer_parented(ca, kind, z, parent_slot);
   }
 
+  // Destroy every per-(ctx) upload a QR symbol holds. destroy_bitmap is safe
+  // for any live ctx, not only the one being painted. A null backend (or one
+  // without destroy_bitmap) only forgets the handles.
+  inline void compound_release_symbol_bitmaps(CompoundLayer::QrSymbol& sym,
+                                              neui_render_backend_t* backend)
+  {
+    if (backend && backend->destroy_bitmap)
+      for (auto& [ctx, cached] : sym.bitmaps)
+        if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
+    sym.bitmaps.clear();
+  }
+
+  // The same for every symbol of every layer: the asset store calls it before
+  // a compound's layers are freed, which is the only point the uploads can
+  // still be reached.
+  inline void compound_release_bitmaps(CompoundAsset& ca, neui_render_backend_t* backend)
+  {
+    for (auto& layer : ca.layers) {
+      if (!layer) continue;
+      for (auto& sym : layer->qr_cache)
+        if (sym) compound_release_symbol_bitmaps(*sym, backend);
+    }
+  }
+
   // Remove a layer. A GROUP layer removes its whole subtree (every descendant)
-  // so no child is left pointing at a freed parent slot.
-  inline void compound_remove_layer(CompoundAsset& ca, uint32_t slot)
+  // so no child is left pointing at a freed parent slot. `backend` frees the
+  // layer's QR uploads.
+  inline void compound_remove_layer(CompoundAsset& ca, uint32_t slot,
+                                    neui_render_backend_t* backend)
   {
     if (slot == 0 || slot >= ca.layers.size()) return;
     if (!ca.layers[slot]) return;
     // Recurse into children first so nested groups are torn down depth-first.
     for (uint32_t i = 1; i < ca.layers.size(); ++i) {
       if (ca.layers[i] && ca.layers[i]->parent == slot)
-        compound_remove_layer(ca, i);
+        compound_remove_layer(ca, i, backend);
     }
+    for (auto& sym : ca.layers[slot]->qr_cache)
+      if (sym) compound_release_symbol_bitmaps(*sym, backend);
     ca.layers[slot].reset();
     ca.free_slots.push_back(slot);
   }
 
-  inline void compound_clear(CompoundAsset& ca)
+  inline void compound_clear(CompoundAsset& ca, neui_render_backend_t* backend)
   {
+    compound_release_bitmaps(ca, backend);
     ca.layers.clear();
     ca.free_slots.clear();
   }

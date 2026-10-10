@@ -1849,7 +1849,8 @@ namespace ios_host
     Session* s = nullptr;
     auto* ca = resolve_compound_ios(session, asset, s);
     if (!ca || neui_detail::compound_layer_asset_slot(layer) != (asset.id & 0xffff)) return;
-    neui_detail::compound_remove_layer(*ca, neui_detail::compound_layer_slot(layer));
+    neui_detail::compound_remove_layer(*ca, neui_detail::compound_layer_slot(layer),
+                                       neui_cg_backend::get_backend());
     s->invalidate_widgets_with_compound(asset.id);
   }
   static void NEUI_ABI co_clear(neui_session_t session, neui_asset_t asset)
@@ -1857,7 +1858,7 @@ namespace ios_host
     Session* s = nullptr;
     auto* ca = resolve_compound_ios(session, asset, s);
     if (!ca) return;
-    neui_detail::compound_clear(*ca);
+    neui_detail::compound_clear(*ca, neui_cg_backend::get_backend());
     s->invalidate_widgets_with_compound(asset.id);
   }
   static void NEUI_ABI co_set_z(neui_session_t session, neui_asset_t asset, neui_compound_layer_t layer, int z)

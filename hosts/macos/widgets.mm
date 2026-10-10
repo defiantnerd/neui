@@ -2684,7 +2684,8 @@ namespace macos_host
     auto* ca = resolve_compound_macos(session, asset, s);
     if (!ca) return;
     if (neui_detail::compound_layer_asset_slot(layer) != (asset.id & 0xffff)) return;
-    neui_detail::compound_remove_layer(*ca, neui_detail::compound_layer_slot(layer));
+    neui_detail::compound_remove_layer(*ca, neui_detail::compound_layer_slot(layer),
+                                       neui_cg_backend::get_backend());
     s->invalidate_widgets_with_compound(asset.id);
   }
 
@@ -2693,7 +2694,7 @@ namespace macos_host
     Session* s = nullptr;
     auto* ca = resolve_compound_macos(session, asset, s);
     if (!ca) return;
-    neui_detail::compound_clear(*ca);
+    neui_detail::compound_clear(*ca, neui_cg_backend::get_backend());
     s->invalidate_widgets_with_compound(asset.id);
   }
 

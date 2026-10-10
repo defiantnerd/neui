@@ -375,9 +375,11 @@ namespace neui_detail
   // the freshly-built symbol failed to rasterise (empty / too-long text).
   // Because the cache is keyed by the full key (incl. the resolved text), one
   // shared layer serves many widgets each showing a different QR code.
+  // An evicted symbol's uploads are destroyed through `backend`.
   inline CompoundLayer::QrSymbol* qr_get_symbol(
       const CompoundLayer& L, const std::string& text, uint32_t side_px,
-      uint32_t dark, uint32_t bg, int ecc, int quiet, float scale)
+      uint32_t dark, uint32_t bg, int ecc, int quiet, float scale,
+      neui_render_backend_t* backend)
   {
     for (auto& sym : L.qr_cache) {
       if (sym && sym->text == text && sym->side_px == side_px &&
@@ -390,8 +392,10 @@ namespace neui_detail
     sym->ecc = ecc;   sym->quiet = quiet;
     qr_rasterize(*sym, scale);
     if (sym->pixels.empty()) return nullptr;
-    if (L.qr_cache.size() >= k_qr_cache_max)
-      L.qr_cache.erase(L.qr_cache.begin());  // FIFO evict oldest
+    if (L.qr_cache.size() >= k_qr_cache_max) {  // FIFO evict oldest
+      if (L.qr_cache.front()) compound_release_symbol_bitmaps(*L.qr_cache.front(), backend);
+      L.qr_cache.erase(L.qr_cache.begin());
+    }
     L.qr_cache.push_back(std::move(sym));
     return L.qr_cache.back().get();
   }
@@ -829,7 +833,8 @@ namespace neui_detail
         // layer with different NEUI_ATTR_QRCODE values each get their own
         // symbol rather than fighting over one held bitmap.
         CompoundLayer::QrSymbol* sym =
-          qr_get_symbol(L, text, side_px, dark, bg, ecc, quiet, scale);
+          qr_get_symbol(L, text, side_px, dark, bg, ecc, quiet, scale,
+                        p ? p->backend : nullptr);
         if (!sym) break;  // empty / un-encodable text - draw nothing
 
         void* bmp = qr_upload(p, *sym);

@@ -540,3 +540,29 @@ TEST_CASE("filmstrip: frame draw on an untagged bitmap draws the whole image")
   CHECK_EQ((int)g_last_src[2], 0);
   CHECK_EQ((int)g_last_src[3], 0);
 }
+
+// A COMPOUND entry's QR layers hold uploads of their own; releasing the slot
+// must destroy them (they were leaked before).
+namespace {
+int g_qr_slot_destroys = 0;
+void NEUI_ABI qr_slot_destroy_bitmap(neui_render_ctx_t, void*) { ++g_qr_slot_destroys; }
+}  // namespace
+
+TEST_CASE("AssetStore: releasing a compound destroys its QR layers' uploads")
+{
+  AssetStore<FakeLoader> store;
+  uint32_t slot = store.allocate_compound();
+  REQUIRE(slot != 0);
+  CompoundAsset& ca = *store.get_slot(slot)->compound;
+  uint32_t q = compound_add_layer(ca, NEUI_COMPOUND_LAYER_QR, 0);
+  auto sym = std::make_unique<CompoundLayer::QrSymbol>();
+  sym->bitmaps[reinterpret_cast<neui_render_ctx_t>(1)] = { reinterpret_cast<void*>(0x10), 0 };
+  sym->bitmaps[reinterpret_cast<neui_render_ctx_t>(2)] = { reinterpret_cast<void*>(0x20), 0 };
+  compound_get_layer(ca, q)->qr_cache.push_back(std::move(sym));
+
+  neui_render_backend_t backend{};
+  backend.destroy_bitmap = qr_slot_destroy_bitmap;
+  g_qr_slot_destroys = 0;
+  store.release_slot(slot, &backend);
+  CHECK_EQ(g_qr_slot_destroys, 2);
+}
