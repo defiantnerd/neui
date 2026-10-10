@@ -518,6 +518,32 @@ if(APPLE)
   target_link_libraries(neui_arc_example PRIVATE neui-macoshost)
 endif()
 
+# Partial-repaint example: simulated automation over a grid of compound knobs
+# on the xpl host, driven by a client pump_once loop that reports how long the
+# pumps (which include the paints) take. Compare against
+# NEUI_DEBUG_FULL_REPAINT=1; NEUI_DEBUG_DAMAGE=1 tints the repainted rects.
+if(MSVC)
+  add_executable(neui_partial_repaint_example WIN32
+    examples/partial_repaint_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_partial_repaint_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_partial_repaint_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_partial_repaint_example WIN32 examples/partial_repaint_example.cpp)
+elseif(APPLE)
+  add_executable(neui_partial_repaint_example MACOSX_BUNDLE examples/partial_repaint_example.cpp)
+else()
+  add_executable(neui_partial_repaint_example examples/partial_repaint_example.cpp)
+endif()
+target_link_libraries(neui_partial_repaint_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_partial_repaint_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_partial_repaint_example PRIVATE neui-macoshost)
+endif()
+
 # Filmstrip / stitchmap knob example. Generates a vertical frame strip into a
 # SURFACE, tags it via assets->set_frame_layout, and drives it with a compound
 # asset layer whose "frame" prop is bound to NEUI_PARAM_VALUE + a rotational

@@ -22,7 +22,16 @@ Two deviations from the design below:
   `WidgetData::repaint()` (the internal hover / press / caret / focus sites)
   stays full-frame until P3.
 
-The P2-P4 and design text below is unchanged.
+**P2 implemented (macOS verified on screen, iOS compile-only).**
+- **Platform side:** `setNeedsDisplayInRect:` + `drawRect:` damage on both. The CG backend accepts damage for window ctxs; off-screen ctxs accept once they hold a frame.
+- **Finding:** a layer-backed view gets one dirty rect, the bounding box of everything invalidated since the last draw. Scattered changes therefore coalesce into a full frame, and only localized ones pay: 0.10 ms against 1.15 ms per paint, with one of 48 knobs per tick, on an M-series Mac.
+- **Added in P2:**
+  - `WidgetData::paint_bounds()`, which a rotated IMAGE overrides. Its unclipped overflow was outside its damage. Windows found it and a negative test on macOS confirmed it.
+  - `NEUI_DEBUG_PAINT_STATS`.
+  - `neui_partial_repaint_example`.
+- **Reference:** `docs/widget-internals.md`, "Partial repaint".
+
+The P3-P4 and design text below is unchanged.
 
 This is the first track ahead of
 `plans/shader-effects.md`. It is worth doing on its own merits, because the

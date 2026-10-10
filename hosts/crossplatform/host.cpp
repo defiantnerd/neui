@@ -2,7 +2,9 @@
 #include <memory>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 
 #include "host.h"
@@ -492,13 +494,16 @@ namespace xpl_host
 
   static neui_detail::DamageRect widget_damage_rect(const WidgetData& wd)
   {
-    return { wd.abs_x - k_damage_margin, wd.abs_y - k_damage_margin,
-             wd.width + 2 * k_damage_margin, wd.height + 2 * k_damage_margin };
+    const neui_detail::DamageRect b = wd.paint_bounds();
+    return { wd.abs_x + b.x - k_damage_margin, wd.abs_y + b.y - k_damage_margin,
+             b.w + 2 * k_damage_margin, b.h + 2 * k_damage_margin };
   }
 
   // Debug switches (read once): NEUI_DEBUG_FULL_REPAINT=1 ignores damage
   // (bisects a partial-repaint artefact); NEUI_DEBUG_DAMAGE=1 tints every
-  // partial frame's damage rects so over- / under-invalidation is visible.
+  // partial frame's damage rects so over- / under-invalidation is visible;
+  // NEUI_DEBUG_PAINT_STATS=1 prints, once a second, how many frames painted
+  // (how many partial) and their average / worst paint_frame time.
   static bool env_flag(const char* name)
   {
 #if defined(_MSC_VER)
@@ -2148,6 +2153,21 @@ namespace xpl_host
     if (rotated) backend->pop_transform(ctx);
   }
 
+  // NEUI_ATTR_ROTATION spins the image (or its placeholder fill) about the
+  // fitted centre without a clip, so it can reach out to the widget's half-
+  // diagonal on any side. Report that enclosing square whenever the attribute
+  // exists at all - including after it went back to 0, so the repaint that
+  // un-rotates still clears the old overflow.
+  neui_detail::DamageRect ImageWidget::paint_bounds() const
+  {
+    if (!attrs || !attrs->has(NEUI_ATTR_ROTATION))
+      return WidgetData::paint_bounds();
+    const int r = static_cast<int>(std::ceil(std::hypot(static_cast<double>(width),
+                                                        static_cast<double>(height)) * 0.5));
+    const int cx = width / 2, cy = height / 2;
+    return { cx - r, cy - r, 2 * r + (width & 1), 2 * r + (height & 1) };
+  }
+
   // -------------------------------------------------------------------------
   // MenubarWidget cleanup
 
@@ -2313,10 +2333,41 @@ namespace xpl_host
     return clear;
   }
 
+  // NEUI_DEBUG_PAINT_STATS accumulator: one line per second to stderr. Times
+  // the whole paint_frame (palette, walk, overlays, present) - on CG the
+  // rasterisation into the view's backing store happens inside it too.
+  struct PaintStats
+  {
+    using clock = std::chrono::steady_clock;
+    clock::time_point window_start = clock::now();
+    int    frames  = 0;
+    int    partial = 0;
+    double total_ms = 0.0;
+    double max_ms   = 0.0;
+
+    void add(double ms, bool was_partial)
+    {
+      ++frames;
+      if (was_partial) ++partial;
+      total_ms += ms;
+      if (ms > max_ms) max_ms = ms;
+      const auto now = clock::now();
+      if (now - window_start >= std::chrono::seconds(1)) {
+        std::fprintf(stderr, "neui paint: %d frames (%d partial), avg %.2f ms, max %.2f ms\n",
+                     frames, partial, total_ms / frames, max_ms);
+        *this = PaintStats{};
+        window_start = now;
+      }
+    }
+  };
+
   void Session::paint_frame(neui_render_ctx_t ctx, uint32_t parent_index,
                             const neui_detail::DamageRegion* damage)
   {
     if (!_backend || !ctx) return;
+    static const bool paint_stats = env_flag("NEUI_DEBUG_PAINT_STATS");
+    const auto paint_t0 = paint_stats ? PaintStats::clock::now()
+                                      : PaintStats::clock::time_point{};
     // Choose the palette for this frame BEFORE reading any colour: the
     // begin_frame clear, the widget paints, the combo / popup overlays,
     // and the focus outline all flow through current_palette(). Frames
@@ -2427,6 +2478,11 @@ namespace xpl_host
                             static_cast<float>(d.w), static_cast<float>(d.h), tint);
     }
     _backend->end_frame(ctx);
+    if (paint_stats) {
+      static PaintStats stats;
+      stats.add(std::chrono::duration<double, std::milli>(
+                  PaintStats::clock::now() - paint_t0).count(), cull != nullptr);
+    }
 
     // Restore the previous override so non-paint callers (event
     // handlers, theme provider, other frames painted in the same pump

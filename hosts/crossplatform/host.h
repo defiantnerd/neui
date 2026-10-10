@@ -150,6 +150,12 @@ namespace xpl_host
     // Type classification - avoids strcmp in hot paths.
     virtual bool is_frame()   const { return false; }
     virtual bool is_menubar() const { return false; }
+    // Where paint() can put pixels, relative to the widget's own top-left.
+    // Partial repaint damages and culls with this, so a widget that paints
+    // outside (0, 0, width, height) must say so - or a change leaves stale
+    // overflow behind and a neighbour's repaint wipes it.
+    virtual neui_detail::DamageRect paint_bounds() const
+    { return { 0, 0, width, height }; }
     // Editable text surfaces (INPUTBOX / MULTILINE). Lets the platform layer
     // target X11 middle-click PRIMARY paste at the right widget. insert_text
     // inserts UTF-8 at the caret (replacing any selection); returns true if it
@@ -655,6 +661,7 @@ namespace xpl_host
     neui_asset_t asset = asset_none;
     void paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
                bool is_focused) override;
+    neui_detail::DamageRect paint_bounds() const override;
   };
 
   // CUSTOMDRAW - client-rendered surface. Emits NEUI_EVENT_WIDGET_PAINT

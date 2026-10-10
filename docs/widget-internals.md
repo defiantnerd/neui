@@ -10,6 +10,24 @@ Implementation-specific constants, scrollbar geometry, multiline cursor math, ed
 
 **xpl win32 DBLCLK→CLICK parity.** `platform_win32.cpp::WM_LBUTTONDBLCLK` mirrors the WM_LBUTTONDOWN setup (`set_focus` / `set_pressed` / `SetCapture`) so the trailing WM_LBUTTONUP fires `MOUSE_BUTTON_CLICK` on widgets that don't opt into DBLCLICK (BUTTON in particular). Without this, the system's CS_DBLCLKS-driven replacement of the second rapid DOWN with DBLCLK would silently swallow every-other rapid click. Widgets that explicitly handle DBLCLICK (CHECKBOX, TREEVIEW, MULTILINE, GRID, KNOB-reset) are unaffected - they now just see an additional trailing CLICK they already ignore. Matches the native win32 host where the system "Button" class has no CS_DBLCLKS and every fast click is a plain click.
 
+## Partial repaint (xpl host)
+
+Status and design record: `plans/xpl-partial-repaint.md`. **Live on Linux / Cairo (P1) and macOS + iOS / CG (P2)**; win32 / D2D still paints full frames (P4), and LVGL has its own retained invalidation.
+
+- **What is partial:** client-driven visual changes funnel through `invalidate_widget_visual` (`widgets.cpp`) -> `Session::invalidate_widget_rect`: attr writes, `set_text` / `set_asset` / `set_enabled`, the public `invalidate`, GRID content. That queues the widget's damage footprint (cached frame-local `abs_x` / `abs_y` + `paint_bounds()` + a 4 px margin) via `platform_invalidate_rect`. Everything else stays full-frame until P3: geometry, focus, hover / press (`WidgetData::repaint()`), scroll, overlays.
+- **Invariant 1 - geometry changes repaint fully.** A rect queued from the previous paint's `abs_x` / `abs_y` is only safe because any move / resize / show / hide / scroll requests a full repaint, and a pending full repaint absorbs the rects queued alongside it. Converting a geometry path to rect invalidation means damaging both the old and the new rect.
+- **Invariant 2 - a widget that paints outside its rect overrides `WidgetData::paint_bounds()`.** Otherwise a change leaves stale overflow behind and a neighbour's repaint culls or clips it. `ImageWidget` does this (`NEUI_ATTR_ROTATION` rotates it unclipped; it reports the half-diagonal square whenever the attr exists). CUSTOMDRAW / compound widgets are clipped to their own rect, and focus rings fit in the margin.
+- **Frame path:** `Session::paint_frame(ctx, frame, damage)` hands non-trivial damage (< 60% coverage, `hosts/shared/damage.h`) to the backend's `set_frame_damage`. It culls (`paint_widgets_recursive`: no PREUPDATE / paint for widgets missing the damage, `abs_x` / `abs_y` still refreshed for hit-testing) **only when the backend returned true**. A refusing backend clears everything. Overlays aren't culled; the backend clip limits them.
+- **Per platform:**
+  - **Cairo:** owns its surface. It clips, clears and blits per rect, and refuses until it holds a complete frame at the current scale. See `docs/host-linux.md`.
+  - **CG (macOS / iOS):** AppKit / UIKit own the pixels. `platform_invalidate_rect` -> `setNeedsDisplayInRect:`; `drawRect:` turns `getRectsBeingDrawn:` / the dirty rect into the damage. The layer keeps everything outside it. **A layer-backed view gets ONE dirty rect, the bounding box of everything invalidated since the last draw**, so scattered changes in one display pass coalesce, often past 60%, into a full frame. Localized changes are where it pays: measured on an M-series Mac with `neui_partial_repaint_example 1` (one of 48 compound knobs per tick), 0.10 ms per paint against 1.15 ms full. The draw can't be culled inside AppKit's box: the double-buffered backing store keeps the previous frame only outside it.
+- **Debug switches** (env, read once):
+  - `NEUI_DEBUG_FULL_REPAINT=1` forces full frames, to bisect an artefact.
+  - `NEUI_DEBUG_DAMAGE=1` tints each partial frame's damage rects.
+  - `NEUI_DEBUG_PAINT_STATS=1` prints frames / partial / avg / max `paint_frame` ms once a second to stderr.
+
+  `neui_partial_repaint_example [knobs-per-tick]` simulates automation and has a rotating IMAGE for invariant 2.
+
 ## Enabled / disabled state
 
 `widgets->set_enabled(sess, w, bool)` / `get_enabled(sess, w)`. Default enabled=true. Disabled widgets paint dimmed and don't receive input.

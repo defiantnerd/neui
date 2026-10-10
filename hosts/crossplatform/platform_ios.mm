@@ -345,7 +345,6 @@ API_AVAILABLE(ios(13.4))
 
 - (void)drawRect:(CGRect)rect
 {
-  (void)rect;
   if (!session) return;
   xpl_host::WidgetData* wd = session->get_widget(widget_index);
   if (!wd || !wd->render_ctx) return;
@@ -356,7 +355,21 @@ API_AVAILABLE(ios(13.4))
   CGSize sz = self.bounds.size;
   neui_cg_backend::set_current_frame(wd->render_ctx, (void*)cg,
                                       (float)sz.width, (float)sz.height);
-  session->paint_frame(wd->render_ctx, widget_index);
+
+  // Partial repaint: a setNeedsDisplayInRect: (platform_invalidate_rect)
+  // makes UIKit redraw only `rect` - the context is clipped to it and the
+  // layer keeps every pixel outside - so it is the frame's damage, already
+  // in frame-local y-down points. A draw covering the whole view stays full.
+  neui_detail::DamageRegion damage;
+  if (!CGRectContainsRect(rect, self.bounds)) {
+    const int x0 = (int)std::floor(CGRectGetMinX(rect));
+    const int y0 = (int)std::floor(CGRectGetMinY(rect));
+    const int x1 = (int)std::ceil(CGRectGetMaxX(rect));
+    const int y1 = (int)std::ceil(CGRectGetMaxY(rect));
+    damage.add({ x0, y0, x1 - x0, y1 - y0 });
+  }
+  session->paint_frame(wd->render_ctx, widget_index,
+                       damage.empty() ? nullptr : &damage);
 }
 
 // Live system dark/light tracking. iOS has no global appearance signal; each
@@ -2419,11 +2432,14 @@ namespace xpl_host
     [view setNeedsDisplay];
   }
 
-  // No partial repaint on iOS yet (setNeedsDisplayInRect: + dirtyRect is
-  // plans/xpl-partial-repaint.md P2). Repaint the whole frame.
-  void platform_invalidate_rect(void* native_handle, int, int, int, int)
+  // Partial repaint: UIKit unions every rect marked before the next display
+  // pass (a whole-view setNeedsDisplay absorbs them) and passes the union to
+  // drawRect:. Frame-local logical rects are view points (y-down).
+  void platform_invalidate_rect(void* native_handle, int x, int y, int w, int h)
   {
-    platform_invalidate(native_handle);
+    if (w <= 0 || h <= 0) return;
+    NEUIView* view = neui_view_for_window(native_handle);
+    [view setNeedsDisplayInRect:CGRectMake(x, y, w, h)];
   }
 
   // UIApplicationMain owns the run loop on iOS; neui never owns / stops it.

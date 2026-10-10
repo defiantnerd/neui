@@ -19,6 +19,7 @@
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
 
+#include <cmath>
 #include <cstring>
 
 #include "host.h"
@@ -162,7 +163,6 @@ void wake_app_event_pump()
 
 - (void)drawRect:(NSRect)dirtyRect
 {
-  (void)dirtyRect;
   if (!session) return;
   xpl_host::WidgetData* wd = session->get_widget(widget_index);
   if (!wd || !wd->render_ctx) return;
@@ -173,7 +173,31 @@ void wake_app_event_pump()
   NSSize sz = self.bounds.size;
   neui_cg_backend::set_current_frame(wd->render_ctx, (void*)cg,
                                       (float)sz.width, (float)sz.height);
-  session->paint_frame(wd->render_ctx, widget_index);
+
+  // Partial repaint: when AppKit redraws only part of the view (a
+  // platform_invalidate_rect -> setNeedsDisplayInRect:), it clips the
+  // context to the rects being drawn and keeps every pixel outside them in
+  // the layer's backing store - so those rects are exactly the frame's
+  // damage. The view is flipped, so they are already frame-local, y-down
+  // logical px. A draw covering the whole view (any setNeedsDisplay:YES,
+  // resize, backing-scale change) stays a full frame.
+  neui_detail::DamageRegion damage;
+  if (!NSContainsRect(dirtyRect, self.bounds)) {
+    const NSRect* rects = nullptr;
+    NSInteger     count = 0;
+    [self getRectsBeingDrawn:&rects count:&count];
+    for (NSInteger i = 0; i < count; ++i) {
+      // Outward to whole points: a superset of what AppKit clipped to is
+      // fine (it only widens the cull), a subset would skip a widget.
+      const int x0 = (int)std::floor(NSMinX(rects[i]));
+      const int y0 = (int)std::floor(NSMinY(rects[i]));
+      const int x1 = (int)std::ceil(NSMaxX(rects[i]));
+      const int y1 = (int)std::ceil(NSMaxY(rects[i]));
+      damage.add({ x0, y0, x1 - x0, y1 - y0 });
+    }
+  }
+  session->paint_frame(wd->render_ctx, widget_index,
+                       damage.empty() ? nullptr : &damage);
 }
 
 // ---------------------------------------------------------------------------
@@ -1672,11 +1696,14 @@ namespace xpl_host
     [frame_content_view(native_handle) setNeedsDisplay:YES];
   }
 
-  // No partial repaint on macOS yet (setNeedsDisplayInRect: + dirtyRect is
-  // plans/xpl-partial-repaint.md P2). Repaint the whole frame.
-  void platform_invalidate_rect(void* native_handle, int, int, int, int)
+  // Partial repaint: AppKit unions every rect marked before the next display
+  // pass (a whole-view setNeedsDisplay:YES absorbs them) and hands the result
+  // to drawRect: via getRectsBeingDrawn:. The content view is flipped, so the
+  // frame-local logical rect is already in view coordinates.
+  void platform_invalidate_rect(void* native_handle, int x, int y, int w, int h)
   {
-    platform_invalidate(native_handle);
+    if (!native_handle || w <= 0 || h <= 0) return;
+    [frame_content_view(native_handle) setNeedsDisplayInRect:NSMakeRect(x, y, w, h)];
   }
 
   bool platform_run()
