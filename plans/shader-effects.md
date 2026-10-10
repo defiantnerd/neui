@@ -2,9 +2,20 @@
 
 ## Status
 
-**Design accepted, not started.** This is a feasibility study and design
-record; nothing is implemented. The prerequisite track is
-`plans/xpl-partial-repaint.md`, which is scheduled first.
+**Phase 0 done (2026-10-10); phase 1 next.** The prerequisite track,
+`plans/xpl-partial-repaint.md`, is implemented (P1-P4).
+
+Phase 0 produced:
+- **the language specification**, `docs/shader-language.md` (types,
+  semantics, every built-in and edge case, pixel grid, output rule, limits,
+  grammar);
+- **a CPU executor prototype + benchmark**, `tests/shader_bench/`, whose
+  ctest `neui_shader_bench_check` pins the bits;
+- **a D2D custom-effect spike**, branch `spike/d2d-shader-effect` (f1774d2),
+  run on the Windows machine.
+
+Results and the decisions they forced are in "Phase 0 results" at the end of
+this document. The sections above it are updated to match.
 
 ## Context
 
@@ -100,6 +111,14 @@ chain per effect):
   all.
 
 ## 2. The language (`.nsl`)
+
+**The normative specification is now `docs/shader-language.md`.** This
+section is the original design summary, and where the two differ, the spec
+wins. Phase 0 added:
+- `break` / `continue`, `out` / `inout` parameters and `const int`;
+- int division as an error; zero-initialised locals;
+- the exact pixel grid with edge coverage, the dithering formula and concrete
+  limits.
 
 GLSL-ES-flavoured, shaped like SkSL "runtime effects": a single entry point,
 uniforms, and nothing else that touches the outside world. Example:
@@ -281,19 +300,32 @@ asks for it. Importing `.sc` stays out.
   (Debug builds are 10-50× slower). This follows the `src/mujson.cpp`
   precedent, which Tier-1 also compiles directly.
 - **How it runs:** a batched structure-of-arrays interpreter. Each IR op
-  processes a lane of about 64 pixels held in float arrays, so dispatch is
-  amortised over the lane and the inner loops auto-vectorise (SSE2 baseline
-  on x64 — AVX2 is not guaranteed inside plugins — and NEON on arm64).
+  processes a lane of 64 pixels held in float arrays, so dispatch is
+  amortised over the lane.
+- **Explicit SIMD kernels**, not auto-vectorisation: a small 4-wide wrapper
+  over SSE2 (x64 baseline; AVX2 is not guaranteed inside plugins), NEON
+  (arm64), and a portable fallback, with the helpers force-inlined. Phase 0
+  showed that auto-vectorisation depends on the compiler: clang vectorises
+  every kernel, GCC part of them, and MSVC only the trivial ones, which left
+  MSVC 3-4× behind.
 - **Control flow:** `if` / `else` becomes predication + select. Early
   `return` uses a "returned" mask. Loops have constant trip counts.
 - **Bit-identity:**
   - neui ships its own polynomial `sin` / `exp2` / `log2` / `atan2` instead
     of libm;
-  - the executor TU is built with `-ffp-contract=off` (no FMA contraction);
+  - **all** shader arithmetic lives in the executor TU, which is built with
+    `-ffp-contract=off` (no FMA contraction). That includes the front end's
+    constant folding: the header-only front end calls into the executor's
+    math rather than folding inline, because a header is compiled with
+    whatever flags its includer uses, and GCC on arm64 contracts by default;
+  - the FP environment (round-to-nearest, no flush-to-zero) is pinned per
+    draw and restored after it, because a DAW may set flush-to-zero on its
+    UI thread;
   - operation order is fixed.
 
-  CRC goldens in CI then guarantee the same pixels on MSVC x64, AppleClang
-  arm64, GCC x64 and the iOS simulator.
+  CRC goldens in CI then guarantee the same pixels on every compiler and
+  CPU. Phase 0 confirmed this on AppleClang arm64, MSVC x64, GCC 13 x64 and
+  Clang 18 x64.
 - **Threads:** single-threaded in v1 and UI-thread-only like all paint. An
   opt-in fork-join pool (pure data, no backend calls, joins before returning)
   is a later item.
@@ -309,8 +341,11 @@ asks for it. Importing `.sc` stays out.
   - the CUSTOMDRAW `draw`, the compound layer and a future filter primitive
     can all share one cache on the asset.
 - **Key:** program `uid` (not the slot, which is reused), `w_px`, `h_px`,
-  `scale × resolution`, the values of the uniforms the program actually reads,
-  and the wrapped time, only if the program reads `neui_time`.
+  `scale × resolution`, the **sub-pixel remainder of the layer's device
+  origin** (`X0 - floor(X0)`, `Y0 - floor(Y0)`: `p` depends on it, see the
+  spec's pixel grid), the values of the uniforms the program actually reads,
+  and the wrapped time, only if the program reads `neui_time`. Widgets on
+  whole logical px have at most a few remainders (0 or 0.5 at 150%).
 - **Content keying + quantisation:** 50 knobs at the same value share one
   bitmap. With the existing `"<prop>.step"` binding quantisation (e.g.
   `u.value.step = 1/128`), the cache stays bounded even under DAW automation.
@@ -321,8 +356,9 @@ asks for it. Importing `.sc` stays out.
 - **Release:** `release_context`, `clear` and `release_slot` in
   `hosts/shared/asset_store.h` free the cache and its uploads.
 - **Upload:** reuses the `qr_upload` pattern (`widget_paint_compound.h` ~401):
-  lazy per ctx, re-upload on a `get_context_generation` bump (device loss),
-  and pixel-snapped origin at fractional DPI.
+  lazy per ctx, and re-upload on a `get_context_generation` bump (device
+  loss). The bitmap is drawn 1:1 at the floored device origin and is never
+  resampled.
 - **Live resize:** while the layer size is changing, draw the last bitmap
   stretched, and re-shade once the size has been stable for a frame.
 
@@ -354,15 +390,31 @@ asks for it. Importing `.sc` stays out.
 - **Draw:** `DrawImage` inside the current frame, so clip and transform
   compose. The current alpha (neui's alpha stack) goes into the constant
   buffer, the same trick the tint path uses.
-- **Coordinates:** `p = SCENE_POSITION.xy / neui_scale`, translated by the
-  layer origin. The coordinate space of `SCENE_POSITION` under DPI scaling is
-  not documented, so the phase-0 spike verifies it at 100, 150 and 200%
-  against the CPU result.
+- **Coordinates (settled by the phase-0 spike):**
+  - `SCENE_POSITION` is in **device pixels**, with its origin where the
+    effect output lands on the target and pixel centres at +0.5. The DIP
+    transform does not affect it.
+  - The output rect from `MapInputRectsToOutputRect` is in device pixels too.
+  - Drawing in DIP mode at a DIP offset is crisp only when the layer's device
+    origin is an integer. Otherwise D2D resamples the output (98-100% of
+    pixels off by more than 2/255 at 125% and 150%).
+  - **Draw it like this:** inside the frame, temporarily `SetDpi(96, 96)` and
+    an identity transform; `DrawImage` at `floor(X0, Y0)` with an output rect
+    of `ceil(X1) - floor(X0)` × `ceil(Y1) - floor(Y0)` device px; restore.
+    The constant buffer carries the sub-pixel remainder and the scale, and
+    the shader computes the spec's `p`.
+  - Measured: within 0-1/255 of the CPU at 96, 120, 144 and 192 DPI, with
+    integer and fractional origins, a translation and a pushed clip. 0% of
+    pixels were over 2/255, and the clip pushed in DIP mode is still honoured.
+  - **Rotation and skew** cannot use this path: fall back to the CPU bitmap.
+    Edge coverage (spec §11) is computed in the shader.
 - **Feature level:** the device is created with default feature levels
   (`d2d_backend.cpp` ~229), so it can land on 9_x. Store the level: use
   `ps_4_0` at ≥ 10_0, CPU below that. Compile with
-  `D3DCOMPILE_IEEE_STRICTNESS`.
-- **Lazy compile:** compiles take about 10-200 ms. Compile lazily, draw with
+  `D3DCOMPILE_IEEE_STRICTNESS`. (With a null level array, D3D11 stops at
+  11_0; ps_4_0 does not need more.)
+- **Lazy compile:** `D3DCompile` measured 2.5 ms for a small shader and
+  14.5 ms for a 6-octave plasma (GTX 1080 machine). Compile lazily, draw with
   the CPU path until the program is ready, and never block a paint on the
   compiler.
 - **No SDK headers at runtime:** do not use `d2d1effecthelpers.hlsli`; it ships
@@ -640,29 +692,41 @@ See `plans/xpl-partial-repaint.md`.
 - **What it does not block:** phases 0-3 may start in parallel if the client
   is in a hurry.
 
-## 7. Performance budget (CPU executor, single thread, estimates)
+## 7. Performance budget (CPU executor, single thread, measured in phase 0)
+
+ns per pixel with the explicit SIMD kernels, 64-pixel lanes, from
+`tests/shader_bench/`:
+
+| CPU (compiler) | ring_glow, 27 ops | plasma, 35 ops / 6 sin | fbm5, 200 ops / 20 hash | synthetic, 176 ops / 15 transc. |
+|---|---|---|---|---|
+| Apple M1 Ultra (AppleClang) | 7 | 15 | 46 | 40 |
+| Apple M1, CI VM (AppleClang) | 8 | 17 | 53 | 43 |
+| AMD EPYC 9V45, CI VM (Clang 18 / GCC 13) | 5 / 7 | 17 / 20 | 67 / 72 | 41 / 49 |
+| AMD EPYC 7763, CI VM (Clang 18 / MSVC / GCC 13) | 10 / 14 / 13 | 25 / 33 / 31 | 98 / 119 / 124 | 70 / 79 / 92 |
+| Intel i7-6800K, 2016 (MSVC 19.42) | 16 | 36 | 131 | 90 |
+
+What a re-shade costs (synthetic shader):
 
 | Case | Cost |
 |---|---|
-| simple op (add / mul / select / min / sqrt) | ~0.15-0.4 ns per lane |
-| transcendental (polynomial sin / exp / log / pow / atan2) | ~1-3 ns per lane |
-| 150 scalar ops / px, ~10% transcendental | **~40-80 ns / px** |
-| knob 120×120 logical @2× (57.6k px) | **~2.3-4.6 ms** per re-shade |
-| background 800×600 @2× (1.92 Mpx) | **~80-150 ms**; ~20-40 ms at `resolution` 0.5 |
-| naive tree-walking interpreter (rejected) | ~1-3 µs / px |
+| knob 120×120 logical @2× (57.6k px) | **2.2-5.4 ms** |
+| background 800×600 @2× (1.92 Mpx) | **70-170 ms**; 18-42 ms at `resolution` 0.5 |
+| one pixel at a time instead of lanes (rejected) | 10-20× slower |
+
+The pre-phase-0 estimate of 40-80 ns/px for a 150-op shader holds. Older
+x64 CPUs reach about 90.
 
 What this means:
 
 - **Fine:** dragging a single knob at 60 Hz. A preset load that re-shades 50
-  knobs costs a one-off ~0.2 s, much less when values share cache entries.
+  knobs costs a one-off ~0.1-0.3 s, much less when values share cache
+  entries.
 - **Needs quantisation + content sharing:** DAW automation of many knobs.
 - **Not viable on the CPU at 60 Hz:** animated full-window backgrounds. Use
   `resolution` < 1, bake a loop into a filmstrip, or rely on the D2D path
   (Windows only).
 - **Guidance for skin authors:** size effects for the CPU worst case (Cairo,
   CG). The GPU path buys headroom on Windows, not a different look.
-- **Phase 0 confirms these numbers** with a micro-benchmark on MSVC,
-  AppleClang arm64 and GCC before the executor design is frozen.
 
 ## 8. Pre-existing issues surfaced (fix independently, before phase 3)
 
@@ -689,7 +753,7 @@ What this means:
 
 | # | Scope | Main files |
 |---|---|---|
-| 0 | Language spec + edge-case table; executor micro-benchmark (MSVC, AppleClang arm64, GCC); D2D zero-input effect spike (`SCENE_POSITION` at 100/150/200% vs CPU) | `docs/shader-language.md` (new), throwaway spike |
+| 0 | **Done.** Language spec + edge-case table; executor micro-benchmark (MSVC, AppleClang arm64, GCC, Clang); D2D zero-input effect spike (`SCENE_POSITION` at 100/120/150/200% vs CPU) | `docs/shader-language.md`, `tests/shader_bench/`, branch `spike/d2d-shader-effect` |
 | 1 | Front end + IR + optimiser; deterministic built-ins; SoA CPU executor; output packer (premultiply, optional dither) | `hosts/shared/{shader_lang.h,shader_builtins.h}`, `src/shader_exec.{h,cpp}`, `CMakeLists.txt`, `tests/CMakeLists.txt` |
 | 2 | `NEUI_API_SHADER` (`create`, `create_from_file`, introspection, **`bake_bitmap` / `bake_filmstrip`**); asset kind + resource kind; shader cache on `AssetEntry`; QR leak fix. **First visible win:** baked shader filmstrips via the existing ASSET layer + `frame` binding, on every supporting host, zero per-frame cost | `include/neui/d/{shader.h,assets.h,resource.h}`, `hosts/shared/{asset_store.h,resource_provider.h}`, the 4 hosts' `host.*` (`get_interface`) + `widgets.*` (thunk tables) |
 | 3 | Live SHADER compound layer (`u.*`, `resolution`, `fallback`); `shader_api->draw`; painter `resolve_shader` seam; component JSON + serialize | `include/neui/d/compound.h`, `hosts/shared/{compound.h,shader_layer.h,widget_paint_compound.h,painter.h,component_loader.h}`, 6 painter construction sites |
@@ -757,8 +821,9 @@ points. The example shows:
 - **Which use case does the client have?** That decides the order of
   phases 2-3 (bake + param-driven) against 5-6 (partial repaint + animation).
   Ask before phase 1 ends.
-- **`SCENE_POSITION` under DPI scaling** is undocumented. The phase-0 spike
-  settles it before phase 4 is designed in detail.
+- **`SCENE_POSITION` under DPI scaling:** settled by the phase-0 spike
+  (device px; draw in device space at the floored origin, see "GPU
+  executors").
 - **Effects that look good on the GPU but cost too much on the CPU.** "Same
   look" is guaranteed; "same frame rate" is not. Tier the guidance, and
   provide `resolution` and bake-to-filmstrip as the levers.
@@ -771,3 +836,52 @@ points. The example shows:
   spec.
 - **`neui_time` precision** over long sessions. It is wrapped; document the
   period so loop-based effects can choose divisors of it.
+
+## 13. Phase 0 results (2026-10-10)
+
+**Deliverables:**
+- **Spec:** `docs/shader-language.md`.
+- **CPU executor prototype + benchmark:** `tests/shader_bench/`, ctest
+  `neui_shader_bench_check`. It has a hand-built IR (no front end), 4 test
+  programs, scalar / auto-vectorised / explicit-SIMD kernels, and the spec's
+  pixel grid, coverage and dithering.
+- **D2D spike:** branch `spike/d2d-shader-effect` (f1774d2), standalone
+  under `spikes/d2d_shader_effect/`.
+
+**Determinism: confirmed.**
+- The bits were identical on AppleClang arm64, MSVC x64 (two machines),
+  GCC 13 x64 and Clang 18 x64. The test covered:
+  - sweeps of every approximated built-in, including denormals, ±0, ±inf
+    and NaN;
+  - 4 programs at 1×, 1.5×, 2× and a fractional, dithered origin;
+  - scalar vs auto-vectorised vs SIMD runs.
+- **FMA contraction changes bits:** the built-in sweeps differ under clang
+  `-ffp-contract=fast`. Hence the one-TU rule in §3.
+- **A host's flush-to-zero changes bits** unless the executor pins the FP
+  environment (`log2` of a denormal). Hence the per-draw guard in §3.
+
+**Performance:** §7. The estimate holds.
+- Auto-vectorisation was the weak point: GCC 2.2× and MSVC 1.8× slower than
+  their explicit-SIMD runs on the same CPU. Clang is fast either way.
+- With explicit SIMD, the three x64 compilers are within 1.3× of each other
+  on one CPU.
+- Force-inlining made no measurable difference on MSVC.
+
+**D2D:**
+- Approach B (device-space draw at the floored origin) matches the CPU
+  within 1/255. See "Coordinates" in §3.
+- `D3DCompile` takes 2.5-14.5 ms per program.
+- A 240×240 effect draw costs about 83 µs per frame, which is D2D's
+  per-frame overhead. Shader cost does not show at that size.
+
+**Carried into phase 1:**
+- Explicit SIMD kernels with 64-pixel lanes. Lanes of 256 were 10-20% faster
+  on x64 and no faster on Apple, so measure again with the real IR.
+- Vectorise the output packer: about 2 ns/px of fixed cost, which is visible
+  on tiny shaders.
+- The checksums move into `neui_tests` as goldens, and `tests/shader_bench/`
+  goes away.
+- Optional: inspect MSVC kernel codegen (`/FAs`, SSE2-only floor and convert
+  sequences).
+- The throwaway branch `spike/shader-bench-ci` (benchmark report on the CI
+  compilers) can be deleted.
