@@ -924,9 +924,16 @@ checker, then lowering:
   work, scalar, once per draw) and a pixel part, and registers are allocated
   by linear scan.
 
-Constants and draw values reach the pixel program through a pool and an
-`OP_LOAD` right before their first use, so an unrolled loop full of distinct
-constants does not exhaust the 256-register limit.
+Constants and draw values reach the pixel program through a pool and
+`OP_LOAD`:
+- by default, a prologue that runs once per draw loads all of them into
+  pinned registers;
+- when pinning would exceed the 256 live-value limit, as an unrolled loop
+  full of distinct constants can, each value is loaded right before its first
+  use and freed after its last;
+- the load-on-demand allocation also decides the limit;
+- `NEUI_DEBUG_SHADER_PIN=0/1` forces either policy for measurement. Pinning
+  was 5-12% faster on MSVC and within noise on the M1.
 
 **Checks:** 26 test cases.
 - The four phase-0 programs compiled from `.nsl` reproduce the phase-0
@@ -943,16 +950,34 @@ constants does not exhaust the 256-register limit.
     decimal-comma locale;
   - mutation fuzzing (about 3000 mutants).
 
-**Speed** (`neui_shader_bench`, M1 Ultra, AppleClang):
+**Speed** (`neui_shader_bench`, SIMD ns/px; `flat` has no per-pixel work and
+measures the fixed cost of the block loop and output packing):
 
-| Shader | ns/px | knob 120×120 @2× |
-|---|---|---|
-| ring_glow (29 ops) | 6.2 | 0.36 ms |
-| plasma (35 ops, 6 sin) | 14.3 | 0.83 ms |
-| fbm5 (191 ops) | 44 | 2.5 ms |
-| metal_knob (128 ops) | 24 | 1.4 ms |
+| Shader | M1 Ultra, AppleClang | i7-6800K (2016), MSVC | knob 120×120 @2× |
+|---|---|---|---|
+| flat | 0.9 | 4.0 | 0.05-0.23 ms |
+| ring_glow (29 ops) | 6.2 | 13.3 | 0.36-0.77 ms |
+| plasma (35 ops, 6 sin) | 14.4 | 35-36 | 0.83-2.1 ms |
+| fbm5 (191 ops) | 44-49 | 134 | 2.5-7.7 ms |
+| metal_knob (128 ops, realistic) | 25 | 62-66 | 1.4-3.8 ms |
 
-That is the same as the phase-0 prototype.
+These are at or better than the phase-0 prototype.
+
+**An MSVC pitfall found on the way:**
+- **Symptom:** the first version of the output packer cost MSVC a fixed
+  16 ns per pixel, making small shaders nearly 2× slower than the prototype.
+  The Windows machine found it with `/FAs`.
+- **Cause:** when the `F4` / `I4` wrapper structs are nested several levels
+  deep, MSVC keeps every temporary on the stack. That came to 83 instructions
+  per pixel, mostly stack stores.
+- **Fix:** the x86 packer now uses raw `__m128` and does the same operations
+  in the same order, so the bits are unchanged. That gives 23 instructions
+  per pixel with zero stack traffic.
+- **Rule for future hot code on x86:** keep wrapper expressions shallow (as
+  the op kernels are), or use raw intrinsics.
+- **What didn't help:** force-inlining the kernel switch into the block loop
+  made MSVC 2-3× slower. 256-pixel lanes gave 5-12%, which phase 2+ can
+  revisit.
 
 **Next (phase 2):** `NEUI_API_SHADER` (`create`, `create_from_file`,
 introspection, `bake_bitmap` / `bake_filmstrip`), the SHADER asset kind and
