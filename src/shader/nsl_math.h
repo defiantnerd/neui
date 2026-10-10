@@ -43,10 +43,12 @@ const float k_nan = std::numeric_limits<float>::quiet_NaN();
 inline float m_abs(float x) { return from_bits(bits(x) & 0x7fffffffu); }
 
 // floor: |x| >= 2^23 is already integral; NaN and inf fall through unchanged.
+// The truncation keeps the sign of x, so floor(-0) is -0 as IEEE requires
+// (and ceil(0) = -floor(-0) is +0).
 inline float m_floor(float x) {
   const float ax = m_abs(x);
   const float xc = ax < 8388608.0f ? x : 0.0f;  // keep the conversion in range
-  const float t  = static_cast<float>(static_cast<int32_t>(xc));
+  const float t  = from_bits(bits(static_cast<float>(static_cast<int32_t>(xc))) | (bits(xc) & 0x80000000u));
   const float f  = t > xc ? t - 1.0f : t;
   return ax < 8388608.0f ? f : x;
 }
@@ -341,7 +343,9 @@ NSL_FI F4 f4_max(F4 x, F4 y) { return f4_sel(f4_lt(x, y), y, x); }
 NSL_FI F4 f4_floor(F4 x) {
   const I4 in = f4_lt(f4_abs(x), f4(8388608.0f));
   const F4 xc = f4_sel(in, x, f4(0.0f));
-  const F4 t  = i4_to_f4(f4_trunc(xc));
+  const I4 sign = f4_bits(xc) & i4(INT32_MIN);
+  const F4 tr = i4_to_f4(f4_trunc(xc));
+  const F4 t  = f4_from_bits(f4_bits(tr) | sign);
   const F4 f  = f4_sel(f4_gt(t, xc), t - f4(1.0f), t);
   return f4_sel(in, f, x);
 }

@@ -657,6 +657,19 @@ const FlowCase k_flow_cases[] = {
        }
      o[0] = s; o[1] = -1; o[2] = -1; o[3] = 0.5f;
    }},
+  // Calls inside a return value: inlining them grows the call-frame stack
+  // while the return statement is being lowered (a use-after-free once).
+  {R"(float sq(float x) { return x * x; }
+      float both(vec2 v) { return sq(v.x) + sq(v.y); }
+      vec4 main(vec2 p) {
+        if (p.x > 30.0) return vec4(both(p * 0.1), sq(sq(p.y * 0.1)), 0.0, 0.5);
+        return vec4(sq(p.x), sq(sq(p.y * 0.1)), both(p), 1.0);
+      })",
+   [](float x, float y, float o[4]) {
+     auto sq = [](float v) { return v * v; };
+     if (x > 30) { o[0] = sq(x * 0.1f) + sq(y * 0.1f); o[1] = sq(sq(y * 0.1f)); o[2] = 0; o[3] = 0.5f; return; }
+     o[0] = sq(x); o[1] = sq(sq(y * 0.1f)); o[2] = sq(x) + sq(y); o[3] = 1;
+   }},
   {R"(float firsthit(float x, out float steps) {
         steps = 0.0;
         for (int i = 0; i < 16; i++) {
@@ -677,6 +690,39 @@ const FlowCase k_flow_cases[] = {
 };
 
 }  // namespace
+
+// floor keeps the sign of zero, as IEEE does: floor(-0) = -0, ceil(0) = +0.
+TEST_CASE("shader exec: floor and ceil of signed zero")
+{
+  auto p = build("vec4 main(vec2 p) {\n"
+                 "  float z = p.x * 0.0;\n"  // +0 for p.x > 0
+                 "  return vec4(floor(-z), ceil(z), floor(z), ceil(-z));\n"
+                 "}");
+  REQUIRE(p != nullptr);
+  const std::vector<float> xs = {3.0f, 5.0f, 7.0f, 9.0f, 11.0f}, ys = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+  for (bool simd : {false, true}) {
+    std::vector<float> out(xs.size() * 4);
+    nsl::Draw d;
+    d.w = d.h = 16.0f;
+    nsl::evaluate(*p, d, xs.data(), ys.data(), static_cast<int>(xs.size()), out.data(), simd);
+    for (size_t i = 0; i < xs.size(); ++i) {
+      CHECK_EQ(float_bits(out[i * 4 + 0]), 0x80000000u);  // floor(-0) = -0
+      CHECK_EQ(float_bits(out[i * 4 + 1]), 0x00000000u);  // ceil(+0) = +0
+      CHECK_EQ(float_bits(out[i * 4 + 2]), 0x00000000u);  // floor(+0) = +0
+      CHECK_EQ(float_bits(out[i * 4 + 3]), 0x80000000u);  // ceil(-0) = -0
+    }
+  }
+  // Constant folding agrees.
+  auto c = build("vec4 main(vec2 p) { return vec4(1.0 / floor(-0.0), 1.0 / ceil(0.0), 0.0, 1.0); }");
+  REQUIRE(c != nullptr);
+  float o[4];
+  const float x = 1.0f, y = 1.0f;
+  nsl::Draw d;
+  d.w = d.h = 4.0f;
+  nsl::evaluate(*c, d, &x, &y, 1, o, false);
+  CHECK(o[0] == -k_inf);
+  CHECK(o[1] == k_inf);
+}
 
 TEST_CASE("shader exec: control flow matches hand-written C++")
 {

@@ -260,14 +260,72 @@ TEST_CASE("shader lang: size limits")
                              "  for (int i = 0; i < 32; i++) for (int j = 0; j < 32; j++)\n"
                              "    s = sin(s * 1.01 + float(i * j)) * cos(s) + sqrt(abs(s)) + 0.5;\n"
                              "  return vec4(s);"),
-                   "operations; the limit is 8192"));
+                   "operations after inlining and unrolling; the limit is 8192"));
   // More than 256 values alive at once.
   std::string many;
   for (int i = 0; i < 270; ++i) many += "  float v" + std::to_string(i) + " = p.x * " + std::to_string(i + 2) + ".0;\n";
   many += "  float s = 0.0;\n";
   for (int i = 0; i < 270; ++i) many += "  s += v" + std::to_string(i) + ";\n";
   many += "  return vec4(s);";
-  CHECK(fails_with(with_main(many), "live values per pixel; the limit is 256"));
+  CHECK(fails_with(with_main(many), "live values per pixel after inlining and unrolling; the limit is 256"));
+}
+
+// Found by a code review: inputs within every source-level limit that made
+// the compiler crash, overflow its stack or run for minutes.
+TEST_CASE("shader lang: hostile programs fail quickly")
+{
+  // f_k calls f_{k-1} twice: 2^40 inlinings, while CSE keeps the IR tiny.
+  std::string twice = "float f0(float x) { return x; }\n";
+  for (int k = 1; k <= 40; ++k)
+    twice += "float f" + std::to_string(k) + "(float x) { float t = f" + std::to_string(k - 1) +
+             "(x); float u = f" + std::to_string(k - 1) + "(x); return t + u; }\n";
+  CHECK(fails_with(twice + "vec4 main(vec2 p) { float t = f40(p.x); return vec4(t); }",
+                   "shader is too large to compile"));
+
+  // Braceless if / for bodies count toward the nesting limit.
+  std::string ifs = "  float s = 0.0;\n  ";
+  for (int i = 0; i < 3000; ++i) ifs += "if (p.x > 0.0) ";
+  ifs += "s = 1.0;\n  return vec4(s);";
+  CHECK(fails_with(with_main(ifs), "nesting is deeper than 128"));
+  std::string elses = "  float s = 0.0;\n  if (p.x > 0.0) s = 1.0;\n";
+  for (int i = 0; i < 1000; ++i) elses += "  else if (p.x > " + std::to_string(i) + ".0) s = 2.0;\n";
+  elses += "  return vec4(s);";
+  CHECK(fails_with(with_main(elses), "nesting is deeper than 128"));
+
+  // Nesting adds up through inlining: 12 functions of 100 nested ifs each.
+  std::string chain = "float g0(float x) { return x; }\n";
+  for (int k = 1; k <= 12; ++k) {
+    chain += "float g" + std::to_string(k) + "(float x) {\n  float t = x;\n  ";
+    for (int i = 0; i < 100; ++i) chain += "if (x > 0.0) ";
+    chain += "t = g" + std::to_string(k - 1) + "(x);\n  return t;\n}\n";
+  }
+  CHECK(fails_with(chain + "vec4 main(vec2 p) { float t = g12(p.x); return vec4(t); }",
+                   "nesting is deeper than 512 after inlining"));
+}
+
+TEST_CASE("shader lang: statement and name rules")
+{
+  // A function cannot call itself (it is registered before its body).
+  CHECK(fails_at("float f(float x) { float t = f(x); return t; }\n" + with_main("  return vec4(f(p.x));"),
+                 1, 30, "'f' calls itself; recursion is not supported"));
+  CHECK(fails_with("float f(int n, float x) { float t = x; if (n > 0) { t = f(n - 1, x * 2.0); } return t; }\n" +
+                       with_main("  return vec4(f(3, p.x));"),
+                   "recursion is not supported"));
+  // A statement that starts with a call must be just the call.
+  CHECK(fails_at(with_main("  abs(p.x) == 1.0;\n  return vec4(0.0);"), 2, 3, "expected a function call statement"));
+  CHECK(fails_at("float f(float x) { return x; }\n" + with_main("  f(p.x) + 1.0;\n  return vec4(0.0);"), 3, 3,
+                 "expected a function call statement"));
+  CHECK(compiles("void g(out float y) { y = 1.0; }\n" + with_main("  float y;\n  g(y);\n  return vec4(y);")));
+  // A local cannot take a function's name.
+  CHECK(fails_at("float f(float x) { return x; }\n" + with_main("  float f = 2.0;\n  return vec4(f);"), 3, 9,
+                 "'f' is a function"));
+  // A long loop that does end says how often it runs.
+  CHECK(fails_at(with_main("  for (int i = 0; i < 2000000; i++) {}\n  return vec4(0.0);"), 2, 3,
+                 "loop runs 2000000 times; the limit is 64"));
+  CHECK(fails_at(with_main("  for (int i = 100; i >= 0; i -= 1) {}\n  return vec4(0.0);"), 2, 3,
+                 "loop runs 101 times; the limit is 64"));
+  CHECK(fails_at(with_main("  for (int i = 0; i != 200; i += 2) {}\n  return vec4(0.0);"), 2, 3,
+                 "loop runs 100 times; the limit is 64"));
 }
 
 TEST_CASE("shader lang: float literals round correctly, whatever the C locale")

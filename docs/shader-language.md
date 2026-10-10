@@ -73,9 +73,10 @@ A program is a sequence of global declarations:
   parameter can have any name;
 - `precision` statements (`precision highp float;`), accepted and ignored.
 
-Everything is **declared before use**, and there are no prototypes. Since a
-function can only call functions defined above it, recursion cannot be
-written. Mutable globals do not exist: a global is `uniform` or `const`.
+Everything is **declared before use**, and there are no prototypes. A
+function can only call functions defined above it, and a call to itself is an
+error, so there is no recursion. A local variable cannot take the name of a
+function. Mutable globals do not exist: a global is `uniform` or `const`.
 
 ## 4. Types and values
 
@@ -241,7 +242,7 @@ in exactly the order given, so every executor produces the same bits.
 |---|---|
 | `abs(x)` | clear the sign bit |
 | `sign(x)` | `x > 0 ? 1 : (x < 0 ? -1 : 0)`; NaN → 0 |
-| `floor(x)` | exact |
+| `floor(x)` | exact; `floor(-0.0)` is `-0.0` |
 | `ceil(x)` | `-floor(-x)` |
 | `fract(x)` | `x - floor(x)`; can round to `1.0` for tiny negative `x` |
 | `mod(x, y)` | `x - y * floor(x / y)`, **floored** (never HLSL `fmod`); `mod(x, 0)` is NaN |
@@ -418,7 +419,8 @@ GPU timeout (TDR on Windows).
 |---|---|
 | source size | 64 KiB |
 | identifier length | 63 |
-| nesting depth (blocks + expressions) | 128 |
+| nesting depth (statements, blocks and expressions) | 128 |
+| nesting depth after inlining | 512 |
 | user functions | 64 |
 | uniforms | 32 declarations, 64 scalar components |
 | `for` trip count | 64 |
@@ -426,6 +428,13 @@ GPU timeout (TDR on Windows).
 | product of nested trip counts | 1024 |
 | scalar operations after inlining, unrolling and folding | 8192 |
 | simultaneously live scalar values | 256 |
+| compile work: statements and expressions lowered after inlining and unrolling | 1,048,576 |
+
+Nesting after inlining and compile work bound the compiler itself, its stack
+and its running time. Inlining multiplies work (a
+function that calls another twice, which calls another twice, ...), and the
+optimiser can fold the result down to a few operations, so neither the source
+limits nor the operation limit would catch it.
 
 ## 14. Keywords and differences from GLSL ES 1.00
 

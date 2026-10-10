@@ -15,7 +15,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <memory>
+#include <new>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -37,6 +39,11 @@ constexpr int k_max_loop_nesting = 4;
 constexpr int k_max_trip_product = 1024;
 constexpr int k_max_ops = 8192;
 constexpr int k_max_live = 256;
+// Bounds on the lowering pass itself. Inlining multiplies work and nesting
+// (f calls g twice, g calls h twice, ...), and CSE keeps the IR small while it
+// happens, so neither the op limit nor the IR cap catches it.
+constexpr int64_t k_max_lower_steps = int64_t(1) << 20;  // statements + expressions + if snapshots
+constexpr int k_max_lower_depth = 512;                   // nesting after inlining
 // Lowering stops long before the op limit could be checked, so a pathological
 // program cannot exhaust memory first.
 constexpr size_t k_max_ir_values = 200000;
@@ -573,6 +580,7 @@ class Parser {
 
   void declare_local(VarDecl* v, const Token& at) {
     check_new_name(at);
+    if (functions_.count(v->name)) fail(at.line, at.col, quote(v->name) + " is a function");
     auto& scope = scopes_.back();
     if (scope.count(v->name)) fail(at.line, at.col, quote(v->name) + " is already declared");
     scope[v->name] = v;
@@ -786,6 +794,7 @@ class Parser {
   // A statement that is its own scope (the body of if / for).
   std::unique_ptr<Stmt> parse_sub_stmt() {
     if (peek().t == T_LBRACE) return parse_block(true);
+    DepthGuard g(*this, peek());  // braceless `if (a) if (b) ...` nests too
     scopes_.emplace_back();
     std::unique_ptr<Stmt> s = parse_stmt();
     scopes_.pop_back();
@@ -814,6 +823,7 @@ class Parser {
         if (peek(1).t == T_LPAREN) {
           auto s = make_stmt(Stmt::CALL, t);
           s->value = parse_expr();
+          if (s->value->k != Expr::CALL) fail(t.line, t.col, "expected a function call statement");
           expect(T_SEMI, "';'");
           return s;
         }
@@ -1306,6 +1316,8 @@ class Parser {
       }
       return e;
     }
+    if (current_fn_ && t.text == current_fn_->name)
+      fail(t.line, t.col, quote(t.text) + " calls itself; recursion is not supported");
     auto it = functions_.find(t.text);
     if (it == functions_.end()) {
       if (lookup(t.text)) fail(t.line, t.col, quote(t.text) + " is not a function");
@@ -1622,6 +1634,7 @@ class Lowerer {
 
   // --- expressions ---
   RV lower_expr(const Expr* e) {
+    Nest nest(*this, e->line, e->col);
     switch (e->k) {
       case Expr::INT: return int_val(e->ival);
       case Expr::FLOAT: return scalar(ir_.k(e->fval));
@@ -1971,8 +1984,28 @@ class Lowerer {
     st.val = nv;
   }
 
+  // --- work and nesting bounds ---
+  void charge(int64_t n, int line, int col) {
+    steps_ += n;
+    if (steps_ > k_max_lower_steps)
+      fail(line, col, "shader is too large to compile (more than " + std::to_string(k_max_lower_steps) +
+                          " steps after inlining and unrolling)");
+  }
+  struct Nest {
+    Lowerer& l;
+    Nest(Lowerer& lw, int line, int col) : l(lw) {
+      if (++l.depth_ > k_max_lower_depth)
+        fail(line, col, "nesting is deeper than " + std::to_string(k_max_lower_depth) + " after inlining");
+      l.charge(1, line, col);
+    }
+    ~Nest() { --l.depth_; }
+    Nest(const Nest&) = delete;
+    Nest& operator=(const Nest&) = delete;
+  };
+
   // --- statements; returns true when the rest of the block is unreachable ---
   bool lower_stmt(const Stmt* s) {
+    Nest nest(*this, s->line, s->col);
     switch (s->k) {
       case Stmt::EMPTY: return false;
       case Stmt::BLOCK:
@@ -2042,6 +2075,7 @@ class Lowerer {
       const Stmt* taken = ir_.is_true(c) ? s->then_s.get() : s->else_s.get();
       return taken ? lower_stmt(taken) : false;
     }
+    charge(2 * static_cast<int64_t>(env_.size()), s->line, s->col);  // the two snapshots below
     Frame& fr = frame();
     const int outer_path = fr.path;
     const auto before = env_;
@@ -2087,10 +2121,26 @@ class Lowerer {
     };
     int64_t trips = 0;
     for (int64_t i = start; holds(i); i += delta) {
-      if (++trips > 1000000) fail(s->line, s->col, "the loop does not terminate");
+      if (++trips <= k_max_trip) continue;
+      // Over the limit: say whether it ever ends, and how often it runs.
+      const int64_t span = bound - start;
+      bool ends = false;
+      switch (s->for_cmp) {
+        case T_LT: case T_LE: ends = delta > 0; break;
+        case T_GT: case T_GE: ends = delta < 0; break;
+        default: ends = span % delta == 0 && span / delta >= 0; break;
+      }
+      if (!ends) fail(s->line, s->col, "the loop does not terminate");
+      int64_t n = 0;
+      switch (s->for_cmp) {
+        case T_LT: n = (span + delta - 1) / delta; break;
+        case T_LE: n = span / delta + 1; break;
+        case T_GT: n = (-span - delta - 1) / -delta; break;
+        case T_GE: n = -span / -delta + 1; break;
+        default: n = span / delta; break;
+      }
+      fail(s->line, s->col, "loop runs " + std::to_string(n) + " times; the limit is " + std::to_string(k_max_trip));
     }
-    if (trips > k_max_trip)
-      fail(s->line, s->col, "loop runs " + std::to_string(trips) + " times; the limit is " + std::to_string(k_max_trip));
     if (loop_nesting_ + 1 > k_max_loop_nesting)
       fail(s->line, s->col, "loops are nested more than " + std::to_string(k_max_loop_nesting) + " deep");
     if (trip_product_ * trips > k_max_trip_product)
@@ -2123,9 +2173,13 @@ class Lowerer {
   const Parser& ps_;
   std::unordered_map<const VarDecl*, VarState> env_;
   std::unordered_map<const VarDecl*, RV> globals_;
-  std::vector<Frame> frames_;
+  // A deque, so a call inlined while a statement holds frame() (a return
+  // value that calls a function) cannot move the frame it refers to.
+  std::deque<Frame> frames_;
   int const_mode_ = 0;
   int call_depth_ = 0;
+  int depth_ = 0;
+  int64_t steps_ = 0;
   int loop_nesting_ = 0;
   int64_t trip_product_ = 1;
 };
@@ -2306,10 +2360,10 @@ void finalize(const IR& ir, const int out[4], int main_line, int main_col, Progr
   PixelAlloc tight = allocate_pixels(ir, live, draw_reg, out, false);
   const int ops = tight.real_ops + static_cast<int>(pg.draw_code.size());
   if (ops > k_max_ops)
-    fail(main_line, main_col, "shader needs " + std::to_string(ops) + " operations; the limit is " + std::to_string(k_max_ops));
+    fail(main_line, main_col, "shader needs " + std::to_string(ops) + " operations after inlining and unrolling; the limit is " + std::to_string(k_max_ops));
   if (tight.peak > k_max_live)
     fail(main_line, main_col, "shader needs " + std::to_string(tight.peak) +
-                                  " live values per pixel; the limit is " + std::to_string(k_max_live));
+                                  " live values per pixel after inlining and unrolling; the limit is " + std::to_string(k_max_live));
   PixelAlloc pinned = allocate_pixels(ir, live, draw_reg, out, true);
   const int policy = debug_pin_policy();
   PixelAlloc& use = (policy != 0 && pinned.peak <= k_max_live) ? pinned : tight;
@@ -2374,6 +2428,10 @@ CompileResult compile(const char* src, size_t len, const char* name) {
     res.line = e.line;
     res.col = e.col;
     res.error = label + ":" + std::to_string(e.line) + ":" + std::to_string(e.col) + ": error: " + e.msg;
+  } catch (const std::bad_alloc&) {
+    res.line = 1;
+    res.col = 1;
+    res.error = label + ":1:1: error: out of memory compiling the shader";
   }
   return res;
 }
