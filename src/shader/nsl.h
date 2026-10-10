@@ -58,6 +58,14 @@ struct Stats {
 };
 Stats stats(const Program& p);
 
+// neui_time for a clock reading in seconds: wrapped to [0, 3600) as the
+// spec requires (negative readings wrap too; NaN and infinities give 0).
+float wrap_time(double seconds);
+
+// Value i of n evenly spaced from `from` to `to`, both ends exact (a
+// filmstrip sweep). Here and not in the caller so no compiler contracts it.
+float sweep_value(float from, float to, uint32_t i, uint32_t n);
+
 // One draw of a shader layer.
 struct Draw {
   float x = 0.0f, y = 0.0f;   // layer origin, logical px, translation included

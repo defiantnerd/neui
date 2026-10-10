@@ -20,7 +20,7 @@ if(WIN32 AND NEUI_WITH_LVGL)
   # Win32/D2D pairing. The registered host id stays neui.host.crossplatform;
   # backend + platform are paired per build, exactly like Linux.
   target_sources(neui-xplhost PRIVATE platform_lvgl.cpp)
-  target_compile_definitions(neui-xplhost PRIVATE NEUI_PLATFORM_LVGL=1)
+  target_compile_definitions(neui-xplhost PRIVATE NEUI_PLATFORM_LVGL=1 NEUI_NO_SHADERS=1)
   target_include_directories(neui-xplhost SYSTEM PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/stb)
   # windowsapp.lib as in the native-Win32 branch below: host.cpp compiles the
@@ -116,4 +116,6 @@ elseif(UNIX)
 else()
   target_sources(neui-xplhost PRIVATE platform_null.cpp)
   target_link_libraries(neui-xplhost PRIVATE neui-backend-null)
+  # The null backend draws nothing, so no shader interface (never hand one out inert).
+  target_compile_definitions(neui-xplhost PRIVATE NEUI_NO_SHADERS=1)
 endif()

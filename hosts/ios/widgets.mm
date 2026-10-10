@@ -18,6 +18,9 @@
 
 #include "host.h"
 #include "../shared/compound.h"
+#if !defined(NEUI_NO_SHADERS)
+#include "../shared/shader_api.h"
+#endif
 #include "../../backends/cg/cg_backend.h"
 
 #include "../shared/ios/clipboard_ios.h"
@@ -2123,6 +2126,22 @@ namespace ios_host
     Session* s = nullptr; auto* P = resolve_filter_prim_ios(session, asset, prim, s);
     if (P) neui_detail::apply_filter_merge_add_input(*P, source);
   }
+#if !defined(NEUI_NO_SHADERS)
+  // -------------------------------------------------------------------------
+  // Shader API (NEUI_API_SHADER) - shared implementation in shader_api.h.
+
+  struct IOSShaderHost {
+    static IOSAssetManager* store(neui_session_t session, uint32_t& session_id)
+    {
+      Session* s = get_session(session);
+      if (!s) return nullptr;
+      session_id = s->session_id();
+      return &s->_asset_manager;
+    }
+  };
+  neui_shader_api_t shader_api = neui_detail::shader_api_table<IOSShaderHost>();
+#endif
+
   neui_filter_api_t filter_api = {
     NEUI_VERSION,
     fi_add_primitive, fi_remove_primitive, fi_clear,

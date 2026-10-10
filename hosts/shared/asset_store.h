@@ -19,6 +19,7 @@
 #include "image_filter.h"  // image_gaussian_blur_bgra
 #include "filter_graph.h"  // FilterAsset + evaluate_filter (SVG fe* engine)
 #include "resource_provider.h"  // ResourceProvider (NEUI_API_RESOURCE_CLIENT)
+#include "shader_asset.h"  // ShaderAsset (NEUI_ASSET_KIND_SHADER)
 
 // Session-scoped asset slot table shared by all three hosts. Each host
 // previously carried a near-identical manager (xpl AssetManager, win32
@@ -107,6 +108,9 @@ namespace neui_detail
     // Populated for NEUI_ASSET_KIND_FILTER entries; null otherwise.
     std::unique_ptr<FilterAsset> filter;
 
+    // Populated for NEUI_ASSET_KIND_SHADER entries; null otherwise.
+    std::unique_ptr<ShaderAsset> shader;
+
     // Populated for NEUI_ASSET_KIND_SURFACE entries; null otherwise.
     // Owns the off-screen render context for the surface's lifetime.
     // `pixels` (above) holds the most recently rendered frame, fed back
@@ -167,6 +171,24 @@ namespace neui_detail
       entry->scale     = scale;
       entry->pixels.assign(bgra_premul,
                             bgra_premul + static_cast<size_t>(width_px) * height_px * 4);
+      return alloc_slot(std::move(entry));
+    }
+
+    // Same, taking the pixel buffer over instead of copying it.
+    uint32_t allocate_bitmap(std::vector<uint8_t>&& bgra_premul, uint32_t width_px,
+                             uint32_t height_px, float scale)
+    {
+      if (width_px == 0 || height_px == 0 ||
+          bgra_premul.size() != static_cast<size_t>(width_px) * height_px * 4)
+        return 0;
+      if (scale <= 0.0f) scale = 1.0f;
+
+      auto entry = std::make_unique<AssetEntry>();
+      entry->kind      = NEUI_ASSET_KIND_BITMAP;
+      entry->width_px  = width_px;
+      entry->height_px = height_px;
+      entry->scale     = scale;
+      entry->pixels    = std::move(bgra_premul);
       return alloc_slot(std::move(entry));
     }
 
@@ -377,9 +399,11 @@ namespace neui_detail
     // zero-size bitmap, or a grid that can't fit at least 1 px per cell - so a
     // mis-tag can never produce an out-of-bounds source rect. Re-tagging
     // overwrites a prior layout; cols == rows == 1 leaves a single-frame
-    // entry (frame_count 1), still drawable via the frame path.
+    // entry (frame_count 1), still drawable via the frame path. A non-zero
+    // frame_count below cols * rows leaves the trailing cells unused (a baked
+    // shader strip whose frame count does not fill its grid).
     bool set_frame_layout(uint32_t slot, uint32_t cols, uint32_t rows,
-                          uint32_t gutter_px)
+                          uint32_t gutter_px, uint32_t frame_count = 0)
     {
       AssetEntry* e = get_slot(slot);
       if (!e) return false;
@@ -399,6 +423,7 @@ namespace neui_detail
       // promises a mis-tag never yields an out-of-bounds source rect).
       const uint64_t fc = static_cast<uint64_t>(cols) * rows;
       if (fc > 0xFFFFFFFFull) return false;
+      if (frame_count > fc) return false;
 
       auto fs = std::make_unique<FilmstripInfo>();
       fs->cols        = cols;
@@ -406,7 +431,7 @@ namespace neui_detail
       fs->gutter_px   = gutter_px;
       fs->frame_w_px  = fw;
       fs->frame_h_px  = fh;
-      fs->frame_count = static_cast<uint32_t>(fc);
+      fs->frame_count = frame_count ? frame_count : static_cast<uint32_t>(fc);
       e->filmstrip = std::move(fs);
       return true;
     }
@@ -514,6 +539,19 @@ namespace neui_detail
       auto entry = std::make_unique<AssetEntry>();
       entry->kind   = NEUI_ASSET_KIND_FILTER;
       entry->filter = std::make_unique<FilterAsset>();
+      return alloc_slot(std::move(entry));
+    }
+
+    // Allocate a slot holding a compiled shader (NEUI_ASSET_KIND_SHADER).
+    // Returns 0 for a null program.
+    uint32_t allocate_shader(std::shared_ptr<const neui::nsl::Program> program)
+    {
+      if (!program) return 0;
+      auto entry = std::make_unique<AssetEntry>();
+      entry->kind           = NEUI_ASSET_KIND_SHADER;
+      entry->shader         = std::make_unique<ShaderAsset>();
+      entry->shader->program = std::move(program);
+      entry->shader->uid     = next_shader_uid();
       return alloc_slot(std::move(entry));
     }
 

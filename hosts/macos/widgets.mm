@@ -16,6 +16,9 @@
 #include "../shared/macos/dnd_source_macos.h"
 #include "../shared/macos/menubar_macos.h"
 #include "../shared/compound.h"
+#if !defined(NEUI_NO_SHADERS)
+#include "../shared/shader_api.h"
+#endif
 #include "../../backends/cg/cg_backend.h"
 
 // One TU emits the @implementation NeuiToastMacOS body. Other TUs that
@@ -3057,6 +3060,22 @@ namespace macos_host
     auto* P = resolve_filter_prim_macos(session, asset, prim, s);
     if (P) neui_detail::apply_filter_merge_add_input(*P, source);
   }
+
+#if !defined(NEUI_NO_SHADERS)
+  // -------------------------------------------------------------------------
+  // Shader API (NEUI_API_SHADER) - shared implementation in shader_api.h.
+
+  struct MacShaderHost {
+    static MacOSAssetManager* store(neui_session_t session, uint32_t& session_id)
+    {
+      Session* s = get_session(session);
+      if (!s) return nullptr;
+      session_id = s->session_id();
+      return &s->_asset_manager;
+    }
+  };
+  neui_shader_api_t shader_api = neui_detail::shader_api_table<MacShaderHost>();
+#endif
 
   neui_filter_api_t filter_api = {
     NEUI_VERSION,

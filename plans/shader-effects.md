@@ -2,8 +2,14 @@
 
 ## Status
 
-**Phases 0 and 1 done (2026-10-10); phase 2 next.** The prerequisite track,
-`plans/xpl-partial-repaint.md`, is implemented (P1-P4).
+**Phases 0, 1 and 2 done (2026-10-10); phase 3 next.** The prerequisite
+track, `plans/xpl-partial-repaint.md`, is implemented (P1-P4).
+
+Phase 2 produced the client interface: `NEUI_API_SHADER`
+(`include/neui/d/shader.h`) with the SHADER asset kind, compile + uniform
+introspection and the bake API, implemented once for all four hosts
+(`hosts/shared/shader_api.h`, `shader_asset.h`), plus `neui_shader_example`.
+See "Phase 2 results".
 
 Phase 1 produced the compiler and the CPU executor: the `neui-shader` static
 library in `src/shader/` (API `src/shader/nsl.h`, linked by `neui`), with
@@ -345,6 +351,10 @@ asks for it. Importing `.sc` stays out.
 
 ### Bitmap cache
 
+Phase 3. A bake creates its own BITMAP asset and needs no cache; the cache
+serves the live layer and `draw`. Phase 2 already put `AssetEntry::shader`
+(`ShaderAsset`: the program and a process-unique `uid`) in place for it.
+
 - **Where it lives:** on the **shader asset** (`AssetEntry::shader`, a
   `unique_ptr<ShaderAsset>` holding the program, a monotonic `uid` and the
   cache), **not** on the layer.
@@ -481,56 +491,64 @@ The backend only compiles emitted text and draws. It never sees `.nsl`.
 - **Never handed out inert:** this is the design-notes lesson from `EMBED` on
   iOS. A non-null interface must work.
 
+Implemented in phase 2 (`include/neui/d/shader.h`; the header is the
+reference, this is its shape):
+
 ```c
 #define NEUI_API_SHADER "com.defiantnerd.neui.extension.shader/0"
 
-typedef struct neui_shader_uniform {
-  const char* name;
-  float       v[4];            // scalar uses v[0]; vec2/3/4 use the leading slots
-} neui_shader_uniform_t;
+typedef struct neui_shader_uniform { const char* name; float v[4]; } neui_shader_uniform_t;
+neui_shader_uniform_t neui_shader_color(const char* name, uint32_t argb);  // static inline
 
-typedef struct neui_shader_draw {   // passed by pointer; append-only (like stroke_style)
-  neui_asset_t                 shader;
-  float                        x, y, w, h;      // logical px, painter space
-  const neui_shader_uniform_t* uniforms;
-  int                          uniform_count;
-  float                        resolution;      // 0 or 1 = full; 0.5 = half-res + upscale
-  uint32_t                     cache_tag;       // optional extra cache-key discriminator
-} neui_shader_draw_t;
+typedef struct neui_shader_uniform_info {
+  const char* name; uint32_t components; float def[4];
+} neui_shader_uniform_info_t;
+
+typedef struct neui_shader_bake {    // passed by pointer; fields may be appended
+  float width, height;               // logical px (one image, or one frame)
+  float scale;                       // device px per logical px; <= 0 means 1
+  float time;                        // neui_time; wrapped to [0, 3600)
+  const neui_shader_uniform_t* uniforms;  // by name; others keep their defaults
+  uint32_t uniform_count;
+} neui_shader_bake_t;
 
 typedef struct neui_shader_api {
   uint32_t neui_version;
-  // Compile. Returns asset_none on failure and writes "line:col: message"
-  // into err (a separate error query could not work - there is no handle).
-  neui_asset_t (NEUI_ABI *create)(neui_session_t, const char* src, size_t len,
-                                  char* err, size_t err_cap);
-  neui_asset_t (NEUI_ABI *create_from_file)(neui_session_t, const char* name,
-                                            char* err, size_t err_cap);
-  // Introspection - lets tools / skins list what a shader expects.
-  int  (NEUI_ABI *uniform_count)(neui_session_t, neui_asset_t shader);
-  bool (NEUI_ABI *uniform_info)(neui_session_t, neui_asset_t shader, int i,
-                                char* name, size_t name_cap, int* type);
-  // Bake to ordinary BITMAP assets (zero per-frame cost afterwards).
-  neui_asset_t (NEUI_ABI *bake_bitmap)(neui_session_t, neui_asset_t shader,
-                                       int w, int h, float scale,
-                                       const neui_shader_uniform_t*, int count);
-  neui_asset_t (NEUI_ABI *bake_filmstrip)(neui_session_t, neui_asset_t shader,
-                                          int w, int h, float scale,
-                                          const char* sweep_uniform, uint32_t frames,
-                                          const neui_shader_uniform_t*, int count);
-  // CUSTOMDRAW: draw inside a WIDGET_PAINT callback with the opaque painter.
-  void (NEUI_ABI *draw)(neui_painter_t* p, const neui_shader_draw_t* d);
+  neui_asset_t (*create)(neui_session_t, const char* src, uint32_t len, const char* name,
+                         char* err, uint32_t err_cap);
+  neui_asset_t (*create_from_file)(neui_session_t, const char* path, char* err, uint32_t err_cap);
+  uint32_t     (*uniform_count)(neui_session_t, neui_asset_t shader);
+  bool         (*uniform_at)(neui_session_t, neui_asset_t shader, uint32_t index,
+                             neui_shader_uniform_info_t* out);
+  neui_asset_t (*bake_bitmap)(neui_session_t, neui_asset_t shader, const neui_shader_bake_t*);
+  neui_asset_t (*bake_filmstrip)(neui_session_t, neui_asset_t shader, const neui_shader_bake_t*,
+                                 const char* sweep, float from, float to, uint32_t frames);
+  // phase 3 appends: void (*draw)(neui_painter_t* p, const neui_shader_draw_t* d);
 } neui_shader_api_t;
 ```
 
 - Shader handles are ordinary `neui_asset_t` of kind SHADER and are destroyed
   with `assets->destroy`. **The asset vtable does not change.**
-- `bake_filmstrip` sweeps `sweep_uniform` over 0..1 across `frames` cells and
-  tags the result with the existing filmstrip frame layout.
-- `draw` takes the opaque `neui_painter_t*`, so **the public painter vtable
-  does not change**. The host resolves the asset through the painter's
-  `host_token`. A painter exists only inside a paint callback (`WIDGET_PAINT`
-  or `paint_surface`), so `draw` works in both and nowhere else.
+- `create` reports the first error as `"<name>:<line>:<col>: error: ..."`
+  into a caller buffer: a failed create has no handle to query.
+- `bake_filmstrip` sets frame i's `sweep` (a float uniform, or `"neui_time"`
+  to bake an animation) to `from + (to - from) * i / (frames - 1)`, matching
+  a `"frame"` binding with scale `frames - 1`. **neui picks the cell grid**:
+  the column count that keeps the longer bitmap side shortest. A
+  single-column strip of 128 frames at 240 px would be 30720 px tall, beyond
+  every GPU's texture limit; frames are drawn by index, so the layout is
+  invisible to clients. `get_frame_count` returns `frames` even when the grid
+  has spare cells.
+- Bakes use the scale the client passes. Clients have no display-scale query,
+  and the xpl host only knows a scale once a window exists, so `scale <= 0`
+  means 1, not "the display's". The example bakes at 2.
+- **Phase 3 appends** `draw(neui_painter_t*, const neui_shader_draw_t*)` for
+  CUSTOMDRAW, with `neui_shader_draw_t` carrying the asset, rect, uniforms,
+  `resolution` and a cache tag. It takes the opaque `neui_painter_t*`, so
+  **the public painter vtable does not change**. The host resolves the asset
+  through the painter's `host_token`. A painter exists only inside a paint
+  callback (`WIDGET_PAINT` or `paint_surface`), so `draw` works in both and
+  nowhere else.
 
 ### Compound layer `NEUI_COMPOUND_LAYER_SHADER = 8`
 
@@ -743,8 +761,12 @@ What this means:
 
 ## 8. Pre-existing issues surfaced (fix independently, before phase 3)
 
-- **QR layer leaks GPU uploads.** `QrSymbol::bitmaps` per-ctx uploads are
-  destroyed only by `release_context` / `clear`
+- **QR layer leaks GPU uploads. Fixed in phase 2:** FIFO eviction,
+  `compound_remove_layer` (which now takes the backend), `compound_clear` and
+  `AssetStore::release_slot` destroy a symbol's uploads in every ctx;
+  regression tests in `tests/test_compound.cpp` and
+  `tests/test_asset_filmstrip.cpp`. The finding was: `QrSymbol::bitmaps`
+  per-ctx uploads were destroyed only by `release_context` / `clear`
   (`compound_release_ctx_bitmaps`, `hosts/shared/compound.h` ~372). These
   paths free a symbol without destroying them:
   - FIFO eviction (`widget_paint_compound.h` ~393);
@@ -768,8 +790,8 @@ What this means:
 |---|---|---|
 | 0 | **Done.** Language spec + edge-case table; executor micro-benchmark (MSVC, AppleClang arm64, GCC, Clang); D2D zero-input effect spike (`SCENE_POSITION` at 100/120/150/200% vs CPU) | `docs/shader-language.md`, `tests/shader_bench/`, branch `spike/d2d-shader-effect` |
 | 1 | **Done.** Front end + IR + optimiser; deterministic built-ins; SoA CPU executor; output packer (premultiply, optional dither) | `src/shader/{nsl.h,nsl_ir.h,nsl_math.h,nsl_compile.cpp,nsl_exec.cpp,CMakeLists.txt}`, `tests/test_shader_{lang,exec}.cpp` |
-| 2 | `NEUI_API_SHADER` (`create`, `create_from_file`, introspection, **`bake_bitmap` / `bake_filmstrip`**); asset kind + resource kind; shader cache on `AssetEntry`; QR leak fix. **First visible win:** baked shader filmstrips via the existing ASSET layer + `frame` binding, on every supporting host, zero per-frame cost | `include/neui/d/{shader.h,assets.h,resource.h}`, `hosts/shared/{asset_store.h,resource_provider.h}`, the 4 hosts' `host.*` (`get_interface`) + `widgets.*` (thunk tables) |
-| 3 | Live SHADER compound layer (`u.*`, `resolution`, `fallback`); `shader_api->draw`; painter `resolve_shader` seam; component JSON + serialize | `include/neui/d/compound.h`, `hosts/shared/{compound.h,shader_layer.h,widget_paint_compound.h,painter.h,component_loader.h}`, 6 painter construction sites |
+| 2 | **Done.** `NEUI_API_SHADER` (`create`, `create_from_file`, introspection, **`bake_bitmap` / `bake_filmstrip`**); asset kind + resource kind; `ShaderAsset` on `AssetEntry`; QR leak fix. **First visible win:** baked shader filmstrips via the existing ASSET layer + `frame` binding, on every supporting host, zero per-frame cost | `include/neui/d/{shader.h,assets.h,resource.h}`, `hosts/shared/{shader_api.h,shader_asset.h,asset_store.h}`, the 4 hosts' `host.*` (`get_interface`) + `widgets.*` (a 10-line host policy each), `examples/shader_example.cpp` |
+| 3 | Live SHADER compound layer (`u.*`, `resolution`, `fallback`); `shader_api->draw`; the bitmap cache on the shader asset; painter `resolve_shader` seam; component JSON + serialize | `include/neui/d/compound.h`, `hosts/shared/{compound.h,shader_layer.h,widget_paint_compound.h,painter.h,component_loader.h}`, 6 painter construction sites |
 | 4 | D2D GPU path: HLSL emitter, runtime `D3DCompile`, custom effect, tolerance tests | `hosts/shared/shader_emit_hlsl.h`, `include/neui/d/renderer.h`, `backends/d2d/{d2d_backend.cpp,d2d_shader_effect.cpp}` |
 | 5 | **Partial repaint** - separate track, scheduled **first** (`plans/xpl-partial-repaint.md`) | see that plan |
 | 6 | Time + animation: clock, registry, generalised heartbeat, fps cap, pause / reduce-motion (**requires 5**) | `hosts/shared/anim_clock.h`, `hosts/crossplatform/{platform.h,platform_*}`, native hosts' timers |
@@ -796,14 +818,17 @@ null platform:
     tolerance, since the C++ side uses libm). This replaced the planned
     tree-walking reference interpreter: it catches the same lowering bugs
     for much less code.
-- **`tests/test_shader_cache.cpp`:** uses a fake backend counting
+- **`tests/test_shader_asset.cpp`** (phase 2): the interface over a real
+  `AssetStore` and a fake host policy: compile + diagnostics, introspection,
+  bake == executor bytes, time wrap, bad input, the strip grid, the resource
+  path, and a filmstrip golden.
+- **`tests/test_shader_cache.cpp`** (phase 3): uses a fake backend counting
   create/destroy (in the style of `test_asset_font.cpp`). Covers:
   - content sharing across AttrBags;
   - LRU and the byte budget;
   - eviction destroying every per-ctx upload;
   - re-upload on a generation bump;
-  - the `release_context` / `release_slot` / `clear` paths;
-  - a QR-leak regression.
+  - the `release_context` / `release_slot` / `clear` paths.
 - **`tests/test_shader_emit.cpp`:** HLSL (and later MSL) golden text.
 - **Extensions:** `tests/test_compound.cpp` (`u.*` routing, `.step`
   interplay, raw-int colour unpack) and `tests/test_component_loader.cpp`
@@ -979,7 +1004,94 @@ These are at or better than the phase-0 prototype.
   made MSVC 2-3× slower. 256-pixel lanes gave 5-12%, which phase 2+ can
   revisit.
 
-**Next (phase 2):** `NEUI_API_SHADER` (`create`, `create_from_file`,
-introspection, `bake_bitmap` / `bake_filmstrip`), the SHADER asset kind and
-resource kind, the shader cache on `AssetEntry`, and the QR-leak fix.
+## 15. Phase 2 results (2026-10-10)
+
+**What exists:**
+- **The interface:** `NEUI_API_SHADER` in `include/neui/d/shader.h` (shape
+  in §4), with `NEUI_ASSET_KIND_SHADER = 10` and
+  `NEUI_RESOURCE_KIND_SHADER = 7`.
+- **One implementation for all four hosts:**
+  - `hosts/shared/shader_api.h` is a template over a host policy that only
+    finds a session's asset store. Each host adds about 10 lines and a
+    `get_interface` entry.
+  - `hosts/shared/shader_asset.h` holds `ShaderAsset` (on `AssetEntry`) and
+    the bake.
+- **Where it is off:**
+  - `-DNEUI_NO_SHADERS=ON` (a CMake option) drops the interface;
+  - the LVGL host and the null platform never hand it out.
+- **The example:** `neui_shader_example`. It bakes:
+  - a brushed-metal banner;
+  - three 128-frame glow-knob strips, driven by a compound ASSET layer's
+    `frame` binding and a drag behavior;
+  - three tiles;
+  - and it shows a broken shader's diagnostic in a label.
+
+  It also has a plain-KNOB fallback for hosts without the interface.
+  - Verified on macOS on both the native and xpl hosts, which give identical
+    screenshots, with a synthesized drag. The `NEUI_NO_SHADERS` fallback was
+    checked too.
+  - It bakes 388 images (12.3 Mpx at 2×) in about 0.5 s on the M1 Ultra.
+    The knob shader costs about 40 ns/px: it is heavier than ring_glow.
+- **The QR upload leak (§8) is fixed.**
+- **New library helpers:** `nsl::wrap_time` (the spec's time wrap) and
+  `nsl::sweep_value` (exact sweep ends). They are in the library so no
+  compiler contracts them.
+
+**Decisions taken while building it:**
+- **The bake parameters are a struct** passed by pointer (size, scale, time,
+  uniforms), so more can be appended.
+- **neui chooses the filmstrip grid,** to stay within GPU texture limits (§4).
+- **The bitmap cache moved to phase 3,** where the live layer and `draw` use
+  it. A bake makes its own BITMAP.
+- **Bakes take an explicit scale.** A client cannot query the display scale,
+  and the xpl host knows one only after a window exists.
+  - **Open:** add a display-scale query (`NEUI_API_METRICS`) if clients need
+    one before showing a window.
+- **Unknown uniform names are ignored** by the bake, as the compound layer
+  will ignore `u.*` props a swapped-in shader does not declare. A sweep
+  that names an unknown or non-float uniform fails instead, because it
+  would bake N identical frames.
+
+**Compiler review (an independent review of `nsl_compile.cpp` at 03ae00b),
+findings fixed:**
+- **A use-after-free in `return` with a call in its value.** The statement
+  held a reference into the call-frame vector, which inlining the call
+  reallocated. It crashed the example, and the `polar` test had been passing
+  by luck.
+  - **Fix:** frames live in a `std::deque`.
+  - **Regression:** a flow case.
+  - **Check:** the whole suite now runs clean under ASan + UBSan, apart from
+    a pre-existing out-of-range enum in `test_metrics.cpp`.
+- **Exponential compile time.** A chain of functions that each call the
+  previous one twice did 2^N inlinings, while CSE kept the IR tiny:
+  measured at 5 s for N = 24, and days for N = 40.
+  - **Fix:** a compile-work budget of 2^20 steps (statements and expressions
+    lowered, plus the variable snapshots each `if` takes).
+- **Unbounded recursion and memory on braceless `if` / `else if` / `for`
+  chains:** 3000 nested `if`s overflowed a 1 MiB stack.
+  - **Fix:** braceless bodies count toward the 128 nesting limit.
+  - **New cap:** nesting after inlining is capped at 512. The deepest
+    allowed program needs under 192 KiB of stack on arm64.
+  - **Out of memory:** `bad_alloc` now becomes a diagnostic.
+- **Smaller fixes:**
+  - a self-call was accepted and could even run under a constant guard; it
+    is now an error;
+  - `f(x) + 1.0;` was accepted as a statement; it is now an error;
+  - a local could shadow a function name; it is now an error;
+  - a long loop that does end was reported as "does not terminate" after a
+    10^6-step simulation; the message now gives the real trip count;
+  - the op and live-value messages now say "after inlining and unrolling";
+  - `floor(-0)` now gives `-0` (the spec says floor is exact, and so does
+    every GPU). No golden changed.
+- **The spec's limits table gained:**
+  - statement nesting;
+  - nesting after inlining (512);
+  - compile work (1,048,576).
+
+**Next (phase 3):**
+- the live SHADER compound layer (`u.*`, `resolution`, `fallback`);
+- `shader_api->draw`;
+- the bitmap cache on the shader asset;
+- the painter `resolve_shader` seam;
+- component JSON.
 

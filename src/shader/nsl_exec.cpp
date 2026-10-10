@@ -10,6 +10,7 @@
 #include "nsl_ir.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -298,6 +299,20 @@ void evaluate(const Program& p, const Draw& d, const float* xs, const float* ys,
               bool simd) {
   if (simd) detail::eval_points<true>(p, d, xs, ys, n, out);
   else detail::eval_points<false>(p, d, xs, ys, n, out);
+}
+
+float wrap_time(double seconds) {
+  if (!(seconds - seconds == 0.0)) return 0.0f;  // NaN or infinite
+  double t = std::fmod(seconds, 3600.0);         // exact
+  if (t < 0.0) t += 3600.0;
+  const float f = static_cast<float>(t);
+  return f < 3600.0f ? f : 0.0f;  // a reading just below 3600 can round up to it
+}
+
+float sweep_value(float from, float to, uint32_t i, uint32_t n) {
+  if (n < 2) return from;
+  const float t = static_cast<float>(i) / static_cast<float>(n - 1);
+  return (1.0f - t) * from + t * to;  // lerp form: t = 0 and t = 1 are exact
 }
 
 Placement placement(const Draw& d) {

@@ -79,6 +79,10 @@ extern "C" {
     // via NEUI_API_FILTER and applied to a SURFACE via apply_filter. See
     // <neui/d/filter.h>.
     NEUI_ASSET_KIND_FILTER    = 9,
+    // Shader: a compiled .nsl program, created via NEUI_API_SHADER and baked
+    // into BITMAP assets with its bake calls. Not drawable itself. See
+    // <neui/d/shader.h>.
+    NEUI_ASSET_KIND_SHADER    = 10,
   } neui_asset_kind_t;
 
   // --- Component loading types (NEUI_ASSET_KIND_COMPONENT) ----------------

@@ -12,6 +12,9 @@
 #include "window.h"  // provides get_hinstance(), ChildSubclassProc
 #include "../../backends/d2d/d2d_backend.h"
 #include "../shared/win32/clipboard_win32.h"
+#if !defined(NEUI_NO_SHADERS)
+#include "../shared/shader_api.h"
+#endif
 #include "../shared/win32/dnd_target_win32.h"
 #include "../shared/win32/dnd_source_win32.h"
 #include "../shared/win32/icon_win32.h"
@@ -6212,6 +6215,22 @@ namespace win32_host
     auto* P = resolve_filter_prim_w32(session, asset, prim, s);
     if (P) neui_detail::apply_filter_merge_add_input(*P, source);
   }
+
+#if !defined(NEUI_NO_SHADERS)
+  // -------------------------------------------------------------------------
+  // Shader API (NEUI_API_SHADER) - shared implementation in shader_api.h.
+
+  struct W32ShaderHost {
+    static W32AssetManager* store(neui_session_t session, uint32_t& session_id)
+    {
+      Session* s = get_session(session);
+      if (!s) return nullptr;
+      session_id = s->session_id();
+      return &s->_asset_manager;
+    }
+  };
+  neui_shader_api_t shader_api = neui_detail::shader_api_table<W32ShaderHost>();
+#endif
 
   neui_filter_api_t filter_api = {
     NEUI_VERSION,

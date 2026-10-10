@@ -3,10 +3,11 @@
 # The neui shading language (`.nsl`), version 1
 
 **Status: implemented by the compiler and CPU executor in `src/shader/`**
-(the `neui-shader` library, API `src/shader/nsl.h`; phase 1 of
-`plans/shader-effects.md`). No host exposes it yet: `NEUI_API_SHADER` and the
-compound layer come in phases 2 and 3. Tests: `tests/test_shader_lang.cpp` and
-`tests/test_shader_exec.cpp`.
+(the `neui-shader` library, API `src/shader/nsl.h`). Clients compile and
+bake shaders through the optional `NEUI_API_SHADER` (`include/neui/d/shader.h`,
+phase 2 of `plans/shader-effects.md`); the live compound layer comes in
+phase 3. Tests: `tests/test_shader_lang.cpp`, `tests/test_shader_exec.cpp` and
+`tests/test_shader_asset.cpp`.
 
 **What is normative:** this document for syntax, types and semantics. The
 exact polynomial behind each approximated built-in (§9.2) is defined by the

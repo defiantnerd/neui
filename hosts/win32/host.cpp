@@ -32,6 +32,9 @@ namespace win32_host
   extern neui_compound_api_t  compound_api;
   extern neui_behavior_api_t  behavior_api;
   extern neui_filter_api_t    filter_api;
+#if !defined(NEUI_NO_SHADERS)
+  extern neui_shader_api_t    shader_api;
+#endif
   extern neui_grid_api_t      grid_api;
   extern neui_dnd_api_t       dnd_api;
   extern neui_scroll_api_t    scroll_api;
@@ -78,6 +81,9 @@ namespace win32_host
     if (!strcmp(iface, NEUI_API_COMPOUND))  return &win32_host::compound_api;
     if (!strcmp(iface, NEUI_API_BEHAVIOR))  return &win32_host::behavior_api;
     if (!strcmp(iface, NEUI_API_FILTER))    return &win32_host::filter_api;
+#if !defined(NEUI_NO_SHADERS)
+    if (!strcmp(iface, NEUI_API_SHADER))    return &win32_host::shader_api;
+#endif
     if (!strcmp(iface, NEUI_API_GRID))      return &win32_host::grid_api;
     if (!strcmp(iface, NEUI_API_DND))       return &win32_host::dnd_api;
     if (!strcmp(iface, NEUI_API_SCROLL))    return &win32_host::scroll_api;

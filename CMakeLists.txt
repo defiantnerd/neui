@@ -28,6 +28,10 @@ option(NEUI_WERROR         "Treat compiler warnings as errors" OFF)
 # platforms (no silent fallback).
 option(NEUI_WITH_LVGL      "EXPERIMENTAL: build the LVGL host + backend (see docs/host-lvgl.md)" OFF)
 
+# NEUI_API_SHADER (include/neui/d/shader.h) is optional: with this ON no host
+# hands it out. The LVGL host and the null platform never do.
+option(NEUI_NO_SHADERS     "Build without the optional shader interface (NEUI_API_SHADER)" OFF)
+
 # iOS is an APPLE platform too, so it must be detected distinctly from macOS:
 # the CoreGraphics backend is shared (gated on APPLE), but the AppKit macOS
 # host must NOT be built for iOS, and the UIKit iOS host is built only here.
@@ -123,6 +127,9 @@ add_library(neui src/neui.c src/mujson.cpp)
 # contraction, in every build type); the hosts reach it through neui.
 add_subdirectory("src/shader")
 target_link_libraries(neui PUBLIC neui-shader)
+if(NEUI_NO_SHADERS)
+  target_compile_definitions(neui PUBLIC NEUI_NO_SHADERS=1)
+endif()
 
 # Vendored QR Code generator (Project Nayuki, MIT). Compiled into a small
 # static lib the host libs link; backs the QR compound layer kind. Added
@@ -574,6 +581,31 @@ if(WIN32)
 endif()
 if(APPLE)
   target_link_libraries(neui_filmstrip_knob_example PRIVATE neui-macoshost)
+endif()
+
+# Shader example (plans/shader-effects.md, phase 2). Compiles .nsl shaders via
+# NEUI_API_SHADER and bakes them once: a bitmap banner, 128-frame knob strips
+# driven by a compound "frame" binding, tiles, and a broken shader's diagnostic.
+if(MSVC)
+  add_executable(neui_shader_example WIN32
+    examples/shader_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_shader_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_shader_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_shader_example WIN32 examples/shader_example.cpp)
+elseif(APPLE)
+  add_executable(neui_shader_example MACOSX_BUNDLE examples/shader_example.cpp)
+else()
+  add_executable(neui_shader_example examples/shader_example.cpp)
+endif()
+target_link_libraries(neui_shader_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_shader_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_shader_example PRIVATE neui-macoshost)
 endif()
 
 # Font-loading example. Registers a client-supplied font (NEUI_ASSET_KIND_FONT)
