@@ -142,9 +142,11 @@ counter.
 derivatives (`fwidth` / `dFdx`, which need 2×2 quad lanes; deferred).
 
 **Built-ins:**
-- **Math:** `abs sign floor ceil fract mod min max clamp mix step smoothstep
-  sqrt inversesqrt pow exp log exp2 log2 sin cos tan asin acos atan(y,x)
-  length distance dot cross normalize reflect`, and swizzles `.xyzw` / `.rgba`.
+- **Math:** `abs sign floor ceil fract mod min max clamp saturate mix step
+  smoothstep sqrt inversesqrt pow exp log exp2 log2 sin cos tan asin acos
+  atan(y,x) length distance dot cross normalize reflect`, and swizzles
+  `.xyzw` / `.rgba`. `saturate(x)` is `clamp(x, 0.0, 1.0)`, under the name
+  HLSL and bgfx use.
 - **Noise:** `neui_hash(vec2)` and `neui_noise(vec2)` are integer-exact, so
   they produce the same value on every executor. The popular
   `fract(sin(x) * 43758.5)` idiom differs per GPU and is documented as "works,
@@ -188,6 +190,58 @@ output, identical on every executor, fights banding in large gradients.
 
 **Uniform defaults** (an extension over GLSL): `uniform float r = 0.4;`.
 Designer-written shaders then render sensibly with no client setup.
+
+### bgfx source compatibility: considered, not adopted
+
+The client pointed out that many people use bgfx, so we checked whether
+`.nsl` should accept bgfx shader source (`.sc`). There are no client `.sc`
+shaders, so nothing has to be imported today.
+
+**What bgfx's shader language is.** It is GLSL 1.x with three layers on top:
+- a C preprocessor (shaderc ships its own);
+- the ~970-line macro header `bgfx_shader.sh`, which maps the GLSL onto
+  HLSL, Metal and SPIR-V;
+- `$input` / `$output` lines plus a `varying.def.sc` file that wire a
+  fragment shader to its vertex shader.
+
+shaderc compiles this offline (glslang, SPIRV-Cross, SPIRV-Tools, DXC).
+The bgfx runtime loads only the compiled binaries.
+
+**Why not:**
+- **No vertex stage in neui.** A bgfx fragment shader reads values handed
+  over by the app's vertex shader (`v_texcoord0`, `v_position`), and the
+  vertex shader decides what they mean. An `.nsl` shader gets only `p`,
+  `neui_size` and its uniforms.
+- **Uniforms.** bgfx has only `vec4`, `mat3`, `mat4` and samplers, so values
+  get packed by convention (its NanoVG shader does
+  `#define u_feather (u_params.x)`). `.nsl` uniforms are named, typed and
+  defaulted, and map 1:1 onto `u.<name>` bindings.
+- **Real bgfx shaders need what v1 leaves out:** textures (`SAMPLER2D`,
+  `texture2D`), matrices (`mul`, `mtxFromCols`) and preprocessor macros.
+  Even a compatibility layer would run almost no existing bgfx shader
+  unchanged.
+- **Semantics.** bgfx results are whatever the GPU gives. The y-axis
+  direction depends on the graphics API, and blending is set from C++, not in
+  the shader. `.nsl` promises the same pixels on every host.
+- **Cost.** Compatibility would need a full preprocessor, matrix types and
+  bgfx's helper functions, and would pull the language toward a 3D pipeline.
+  Using shaderc itself breaks the no-new-dependencies rule.
+
+**Porting from bgfx** is mechanical, because both languages are plain GLSL
+inside the functions:
+
+| bgfx | `.nsl` |
+|---|---|
+| `$input v_texcoord0` / `gl_FragCoord` | `p` (layer-local, y-down) and `neui_size` |
+| packed `uniform vec4 u_params;` + `#define` | one named uniform per value, with a default |
+| `void main() { gl_FragColor = c; }` | `vec4 main(vec2 p) { return c; }` (straight alpha) |
+| `vec4_splat(a)` | `vec4(a)` |
+| `saturate(x)` | `saturate(x)` (built-in) |
+| `texture2D`, `mul`, `mtxFromCols` | not in v1 |
+
+**Left open:** an exporter that writes `.nsl` as bgfx `.sc`, from the same IR
+as the HLSL emitter, which is cheap. Build it only if a client ships bgfx and
+asks for it. Importing `.sc` stays out.
 
 ## 3. Architecture
 
