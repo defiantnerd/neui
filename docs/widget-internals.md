@@ -12,7 +12,7 @@ Implementation-specific constants, scrollbar geometry, multiline cursor math, ed
 
 ## Partial repaint (xpl host)
 
-Status and design record: `plans/xpl-partial-repaint.md`. **Live on Linux / Cairo and macOS + iOS / CG (P1-P3)**; win32 / D2D still paints full frames (P4 open), and LVGL has its own retained invalidation.
+Status and design record: `plans/xpl-partial-repaint.md`. **Live on every xpl platform: Linux / Cairo, macOS + iOS / CG and win32 / D2D (P1-P4)**. LVGL has its own retained invalidation; the native win32 / macOS / iOS hosts invalidate per native view anyway.
 
 - **What is partial:** every invalidation that concerns one widget's own pixels goes through `Session::invalidate_widget_rect`. It queues the widget's damage footprint via `platform_invalidate_rect`: cached frame-local `abs_x` / `abs_y` + `paint_bounds()` + a 4 px margin.
   - **Client-driven:** the `invalidate_widget_visual` funnel in `widgets.cpp` - attr writes, `set_text` / `set_asset` / `set_enabled`, the public `invalidate`, GRID content.
@@ -29,6 +29,8 @@ Status and design record: `plans/xpl-partial-repaint.md`. **Live on Linux / Cair
 - **Per platform:**
   - **Cairo:** owns its surface. It clips, clears and blits per rect, and refuses until it holds a complete frame at the current scale. See `docs/host-linux.md`.
   - **CG (macOS / iOS):** AppKit / UIKit own the pixels. `platform_invalidate_rect` -> `setNeedsDisplayInRect:`; `drawRect:` turns `getRectsBeingDrawn:` / the dirty rect into the damage. The layer keeps everything outside it. **A layer-backed view gets ONE dirty rect, the bounding box of everything invalidated since the last draw**, so scattered changes in one display pass coalesce, often past 60%, into a full frame. Localized changes are where it pays: measured on an M-series Mac with `neui_partial_repaint_example 1` (one of 48 compound knobs per tick), 0.10 ms per paint against 1.15 ms full. The draw can't be culled inside AppKit's box: the double-buffered backing store keeps the previous frame only outside it.
+  - **D2D (win32):** the 2-buffer flip chain's back buffer holds frame N-2, so the first damage request switches the frame's ctx to **canvas mode** for good. Every frame draws into a persistent GPU target bitmap; `end_frame` copies it into the back buffer (`CopyFromBitmap`, with a DrawBitmap fallback) and passes the damage to `Present1` as dirty rects. One rect = `PushAxisAlignedClip` + `Clear`. Several = `PushLayer` masked by their union + a fill (`Clear` ignores layer masks). The mask is built in `set_frame_damage`, so a failure refuses cleanly. Refused (full frame) on the first request and after any resize / DPI change / device loss. Overlay (DirectComposition) and SURFACE ctxs never enter canvas mode. `WM_PAINT` reads the true update region (`GetUpdateRgn` / `GetRegionData`) before `BeginPaint`.
+  - **Measured on Windows** (GTX 1080, 150%, Debug, 48 knobs): 1 knob per tick, 3.8 ms full -> 1.4 ms partial. 8 knobs per tick, about 45% of frames stay partial: nearby rects merge, the 8-rect cap merges further, and a frame past 60% coverage goes full. Average 3.1 ms against 4.1-4.7 ms.
 - **Debug switches** (env, read once):
   - `NEUI_DEBUG_FULL_REPAINT=1` forces full frames, to bisect an artefact.
   - `NEUI_DEBUG_DAMAGE=1` tints each partial frame's damage rects.

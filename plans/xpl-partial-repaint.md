@@ -49,7 +49,22 @@ Measured in `neui_example` on the xpl host, macOS:
 
 P4 baseline from Windows: a D2D full frame of the 48-knob example costs 4.1-4.7 ms (Debug, 150%, GTX 1080) regardless of how many knobs change.
 
-The P4 and design text below is unchanged.
+**P4 implemented and verified on Windows** (GTX 1080, 150%, Debug, by the Windows session). It compiled clean under `NEUI_WERROR`, and the visual checks (damage tint, resize, partly off-screen and back, `neui_example` interaction) showed no stale or garbage pixels.
+
+How it differs from the original design: it keeps a persistent canvas as planned, but copies the WHOLE canvas into the back buffer each frame instead of tracking damage(N) and damage(N-1). It's a GPU copy, cheap, and correct without bookkeeping. Multi-rect frames clip with a geometry-group layer; the mask is built in `set_frame_damage`, so a failure refuses cleanly.
+
+Numbers for `neui_partial_repaint_example`:
+
+| Knobs per tick | Full frame | Partial | Partial share |
+|---|---|---|---|
+| 1 | 3.8 ms | 1.4 ms (`pump_once` 196 -> 77 ms/s) | all frames |
+| 8 | 4.1-4.7 ms | 3.1 ms average | about 45% |
+
+At 8 knobs per tick the rest go full by coverage: nearby rects merge within `k_merge_gap`, and past `k_max_rects` = 8 the cheapest pairs merge until the boxes exceed 60%.
+
+Tuning left open: a larger rect cap, or a smaller merge gap for GPU / per-rect-cheap backends.
+
+The design text below is the original plan, kept for reference.
 
 This is the first track ahead of
 `plans/shader-effects.md`. It is worth doing on its own merits, because the

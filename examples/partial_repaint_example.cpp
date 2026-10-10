@@ -4,9 +4,9 @@
 // A 8x6 grid of compound "arc" knobs (CUSTOMDRAW + ARC layers bound to
 // NEUI_PARAM_VALUE). The client drives its own loop via pump_once and, every
 // ~16 ms, writes NEUI_PARAM_VALUE on a few knobs - the way a plugin mirrors
-// host automation. Each write invalidates only that knob, so on a platform
-// with partial repaint (Linux / Cairo, macOS + iOS / CG) a frame repaints a
-// handful of rects instead of all 48 knobs.
+// host automation. Each write invalidates only that knob, so the xpl host
+// (Linux / Cairo, macOS + iOS / CG, win32 / D2D) repaints a handful of rects
+// per frame instead of all 48 knobs.
 //
 // Once a second it prints (and shows in the status line) how long pump_once
 // took - the paint happens inside it - so the two modes can be compared:
