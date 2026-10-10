@@ -186,6 +186,7 @@ Deep per-subsystem detail lives in `docs/`. **Read the relevant file before doin
 - **LVGL host (EXPERIMENTAL)** -> `docs/host-lvgl.md`. Opt-in embedded substrate for the xpl host: build flags, retained mirror layer, what works, what is stubbed, why it is paused pending hardware.
 - **Deferred / known-limitation list** -> `docs/deferred-issues.md`.
 - **Shader language (`.nsl`)** -> `docs/shader-language.md`. Normative spec for shader support (`plans/shader-effects.md`, client API `NEUI_API_SHADER`): types, semantics, every built-in and its edge cases, pixel grid + output rule, limits, grammar. Read before touching shader code; the CPU executor must match it bit for bit.
+- **Writing shaders (guide)** -> `docs/shader-guide.md`. Practical introduction for shader and skin authors: a first shader, coordinates, uniforms, recipes (distance shapes, knob arcs, dithered gradients, noise), animation, the client API paths (bake / SHADER layer / component JSON / `draw`), performance and a table of real compiler errors. Every shader in it compiles; keep it that way when the language changes.
 - **Design rationale for shipped features** -> `docs/design-notes.md`. **Component-widget authoring how-to** -> `docs/component-widgets-howto.md`.
 
 ## Plans

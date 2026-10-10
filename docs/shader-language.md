@@ -10,6 +10,9 @@ into bitmaps (phases 2 and 3 of `plans/shader-effects.md`). Tests:
 `tests/test_shader_lang.cpp`, `tests/test_shader_exec.cpp`,
 `tests/test_shader_asset.cpp` and `tests/test_shader_layer.cpp`.
 
+**New to `.nsl`?** Start with the guide, `docs/shader-guide.md`: it teaches
+the language by example and shows how a client puts a shader on screen.
+
 **What is normative:** this document for syntax, types and semantics. The
 exact polynomial behind each approximated built-in (§9.2) is defined by the
 reference implementation (`src/shader/nsl_math.h`) and pinned by checksums. Its accuracy bounds are
