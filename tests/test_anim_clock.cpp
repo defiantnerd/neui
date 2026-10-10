@@ -92,7 +92,7 @@ TEST_CASE("anim clock: frames are gated by the fps; widgets of a frame agree")
   CHECK_EQ(tick(c).size(), 2u);
 }
 
-TEST_CASE("anim clock: a widget that did not paint after its invalidation is dropped")
+TEST_CASE("anim clock: a widget that misses two frames running is dropped")
 {
   g_now = 0;
   AnimClock c(&fake_now);
@@ -100,9 +100,12 @@ TEST_CASE("anim clock: a widget that did not paint after its invalidation is dro
   paint(c, 20, 2);
   g_now = 40 * k_ms;
   CHECK_EQ(tick(c).size(), 2u);
-  paint(c, 10, 1);  // 20 does not paint (hidden)
+  paint(c, 10, 1);  // 20 does not paint (hidden, or its paint is late)
   g_now = 80 * k_ms;
-  Calls b = tick(c);
+  CHECK_EQ(tick(c).size(), 2u);  // one miss: invalidated again
+  paint(c, 10, 1);
+  g_now = 120 * k_ms;
+  Calls b = tick(c);  // the second miss
   REQUIRE(b.size() == 1u);
   CHECK_EQ(b[0].first, 10u);
   CHECK_EQ(c.size(), 1u);
@@ -163,6 +166,19 @@ TEST_CASE("anim clock: reduced motion holds the time and polls slowly")
   CHECK_EQ(c.heartbeat_ms(3), 16u);
   CHECK_EQ(tick(c).size(), 1u);
   CHECK_APPROX(paint(c, 1, 3), 0.1);
+}
+
+TEST_CASE("anim clock: a late paint resets the misses")
+{
+  g_now = 0;
+  AnimClock c(&fake_now);
+  paint(c, 5, 0);
+  for (int frame = 1; frame <= 6; ++frame) {
+    g_now = uint64_t(frame) * 40 * k_ms;
+    CHECK_EQ(tick(c).size(), 1u);
+    if (frame % 2 == 0) paint(c, 5, 0);  // paints every other frame
+  }
+  CHECK_EQ(c.size(), 1u);
 }
 
 TEST_CASE("anim clock: re-marking a widget moves it to its new owner")

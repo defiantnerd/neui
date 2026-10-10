@@ -1133,7 +1133,15 @@ namespace neui_d2d_backend
         pp.DirtyRectsCount = static_cast<UINT>(ctx->frame_dirty.size());
         pp.pDirtyRects     = ctx->frame_dirty.data();
       }
-      hr = ctx->swap_chain->Present1(1, 0, &pp);
+      // Sync interval 0: never block the UI thread waiting for vblank. On a
+      // windowed flip chain without ALLOW_TEARING the compositor still shows
+      // one frame per refresh (the newest), so nothing tears; with vsync
+      // every animating window on a thread shared ~170-180 presents a second
+      // and each paint waited for the display. The hosts pace paints to the
+      // refresh rate instead (hosts/shared/win32/paint_pacer_win32.h); the
+      // canvas copy keeps every back buffer complete, so a frame the
+      // compositor skips leaves nothing stale.
+      hr = ctx->swap_chain->Present1(0, 0, &pp);
       if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
         lost = true;
     }

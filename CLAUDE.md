@@ -158,6 +158,7 @@ Win32:
 - **`TranslateAccelerator` order** - runs before `TranslateMessage` and (xpl) before `IsDialogMessage`; `set_menu_cmd` routing keeps widget-local Ctrl+Z working.
 - **HACCEL / HICON / HMENU lifetimes** - owned per widget; freed on destroy/replace; rebuilt on `set_shortcut` / `tree_remove` / `tree_clear`.
 - **`WM_COMMAND` ID space** - control IDs `[1, 0x7FFF]` (tree slots); menu cmd_ids `[0x8000, 0xFFFF]` (recycled via `free_menu_cmd_ids`). Don't cross-pollinate.
+- **D2D presents without vsync** (`Present1(0, ...)`), so every `WM_PAINT` of a D2D-painted HWND (the xpl frame, native painted widgets) goes through the paint pacer: `pace_hold` first (a held paint keeps its update region and returns), `pace_presented` after, `pace_timer` in `WM_TIMER`, `pace_force` on resize / DPI / show, `pace_release` in `WM_DESTROY` (`hosts/shared/win32/paint_pacer_win32.h`). A new D2D window that skips it paints as fast as input arrives.
 - **Frame create sizing** - the xpl host grows the requested logical client to the outer window via `AdjustWindowRectExForDpi` (reserving the menu row); `platform_set_window_pos` + `platform_menubar_attach` keep the client = requested size on resize / late menubar.
 
 macOS:

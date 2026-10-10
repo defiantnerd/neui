@@ -15,8 +15,10 @@
 // iOS). The owner's timer runs at heartbeat_ms(owner) and calls tick(). When a
 // frame is due (the fps cap), the frame time advances and every widget painted
 // since the previous frame is invalidated. A widget that was invalidated but did
-// not paint again (hidden, scrolled away, in a minimised window, or its layer
-// now has a time of its own) is dropped. Dropping is always safe: the next
+// not paint for two frames running (hidden, scrolled away, in a minimised
+// window, or its layer now has a time of its own) is dropped; one missed frame
+// is only a late paint (a held paint, see paint_pacer.h, or a slow frame) and
+// is invalidated again. Dropping is always safe: the next
 // paint that reads the clock marks the widget again and restarts the timer, so
 // nothing has to track visibility.
 //
@@ -39,6 +41,7 @@ namespace neui_detail
     static constexpr uint32_t k_default_fps = 30;
     static constexpr uint32_t k_max_fps     = 120;
     static constexpr uint32_t k_poll_ms     = 500;  // timer while reduced motion holds the clock
+    static constexpr uint32_t k_max_misses  = 2;    // frames a widget may miss before it is dropped
 
     static uint64_t steady_ns()
     {
@@ -83,6 +86,7 @@ namespace neui_detail
         if (e.widget != widget) continue;
         e.owner = owner;
         e.painted = true;
+        e.misses = 0;
         return;
       }
       _entries.push_back({ widget, owner, true });
@@ -101,7 +105,7 @@ namespace neui_detail
     }
 
     // A timer event. When a frame is due, advances the frame time, drops the
-    // widgets not painted since the previous frame, and calls
+    // widgets that missed k_max_misses frames running, and calls
     // invalidate(widget, owner) for the others. Does nothing while the clock
     // stands.
     template <typename Invalidate>
@@ -121,7 +125,8 @@ namespace neui_detail
       size_t kept = 0;
       for (size_t i = 0; i < _entries.size(); ++i) {
         Entry e = _entries[i];
-        if (!e.painted) continue;
+        if (e.painted) e.misses = 0;
+        else if (++e.misses >= k_max_misses) continue;
         e.painted = false;
         _entries[kept++] = e;
         due.push_back(e);
@@ -167,6 +172,7 @@ namespace neui_detail
       uint32_t widget  = 0;
       uint32_t owner   = 0;
       bool     painted = false;  // painted (and read the clock) since the last frame
+      uint32_t misses  = 0;      // frames running it did not paint
     };
 
     uint64_t interval_ns() const { return 1000000000ull / _fps; }

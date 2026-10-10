@@ -23,6 +23,7 @@
 #include "../shared/win32/clipboard_win32.h"
 #include "../shared/win32/dnd_target_win32.h"
 #include "../shared/win32/dnd_source_win32.h"
+#include "../shared/win32/paint_pacer_win32.h"
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
 
@@ -57,6 +58,8 @@ namespace xpl_host
     uint32_t bouncing_section_index = 0;
     // Interval of the shader animation timer (anim_clock.h), 0 = off.
     uint32_t anim_timer_ms = 0;
+    // D2D presents without vsync; paints are paced to the refresh rate.
+    neui_detail::PaintPacerWin32 pacer;
   };
 
   // Timer ID for the grid spring-back animation on the frame's HWND.
@@ -463,6 +466,7 @@ namespace xpl_host
     case WM_DESTROY: {
       auto* wud = get_wud(hwnd);
       if (wud) {
+        neui_detail::pace_release(wud->pacer, hwnd);
         // Release the D2D render context before the HWND is gone.
         auto* wd = wud->session->get_widget(wud->widget_index);
         if (wd) {
@@ -558,8 +562,10 @@ namespace xpl_host
       // BeginPaint validates it. Windows keeps a true region - one rect per
       // platform_invalidate_rect - so it maps straight onto the frame's
       // damage; a whole-client InvalidateRect becomes a full frame by
-      // coverage in paint_frame.
+      // coverage in paint_frame. A paint that comes too soon after the last
+      // present is held back with its update region (paint_pacer_win32.h).
       auto* wud = get_wud(hwnd);
+      if (wud && neui_detail::pace_hold(wud->pacer, hwnd)) return 0;
       auto* wd  = wud ? wud->session->get_widget(wud->widget_index) : nullptr;
       neui_detail::DamageRegion damage;
       if (wd && wd->render_ctx) {
@@ -589,9 +595,11 @@ namespace xpl_host
       PAINTSTRUCT ps;
       BeginPaint(hwnd, &ps);
       EndPaint(hwnd, &ps);
-      if (wd && wd->render_ctx)
+      if (wd && wd->render_ctx) {
         wud->session->paint_frame(wd->render_ctx, wud->widget_index,
                                   damage.empty() ? nullptr : &damage);
+        neui_detail::pace_presented(wud->pacer);
+      }
       return 0;
     }
 
@@ -626,6 +634,7 @@ namespace xpl_host
 
       auto* wud = get_wud(hwnd);
       if (wud) {
+        neui_detail::pace_force(wud->pacer);  // show the new size at once
         UINT w_phys = LOWORD(lParam);
         UINT h_phys = HIWORD(lParam);
         wud->session->resize_render_ctx(wud->widget_index, w_phys, h_phys);
@@ -660,6 +669,7 @@ namespace xpl_host
       // lParam: RECT* suggesting the new window position/size at the new DPI.
       auto* wud = get_wud(hwnd);
       if (wud) {
+        neui_detail::pace_force(wud->pacer);
         uint32_t new_dpi = static_cast<uint32_t>(LOWORD(wParam));
         wud->session->on_dpi_changed(wud->widget_index, new_dpi);
 
@@ -1129,6 +1139,11 @@ namespace xpl_host
       // ondemand-frame post-paint pass picks up next tick).
       if (wParam == XPL_TOAST_TIMER_ID) {
         InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+      }
+      if (wParam == neui_detail::k_paint_pace_timer_id) {
+        if (auto* pwud = get_wud(hwnd)) neui_detail::pace_timer(pwud->pacer, hwnd, wParam);
+        else KillTimer(hwnd, wParam);
         return 0;
       }
       if (wParam == XPL_ANIM_TIMER_ID) {
@@ -1681,6 +1696,8 @@ namespace xpl_host
 
   void platform_show_window(void* native_handle)
   {
+    if (auto* wud = get_wud(static_cast<HWND>(native_handle)))
+      neui_detail::pace_force(wud->pacer);  // UpdateWindow below must paint
     ShowWindow(static_cast<HWND>(native_handle), SW_SHOW);
     UpdateWindow(static_cast<HWND>(native_handle));
   }

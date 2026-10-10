@@ -195,9 +195,9 @@ extern "C" {
     float (NEUI_ABI *animation_time)(neui_session_t session);
 
     // Frames per second of the animation, clamped to [1, 120]; 30 by default.
-    // Approximate (OS timers; Windows ticks on a ~15.6 ms grid). Stay below
-    // the display's refresh rate: at or above it, Direct2D waits for vblank
-    // on the UI thread every frame, which in a plugin is the host's.
+    // Approximate (OS timers; Windows ticks on a ~15.6 ms grid), and never
+    // more than the display shows: above its refresh rate frames are capped.
+    // A busy UI thread (a DAW's) lowers the frame rate, not the speed.
     void  (NEUI_ABI *set_animation_fps)(neui_session_t session, uint32_t fps);
 
     // Paused, the clock stands still and nothing repaints for it; resuming

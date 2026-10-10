@@ -11,6 +11,7 @@
 #include "../shared/widget_section_scroll.h"
 #include "../shared/widget_tabview.h"
 #include "asset_manager_w32.h"
+#include "../shared/win32/paint_pacer_win32.h"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -112,6 +113,9 @@ namespace win32_host {
     wchar_t pending_surrogate = 0;  // high surrogate waiting for its low pair in WM_CHAR
     uint32_t widget_id = 0;    // stored as uint32_t for packing math; wrap as neui_widget_t when returning to public API
     uint32_t anim_timer_ms = 0;  // frames: interval of the animation clock's WM_TIMER, 0 = off
+    // Painted widgets: D2D presents without vsync; paints are paced to the
+    // refresh rate (paint_pacer_win32.h).
+    neui_detail::PaintPacerWin32 pacer;
     std::string text;          // copy of the last set_text value; applied on HWND creation if set before show
     struct PendingItem { std::string text; void* userdata; };
     std::vector<PendingItem> pending_items;     // items queued before HWND exists

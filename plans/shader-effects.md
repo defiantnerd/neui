@@ -1354,7 +1354,8 @@ only if measured necessary.
   widget whose paint read the clock, with an owner (its frame on xpl and
   win32, the session on macOS and iOS). A timer per owner calls `tick`;
   when a frame is due (fps cap) it invalidates the widgets painted since the
-  last frame and drops the ones that did not paint again. A dropped widget
+  last frame and drops the ones that missed two frames running (one miss is
+  a late paint and is invalidated again). A dropped widget
   that paints again (shown, scrolled back, window restored) is marked again
   and restarts the timer, so nothing tracks visibility, minimised windows
   stop on their own, and a widget whose layer gets a set time stops too.
@@ -1427,8 +1428,7 @@ only if measured necessary.
   tearing (DWM still composites at vblank); but it also stops pacing
   input-driven paints (a 1000 Hz drag then paints ~3x the refresh rate at
   2.5-3x the CPU), so it needs a paint-rate cap too. Recorded with that design
-  in `docs/deferred-issues.md` rather than made here. The 30 fps default does
-  not hit it.
+  in `docs/deferred-issues.md` first, then done as a follow-up (below).
 - **DAW embedding** (review): `SetTimer` with no `TIMERPROC` on the frame
   HWND is the right shape (no code pointer into the plugin DLL, the timer
   dies with the HWND, ids cannot collide between instances, the DAW's pump
@@ -1456,3 +1456,44 @@ argument too.
   windows on every host with one rule.
 - **`platform_now_ms` stays** (`GetTickCount64` on Windows): the clock reads
   `steady_clock`, which is `QueryPerformanceCounter` on MSVC.
+
+**Follow-up: present pacing on Direct2D** (same day, after the measurements
+above):
+- `Present1(0, ...)`: the UI thread no longer waits for vblank. On a
+  windowed flip chain without `ALLOW_TEARING` the compositor still shows the
+  newest frame per refresh, so nothing tears, and the canvas copy keeps every
+  back buffer complete.
+- **Paint pacing** (`hosts/shared/paint_pacer.h` + `win32/paint_pacer_win32.h`,
+  per HWND on both Windows hosts): a paint within 90% of a refresh interval of
+  that window's last present keeps its update region and comes back from a
+  one-shot `WM_TIMER`, so a 1000 Hz drag paints at the refresh rate instead of
+  ~3x it, and animation ticks and input share frames. The first paint and the
+  one after a resize, DPI change or show never wait; the rate is the
+  monitor's (`EnumDisplaySettingsW`). Tier-1: `tests/test_paint_pacer.cpp`.
+- **The clock tolerates one late paint:** a widget is dropped after two
+  missed frames, not one, since a held paint can outlast an animation tick.
+- **Two timing bugs found on Windows and fixed:** stamping the present after
+  the paint made each 15.6 ms animation tick look early by the paint's ~1.7 ms
+  and get held, and a held paint's 1-2 ms `SetTimer` fired at the next
+  15.6 ms tick, so 60 fps animations ran at ~32. Times are now taken when a
+  paint starts, and a wait under 4 ms is not held unless that would put two
+  presents within half a refresh.
+- **Measured** (neui-win, GTX 1080, 60 Hz, Debug, CPU path, 1000 Hz raw-input
+  drag; presents/s and CPU % of one core, sync 1 -> paced): xpl paused drag
+  59 / 11.0% -> 65 / 17.7%; xpl 60 fps idle 60 / 30.4% -> 58 / 30.3%; xpl
+  60 fps + drag 60 / 14.0% -> 68 / 44.0%, with the animated panels at 55-60
+  fps during the drag instead of ~20 (no more starvation). K sessions on one
+  thread at 60 fps: K = 4 44.5 -> 53.3 fps each, K = 8 21 -> 53.2
+  (`paint_frame` 5.3-5.6 ms -> ~1.5 ms; at K = 8 the thread is CPU-bound on the
+  CPU-path shaders). 30 fps idle unchanged. Live resize, tab switching, the
+  DirectComposition overlay and partial-repaint damage show nothing stale.
+  Drags cost more CPU than with vsync at the same paint rate: Windows no longer
+  coalesces mouse moves while the thread sat in `Present`, so every move runs
+  the value update (deferred: coalesce drag input per frame).
+- **Re-measured on the final code:** xpl 60 fps idle 61 / 30.2% (paint
+  1.6-1.8 ms), 60 fps + live drag 72 / 42.2% with the panel at 60.6; native
+  60 fps + live drag 220-230 presents (summed over the HWND chains) with the
+  panel at 47-54 (each HWND is paced on its own; deferred); K = 8 sessions
+  54.4 fps each; nothing stale after fast drags. The half-refresh guard is
+  untested on a >60 Hz display.
+- Still deferred: skipping ticks for a fully occluded (not minimised) window.
