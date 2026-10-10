@@ -146,6 +146,27 @@ namespace neui_d2d_backend
     // issued against this ctx. Released alongside `target` on device-loss
     // / destroy. Reused across draws within a frame.
     ID2D1Effect*                tint_effect = nullptr;
+
+    // Partial repaint (set_frame_damage; opaque flip-chain HWND ctxs only).
+    // A 2-buffer flip chain's back buffer holds the frame from TWO presents
+    // ago, so it can't be drawn into partially. The first damage request
+    // therefore switches the ctx to canvas mode for good: every frame draws
+    // into `canvas`, a persistent GPU target bitmap that keeps the previous
+    // frame, and end_frame copies it into the back buffer before Present1.
+    // A partial frame clips to the damage (one rect: an axis-aligned clip;
+    // several: a layer masked by a rect group) and hands it to Present1 as
+    // dirty rects. canvas_valid = the canvas holds a complete frame at the
+    // current size + DPI; until then damage is refused (full frame).
+    bool                        canvas_mode   = false;
+    ID2D1Bitmap1*               canvas        = nullptr;
+    bool                        canvas_valid  = false;
+    uint32_t                    canvas_w      = 0;
+    uint32_t                    canvas_h      = 0;
+    uint32_t                    canvas_dpi    = 0;
+    std::vector<RECT>           pending_damage;   // accepted for the next frame, device px
+    std::vector<RECT>           frame_dirty;      // this frame's damage, for Present1
+    int                         frame_clip    = 0;  // 0 none, 1 axis-aligned clip, 2 layer
+    ID2D1GeometryGroup*         frame_mask    = nullptr;  // layer mask, held until PopLayer
   };
 
   // Process-wide D2D / DWrite / DXGI factories - created once, never
@@ -603,6 +624,14 @@ namespace neui_d2d_backend
   {
     if (!ctx) return;
     if (ctx->tint_effect) { ctx->tint_effect->Release(); ctx->tint_effect = nullptr; }
+    // The canvas belongs to the device; canvas_mode survives so the rebuilt
+    // ctx draws through a fresh canvas again (refusing damage until full).
+    if (ctx->frame_mask)  { ctx->frame_mask->Release();  ctx->frame_mask  = nullptr; }
+    if (ctx->canvas)      { ctx->canvas->Release();      ctx->canvas      = nullptr; }
+    ctx->canvas_valid = false;
+    ctx->frame_clip   = 0;
+    ctx->pending_damage.clear();
+    ctx->frame_dirty.clear();
     if (ctx->brush)       { ctx->brush->Release();       ctx->brush       = nullptr; }
     if (ctx->back_buffer) { ctx->back_buffer->Release(); ctx->back_buffer = nullptr; }
     if (ctx->target)      { ctx->target->Release();      ctx->target      = nullptr; }
@@ -867,6 +896,129 @@ namespace neui_d2d_backend
     ctx->back_buffer = bb;
   }
 
+  // Canvas mode helpers (partial repaint) -------------------------------------
+
+  // (Re)create the canvas at the ctx's current size + DPI. Same pixel format
+  // as the back buffer (B8G8R8A8, alpha ignored) so CopyFromBitmap is a
+  // straight copy; falls back to premultiplied if a driver rejects that.
+  static bool d2d_ensure_canvas(D2DContext* ctx)
+  {
+    if (!ctx->target || ctx->width == 0 || ctx->height == 0) return false;
+    if (ctx->canvas && ctx->canvas_w == ctx->width && ctx->canvas_h == ctx->height &&
+        ctx->canvas_dpi == ctx->dpi)
+      return true;
+    if (ctx->canvas) { ctx->canvas->Release(); ctx->canvas = nullptr; }
+    ctx->canvas_valid = false;
+    D2D1_BITMAP_PROPERTIES1 bp = {};
+    bp.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+    bp.pixelFormat   = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE);
+    bp.dpiX = static_cast<float>(ctx->dpi);
+    bp.dpiY = static_cast<float>(ctx->dpi);
+    HRESULT hr = ctx->target->CreateBitmap(D2D1::SizeU(ctx->width, ctx->height),
+                                           nullptr, 0u, &bp, &ctx->canvas);
+    if (FAILED(hr) || !ctx->canvas) {
+      ctx->canvas = nullptr;
+      bp.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                         D2D1_ALPHA_MODE_PREMULTIPLIED);
+      hr = ctx->target->CreateBitmap(D2D1::SizeU(ctx->width, ctx->height),
+                                     nullptr, 0u, &bp, &ctx->canvas);
+      if (FAILED(hr) || !ctx->canvas) { ctx->canvas = nullptr; return false; }
+    }
+    ctx->canvas_w   = ctx->width;
+    ctx->canvas_h   = ctx->height;
+    ctx->canvas_dpi = ctx->dpi;
+    return true;
+  }
+
+  // Device-px damage rect -> DIPs at the ctx's DPI.
+  static D2D1_RECT_F d2d_damage_dip(const D2DContext* ctx, const RECT& r)
+  {
+    const float inv = 96.0f / static_cast<float>(ctx->dpi);
+    return D2D1::RectF(static_cast<float>(r.left)  * inv, static_cast<float>(r.top)    * inv,
+                       static_cast<float>(r.right) * inv, static_cast<float>(r.bottom) * inv);
+  }
+
+  // Layer mask for a multi-rect partial frame: the union of the damage rects
+  // as a geometry group (a factory resource, so it can be built before
+  // BeginDraw). Built in set_frame_damage - a failure there refuses the
+  // damage cleanly instead of leaving begin_frame without a correct clip.
+  static ID2D1GeometryGroup* d2d_build_damage_mask(const D2DContext* ctx,
+                                                   const std::vector<RECT>& rects)
+  {
+    if (!g_factory) return nullptr;
+    std::vector<ID2D1Geometry*> geos;
+    geos.reserve(rects.size());
+    bool ok = true;
+    for (const RECT& r : rects) {
+      ID2D1RectangleGeometry* g = nullptr;
+      if (FAILED(g_factory->CreateRectangleGeometry(d2d_damage_dip(ctx, r), &g)) || !g) {
+        ok = false;
+        break;
+      }
+      geos.push_back(g);
+    }
+    ID2D1GeometryGroup* group = nullptr;
+    if (ok && FAILED(g_factory->CreateGeometryGroup(D2D1_FILL_MODE_WINDING, geos.data(),
+                                                    static_cast<UINT32>(geos.size()), &group)))
+      group = nullptr;
+    for (ID2D1Geometry* g : geos) g->Release();   // the group holds its own refs
+    return group;
+  }
+
+  // Copy the canvas into the swap chain's back buffer. CopyFromBitmap is a
+  // straight GPU copy; if a driver rejects it (format / option combination),
+  // draw the canvas instead.
+  static HRESULT d2d_copy_canvas_to_back_buffer(D2DContext* ctx)
+  {
+    HRESULT hr = ctx->back_buffer->CopyFromBitmap(nullptr, ctx->canvas, nullptr);
+    if (SUCCEEDED(hr)) return hr;
+    ctx->target->SetTarget(ctx->back_buffer);
+    ctx->target->BeginDraw();
+    ctx->target->SetTransform(D2D1::Matrix3x2F::Identity());
+    ctx->target->DrawBitmap(ctx->canvas, nullptr, 1.0f,
+                            D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, nullptr);
+    hr = ctx->target->EndDraw();
+    ctx->target->SetTarget(ctx->canvas);
+    return hr;
+  }
+
+  // Queue damage for the next frame. Accepted only for an opaque flip-chain
+  // HWND ctx whose canvas holds a complete frame at the current size + DPI.
+  // The first request (or the first after a resize / DPI change / device
+  // loss) switches the ctx to canvas mode and is refused, so that frame is
+  // drawn in full into a fresh canvas. The host culls only after true.
+  static bool d2d_set_frame_damage(neui_render_ctx_t raw,
+                                   const float* rects_xywh, int count)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx) return false;
+    ctx->pending_damage.clear();
+    if (!ctx->swap_chain || ctx->composition || !ctx->target) return false;
+    if (!rects_xywh || count <= 0) return false;
+    ctx->canvas_mode = true;
+    if (!ctx->canvas || !ctx->canvas_valid || ctx->canvas_w != ctx->width ||
+        ctx->canvas_h != ctx->height || ctx->canvas_dpi != ctx->dpi)
+      return false;
+    const float scale = static_cast<float>(ctx->dpi) / 96.0f;
+    for (int i = 0; i < count; ++i) {
+      int r[4];
+      if (neui_detail::damage_rect_to_device(rects_xywh[i * 4],     rects_xywh[i * 4 + 1],
+                                             rects_xywh[i * 4 + 2], rects_xywh[i * 4 + 3],
+                                             scale, static_cast<int>(ctx->width),
+                                             static_cast<int>(ctx->height), r))
+        ctx->pending_damage.push_back(RECT{ r[0], r[1], r[0] + r[2], r[1] + r[3] });
+    }
+    // All off-surface: nothing visible to repaint - but an empty clip can't
+    // be expressed as dirty rects, so take the (cheap) full frame instead.
+    if (ctx->pending_damage.empty()) return false;
+    if (ctx->frame_mask) { ctx->frame_mask->Release(); ctx->frame_mask = nullptr; }
+    if (ctx->pending_damage.size() > 1) {
+      ctx->frame_mask = d2d_build_damage_mask(ctx, ctx->pending_damage);
+      if (!ctx->frame_mask) { ctx->pending_damage.clear(); return false; }
+    }
+    return true;
+  }
+
   static void d2d_begin_frame(neui_render_ctx_t raw, uint32_t clear_argb)
   {
     auto* ctx = static_cast<D2DContext*>(raw);
@@ -886,6 +1038,17 @@ namespace neui_d2d_backend
       ctx->generation++;
     }
     if (!ctx->target) return;
+    // Canvas mode (partial repaint): draw into the persistent canvas, which
+    // end_frame copies to the back buffer. (Re)create it at the current size
+    // + DPI; a fresh canvas is not valid until this frame completes.
+    if (ctx->canvas_mode && !d2d_ensure_canvas(ctx)) {
+      ctx->canvas_mode = false;        // no canvas -> plain full frames
+      ctx->pending_damage.clear();
+    }
+    if (ID2D1Bitmap1* tgt = (ctx->canvas_mode ? ctx->canvas : ctx->back_buffer)) {
+      ctx->target->SetTarget(tgt);
+      ctx->target->SetDpi(static_cast<float>(ctx->dpi), static_cast<float>(ctx->dpi));
+    }
     ctx->target->BeginDraw();
     // Reset transform stack to identity each frame so a missing pop in
     // a previous frame can't bleed across frame boundaries.
@@ -894,25 +1057,84 @@ namespace neui_d2d_backend
     ctx->alpha_stack.clear();
     ctx->font_stack.clear();
     ctx->target->SetTransform(ctx->current);
-    ctx->target->Clear(argb_to_color(clear_argb));
+
+    ctx->frame_dirty.clear();
+    ctx->frame_clip = 0;
+    if (!ctx->pending_damage.empty() && ctx->canvas_mode) {
+      // Partial frame (accepted by set_frame_damage): clip to the damage and
+      // clear only there. The rects are device px snapped outward; the
+      // device context works in DIPs at ctx->dpi.
+      ctx->frame_dirty.swap(ctx->pending_damage);
+      if (ctx->frame_dirty.size() == 1) {
+        ctx->target->PushAxisAlignedClip(d2d_damage_dip(ctx, ctx->frame_dirty[0]),
+                                         D2D1_ANTIALIAS_MODE_ALIASED);
+        ctx->frame_clip = 1;
+        ctx->target->Clear(argb_to_color(clear_argb));
+      } else {
+        // Several rects: a layer masked by their union (built - and its
+        // failure refused - in set_frame_damage). Clear isn't masked by a
+        // layer, so fill instead; an opaque flip chain's clear colour is
+        // opaque, so the fill replaces the pixels.
+        ctx->target->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), ctx->frame_mask,
+                                                      D2D1_ANTIALIAS_MODE_ALIASED),
+                               nullptr);
+        ctx->frame_clip = 2;
+        if (ctx->brush) {
+          const float inv = 96.0f / static_cast<float>(ctx->dpi);
+          ctx->brush->SetColor(argb_to_color(clear_argb));
+          ctx->target->FillRectangle(
+            D2D1::RectF(0.0f, 0.0f, static_cast<float>(ctx->width)  * inv,
+                                    static_cast<float>(ctx->height) * inv), ctx->brush);
+        }
+      }
+    } else {
+      ctx->pending_damage.clear();
+      if (ctx->frame_mask) { ctx->frame_mask->Release(); ctx->frame_mask = nullptr; }
+      ctx->target->Clear(argb_to_color(clear_argb));
+    }
   }
 
   static void d2d_end_frame(neui_render_ctx_t raw)
   {
     auto* ctx = static_cast<D2DContext*>(raw);
     if (!ctx || !ctx->target) return;
+    // Pop the partial frame's damage clip / layer (LIFO: every widget clip
+    // pushed inside it has been popped by now).
+    if (ctx->frame_clip == 1) ctx->target->PopAxisAlignedClip();
+    else if (ctx->frame_clip == 2) ctx->target->PopLayer();
+    ctx->frame_clip = 0;
     HRESULT hr = ctx->target->EndDraw();
+    if (ctx->frame_mask) { ctx->frame_mask->Release(); ctx->frame_mask = nullptr; }
     bool lost = (hr == D2DERR_RECREATE_TARGET);
+
+    // Canvas mode: bring the back buffer (frame N-2 on the flip chain) up to
+    // date with the canvas, which now holds the complete current frame.
+    const bool via_canvas = SUCCEEDED(hr) && ctx->canvas_mode && ctx->canvas &&
+                            ctx->back_buffer && ctx->swap_chain;
+    if (via_canvas) {
+      HRESULT hc = d2d_copy_canvas_to_back_buffer(ctx);
+      if (hc == D2DERR_RECREATE_TARGET) lost = true;
+      else if (SUCCEEDED(hc)) ctx->canvas_valid = true;
+      else hr = hc;   // skip this present; the next frame retries
+    }
 
     // For HWND ctxs, Present1 ships the frame to the desktop compositor.
     // DXGI_ERROR_DEVICE_REMOVED / DXGI_ERROR_DEVICE_RESET are the DXGI-side
     // signal that the device chain is gone; treat them like D2DERR_RECREATE_TARGET.
-    if (SUCCEEDED(hr) && ctx->swap_chain) {
+    if (SUCCEEDED(hr) && !lost && ctx->swap_chain) {
       DXGI_PRESENT_PARAMETERS pp = {};
+      // A partial frame names its dirty rects so DWM recomposes only those;
+      // everything outside them is identical to the previous frame (the
+      // back buffer was just copied from the canvas).
+      if (via_canvas && !ctx->frame_dirty.empty()) {
+        pp.DirtyRectsCount = static_cast<UINT>(ctx->frame_dirty.size());
+        pp.pDirtyRects     = ctx->frame_dirty.data();
+      }
       hr = ctx->swap_chain->Present1(1, 0, &pp);
       if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
         lost = true;
     }
+    ctx->frame_dirty.clear();
 
     if (lost && ctx->swap_chain) {
       // Device lost on an HWND ctx. Drop the live target objects and the
@@ -1867,7 +2089,7 @@ namespace neui_d2d_backend
     d2d_set_fill_rule,
     d2d_stroke_path_styled,
     d2d_stroke_path_gradient,
-    nullptr,  // set_frame_damage: flip-model swap chain keeps no previous frame (see plans/xpl-partial-repaint.md P4)
+    d2d_set_frame_damage,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

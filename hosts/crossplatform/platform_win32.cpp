@@ -6,7 +6,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <imm.h>
+#include <cmath>
 #include <string>
+#include <vector>
 
 #include "host.h"
 #include "platform.h"
@@ -548,15 +550,44 @@ namespace xpl_host
     }
 
     case WM_PAINT: {
+      // Partial repaint: read the update region (client px) BEFORE
+      // BeginPaint validates it. Windows keeps a true region - one rect per
+      // platform_invalidate_rect - so it maps straight onto the frame's
+      // damage; a whole-client InvalidateRect becomes a full frame by
+      // coverage in paint_frame.
+      auto* wud = get_wud(hwnd);
+      auto* wd  = wud ? wud->session->get_widget(wud->widget_index) : nullptr;
+      neui_detail::DamageRegion damage;
+      if (wd && wd->render_ctx) {
+        if (HRGN rgn = CreateRectRgn(0, 0, 0, 0)) {
+          const int kind = GetUpdateRgn(hwnd, rgn, FALSE);
+          if (kind == SIMPLEREGION || kind == COMPLEXREGION) {
+            const DWORD bytes = GetRegionData(rgn, 0, nullptr);
+            std::vector<unsigned char> buf(bytes);
+            if (bytes >= sizeof(RGNDATAHEADER) &&
+                GetRegionData(rgn, bytes, reinterpret_cast<RGNDATA*>(buf.data())) == bytes) {
+              const auto* rd = reinterpret_cast<const RGNDATA*>(buf.data());
+              const auto* rs = reinterpret_cast<const RECT*>(rd->Buffer);
+              const double s = static_cast<double>(wd->dpi ? wd->dpi : 96u) / 96.0;
+              for (DWORD i = 0; i < rd->rdh.nCount; ++i) {
+                // Device px -> logical px, outward.
+                const int x0 = static_cast<int>(std::floor(rs[i].left   / s));
+                const int y0 = static_cast<int>(std::floor(rs[i].top    / s));
+                const int x1 = static_cast<int>(std::ceil (rs[i].right  / s));
+                const int y1 = static_cast<int>(std::ceil (rs[i].bottom / s));
+                damage.add({ x0, y0, x1 - x0, y1 - y0 });
+              }
+            }
+          }
+          DeleteObject(rgn);
+        }
+      }
       PAINTSTRUCT ps;
       BeginPaint(hwnd, &ps);
       EndPaint(hwnd, &ps);
-      auto* wud = get_wud(hwnd);
-      if (wud) {
-        auto* wd = wud->session->get_widget(wud->widget_index);
-        if (wd && wd->render_ctx)
-          wud->session->paint_frame(wd->render_ctx, wud->widget_index);
-      }
+      if (wd && wd->render_ctx)
+        wud->session->paint_frame(wd->render_ctx, wud->widget_index,
+                                  damage.empty() ? nullptr : &damage);
       return 0;
     }
 
@@ -1714,11 +1745,21 @@ namespace xpl_host
       InvalidateRect(static_cast<HWND>(native_handle), nullptr, FALSE);
   }
 
-  // No partial repaint on win32 yet: the D2D flip-model swap chain keeps no
-  // previous frame (plans/xpl-partial-repaint.md P4). Repaint the whole frame.
-  void platform_invalidate_rect(void* native_handle, int, int, int, int)
+  // Partial repaint: invalidate just the logical rect, mapped outward to
+  // client px. Windows accumulates a true update region (a whole-client
+  // InvalidateRect absorbs it); WM_PAINT hands it to paint_frame.
+  void platform_invalidate_rect(void* native_handle, int x, int y, int w, int h)
   {
-    platform_invalidate(native_handle);
+    if (!native_handle || w <= 0 || h <= 0) return;
+    HWND hwnd = static_cast<HWND>(native_handle);
+    UINT dpi  = GetDpiForWindow(hwnd);
+    const double s = static_cast<double>(dpi ? dpi : 96u) / 96.0;
+    RECT rc;
+    rc.left   = static_cast<LONG>(std::floor(x * s));
+    rc.top    = static_cast<LONG>(std::floor(y * s));
+    rc.right  = static_cast<LONG>(std::ceil((x + w) * s));
+    rc.bottom = static_cast<LONG>(std::ceil((y + h) * s));
+    InvalidateRect(hwnd, &rc, FALSE);
   }
 
   static void dispatch_one(MSG& msg)
