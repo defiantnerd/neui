@@ -1173,6 +1173,20 @@ findings fixed:**
   follows the first knob.
 - **Builds:** macOS (Ninja, Debug), the `NEUI_NO_SHADERS` configuration and
   the iOS simulator (Xcode) build clean.
+- **Windows** (D2D, MSVC Debug `/W4 /WX`): a clean build, 422/422 tests, and
+  at 150% the live row is as sharp as the baked knobs on both the native
+  win32 and the xpl host, so D2D's `get_device_transform` places the images
+  on whole device pixels. Real-mouse drags on both hosts re-shade only the
+  dragged knob (screenshot diffs: the other knobs' pixels unchanged), and the
+  `draw` panel follows the first knob only.
+- **Bench on Windows** (i7-6800K, MSVC 19.42, unchanged executor since phase
+  2): flat 2.8, ring_glow 13.2-14.3, plasma 34.5-34.7, metal_knob 64.8-65.1
+  ns/px; fbm5 145, up from 134 in phase 1 and 140-143 in phase 2. The rise
+  arrived with phase 2's sign-preserving `floor` (the noise built-ins floor
+  every octave); within noise of the phase 2 figure.
+- **Seen in passing:** the glow knob's glow is cut off at the widget rect
+  and at the arc's end angle, in the baked strips and the live layer alike.
+  That is the shader, not the layer; soften it in the shader if wanted.
 
 **Decisions taken while building it:**
 - **Placement snaps the sub-pixel remainder to 1/256 device px.** Float
@@ -1195,9 +1209,8 @@ findings fixed:**
 - **Live-resize stretch:** a resizing shader layer re-shades every frame.
 - **A per-layer `rev` cache** of the uniform resolution: not needed at the
   measured cost.
-- **Windows and Linux on-screen checks** of the live layer: CI builds and
-  tests them; the D2D and Cairo `get_device_transform` implementations have
-  no on-screen verification yet.
+- **Linux on-screen check** of the live layer: CI builds and tests it; the
+  Cairo `get_device_transform` has no on-screen verification yet.
 
 **Next:** phase 4 (D2D GPU path) or phase 6 (time and animation; partial
 repaint, its prerequisite, is done). Which one first depends on the client's
