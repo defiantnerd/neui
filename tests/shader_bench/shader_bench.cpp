@@ -394,6 +394,294 @@ class Builder {
 // lane and the inner loops auto-vectorise.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Explicit 4-wide SIMD: SSE2 on x86-64, NEON on arm64, plain arrays
+// elsewhere. Phase 0 showed that auto-vectorisation of the scalar kernels
+// depends on the compiler: clang vectorises everything, GCC part of it, and
+// MSVC only add / sub / mul / div / min / max / sqrt / lt. The f4_* math
+// mirrors the scalar m_* functions operation for operation, so both produce
+// the same bits; the checksums compare them.
+// ---------------------------------------------------------------------------
+
+// -DNSB_FORCE_PORTABLE builds the fallback on any CPU, to test it.
+#if NSB_X86 && !defined(NSB_FORCE_PORTABLE)
+#include <emmintrin.h>
+struct F4 { __m128 v; };
+struct I4 { __m128i v; };  // int32 lanes; a mask is all-ones / all-zeros
+inline F4 f4_load(const float* p) { return {_mm_loadu_ps(p)}; }
+inline void f4_store(float* p, F4 a) { _mm_storeu_ps(p, a.v); }
+inline F4 f4(float f) { return {_mm_set1_ps(f)}; }
+inline I4 i4(int32_t i) { return {_mm_set1_epi32(i)}; }
+inline F4 operator+(F4 a, F4 b) { return {_mm_add_ps(a.v, b.v)}; }
+inline F4 operator-(F4 a, F4 b) { return {_mm_sub_ps(a.v, b.v)}; }
+inline F4 operator*(F4 a, F4 b) { return {_mm_mul_ps(a.v, b.v)}; }
+inline F4 operator/(F4 a, F4 b) { return {_mm_div_ps(a.v, b.v)}; }
+inline F4 f4_sqrt(F4 a) { return {_mm_sqrt_ps(a.v)}; }
+inline I4 f4_lt(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmplt_ps(a.v, b.v))}; }
+inline I4 f4_gt(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpgt_ps(a.v, b.v))}; }
+inline I4 f4_ge(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpge_ps(a.v, b.v))}; }
+inline I4 f4_eq(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpeq_ps(a.v, b.v))}; }
+inline I4 f4_ne(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpneq_ps(a.v, b.v))}; }
+inline F4 f4_sel(I4 m, F4 a, F4 b) {
+  const __m128 mm = _mm_castsi128_ps(m.v);
+  return {_mm_or_ps(_mm_and_ps(mm, a.v), _mm_andnot_ps(mm, b.v))};
+}
+inline I4 i4_sel(I4 m, I4 a, I4 b) {
+  return {_mm_or_si128(_mm_and_si128(m.v, a.v), _mm_andnot_si128(m.v, b.v))};
+}
+inline I4 f4_bits(F4 a) { return {_mm_castps_si128(a.v)}; }
+inline F4 f4_from_bits(I4 a) { return {_mm_castsi128_ps(a.v)}; }
+inline I4 f4_trunc(F4 a) { return {_mm_cvttps_epi32(a.v)}; }  // in-range values only
+inline F4 i4_to_f4(I4 a) { return {_mm_cvtepi32_ps(a.v)}; }
+inline I4 operator+(I4 a, I4 b) { return {_mm_add_epi32(a.v, b.v)}; }
+inline I4 operator-(I4 a, I4 b) { return {_mm_sub_epi32(a.v, b.v)}; }
+inline I4 operator&(I4 a, I4 b) { return {_mm_and_si128(a.v, b.v)}; }
+inline I4 operator|(I4 a, I4 b) { return {_mm_or_si128(a.v, b.v)}; }
+inline I4 operator^(I4 a, I4 b) { return {_mm_xor_si128(a.v, b.v)}; }
+template <int N> inline I4 i4_shl(I4 a) { return {_mm_slli_epi32(a.v, N)}; }
+template <int N> inline I4 i4_shr(I4 a) { return {_mm_srli_epi32(a.v, N)}; }  // logical
+inline I4 i4_lt(I4 a, I4 b) { return {_mm_cmplt_epi32(a.v, b.v)}; }
+inline I4 i4_eq(I4 a, I4 b) { return {_mm_cmpeq_epi32(a.v, b.v)}; }
+inline I4 i4_mul(I4 a, I4 b) {  // low 32 bits; SSE2 has no pmulld
+  const __m128i p02 = _mm_mul_epu32(a.v, b.v);
+  const __m128i p13 = _mm_mul_epu32(_mm_srli_epi64(a.v, 32), _mm_srli_epi64(b.v, 32));
+  return {_mm_unpacklo_epi32(_mm_shuffle_epi32(p02, 0x08), _mm_shuffle_epi32(p13, 0x08))};
+}
+#elif NSB_A64 && !defined(NSB_FORCE_PORTABLE)
+#include <arm_neon.h>
+struct F4 { float32x4_t v; };
+struct I4 { int32x4_t v; };
+inline F4 f4_load(const float* p) { return {vld1q_f32(p)}; }
+inline void f4_store(float* p, F4 a) { vst1q_f32(p, a.v); }
+inline F4 f4(float f) { return {vdupq_n_f32(f)}; }
+inline I4 i4(int32_t i) { return {vdupq_n_s32(i)}; }
+inline F4 operator+(F4 a, F4 b) { return {vaddq_f32(a.v, b.v)}; }
+inline F4 operator-(F4 a, F4 b) { return {vsubq_f32(a.v, b.v)}; }
+inline F4 operator*(F4 a, F4 b) { return {vmulq_f32(a.v, b.v)}; }
+inline F4 operator/(F4 a, F4 b) { return {vdivq_f32(a.v, b.v)}; }
+inline F4 f4_sqrt(F4 a) { return {vsqrtq_f32(a.v)}; }
+inline I4 m4(uint32x4_t m) { return {vreinterpretq_s32_u32(m)}; }
+inline I4 f4_lt(F4 a, F4 b) { return m4(vcltq_f32(a.v, b.v)); }
+inline I4 f4_gt(F4 a, F4 b) { return m4(vcgtq_f32(a.v, b.v)); }
+inline I4 f4_ge(F4 a, F4 b) { return m4(vcgeq_f32(a.v, b.v)); }
+inline I4 f4_eq(F4 a, F4 b) { return m4(vceqq_f32(a.v, b.v)); }
+inline I4 f4_ne(F4 a, F4 b) { return m4(vmvnq_u32(vceqq_f32(a.v, b.v))); }
+inline F4 f4_sel(I4 m, F4 a, F4 b) { return {vbslq_f32(vreinterpretq_u32_s32(m.v), a.v, b.v)}; }
+inline I4 i4_sel(I4 m, I4 a, I4 b) { return {vbslq_s32(vreinterpretq_u32_s32(m.v), a.v, b.v)}; }
+inline I4 f4_bits(F4 a) { return {vreinterpretq_s32_f32(a.v)}; }
+inline F4 f4_from_bits(I4 a) { return {vreinterpretq_f32_s32(a.v)}; }
+inline I4 f4_trunc(F4 a) { return {vcvtq_s32_f32(a.v)}; }  // in-range values only
+inline F4 i4_to_f4(I4 a) { return {vcvtq_f32_s32(a.v)}; }
+inline I4 operator+(I4 a, I4 b) { return {vaddq_s32(a.v, b.v)}; }
+inline I4 operator-(I4 a, I4 b) { return {vsubq_s32(a.v, b.v)}; }
+inline I4 operator&(I4 a, I4 b) { return {vandq_s32(a.v, b.v)}; }
+inline I4 operator|(I4 a, I4 b) { return {vorrq_s32(a.v, b.v)}; }
+inline I4 operator^(I4 a, I4 b) { return {veorq_s32(a.v, b.v)}; }
+template <int N> inline I4 i4_shl(I4 a) { return {vshlq_n_s32(a.v, N)}; }
+template <int N> inline I4 i4_shr(I4 a) {  // logical
+  return {vreinterpretq_s32_u32(vshrq_n_u32(vreinterpretq_u32_s32(a.v), N))};
+}
+inline I4 i4_lt(I4 a, I4 b) { return m4(vcltq_s32(a.v, b.v)); }
+inline I4 i4_eq(I4 a, I4 b) { return m4(vceqq_s32(a.v, b.v)); }
+inline I4 i4_mul(I4 a, I4 b) { return {vmulq_s32(a.v, b.v)}; }  // low 32 bits
+#else
+// Portable fallback: four scalars per value.
+struct F4 { float v[4]; };
+struct I4 { int32_t v[4]; };
+#define NSB_F4_LOOP(expr) for (int k_ = 0; k_ < 4; ++k_) { expr; }
+inline F4 f4_load(const float* p) { F4 r; NSB_F4_LOOP(r.v[k_] = p[k_]) return r; }
+inline void f4_store(float* p, F4 a) { NSB_F4_LOOP(p[k_] = a.v[k_]) }
+inline F4 f4(float f) { F4 r; NSB_F4_LOOP(r.v[k_] = f) return r; }
+inline I4 i4(int32_t i) { I4 r; NSB_F4_LOOP(r.v[k_] = i) return r; }
+inline F4 operator+(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] + b.v[k_]) return r; }
+inline F4 operator-(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] - b.v[k_]) return r; }
+inline F4 operator*(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] * b.v[k_]) return r; }
+inline F4 operator/(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] / b.v[k_]) return r; }
+inline F4 f4_sqrt(F4 a) { F4 r; NSB_F4_LOOP(r.v[k_] = std::sqrt(a.v[k_])) return r; }
+inline I4 f4_lt(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] < b.v[k_] ? -1 : 0) return r; }
+inline I4 f4_gt(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] > b.v[k_] ? -1 : 0) return r; }
+inline I4 f4_ge(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] >= b.v[k_] ? -1 : 0) return r; }
+inline I4 f4_eq(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] == b.v[k_] ? -1 : 0) return r; }
+inline I4 f4_ne(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] != b.v[k_] ? -1 : 0) return r; }
+inline F4 f4_sel(I4 m, F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = m.v[k_] ? a.v[k_] : b.v[k_]) return r; }
+inline I4 i4_sel(I4 m, I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = m.v[k_] ? a.v[k_] : b.v[k_]) return r; }
+inline I4 f4_bits(F4 a) { I4 r; std::memcpy(r.v, a.v, 16); return r; }
+inline F4 f4_from_bits(I4 a) { F4 r; std::memcpy(r.v, a.v, 16); return r; }
+inline I4 f4_trunc(F4 a) { I4 r; NSB_F4_LOOP(r.v[k_] = static_cast<int32_t>(a.v[k_])) return r; }
+inline F4 i4_to_f4(I4 a) { F4 r; NSB_F4_LOOP(r.v[k_] = static_cast<float>(a.v[k_])) return r; }
+inline uint32_t u_(int32_t x) { return static_cast<uint32_t>(x); }
+inline int32_t s_(uint32_t x) { return static_cast<int32_t>(x); }
+inline I4 operator+(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) + u_(b.v[k_]))) return r; }
+inline I4 operator-(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) - u_(b.v[k_]))) return r; }
+inline I4 operator&(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] & b.v[k_]) return r; }
+inline I4 operator|(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] | b.v[k_]) return r; }
+inline I4 operator^(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] ^ b.v[k_]) return r; }
+template <int N> inline I4 i4_shl(I4 a) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) << N)) return r; }
+template <int N> inline I4 i4_shr(I4 a) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) >> N)) return r; }
+inline I4 i4_lt(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] < b.v[k_] ? -1 : 0) return r; }
+inline I4 i4_eq(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] == b.v[k_] ? -1 : 0) return r; }
+inline I4 i4_mul(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) * u_(b.v[k_]))) return r; }
+#undef NSB_F4_LOOP
+#endif
+
+inline F4 f4_neg(F4 a) { return f4_from_bits(f4_bits(a) ^ i4(INT32_MIN)); }
+inline F4 f4_abs(F4 a) { return f4_from_bits(f4_bits(a) & i4(0x7fffffff)); }
+inline F4 f4_min(F4 x, F4 y) { return f4_sel(f4_lt(y, x), y, x); }
+inline F4 f4_max(F4 x, F4 y) { return f4_sel(f4_lt(x, y), y, x); }
+
+inline F4 f4_floor(F4 x) {
+  const I4 in = f4_lt(f4_abs(x), f4(8388608.0f));
+  const F4 xc = f4_sel(in, x, f4(0.0f));
+  const F4 t  = i4_to_f4(f4_trunc(xc));
+  const F4 f  = f4_sel(f4_gt(t, xc), t - f4(1.0f), t);
+  return f4_sel(in, f, x);
+}
+
+inline void f4_sincos_reduce(F4 x, F4& r, I4& q) {
+  const F4 k = f4_floor(x * f4(0.636619772f) + f4(0.5f));
+  r = ((x - k * f4(1.5703125f)) - k * f4(4.837512969970703125e-4f)) - k * f4(7.54978995489188216e-8f);
+  F4 m = k - f4(4.0f) * f4_floor(k * f4(0.25f));
+  m = f4_sel(f4_eq(m, m), m, f4(0.0f));
+  q = f4_trunc(m);
+}
+inline F4 f4_sin_poly(F4 r) {
+  const F4 z = r * r;
+  return ((f4(-1.9515295891e-4f) * z + f4(8.3321608736e-3f)) * z - f4(1.6666654611e-1f)) * z * r + r;
+}
+inline F4 f4_cos_poly(F4 r) {
+  const F4 z = r * r;
+  return ((f4(2.443315711809948e-5f) * z - f4(1.388731625493765e-3f)) * z + f4(4.166664568298827e-2f)) * z * z
+         - f4(0.5f) * z + f4(1.0f);
+}
+inline F4 f4_sin(F4 x) {
+  F4 r; I4 q; f4_sincos_reduce(x, r, q);
+  const F4 s = f4_sin_poly(r), c = f4_cos_poly(r);
+  const F4 v = f4_sel(i4_eq(q & i4(1), i4(1)), c, s);
+  return f4_sel(i4_eq(q & i4(2), i4(2)), f4_neg(v), v);
+}
+inline F4 f4_cos(F4 x) {
+  F4 r; I4 q; f4_sincos_reduce(x, r, q);
+  const F4 s = f4_sin_poly(r), c = f4_cos_poly(r);
+  const F4 v = f4_sel(i4_eq(q & i4(1), i4(1)), s, c);
+  return f4_sel(i4_eq((q + i4(1)) & i4(2), i4(2)), f4_neg(v), v);
+}
+
+inline F4 f4_exp2(F4 x) {
+  F4 xc = f4_sel(f4_lt(x, f4(-126.0f)), f4(-126.0f), x);
+  xc = f4_sel(f4_gt(xc, f4(127.99999f)), f4(127.99999f), xc);
+  xc = f4_sel(f4_eq(xc, xc), xc, f4(0.0f));
+  const F4 n = f4_floor(xc + f4(0.5f));
+  const F4 f = xc - n;
+  F4 p = f4(1.535336188319500e-4f);
+  p = p * f + f4(1.339887440266574e-3f);
+  p = p * f + f4(9.618437357674640e-3f);
+  p = p * f + f4(5.550332471162809e-2f);
+  p = p * f + f4(2.402264791363012e-1f);
+  p = p * f + f4(6.931472028550421e-1f);
+  p = p * f + f4(1.0f);
+  const I4 ni = f4_trunc(n);
+  const I4 e  = i4_sel(i4_lt(ni, i4(128)), ni, i4(127));
+  const F4 s  = f4_from_bits(i4_shl<23>(e + i4(127)));
+  F4 r = p * s;
+  r = f4_sel(i4_eq(ni, i4(128)), r * f4(2.0f), r);
+  r = f4_sel(f4_lt(x, f4(-126.0f)), f4(0.0f), r);
+  r = f4_sel(f4_ge(x, f4(128.0f)), f4(k_inf), r);
+  return f4_sel(f4_eq(x, x), r, x);
+}
+
+inline F4 f4_log2(F4 x) {
+  const I4 den = f4_lt(x, f4(1.17549435e-38f));
+  const F4 xs = f4_sel(den, x * f4(8388608.0f), x);
+  const I4 u = f4_bits(xs);
+  I4 e = (i4_shr<23>(u) & i4(0xff)) - i4(127) - (den & i4(23));
+  F4 m = f4_from_bits((u & i4(0x007fffff)) | i4(0x3f800000));
+  const I4 big = f4_gt(m, f4(1.41421356f));
+  m = f4_sel(big, m * f4(0.5f), m);
+  e = e + (big & i4(1));
+  const F4 t  = (m - f4(1.0f)) / (m + f4(1.0f));
+  const F4 t2 = t * t;
+  F4 p = f4(0.412198583111132f);
+  p = p * t2 + f4(0.577078016355585f);
+  p = p * t2 + f4(0.961796693925976f);
+  p = p * t2 + f4(2.885390081777927f);
+  F4 r = i4_to_f4(e) + t * p;
+  r = f4_sel(f4_eq(x, f4(0.0f)), f4(-k_inf), r);
+  r = f4_sel(f4_lt(x, f4(0.0f)), f4(k_nan), r);
+  r = f4_sel(f4_eq(x, f4(k_inf)), f4(k_inf), r);
+  return f4_sel(f4_eq(x, x), r, x);
+}
+
+inline F4 f4_atan2(F4 y, F4 x) {
+  const F4 ax = f4_abs(x), ay = f4_abs(y);
+  const I4 xbig = f4_gt(ax, ay);
+  const F4 mx = f4_sel(xbig, ax, ay);
+  const F4 mn = f4_sel(xbig, ay, ax);
+  const F4 a  = f4_sel(f4_gt(mx, f4(0.0f)), mn / mx, f4(0.0f));
+  const I4 red = f4_gt(a, f4(0.414213562f));
+  const F4 aa = f4_sel(red, (a - f4(1.0f)) / (a + f4(1.0f)), a);
+  const F4 z  = aa * aa;
+  F4 r = (((f4(8.05374449538e-2f) * z - f4(1.38776856032e-1f)) * z + f4(1.99777106478e-1f)) * z
+          - f4(3.33329491539e-1f)) * z * aa + aa;
+  r = f4_sel(red, r + f4(0.785398163f), r);
+  r = f4_sel(f4_gt(ay, ax), f4(1.57079633f) - r, r);
+  r = f4_sel(f4_lt(x, f4(0.0f)), f4(3.14159265f) - r, r);
+  return f4_sel(f4_lt(y, f4(0.0f)), f4_neg(r), r);
+}
+
+inline I4 f4_hash_coord(F4 v) {
+  v = f4_sel(f4_eq(v, v), v, f4(0.0f));
+  v = f4_floor(v);
+  v = f4_sel(f4_lt(v, f4(-16777216.0f)), f4(-16777216.0f),
+             f4_sel(f4_gt(v, f4(16777216.0f)), f4(16777216.0f), v));
+  return f4_trunc(v);
+}
+inline F4 f4_hash2(F4 x, F4 y) {
+  I4 h = i4_mul(f4_hash_coord(x), i4(static_cast<int32_t>(0x8da6b343u))) ^
+         i4_mul(f4_hash_coord(y), i4(static_cast<int32_t>(0xd8163841u)));
+  h = h ^ i4_shr<16>(h); h = i4_mul(h, i4(0x7feb352d));
+  h = h ^ i4_shr<15>(h); h = i4_mul(h, i4(static_cast<int32_t>(0x846ca68bu)));
+  h = h ^ i4_shr<16>(h);
+  return i4_to_f4(i4_shr<8>(h)) * f4(1.0f / 16777216.0f);
+}
+
+template <int L>
+void run_block_simd(const Program& pg, float (*R)[L]) {
+  static_assert(L % 4 == 0, "SIMD lanes come in fours");
+  for (const Ins& in : pg.code) {
+    float* d = R[in.d];
+    const float* a = R[in.a];
+    const float* b = R[in.b];
+    const float* c = R[in.c];
+#define NSB_K1(expr) for (int i = 0; i < L; i += 4) { const F4 x = f4_load(a + i); f4_store(d + i, expr); } break;
+#define NSB_K2(expr) for (int i = 0; i < L; i += 4) { const F4 x = f4_load(a + i), y = f4_load(b + i); f4_store(d + i, expr); } break;
+    switch (in.op) {
+      case OP_ADD:   NSB_K2(x + y)
+      case OP_SUB:   NSB_K2(x - y)
+      case OP_MUL:   NSB_K2(x * y)
+      case OP_DIV:   NSB_K2(x / y)
+      case OP_MIN:   NSB_K2(f4_min(x, y))
+      case OP_MAX:   NSB_K2(f4_max(x, y))
+      case OP_ABS:   NSB_K1(f4_abs(x))
+      case OP_FLOOR: NSB_K1(f4_floor(x))
+      case OP_SQRT:  NSB_K1(f4_sqrt(x))
+      case OP_SIN:   NSB_K1(f4_sin(x))
+      case OP_COS:   NSB_K1(f4_cos(x))
+      case OP_EXP2:  NSB_K1(f4_exp2(x))
+      case OP_LOG2:  NSB_K1(f4_log2(x))
+      case OP_ATAN2: NSB_K2(f4_atan2(x, y))
+      case OP_LT:    NSB_K2(f4_sel(f4_lt(x, y), f4(1.0f), f4(0.0f)))
+      case OP_SEL:
+        for (int i = 0; i < L; i += 4)
+          f4_store(d + i, f4_sel(f4_ne(f4_load(a + i), f4(0.0f)), f4_load(b + i), f4_load(c + i)));
+        break;
+      case OP_HASH2: NSB_K2(f4_hash2(x, y))
+      default: break;
+    }
+#undef NSB_K1
+#undef NSB_K2
+  }
+}
+
 template <int L>
 void run_block(const Program& pg, float (*R)[L]) {
   for (const Ins& in : pg.code) {
@@ -432,7 +720,7 @@ inline uint8_t q8(float v) { return static_cast<uint8_t>(static_cast<int32_t>(v 
 // Renders a w_px x h_px premultiplied BGRA8 bitmap for a layer of size
 // (w_log, h_log) logical px. Pixel (i, j) is evaluated at
 // p = ((i + 0.5) * (w_log / w_px), (j + 0.5) * (h_log / h_px)).
-template <int L>
+template <int L, bool Simd>
 void render(const Program& pg, int w_px, int h_px, float w_log, float h_log,
             uint8_t* out, std::vector<float>& regs) {
   FpEnvGuard fp;
@@ -449,7 +737,7 @@ void render(const Program& pg, int w_px, int h_px, float w_log, float h_log,
         R[pg.px][i] = (static_cast<float>(x0 + i) + 0.5f) * sx;
         R[pg.py][i] = pyv;
       }
-      run_block<L>(pg, R);
+      if constexpr (Simd) run_block_simd<L>(pg, R); else run_block<L>(pg, R);
       const int n = std::min(L, w_px - x0);
       uint8_t* dst = out + (static_cast<size_t>(y) * static_cast<size_t>(w_px) + static_cast<size_t>(x0)) * 4u;
       const float* cr = R[pg.out[0]];
@@ -467,15 +755,29 @@ void render(const Program& pg, int w_px, int h_px, float w_log, float h_log,
   }
 }
 
-void render_lane(int lane, const Program& pg, int w_px, int h_px, float w_log, float h_log,
+// Executor variants: lane width L, auto-vectorised scalar kernels or explicit
+// SIMD kernels (L >= 4).
+enum Exec { EXEC_AUTO, EXEC_SIMD };
+
+void render_lane(int lane, Exec exec, const Program& pg, int w_px, int h_px, float w_log, float h_log,
                  uint8_t* out, std::vector<float>& regs) {
+  if (exec == EXEC_SIMD && lane >= 4) {
+    switch (lane) {
+      case 8:   render<8, true>(pg, w_px, h_px, w_log, h_log, out, regs); break;
+      case 32:  render<32, true>(pg, w_px, h_px, w_log, h_log, out, regs); break;
+      case 64:  render<64, true>(pg, w_px, h_px, w_log, h_log, out, regs); break;
+      case 128: render<128, true>(pg, w_px, h_px, w_log, h_log, out, regs); break;
+      default:  render<256, true>(pg, w_px, h_px, w_log, h_log, out, regs); break;
+    }
+    return;
+  }
   switch (lane) {
-    case 1:   render<1>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-    case 8:   render<8>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-    case 32:  render<32>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-    case 64:  render<64>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-    case 128: render<128>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-    default:  render<256>(pg, w_px, h_px, w_log, h_log, out, regs); break;
+    case 1:   render<1, false>(pg, w_px, h_px, w_log, h_log, out, regs); break;
+    case 8:   render<8, false>(pg, w_px, h_px, w_log, h_log, out, regs); break;
+    case 32:  render<32, false>(pg, w_px, h_px, w_log, h_log, out, regs); break;
+    case 64:  render<64, false>(pg, w_px, h_px, w_log, h_log, out, regs); break;
+    case 128: render<128, false>(pg, w_px, h_px, w_log, h_log, out, regs); break;
+    default:  render<256, false>(pg, w_px, h_px, w_log, h_log, out, regs); break;
   }
 }
 
@@ -645,7 +947,7 @@ void run_sweeps(uint32_t out[SW_COUNT]) {
 // Program output checksums: every program at 64x64 logical px, 1x / 1.5x / 2x.
 const float k_check_scales[3] = {1.0f, 1.5f, 2.0f};
 
-void run_programs(int lane, uint32_t out[k_program_count][3]) {
+void run_programs(int lane, Exec exec, uint32_t out[k_program_count][3]) {
   std::vector<float> regs;
   std::vector<uint8_t> px;
   for (int p = 0; p < k_program_count; ++p) {
@@ -654,7 +956,7 @@ void run_programs(int lane, uint32_t out[k_program_count][3]) {
       const int wpx = static_cast<int>(64.0f * scale + 0.5f);
       const Program pg = k_programs[p](64.0f, 64.0f, scale);
       px.assign(static_cast<size_t>(wpx) * static_cast<size_t>(wpx) * 4u, 0);
-      render_lane(lane, pg, wpx, wpx, 64.0f, 64.0f, px.data(), regs);
+      render_lane(lane, exec, pg, wpx, wpx, 64.0f, 64.0f, px.data(), regs);
       out[p][s] = crc32(px.data(), px.size());
     }
   }
@@ -681,7 +983,7 @@ int check(bool verbose) {
     std::printf("  sweep %-6s 0x%08x %s\n", k_sweep_names[i], static_cast<unsigned>(sw[i]), ok ? "ok" : "MISMATCH");
   }
   uint32_t pr[k_program_count][3];
-  run_programs(64, pr);
+  run_programs(64, EXEC_SIMD, pr);
   for (int p = 0; p < k_program_count; ++p) {
     const Program pg = k_programs[p](64.0f, 64.0f, 1.0f);
     for (int s = 0; s < 3; ++s) {
@@ -692,21 +994,23 @@ int check(bool verbose) {
     }
   }
 
-  // The lane width must not change a single bit.
-  uint32_t pr1[k_program_count][3];
-  run_programs(1, pr1);
-  const bool lanes_ok = std::memcmp(pr, pr1, sizeof(pr)) == 0;
+  // Neither the lane width nor the kernel flavour may change a single bit:
+  // scalar one pixel at a time, auto-vectorised and explicit SIMD.
+  uint32_t pr1[k_program_count][3], pr2[k_program_count][3];
+  run_programs(1, EXEC_AUTO, pr1);
+  run_programs(64, EXEC_AUTO, pr2);
+  const bool lanes_ok = std::memcmp(pr, pr1, sizeof(pr)) == 0 && std::memcmp(pr, pr2, sizeof(pr)) == 0;
   bad += lanes_ok ? 0 : 1;
-  std::printf("  lane width 1 vs 64: %s\n", lanes_ok ? "identical" : "DIFFERENT");
+  std::printf("  scalar L=1 vs auto L=64 vs SIMD L=64: %s\n", lanes_ok ? "identical" : "DIFFERENT");
 
   // A host that flushes denormals must not change a single bit either.
   {
     HostFlushToZero host;
     uint32_t sw2[SW_COUNT];
-    uint32_t pr2[k_program_count][3];
     run_sweeps(sw2);
-    run_programs(64, pr2);
-    const bool env_ok = std::memcmp(sw, sw2, sizeof(sw)) == 0 && std::memcmp(pr, pr2, sizeof(pr)) == 0;
+    uint32_t pr3[k_program_count][3];
+    run_programs(64, EXEC_SIMD, pr3);
+    const bool env_ok = std::memcmp(sw, sw2, sizeof(sw)) == 0 && std::memcmp(pr, pr3, sizeof(pr)) == 0;
     bad += env_ok ? 0 : 1;
     std::printf("  host flush-to-zero, guarded: %s\n", env_ok ? "identical" : "DIFFERENT");
   }
@@ -733,14 +1037,14 @@ double now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-double ns_per_px(int lane, const Program& pg, int wpx, int hpx, float wl, float hl, int reps) {
+double ns_per_px(int lane, Exec exec, const Program& pg, int wpx, int hpx, float wl, float hl, int reps) {
   std::vector<float> regs;
   std::vector<uint8_t> px(static_cast<size_t>(wpx) * static_cast<size_t>(hpx) * 4u);
-  render_lane(lane, pg, wpx, hpx, wl, hl, px.data(), regs);  // warm up
+  render_lane(lane, exec, pg, wpx, hpx, wl, hl, px.data(), regs);  // warm up
   double best = 1e30;
   for (int r = 0; r < reps; ++r) {
     const double t0 = now_s();
-    render_lane(lane, pg, wpx, hpx, wl, hl, px.data(), regs);
+    render_lane(lane, exec, pg, wpx, hpx, wl, hl, px.data(), regs);
     best = std::min(best, now_s() - t0);
   }
   return best * 1e9 / (static_cast<double>(wpx) * static_cast<double>(hpx));
@@ -778,34 +1082,43 @@ void report() {
 #elif defined(__GNUC__)
   std::printf("compiler: GCC %s", __VERSION__);
 #endif
-#if NSB_X86
-  std::printf(" (x86, SSE)\n");
+#if defined(__x86_64__) || defined(_M_X64)
+  std::printf(" (x64, SSE2)\n");
+#elif NSB_X86
+  std::printf(" (x86, SSE2)\n");
 #elif NSB_A64
-  std::printf(" (arm64)\n");
+  std::printf(" (arm64, NEON)\n");
 #else
   std::printf(" (other)\n");
 #endif
+#if defined(NSB_FORCE_PORTABLE)
+  std::printf("SIMD kernels: portable fallback (forced)\n");
+#endif
 
-  const int lanes[] = {1, 8, 32, 64, 128, 256};
-  std::printf("\nns per pixel by lane width (120x120 logical knob @2x = 240x240 px, best of 7):\n");
-  std::printf("  %-13s %4s %5s", "program", "ops", "trans");
-  for (int l : lanes) std::printf(" %7s%-3d", "L=", l);
+  std::printf("\nns per pixel (120x120 logical knob @2x = 240x240 px, best of 7)\n");
+  std::printf("scalar = one pixel at a time; auto = scalar kernels left to the auto-vectoriser;\n");
+  std::printf("SIMD = explicit 4-wide kernels; L = pixels per lane\n");
+  const int lanes[] = {8, 32, 64, 128, 256};
+  std::printf("  %-13s %4s %5s %4s %9s %9s", "program", "ops", "trans", "regs", "scalar", "auto L64");
+  for (int l : lanes) std::printf(" %6s%-3d", "SIMD L", l);
   std::printf("\n");
   for (int p = 0; p < k_program_count; ++p) {
     const Program pg = k_programs[p](120.0f, 120.0f, 2.0f);
-    std::printf("  %-13s %4d %5d", pg.name, static_cast<int>(pg.code.size()), pg.transcendentals);
-    for (int l : lanes) std::printf(" %10.2f", ns_per_px(l, pg, 240, 240, 120.0f, 120.0f, 7));
+    std::printf("  %-13s %4d %5d %4d", pg.name, static_cast<int>(pg.code.size()), pg.transcendentals, pg.nregs);
+    std::printf(" %9.2f", ns_per_px(1, EXEC_AUTO, pg, 240, 240, 120.0f, 120.0f, 7));
+    std::printf(" %9.2f", ns_per_px(64, EXEC_AUTO, pg, 240, 240, 120.0f, 120.0f, 7));
+    for (int l : lanes) std::printf(" %9.2f", ns_per_px(l, EXEC_SIMD, pg, 240, 240, 120.0f, 120.0f, 7));
     std::printf("\n");
   }
 
-  std::printf("\nms per re-shade at L=64:\n");
+  std::printf("\nms per re-shade, SIMD L=64:\n");
   std::printf("  %-13s %14s %20s %18s\n", "program", "knob 120@2x", "background 800x600@2x", "same @ resolution 0.5");
   for (int p = 0; p < k_program_count; ++p) {
     const Program knob = k_programs[p](120.0f, 120.0f, 2.0f);
     const Program bg   = k_programs[p](800.0f, 600.0f, 2.0f);
-    const double knob_ms = ns_per_px(64, knob, 240, 240, 120.0f, 120.0f, 7) * 240.0 * 240.0 * 1e-6;
-    const double bg_ms   = ns_per_px(64, bg, 1600, 1200, 800.0f, 600.0f, 2) * 1600.0 * 1200.0 * 1e-6;
-    const double half_ms = ns_per_px(64, bg, 800, 600, 800.0f, 600.0f, 3) * 800.0 * 600.0 * 1e-6;
+    const double knob_ms = ns_per_px(64, EXEC_SIMD, knob, 240, 240, 120.0f, 120.0f, 7) * 240.0 * 240.0 * 1e-6;
+    const double bg_ms   = ns_per_px(64, EXEC_SIMD, bg, 1600, 1200, 800.0f, 600.0f, 2) * 1600.0 * 1200.0 * 1e-6;
+    const double half_ms = ns_per_px(64, EXEC_SIMD, bg, 800, 600, 800.0f, 600.0f, 3) * 800.0 * 600.0 * 1e-6;
     std::printf("  %-13s %11.2f ms %17.1f ms %15.1f ms\n", knob.name, knob_ms, bg_ms, half_ms);
   }
 
