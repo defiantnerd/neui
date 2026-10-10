@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -66,6 +67,32 @@ namespace neui_detail
   inline uint32_t font_size_q10(float font_size)
   {
     return static_cast<uint32_t>(font_size * 10.0f + 0.5f);
+  }
+
+  // Partial-repaint damage: map a logical-px rect to whole device pixels at
+  // `scale`, snapping OUTWARD (floor the origin, ceil the far edge) so a
+  // fractional DPI (150%) never leaves a half-covered seam pixel outside the
+  // clip, then clamp to the [0, max_w) x [0, max_h) surface. Writes x, y, w, h
+  // into out[]; returns false when nothing is left after clamping.
+  inline bool damage_rect_to_device(float x, float y, float w, float h,
+                                    float scale, int max_w, int max_h,
+                                    int out[4])
+  {
+    if (!(scale > 0.0f)) scale = 1.0f;
+    double x0 = std::floor(static_cast<double>(x) * scale);
+    double y0 = std::floor(static_cast<double>(y) * scale);
+    double x1 = std::ceil(static_cast<double>(x + w) * scale);
+    double y1 = std::ceil(static_cast<double>(y + h) * scale);
+    if (x0 < 0.0) x0 = 0.0;
+    if (y0 < 0.0) y0 = 0.0;
+    if (x1 > max_w) x1 = max_w;
+    if (y1 > max_h) y1 = max_h;
+    if (x1 <= x0 || y1 <= y0) return false;
+    out[0] = static_cast<int>(x0);
+    out[1] = static_cast<int>(y0);
+    out[2] = static_cast<int>(x1 - x0);
+    out[3] = static_cast<int>(y1 - y0);
+    return true;
   }
 
 } // namespace neui_detail

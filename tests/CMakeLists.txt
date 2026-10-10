@@ -24,6 +24,7 @@ add_executable(neui_tests
   test_image_filter.cpp
   test_filter_graph.cpp
   test_backend_util.cpp
+  test_damage.cpp
   test_tabview.cpp
   test_mujson.cpp
   test_component_loader.cpp

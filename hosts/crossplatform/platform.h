@@ -114,6 +114,12 @@ namespace xpl_host
   // next message-loop iteration. Used after focus changes to update the outline.
   void platform_invalidate(void* native_handle);
 
+  // Invalidate one frame-local rect (logical px) so the next paint can be
+  // partial (see Session::paint_frame's `damage`). A pending full-window
+  // invalidation absorbs it. Platforms without partial repaint forward to
+  // platform_invalidate, which is always correct.
+  void platform_invalidate_rect(void* native_handle, int x, int y, int w, int h);
+
   // Start / stop a 16 ms repaint heartbeat on a frame's native window.
   // Used by the toast overlay (and any future animation that does not
   // belong to a single widget). The platform layer is responsible for

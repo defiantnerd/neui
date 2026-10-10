@@ -119,13 +119,18 @@ namespace xpl_host
   // re-syncs the mirror tree; every other platform keeps the historical
   // whole-frame invalidate.
 
+  // The funnel for client-driven visual changes (attribute writes, set_text,
+  // set_asset, set_enabled, the public invalidate, GRID content). None of
+  // them changes geometry, so only the widget's own area needs repainting -
+  // a partial frame where the platform supports it (Session::
+  // invalidate_widget_rect falls back to the whole frame when it can't
+  // vouch for the rect).
   static void invalidate_widget_visual(Session* s, uint32_t idx)
   {
 #ifdef NEUI_PLATFORM_LVGL
     platform_retained_widget_invalidate(s, idx);
 #else
-    if (void* frame = s->find_parent_native_handle(idx))
-      platform_invalidate(frame);
+    s->invalidate_widget_rect(idx);
 #endif
   }
 
@@ -728,10 +733,10 @@ namespace xpl_host
     if (!s) return;
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
-    // Map any widget invalidation to a frame-level repaint - on the xpl
-    // host the entire frame paints in one pass, so per-widget invalidation
-    // would have to invalidate the frame anyway. (The LVGL retained platform
-    // narrows this to the widget's mirror object.)
+    // Repaint just this widget's area where the platform supports partial
+    // frames (Linux / Cairo); elsewhere the whole frame repaints in one
+    // pass. (The LVGL retained platform narrows this to the widget's mirror
+    // object.)
     invalidate_widget_visual(s, idx);
   }
 

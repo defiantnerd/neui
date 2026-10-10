@@ -1867,6 +1867,7 @@ namespace neui_d2d_backend
     d2d_set_fill_rule,
     d2d_stroke_path_styled,
     d2d_stroke_path_gradient,
+    nullptr,  // set_frame_damage: flip-model swap chain keeps no previous frame (see plans/xpl-partial-repaint.md P4)
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

@@ -2419,6 +2419,13 @@ namespace xpl_host
     [view setNeedsDisplay];
   }
 
+  // No partial repaint on iOS yet (setNeedsDisplayInRect: + dirtyRect is
+  // plans/xpl-partial-repaint.md P2). Repaint the whole frame.
+  void platform_invalidate_rect(void* native_handle, int, int, int, int)
+  {
+    platform_invalidate(native_handle);
+  }
+
   // UIApplicationMain owns the run loop on iOS; neui never owns / stops it.
   bool platform_run() { return true; }
   bool platform_pump_once() { return true; }

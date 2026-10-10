@@ -2,7 +2,29 @@
 
 ## Status
 
-**Design accepted, not started.** This is the first track ahead of
+**P1 implemented (branch `shaders`); Linux runtime check pending.** The pieces:
+- `hosts/shared/damage.h` with Tier-1 `tests/test_damage.cpp`;
+- `damage_rect_to_device` in `backends/shared/backend_util.h`;
+- the `set_frame_damage` backend slot;
+- the Cairo clip / clear / per-rect blit, covered by `neui_cairo_smoke`;
+- `LinuxWindow::damage` + `platform_invalidate_rect`;
+- the culled paint walk;
+- `Session::invalidate_widget_rect`.
+
+Two deviations from the design below:
+- **`set_frame_damage` returns `bool`.** A backend may refuse a partial frame
+  (fresh surface after create / resize, DPI change), and culling against a
+  full clear would blank the skipped widgets. The host therefore culls only
+  after `true`.
+- **The `invalidate_widget_visual` funnel moved into P1**, so P1 is
+  observable: attr writes, `set_text` / `set_asset` / `set_enabled`, the
+  public `invalidate`, GRID content. That is exactly the DAW-automation path.
+  `WidgetData::repaint()` (the internal hover / press / caret / focus sites)
+  stays full-frame until P3.
+
+The P2-P4 and design text below is unchanged.
+
+This is the first track ahead of
 `plans/shader-effects.md`. It is worth doing on its own merits, because the
 cost it removes already exists without shaders. It is also a hard prerequisite
 for time-animated shaders (shader phase 6).

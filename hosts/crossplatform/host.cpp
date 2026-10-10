@@ -3,6 +3,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 #include "host.h"
 #include "platform.h"
@@ -477,6 +478,52 @@ namespace xpl_host
         return _widgets[p].native_handle;
     }
     return nullptr;
+  }
+
+  // Partial repaint: a widget's damage footprint - its frame-local rect
+  // grown by a margin covering what paints just outside it (the 1.5 px
+  // focus-ring stroke straddles the edge; anti-aliasing bleeds a pixel). Used
+  // both to queue damage (Session::invalidate_widget_rect) and to cull, so
+  // the two always agree.
+  static constexpr int k_damage_margin = 4;
+  // Above this damage coverage a partial frame saves too little to beat the
+  // per-rect clip + blit overhead; paint the whole frame instead.
+  static constexpr float k_partial_max_coverage = 0.6f;
+
+  static neui_detail::DamageRect widget_damage_rect(const WidgetData& wd)
+  {
+    return { wd.abs_x - k_damage_margin, wd.abs_y - k_damage_margin,
+             wd.width + 2 * k_damage_margin, wd.height + 2 * k_damage_margin };
+  }
+
+  // Debug switches (read once): NEUI_DEBUG_FULL_REPAINT=1 ignores damage
+  // (bisects a partial-repaint artefact); NEUI_DEBUG_DAMAGE=1 tints every
+  // partial frame's damage rects so over- / under-invalidation is visible.
+  static bool env_flag(const char* name)
+  {
+#if defined(_MSC_VER)
+    char   buf[8] = {};
+    size_t n      = 0;
+    return getenv_s(&n, buf, sizeof(buf), name) == 0 && n > 1 && buf[0] != '0';
+#else
+    const char* v = std::getenv(name);
+    return v && *v && *v != '0';
+#endif
+  }
+
+  void Session::invalidate_widget_rect(uint32_t widget_index)
+  {
+    void* frame = find_parent_native_handle(widget_index);
+    if (!frame) return;
+    WidgetData* wd = get_widget(widget_index);
+    if (!wd || !wd->abs_valid || wd->is_frame() || wd->is_menubar() ||
+        wd->native_handle || widget_index == _open_combo ||
+        wd->width <= 0 || wd->height <= 0) {
+      platform_invalidate(frame);
+      return;
+    }
+    const neui_detail::DamageRect r = widget_damage_rect(*wd);
+    platform_invalidate_rect(frame, r.x, r.y, r.w, r.h);
   }
 
   int Session::frame_client_height(uint32_t widget_index)
@@ -2141,12 +2188,18 @@ namespace xpl_host
   // happens with the renderer transform set so the child paints at its
   // own (x, y) which maps to the correct absolute position - so widget
   // paint code can stay coordinate-agnostic.
+  // `cull` != nullptr only on a partial frame the backend accepted: widgets
+  // whose damage footprint misses it are skipped (no PREUPDATE, no paint).
+  // The backend clips to the damage regardless, so culling is purely a
+  // saving - and abs_x / abs_y are refreshed for every widget either way,
+  // because hit-testing reads them.
   static void paint_widgets_recursive(neui_render_backend_t* backend,
                                       neui_render_ctx_t ctx,
                                       neui_detail::Tree<WidgetData>& widgets,
                                       uint32_t parent_index,
                                       int parent_abs_x, int parent_abs_y,
-                                      uint32_t focused_widget)
+                                      uint32_t focused_widget,
+                                      const neui_detail::DamageRegion* cull)
   {
     uint32_t idx = widgets.child(parent_index);
     while (idx != 0) {
@@ -2154,7 +2207,9 @@ namespace xpl_host
         auto& wd = widgets[idx];
         wd.abs_x = parent_abs_x + wd.x;
         wd.abs_y = parent_abs_y + wd.y;
-        if (!wd.native_handle && !wd.is_menubar() && wd.visible && wd.width > 0 && wd.height > 0) {
+        wd.abs_valid = true;
+        const bool culled = cull && !cull->intersects(widget_damage_rect(wd));
+        if (!culled && !wd.native_handle && !wd.is_menubar() && wd.visible && wd.width > 0 && wd.height > 0) {
           // Fire WIDGET_PREUPDATE to opted-in widgets so the client can
           // refresh attribute-driven state (e.g. NEUI_PARAM_VALUE) before
           // we read it during paint.
@@ -2216,12 +2271,12 @@ namespace xpl_host
           backend->translate(ctx, static_cast<float>(child_origin_x),
                                   static_cast<float>(child_origin_y));
         paint_widgets_recursive(backend, ctx, widgets, idx,
-                                abs_origin_x, abs_origin_y, focused_widget);
+                                abs_origin_x, abs_origin_y, focused_widget, cull);
         // After-children hook: widget-local coords are active here (we
         // translated by (wd.x, wd.y) above and have not popped yet).
         // Used by CUSTOMDRAW + compound to paint z>=0 layers above the
         // child-widget pass; default implementation is a no-op.
-        if (!wd.native_handle && !wd.is_menubar() && wd.visible && wd.width > 0 && wd.height > 0) {
+        if (!culled && !wd.native_handle && !wd.is_menubar() && wd.visible && wd.width > 0 && wd.height > 0) {
           wd.paint_after_children(backend, ctx, idx == focused_widget);
         }
         if (backend->pop_transform) backend->pop_transform(ctx);
@@ -2258,7 +2313,8 @@ namespace xpl_host
     return clear;
   }
 
-  void Session::paint_frame(neui_render_ctx_t ctx, uint32_t parent_index)
+  void Session::paint_frame(neui_render_ctx_t ctx, uint32_t parent_index,
+                            const neui_detail::DamageRegion* damage)
   {
     if (!_backend || !ctx) return;
     // Choose the palette for this frame BEFORE reading any colour: the
@@ -2289,6 +2345,37 @@ namespace xpl_host
       if (fw && fw->attrs && fw->attrs->has(NEUI_ATTR_BACKGROUND))
         clear = static_cast<uint32_t>(fw->attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
     }
+    // Partial frame? Only for real damage (not EMPTY / FULL), below the
+    // coverage threshold, and only once the backend has ACCEPTED it - it may
+    // refuse (fresh surface, DPI change) and then clears everything, so
+    // culling must not happen. Every other frame tells the backend "full"
+    // explicitly, so no damage can leak into a later frame.
+    static const bool force_full  = env_flag("NEUI_DEBUG_FULL_REPAINT");
+    static const bool flash_damage = env_flag("NEUI_DEBUG_DAMAGE");
+    const neui_detail::DamageRegion* cull = nullptr;
+    if (_backend->set_frame_damage) {
+      bool want_partial = damage && !damage->empty() && !damage->full() && !force_full;
+      if (want_partial) {
+        WidgetData* fw = get_widget(parent_index);
+        if (!fw || damage->coverage(fw->width, fw->height) >= k_partial_max_coverage)
+          want_partial = false;
+      }
+      if (want_partial) {
+        std::vector<float> rects;
+        rects.reserve(damage->rects().size() * 4);
+        for (const auto& d : damage->rects()) {
+          rects.push_back(static_cast<float>(d.x));
+          rects.push_back(static_cast<float>(d.y));
+          rects.push_back(static_cast<float>(d.w));
+          rects.push_back(static_cast<float>(d.h));
+        }
+        if (_backend->set_frame_damage(ctx, rects.data(),
+                                       static_cast<int>(damage->rects().size())))
+          cull = damage;
+      } else {
+        _backend->set_frame_damage(ctx, nullptr, 0);
+      }
+    }
     _backend->begin_frame(ctx, clear);
     // While the frame doesn't own OS keyboard focus, suppress focus
     // decorations (caret, focus outline) by reporting "no focused widget" to
@@ -2307,10 +2394,10 @@ namespace xpl_host
     if (inset > 0 && _backend->push_transform && _backend->translate) {
       _backend->push_transform(ctx);
       _backend->translate(ctx, 0.0f, (float)inset);
-      paint_widgets_recursive(_backend, ctx, _widgets, parent_index, 0, inset, focus_for_paint);
+      paint_widgets_recursive(_backend, ctx, _widgets, parent_index, 0, inset, focus_for_paint, cull);
       _backend->pop_transform(ctx);
     } else {
-      paint_widgets_recursive(_backend, ctx, _widgets, parent_index, 0, 0, focus_for_paint);
+      paint_widgets_recursive(_backend, ctx, _widgets, parent_index, 0, 0, focus_for_paint, cull);
     }
     // Draw the open combo overlay on top of all other widgets.
     if (_open_combo != 0 && _widgets.exists(_open_combo)) {
@@ -2330,6 +2417,15 @@ namespace xpl_host
     paint_popup_menu(ctx);
     // Toast overlay sits on top of every other overlay.
     paint_toast(ctx, parent_index);
+    // The overlays above are not culled: the backend clips them to the
+    // damage, which is all a partial frame needs.
+    if (cull && flash_damage && _backend->fill_rect) {
+      static uint32_t flash_phase = 0;
+      const uint32_t tint = (++flash_phase & 1u) ? 0x40FF00FFu : 0x4000FFFFu;
+      for (const auto& d : cull->rects())
+        _backend->fill_rect(ctx, static_cast<float>(d.x), static_cast<float>(d.y),
+                            static_cast<float>(d.w), static_cast<float>(d.h), tint);
+    }
     _backend->end_frame(ctx);
 
     // Restore the previous override so non-paint callers (event

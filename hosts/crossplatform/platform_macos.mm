@@ -1672,6 +1672,13 @@ namespace xpl_host
     [frame_content_view(native_handle) setNeedsDisplay:YES];
   }
 
+  // No partial repaint on macOS yet (setNeedsDisplayInRect: + dirtyRect is
+  // plans/xpl-partial-repaint.md P2). Repaint the whole frame.
+  void platform_invalidate_rect(void* native_handle, int, int, int, int)
+  {
+    platform_invalidate(native_handle);
+  }
+
   bool platform_run()
   {
     [NSApp run];

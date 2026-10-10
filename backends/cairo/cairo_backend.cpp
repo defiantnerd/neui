@@ -75,6 +75,19 @@ namespace neui_cairo_backend
 
     bool is_offscreen = false;            // backs NEUI_ASSET_KIND_SURFACE
     bool eo_fill      = false;            // even-odd fill rule (reset on begin_path)
+
+    // Partial repaint (set_frame_damage). pending_damage is what the host
+    // queued for the next frame (logical x,y,w,h quadruples); frame_damage_px
+    // is what that frame actually clipped to (device px) and end_frame blits.
+    // has_content / content_scale guard the partial path: the surface is
+    // reallocated (contents lost) on create / resize, and a DPI change
+    // invalidates every pixel, so until one full frame has been drawn at the
+    // current scale every frame is full regardless of the queued damage.
+    std::vector<float> pending_damage;
+    std::vector<int>   frame_damage_px;
+    bool  frame_partial = false;
+    bool  has_content   = false;
+    float content_scale = 0.0f;
   };
 
   // --------------------------------------------------------------------------
@@ -289,6 +302,7 @@ namespace neui_cairo_backend
   static void alloc_window_surface(CairoCtx* st)
   {
     const int stride = cairo_stride(st->w_px);
+    st->has_content = false;   // fresh buffer - the next frame must be full
 
     // --- Try MIT-SHM (zero-copy: cairo renders straight into the shm buffer).
     if (st->dpy && XShmQueryExtension(st->dpy)) {
@@ -421,14 +435,44 @@ namespace neui_cairo_backend
     st->alpha_stack.clear();
     st->font_stack.clear();
 
+    // Partial frame: clip to the queued damage in DEVICE space (the CTM is
+    // still identity here), snapped outward to whole pixels so fractional
+    // DPI leaves no seam. Every later push_clip intersects with this, and the
+    // clear below only touches the damage - the rest of the surface keeps the
+    // previous frame. pending_damage is only ever non-empty when
+    // set_frame_damage accepted it (surface complete at this scale).
+    st->frame_damage_px.clear();
+    st->frame_partial = false;
+    if (!st->pending_damage.empty()) {
+      const auto& pd = st->pending_damage;
+      for (size_t i = 0; i + 3 < pd.size(); i += 4) {
+        int r[4];
+        if (neui_detail::damage_rect_to_device(pd[i], pd[i + 1], pd[i + 2], pd[i + 3],
+                                               st->scale,
+                                               static_cast<int>(st->w_px),
+                                               static_cast<int>(st->h_px), r))
+          st->frame_damage_px.insert(st->frame_damage_px.end(), r, r + 4);
+      }
+      // An all-off-surface damage list leaves an empty clip: nothing paints,
+      // nothing blits - correct, since nothing visible changed.
+      cairo_new_path(st->cr);
+      for (size_t i = 0; i + 3 < st->frame_damage_px.size(); i += 4)
+        cairo_rectangle(st->cr, st->frame_damage_px[i],     st->frame_damage_px[i + 1],
+                                st->frame_damage_px[i + 2], st->frame_damage_px[i + 3]);
+      cairo_clip(st->cr);
+      st->frame_partial = true;
+    }
+    st->pending_damage.clear();
+
     // Baseline scale: a logical-px draw maps to (scale) device px. Applied
     // here (not at create) so update_dpi takes effect on the next frame.
     if (st->scale != 1.0f)
       cairo_scale(st->cr, st->scale, st->scale);
 
-    // Clear the whole surface. cairo_paint fills the entire clip region with
-    // the source regardless of the CTM (a solid colour pattern is
-    // CTM-independent), so this covers all physical pixels.
+    // Clear the surface - all of it, or just the damage on a partial frame.
+    // cairo_paint fills the entire clip region with the source regardless of
+    // the CTM (a solid colour pattern is CTM-independent), so this covers all
+    // physical pixels inside the clip.
     double rgba[4]; argb_to_rgba(clear_argb, rgba);
     cairo_set_source_rgba(st->cr, rgba[0], rgba[1], rgba[2], rgba[3]);
     cairo_set_operator(st->cr, CAIRO_OPERATOR_SOURCE);
@@ -443,8 +487,18 @@ namespace neui_cairo_backend
     cairo_restore(st->cr);
     cairo_surface_flush(st->surface);
 
+    // The surface now holds a complete frame at this scale - later frames
+    // may be partial. Snapshot the blit list before resetting the frame state.
+    st->has_content   = true;
+    st->content_scale = st->scale;
+    const bool partial = st->frame_partial;
+    st->frame_partial = false;
+
     // Offscreen ctxs have nothing to present.
-    if (st->is_offscreen || !st->dpy || !st->ximage) return;
+    if (st->is_offscreen || !st->dpy || !st->ximage) {
+      st->frame_damage_px.clear();
+      return;
+    }
 
     if (st->use_shm) {
       // XShmPutImage is asynchronous: the server reads our shared buffer
@@ -455,16 +509,54 @@ namespace neui_cairo_backend
       // guarantees the server has executed the put (incl. the shm read)
       // before we return. (A completion-event handshake would avoid the
       // round-trip, but at neui's redraw rates the sync cost is negligible.)
-      XShmPutImage(st->dpy, st->win, st->gc, st->ximage,
-                   0, 0, 0, 0, st->w_px, st->h_px, False);
+      // A partial frame blits only its damage rects (same src + dst origin:
+      // the window and the surface share one pixel grid).
+      if (partial) {
+        const auto& d = st->frame_damage_px;
+        for (size_t i = 0; i + 3 < d.size(); i += 4)
+          XShmPutImage(st->dpy, st->win, st->gc, st->ximage,
+                       d[i], d[i + 1], d[i], d[i + 1],
+                       static_cast<unsigned>(d[i + 2]),
+                       static_cast<unsigned>(d[i + 3]), False);
+      } else {
+        XShmPutImage(st->dpy, st->win, st->gc, st->ximage,
+                     0, 0, 0, 0, st->w_px, st->h_px, False);
+      }
       XSync(st->dpy, False);
     } else {
       // XPutImage copies the pixels into the protocol request, so the buffer
       // is free to reuse as soon as the request is flushed.
-      XPutImage(st->dpy, st->win, st->gc, st->ximage,
-                0, 0, 0, 0, st->w_px, st->h_px);
+      if (partial) {
+        const auto& d = st->frame_damage_px;
+        for (size_t i = 0; i + 3 < d.size(); i += 4)
+          XPutImage(st->dpy, st->win, st->gc, st->ximage,
+                    d[i], d[i + 1], d[i], d[i + 1],
+                    static_cast<unsigned>(d[i + 2]),
+                    static_cast<unsigned>(d[i + 3]));
+      } else {
+        XPutImage(st->dpy, st->win, st->gc, st->ximage,
+                  0, 0, 0, 0, st->w_px, st->h_px);
+      }
       XFlush(st->dpy);
     }
+    st->frame_damage_px.clear();
+  }
+
+  // Queue damage for the NEXT frame only (begin_frame consumes it). An empty
+  // list (or count 0) means that frame is full. Accepted only when the
+  // surface holds a complete frame at the current scale (see has_content);
+  // the host culls only on a true return, so begin_frame applies whatever was
+  // accepted here without re-checking.
+  static bool cairo_set_frame_damage(neui_render_ctx_t raw,
+                                     const float* rects_xywh, int count)
+  {
+    auto* st = static_cast<CairoCtx*>(raw);
+    if (!st) return false;
+    st->pending_damage.clear();
+    if (!rects_xywh || count <= 0) return false;
+    if (!st->has_content || st->content_scale != st->scale) return false;
+    st->pending_damage.assign(rects_xywh, rects_xywh + static_cast<size_t>(count) * 4);
+    return true;
   }
 
   // --------------------------------------------------------------------------
@@ -1208,6 +1300,7 @@ namespace neui_cairo_backend
     cairo_set_fill_rule_fn,
     cairo_stroke_path_styled,
     cairo_stroke_path_gradient,
+    cairo_set_frame_damage,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

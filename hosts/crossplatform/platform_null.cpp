@@ -49,6 +49,7 @@ namespace xpl_host
   float platform_get_scale_factor(void* /*native_handle*/) { return 1.0f; }
 
   void platform_invalidate(void* /*native_handle*/) {}
+  void platform_invalidate_rect(void* /*native_handle*/, int, int, int, int) {}
 
   bool platform_run() { return true; }
   bool platform_pump_once() { return true; }

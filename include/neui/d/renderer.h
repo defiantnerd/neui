@@ -337,6 +337,25 @@ typedef struct neui_render_backend {
                                         const neui_gradient_t* grad,
                                         const neui_stroke_style_t* style);
 
+  // --- Partial repaint (vtable-appended; NULL = full frames only) ---------
+  //
+  // Restrict the NEXT begin_frame / end_frame pair to `count` damage rects
+  // (x, y, w, h quadruples in logical pixels, frame-local): begin_frame
+  // clips to them and clears only there, end_frame presents only them, and
+  // every pixel outside keeps the previous frame's content. count == 0 (or
+  // rects == NULL) means a full frame. Consumed by that one frame - each
+  // frame without a call is full.
+  //
+  // Returns true only when that frame WILL be partial. A backend may refuse
+  // (false = full frame) whenever it can't vouch for the pixels outside the
+  // damage - a freshly (re)allocated surface, a DPI change since the last
+  // frame. The host must cull widgets only after a true return, otherwise a
+  // full clear would wipe what it skipped. A backend that can never keep the
+  // previous frame (e.g. a flip-model swap chain without a persistent
+  // canvas) leaves this NULL.
+  bool (NEUI_ABI *set_frame_damage)(neui_render_ctx_t ctx,
+                                    const float* rects_xywh, int count);
+
 } neui_render_backend_t;
 
 #ifdef __cplusplus

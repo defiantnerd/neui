@@ -10,6 +10,7 @@
 #include "../shared/grid_model.h"
 #include "../shared/widget_section_scroll.h"
 #include "../shared/widget_tabview.h"
+#include "../shared/damage.h"
 #include "asset_manager.h"
 
 #include <string>
@@ -43,6 +44,10 @@ namespace xpl_host
     // test happens to land on the frame's top-left, which is acceptable
     // because input cannot arrive before the window is first painted.
     int abs_x = 0, abs_y = 0;
+    // Set once the paint walk has computed abs_x / abs_y. Partial repaint
+    // builds a widget's damage rect from them, so until then any
+    // invalidation of this widget repaints the whole frame.
+    bool abs_valid   = false;
     bool isroot      = false;
     bool visible     = false;
     bool emit_events = false;
@@ -860,7 +865,23 @@ namespace xpl_host
                                uint32_t stop_before = 0);
 
     // Called by the platform layer when WM_PAINT / equivalent fires.
-    void paint_frame(neui_render_ctx_t ctx, uint32_t parent_index);
+    // `damage` (frame-local logical px) restricts the frame to those rects:
+    // widgets outside them are culled and the backend clips + presents only
+    // them. nullptr / FULL / EMPTY, a backend without set_frame_damage, or
+    // damage covering most of the frame all fall back to a full frame.
+    void paint_frame(neui_render_ctx_t ctx, uint32_t parent_index,
+                     const neui_detail::DamageRegion* damage = nullptr);
+
+    // Queue a repaint of just this widget's area (its cached frame-local
+    // rect plus a small margin for focus rings / anti-aliasing) on its
+    // frame. Falls back to a whole-frame repaint whenever that rect can't be
+    // trusted or the change can reach beyond it: never painted yet, the
+    // frame itself, an open combo (its drop list lies outside the rect).
+    // Correctness relies on one invariant: every geometry change (move,
+    // resize, show / hide, scroll) still requests a FULL repaint, and a
+    // pending full repaint absorbs any rects queued alongside it - so a
+    // rect computed from stale abs_x / abs_y is never the only repaint.
+    void invalidate_widget_rect(uint32_t widget_index);
 
 #ifdef NEUI_PLATFORM_LVGL
     // Retained-mode paint entries (LVGL Option C prototype). The LVGL

@@ -1714,6 +1714,13 @@ namespace xpl_host
       InvalidateRect(static_cast<HWND>(native_handle), nullptr, FALSE);
   }
 
+  // No partial repaint on win32 yet: the D2D flip-model swap chain keeps no
+  // previous frame (plans/xpl-partial-repaint.md P4). Repaint the whole frame.
+  void platform_invalidate_rect(void* native_handle, int, int, int, int)
+  {
+    platform_invalidate(native_handle);
+  }
+
   static void dispatch_one(MSG& msg)
   {
     // Menu accelerator translation runs before TranslateMessage so a

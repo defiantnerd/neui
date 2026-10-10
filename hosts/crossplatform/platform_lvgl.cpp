@@ -1555,6 +1555,13 @@ namespace xpl_host
     invalidate_window(find_window(native_handle));
   }
 
+  // LVGL narrows invalidation per widget through its retained mirror
+  // (platform_retained_widget_invalidate), not through damage rects.
+  void platform_invalidate_rect(void* native_handle, int, int, int, int)
+  {
+    platform_invalidate(native_handle);
+  }
+
   // Toast heartbeat: a 16 ms lv_timer that invalidates the frame; the paint
   // pass advances the toast phase exactly like the other platforms.
   static void toast_timer_cb(lv_timer_t* t)

@@ -106,7 +106,12 @@ namespace
     bool         is_appwindow = false;
     bool         counted      = false;     // contributes to g_appwindow_count
     uint32_t     dpi          = 96;
+    // needs_paint = a FULL repaint is pending (every pre-existing
+    // invalidation path sets it). `damage` collects partial-repaint rects
+    // from platform_invalidate_rect; it only matters while needs_paint is
+    // false - a pending full repaint absorbs it.
     bool         needs_paint  = false;
+    neui_detail::DamageRegion damage;
     bool         toast_anim   = false;
     // Modal blocking: set while a modal child dialog is up (X11 has no native
     // per-window input disable, so dispatch_x_event swallows input to a
@@ -358,13 +363,24 @@ namespace
 
   // ---- Painting -------------------------------------------------------------
 
+  static bool paint_pending(const LinuxWindow* lw)
+  {
+    return lw->needs_paint || !lw->damage.empty();
+  }
+
   void paint_window(LinuxWindow* lw)
   {
     if (!lw || !lw->session) return;
     auto* wd = lw->session->get_widget(lw->widget_index);
+    // Partial only when nothing asked for a full repaint since the last
+    // paint; paint_frame itself falls back to full when the backend or the
+    // coverage says so. Invalidations raised DURING the paint are dropped
+    // with the reset below, exactly as needs_paint always was.
     if (wd && wd->render_ctx)
-      lw->session->paint_frame(wd->render_ctx, lw->widget_index);
+      lw->session->paint_frame(wd->render_ctx, lw->widget_index,
+                               lw->needs_paint ? nullptr : &lw->damage);
     lw->needs_paint = false;
+    lw->damage.clear();
   }
 
   void flush_pending_paints()
@@ -373,7 +389,7 @@ namespace
     std::vector<LinuxWindow*> todo;
     todo.reserve(g_windows.size());
     for (auto& kv : g_windows)
-      if (kv.second->needs_paint) todo.push_back(kv.second);
+      if (paint_pending(kv.second)) todo.push_back(kv.second);
     for (auto* lw : todo)
       if (g_windows.count(lw->win)) paint_window(lw);
   }
@@ -1971,7 +1987,7 @@ namespace
       step_scroll_bounce(lw);   // advance any GRID/SECTION spring-back
       neui_detail::theme_dbus_dispatch();   // pick up system dark/light changes
     }
-    if (lw->needs_paint) paint_window(lw);
+    if (paint_pending(lw)) paint_window(lw);
     XFlush(lw->dpy);
   }
 
@@ -2091,6 +2107,14 @@ namespace
   {
     if (!native_handle) return;
     static_cast<LinuxWindow*>(native_handle)->needs_paint = true;
+  }
+
+  void platform_invalidate_rect(void* native_handle, int x, int y, int w, int h)
+  {
+    if (!native_handle) return;
+    auto* lw = static_cast<LinuxWindow*>(native_handle);
+    if (lw->needs_paint) return;   // a full repaint is already pending
+    lw->damage.add({ x, y, w, h });
   }
 
   bool platform_run()

@@ -1260,6 +1260,7 @@ namespace neui_cg_backend
     cg_set_fill_rule,
     cg_stroke_path_styled,
     cg_stroke_path_gradient,
+    nullptr,  // set_frame_damage: not yet - AppKit/UIKit dirtyRect wiring is P2
   };
 
   neui_render_backend_t* get_backend() { return &backend; }
