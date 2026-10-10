@@ -70,6 +70,16 @@ namespace neui_detail
     float       def = 0.0f;
   };
 
+  // One entry of a component's "shaders" block: a file path (resolved
+  // through the client resource provider) or inline source.
+  struct ComponentShaderSource
+  {
+    std::string name;
+    std::string path;          // file entry
+    std::string source;        // inline entry ("source")
+    bool        is_inline = false;
+  };
+
   // What build_component returns; the host wraps it into a COMPONENT entry.
   struct BuiltComponent
   {
@@ -93,6 +103,11 @@ namespace neui_detail
     // keyed by the resolved asset handle id (deduped). The layout lives on the
     // asset, not the layer, so serialize_component re-emits it from here.
     std::vector<std::pair<uint32_t, FilmstripLayout>> asset_frame_layouts;
+    // The "shaders" block, and each compiled SHADER handle id -> its name, so
+    // shader layers serialize by name again. The shaders themselves are owned
+    // (in owned_assets).
+    std::vector<ComponentShaderSource>               shader_sources;
+    std::vector<std::pair<uint32_t, std::string>>    shader_handle_names;
   };
 
   // The api vtables the loader drives. The host passes its own pointers.
@@ -119,6 +134,17 @@ namespace neui_detail
     neui_asset_t (*bitmap_from_name)(void* user, const char* name,
                                      const char* base_dir) = nullptr;
     void*        user = nullptr;
+
+    // Optional shader hook, installed by hosts that expose NEUI_API_SHADER:
+    // compile one "shaders" entry into an owned SHADER asset. `source` (len
+    // bytes) for an inline entry, else the file `name`, asked of the client
+    // resource provider with base_dir (NULL when the document has none) and
+    // then read from base_dir joined with name. asset_none on failure. When
+    // absent, shader layers load without a shader and their "fallback"
+    // layer paints instead.
+    neui_asset_t (*shader_from)(neui_session_t session, const char* name,
+                                const char* source, uint32_t len,
+                                const char* base_dir) = nullptr;
   };
 
   namespace cl_detail
@@ -186,6 +212,7 @@ namespace neui_detail
       if (s == "path")  return NEUI_COMPOUND_LAYER_PATH;
       if (s == "group") return NEUI_COMPOUND_LAYER_GROUP;
       if (s == "arc")   return NEUI_COMPOUND_LAYER_ARC;
+      if (s == "shader") return NEUI_COMPOUND_LAYER_SHADER;
       return NEUI_COMPOUND_LAYER_NONE;
     }
     inline neui_behavior_kind_t parse_behavior_kind(const std::string& s)
@@ -303,6 +330,7 @@ namespace neui_detail
         case NEUI_COMPOUND_LAYER_PATH:  return "path";
         case NEUI_COMPOUND_LAYER_GROUP: return "group";
         case NEUI_COMPOUND_LAYER_ARC:   return "arc";
+        case NEUI_COMPOUND_LAYER_SHADER: return "shader";
         default:                        return "";
       }
     }
@@ -417,6 +445,51 @@ namespace neui_detail
       return a;
     };
 
+    // "shaders": name -> "path" or { "source": "..." }, compiled up front
+    // into owned SHADER assets. An entry that fails to load or compile is
+    // kept for the round trip; its layers paint their fallback.
+    std::vector<std::pair<std::string, neui_asset_t>> shader_handles;
+    if (const mj::object_t* shaders = as_obj(obj_get(root, "shaders"))) {
+      for (const auto& kv : *shaders) {
+        ComponentShaderSource src;
+        src.name = kv.first;
+        if (const std::string* path = as_str(&kv.second)) {
+          src.path = *path;
+        } else if (const mj::object_t* so = as_obj(&kv.second)) {
+          const std::string* code = as_str(obj_get(*so, "source"));
+          if (!code) continue;
+          src.source    = *code;
+          src.is_inline = true;
+        } else {
+          continue;
+        }
+        neui_asset_t a = asset_none;
+        if (apis.shader_from) {
+          a = src.is_inline
+            ? apis.shader_from(session, src.name.c_str(), src.source.data(),
+                               static_cast<uint32_t>(src.source.size()), nullptr)
+            : apis.shader_from(session, src.path.c_str(), nullptr, 0,
+                               base_dir.empty() ? nullptr : base_dir.c_str());
+        }
+        if (a.id != asset_none.id) {
+          out.owned_assets.push_back(a);
+          out.shader_handle_names.emplace_back(a.id, src.name);
+          shader_handles.emplace_back(src.name, a);
+        }
+        out.shader_sources.push_back(std::move(src));
+      }
+    }
+    auto shader_by_name = [&](const std::string& name) -> neui_asset_t {
+      for (const auto& e : shader_handles)
+        if (e.first == name) return e.second;
+      return asset_none;
+    };
+
+    // Layer "name"s (for a shader layer's "fallback") and the fallbacks to
+    // resolve once every layer exists, since one may name a later layer.
+    std::vector<std::pair<std::string, neui_compound_layer_t>> layer_names;
+    std::vector<std::pair<neui_compound_layer_t, std::string>> pending_fallbacks;
+
     // params -> manifest + default attrs
     if (const mj::array_t* params = as_arr(obj_get(root, "params"))) {
       for (const auto& pn : *params) {
@@ -481,6 +554,11 @@ namespace neui_detail
           if (an->size() >= 2) if (auto* s = as_str(&(*an)[1])) sa = parse_anchor(*s);
         }
         apis.compound->set_anchor(session, cs, layer, pa, sa);
+
+        if (auto* nm = as_str(obj_get(*lo, "name"))) {
+          apis.compound->set_string(session, cs, layer, "name", nm->c_str());
+          layer_names.emplace_back(*nm, layer);
+        }
 
         // offset
         if (const mj::array_t* off = as_arr(obj_get(*lo, "offset"))) {
@@ -703,6 +781,43 @@ namespace neui_detail
             apis.compound->set_int(session, cs, layer, "direction", (*ds == "ccw") ? 1 : 0);
           else { double dd; if (as_num(obj_get(*lo, "direction"), dd))
             apis.compound->set_int(session, cs, layer, "direction", (dd != 0.0) ? 1 : 0); }
+        } else if (kind == NEUI_COMPOUND_LAYER_SHADER) {
+          if (auto* nm = as_str(obj_get(*lo, "shader"))) {
+            const neui_asset_t sh = shader_by_name(*nm);
+            if (sh.id != asset_none.id)
+              apis.compound->set_asset(session, cs, layer, "shader", sh);
+          }
+          double d;
+          if (as_num(obj_get(*lo, "resolution"), d))
+            apis.compound->set_float(session, cs, layer, "resolution", static_cast<float>(d));
+          if (as_num(obj_get(*lo, "time"), d))
+            apis.compound->set_float(session, cs, layer, "time", static_cast<float>(d));
+          // "uniforms": a number sets every component, "#AARRGGBB" a colour,
+          // an array of numbers the components.
+          if (const mj::object_t* us = as_obj(obj_get(*lo, "uniforms"))) {
+            for (const auto& ukv : *us) {
+              const std::string prop = "u." + ukv.first;
+              int col;
+              if (const mj::array_t* arr = as_arr(&ukv.second)) {
+                std::string spec;
+                for (const auto& cn : *arr) {
+                  double c;
+                  if (!as_num(&cn, c)) continue;
+                  char buf[32];
+                  std::snprintf(buf, sizeof buf, "%.9g", c);  // round-trips a float
+                  if (!spec.empty()) spec += ',';
+                  spec += buf;
+                }
+                apis.compound->set_string(session, cs, layer, prop.c_str(), spec.c_str());
+              } else if (as_str(&ukv.second) && as_color(&ukv.second, col)) {
+                apis.compound->set_int(session, cs, layer, prop.c_str(), col);
+              } else if (as_num(&ukv.second, d)) {
+                apis.compound->set_float(session, cs, layer, prop.c_str(), static_cast<float>(d));
+              }
+            }
+          }
+          if (auto* fb = as_str(obj_get(*lo, "fallback")))
+            pending_fallbacks.emplace_back(layer, *fb);
         }
 
         // bindings (numeric props + asset prop)
@@ -712,8 +827,8 @@ namespace neui_detail
             if (!bo) continue;
             const std::string* attr = as_str(obj_get(*bo, "attr"));
             if (!attr) continue;
-            if (bkv.first == "asset") {
-              apis.compound->bind_asset(session, cs, layer, "asset", attr->c_str());
+            if (bkv.first == "asset" || bkv.first == "shader") {
+              apis.compound->bind_asset(session, cs, layer, bkv.first.c_str(), attr->c_str());
             } else {
               double scale = 1.0, offset = 0.0, step = 0.0;
               as_num(obj_get(*bo, "scale"),  scale);
@@ -744,6 +859,12 @@ namespace neui_detail
         if (const mj::object_t* lo = as_obj(&ln))
           build_layer(*lo, compound_layer_none);
     }
+    for (const auto& fb : pending_fallbacks)
+      for (const auto& ln : layer_names)
+        if (ln.first == fb.second) {
+          apis.compound->set_int(session, cs, fb.first, "fallback", static_cast<int>(ln.second.id));
+          break;
+        }
 
     // behavior
     neui_asset_t ba = apis.asset->create_behavior(session);
@@ -797,6 +918,8 @@ namespace neui_detail
     const std::vector<std::pair<std::string, std::string>>* asset_names = nullptr;
     const std::vector<std::pair<uint32_t, std::string>>*    asset_handle_names = nullptr;
     const std::vector<std::pair<uint32_t, FilmstripLayout>>* asset_frame_layouts = nullptr;
+    const std::vector<ComponentShaderSource>*               shader_sources = nullptr;
+    const std::vector<std::pair<uint32_t, std::string>>*    shader_handle_names = nullptr;
     const CompoundAsset*                                    compound = nullptr;
     const BehaviorAsset*                                    behavior = nullptr;
   };
@@ -842,9 +965,29 @@ namespace neui_detail
       root.emplace_back("assets", njson_obj(std::move(ao)));
     }
 
+    if (in.shader_sources && !in.shader_sources->empty()) {
+      mj::object_t so;
+      for (const auto& e : *in.shader_sources) {
+        if (e.is_inline) {
+          mj::object_t one;
+          one.emplace_back("source", njson_str(e.source));
+          so.emplace_back(e.name, njson_obj(std::move(one)));
+        } else {
+          so.emplace_back(e.name, njson_str(e.path));
+        }
+      }
+      root.emplace_back("shaders", njson_obj(std::move(so)));
+    }
+
     auto name_for_handle = [&](neui_asset_t a) -> const std::string* {
       if (in.asset_handle_names)
         for (const auto& e : *in.asset_handle_names)
+          if (e.first == a.id) return &e.second;
+      return nullptr;
+    };
+    auto shader_name_for_handle = [&](neui_asset_t a) -> const std::string* {
+      if (in.shader_handle_names)
+        for (const auto& e : *in.shader_handle_names)
           if (e.first == a.id) return &e.second;
       return nullptr;
     };
@@ -877,6 +1020,7 @@ namespace neui_detail
           an.push_back(njson_str(anchor_token(L->self_anchor)));
           lo.emplace_back("anchor", njson_arr(std::move(an)));
         }
+        if (!L->name.empty()) lo.emplace_back("name", njson_str(L->name));
         if (L->width == NEUI_COMPOUND_FILL && L->height == NEUI_COMPOUND_FILL) {
           lo.emplace_back("size", njson_str("fill"));
         } else {
@@ -1036,6 +1180,37 @@ namespace neui_detail
             lo.emplace_back("polarity", njson_str(L->arc_polarity == 1 ? "center" : L->arc_polarity == 2 ? "max" : "min"));
           if (L->arc_direction != defL.arc_direction)
             lo.emplace_back("direction", njson_str(L->arc_direction == 1 ? "ccw" : "cw"));
+        } else if (L->kind == NEUI_COMPOUND_LAYER_SHADER) {
+          if (L->shader.id != asset_none.id)
+            if (const std::string* nm = shader_name_for_handle(L->shader))
+              lo.emplace_back("shader", njson_str(*nm));
+          if (L->shader_resolution != defL.shader_resolution)
+            lo.emplace_back("resolution", njson_num(L->shader_resolution));
+          if (L->shader_time != defL.shader_time)
+            lo.emplace_back("time", njson_num(L->shader_time));
+          if (!L->shader_uniforms.empty()) {
+            std::vector<std::string> keys;
+            for (const auto& kv : L->shader_uniforms) keys.push_back(kv.first);
+            std::sort(keys.begin(), keys.end());  // deterministic output
+            mj::object_t uo;
+            for (const auto& k : keys) {
+              const auto& u = L->shader_uniforms.at(k);
+              using S = CompoundLayer::ShaderUniformStatic;
+              if (u.kind == S::INT) {
+                uo.emplace_back(k, njson_str(hexcolor(static_cast<uint32_t>(u.i))));
+              } else if (u.kind == S::VEC) {
+                mj::array_t a;
+                for (int c = 0; c < u.count; ++c) a.push_back(njson_num(u.v[c]));
+                uo.emplace_back(k, njson_arr(std::move(a)));
+              } else {
+                uo.emplace_back(k, njson_num(u.v[0]));
+              }
+            }
+            lo.emplace_back("uniforms", njson_obj(std::move(uo)));
+          }
+          // By the target's name; a fallback without one has no JSON form.
+          if (const CompoundLayer* fb = compound_get_layer(*in.compound, L->fallback))
+            if (!fb->name.empty()) lo.emplace_back("fallback", njson_str(fb->name));
         } else if (L->kind == NEUI_COMPOUND_LAYER_GROUP) {
           // Recurse: the group's children become its own nested layers array.
           lo.emplace_back("layers", njson_arr(emit_children(slot)));

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include "api.h"
 #include "assets.h"
+#include "painter.h"
 
 // Shader API - optional. Reached via
 //   neui_shader_api_t* sh = (neui_shader_api_t*)
@@ -23,12 +24,21 @@
 //   }
 //
 // create() compiles source into a SHADER asset (NEUI_ASSET_KIND_SHADER),
-// destroyed like any asset with neui_asset_api_t::destroy. A SHADER asset is
-// not drawable itself: bake it into an ordinary BITMAP asset, once, and draw
-// that. bake_filmstrip renders a sweep of one uniform into a frame strip that
-// the existing frame machinery draws by index (painter draw_asset_frame, or a
-// compound ASSET layer with its "frame" prop bound to a value attr), so a
-// shader-drawn knob costs nothing per frame after the bake.
+// destroyed like any asset with neui_asset_api_t::destroy. There are three
+// ways to put it on screen:
+//
+//   - a compound SHADER layer (NEUI_COMPOUND_LAYER_SHADER, <neui/d/compound.h>)
+//     whose "u.<name>" props set and bind uniforms to widget attributes, so a
+//     knob's look follows its value;
+//   - draw() from a CUSTOMDRAW paint callback;
+//   - bake_bitmap / bake_filmstrip into an ordinary BITMAP asset, once. A
+//     filmstrip of one uniform's sweep is drawn by index by the existing frame
+//     machinery (painter draw_asset_frame, or a compound ASSET layer with its
+//     "frame" prop bound to a value attr) and costs nothing per frame.
+//
+// The first two re-run the shader only when its inputs change: the result is
+// cached per session by content (shader, size, scale, sub-pixel position,
+// uniform values, time), so fifty knobs at one value share one bitmap.
 //
 // The pixels are the same on every platform and compiler, bit for bit: neui
 // runs shaders on the CPU with its own deterministic math.
@@ -75,6 +85,17 @@ extern "C" {
     const neui_shader_uniform_t* uniforms;       // values by name; may be NULL
     uint32_t                     uniform_count;
   } neui_shader_bake_t;
+
+  // What to draw: a shader over a rect of the painter's current space.
+  // Passed by pointer; fields may be appended, zero-initialise it.
+  typedef struct neui_shader_draw {
+    neui_asset_t                 shader;
+    float                        x, y, width, height;  // logical px, painter space
+    float                        resolution;  // shading density, (0, 4]; <= 0 means 1
+    float                        time;        // neui_time in seconds; wrapped to [0, 3600)
+    const neui_shader_uniform_t* uniforms;    // values by name; may be NULL
+    uint32_t                     uniform_count;
+  } neui_shader_draw_t;
 
   typedef struct neui_shader_api {
     uint32_t neui_version;
@@ -132,6 +153,20 @@ extern "C" {
                                             const neui_shader_bake_t* bake,
                                             const char* sweep, float from, float to,
                                             uint32_t frames);
+
+    // -------- Draw (vtable-appended) -----------------------------------------
+
+    // Draw the shader into a paint callback: `p` is the painter of a
+    // NEUI_EVENT_WIDGET_PAINT event or a surface paint function, and is only
+    // valid inside it. The shader sees a layer of width x height logical px
+    // (neui_size) and is evaluated once per device pixel, so the result is
+    // drawn 1:1 and stays sharp at any display scale; under a rotation or
+    // skew it is drawn transformed. `resolution` below 1 shades fewer pixels
+    // and scales the result up (cheap, soft backgrounds). Clip, transform and
+    // the alpha stack apply as for any painter call. Returns false and draws
+    // nothing for a bad handle, an empty or oversized rect (a side over 16384
+    // device px), or a painter of another session.
+    bool (NEUI_ABI *draw)(neui_painter_t* p, const neui_shader_draw_t* draw);
   } neui_shader_api_t;
 
 #ifdef __cplusplus

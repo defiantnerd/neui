@@ -296,4 +296,9 @@ namespace macos_host
   // the public session id; 0 is reserved for "invalid".
   extern std::vector<std::unique_ptr<Session>> sessions;
 
+  // Every painter's resolve_shader thunk (painter.h), defined with the
+  // shader API in widgets.cpp / .mm; null in a NEUI_NO_SHADERS build, where
+  // shader layers paint their fallback.
+  extern const neui_detail::resolve_shader_thunk_t macos_resolve_shader;
+
 } // namespace macos_host

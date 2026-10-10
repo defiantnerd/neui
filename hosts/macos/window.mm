@@ -1553,6 +1553,7 @@ static float neui_snap_to_steps(float v, int steps)
     painter.ctx              = render_ctx;
     painter.host_token       = sess;
     painter.draw_asset_thunk = &macos_host::macos_painter_draw_asset_thunk;
+    painter.resolve_shader   = macos_host::macos_resolve_shader;
 
     // Resolve compound (if any). asset_none -> no compound -> dispatch
     // WIDGET_PAINT.

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -253,6 +254,28 @@ namespace neui_detail
     // CompoundLayer&); it does not change the layer's logical state.
     mutable std::vector<std::unique_ptr<QrSymbol>> qr_cache;
 
+    // SHADER-layer (NEUI_COMPOUND_LAYER_SHADER) config. Uniform values are
+    // kept by prop name ("value" for "u.value", "center.x" for "u.center.x")
+    // rather than resolved against the program: the shader may be attached
+    // after its uniforms are set, or swapped. Paint reads them against the
+    // program it finds (shader_layer.h).
+    struct ShaderUniformStatic {
+      enum Kind : uint8_t { FLOAT, INT, VEC } kind = FLOAT;
+      int     count = 1;      // VEC: the components given
+      int32_t i     = 0;      // INT: the raw value (an ARGB colour on a vec3 / vec4)
+      float   v[4]  = { 0.0f, 0.0f, 0.0f, 0.0f };
+    };
+    neui_asset_t             shader            = asset_none;
+    float                    shader_resolution = 1.0f;
+    float                    shader_time       = 0.0f;
+    // Slot of the layer that paints instead when this one cannot render
+    // (no shader support, no shader asset). 0 = none.
+    uint32_t                 fallback          = 0;
+    std::unordered_map<std::string, ShaderUniformStatic> shader_uniforms;
+
+    // Optional label (any kind). Component JSON refers to layers by it.
+    std::string              name;
+
     // Bindings per property name.
     std::unordered_map<std::string, CompoundBinding> bindings;
     // Quantisation per property name, kept apart from the binding so it can be
@@ -383,6 +406,9 @@ namespace neui_detail
       if (sym) compound_release_symbol_bitmaps(*sym, backend);
     ca.layers[slot].reset();
     ca.free_slots.push_back(slot);
+    // A reused slot must not inherit the role of a removed fallback.
+    for (auto& layer : ca.layers)
+      if (layer && layer->fallback == slot) layer->fallback = 0;
   }
 
   inline void compound_clear(CompoundAsset& ca, neui_render_backend_t* backend)
@@ -622,6 +648,34 @@ namespace neui_detail
 
   // ---- Property setters (mutator helpers used by the host thunks) ----------
 
+  // A shader uniform value prop: "u.<name>" or "u.<name>.<component>" with a
+  // component of x y z w / r g b a. `key` gets the part after "u.". False for
+  // anything else, including "u.<name>.step" (the quantisation of a binding,
+  // handled with every other ".step").
+  inline bool shader_uniform_prop(const std::string& prop, std::string& key)
+  {
+    if (prop.size() < 3 || prop.compare(0, 2, "u.") != 0) return false;
+    key = prop.substr(2);
+    const size_t dot = key.find('.');
+    if (dot == std::string::npos) return true;
+    return dot > 0 && key.size() == dot + 2 &&
+           std::strchr("xyzwrgba", key[dot + 1]) != nullptr;
+  }
+
+  // Component index of a "<name>.<c>" uniform key, or -1 for a whole uniform.
+  inline int shader_uniform_component(const std::string& key)
+  {
+    const size_t dot = key.find('.');
+    if (dot == std::string::npos || dot + 1 >= key.size()) return -1;
+    switch (key[dot + 1]) {
+      case 'x': case 'r': return 0;
+      case 'y': case 'g': return 1;
+      case 'z': case 'b': return 2;
+      case 'w': case 'a': return 3;
+      default:            return -1;
+    }
+  }
+
   // Lookup in a small set of known prop names. Unknown names are stored
   // into the layer's bindings map but otherwise inert (callers don't use
   // them for paint; matches AttrBag's "unknown stored" semantics).
@@ -632,6 +686,18 @@ namespace neui_detail
 
   inline bool apply_set_int(CompoundLayer& L, const std::string& prop, int v)
   {
+    if (L.kind == NEUI_COMPOUND_LAYER_SHADER) {
+      std::string key;
+      if (shader_uniform_prop(prop, key)) {
+        CompoundLayer::ShaderUniformStatic u;
+        u.kind = CompoundLayer::ShaderUniformStatic::INT;
+        u.i    = v;
+        L.shader_uniforms[key] = u;
+        return true;
+      }
+      // A layer handle (.id) or a bare slot; the slot is the low 16 bits.
+      if (prop == "fallback") { L.fallback = static_cast<uint32_t>(v) & 0xffffu; return true; }
+    }
     if (prop == "offset_x") { L.offset_x = v; return true; }
     if (prop == "offset_y") { L.offset_y = v; return true; }
     if (prop == "width")    { L.width    = v; return true; }
@@ -693,6 +759,17 @@ namespace neui_detail
 
   inline bool apply_set_float(CompoundLayer& L, const std::string& prop, float v)
   {
+    if (L.kind == NEUI_COMPOUND_LAYER_SHADER) {
+      std::string key;
+      if (shader_uniform_prop(prop, key)) {
+        CompoundLayer::ShaderUniformStatic u;
+        u.v[0] = v;
+        L.shader_uniforms[key] = u;
+        return true;
+      }
+      if (prop == "resolution") { L.shader_resolution = v; return true; }
+      if (prop == "time")       { L.shader_time       = v; return true; }
+    }
     // "<prop>.step" is the quantisation of THAT prop's binding (see
     // eval_binding_float). The compound API has no bind-with-step entry point
     // and this needs no vtable change - the same route stroke_dasharray takes to
@@ -742,6 +819,27 @@ namespace neui_detail
   inline bool apply_set_string(CompoundLayer& L, const std::string& prop,
                                  const char* v)
   {
+    if (prop == "name") { L.name = v ? v : ""; return true; }
+    // A whole uniform's components, comma / space separated ("0.25, 0.75"),
+    // the stroke_dasharray route for a value the vtable has no setter for.
+    std::string key;
+    if (L.kind == NEUI_COMPOUND_LAYER_SHADER && shader_uniform_prop(prop, key) &&
+        shader_uniform_component(key) < 0) {
+      CompoundLayer::ShaderUniformStatic u;
+      u.kind  = CompoundLayer::ShaderUniformStatic::VEC;
+      u.count = 0;
+      for (const char* p = v ? v : ""; *p && u.count < 4;) {
+        while (*p == ' ' || *p == ',' || *p == '\t') ++p;
+        if (!*p) break;
+        char* e = nullptr;
+        const double d = std::strtod(p, &e);
+        if (e == p) break;
+        p = e;
+        u.v[u.count++] = static_cast<float>(d);
+      }
+      L.shader_uniforms[key] = u;
+      return true;
+    }
     if (L.kind == NEUI_COMPOUND_LAYER_TEXT && prop == "text") {
       L.text_template = v ? v : "";
       L.text_segments = parse_template(v);
@@ -784,6 +882,10 @@ namespace neui_detail
   {
     if (L.kind == NEUI_COMPOUND_LAYER_ASSET && prop == "asset") {
       L.asset = v;
+      return true;
+    }
+    if (L.kind == NEUI_COMPOUND_LAYER_SHADER && prop == "shader") {
+      L.shader = v;
       return true;
     }
     return false;

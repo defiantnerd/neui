@@ -1121,3 +1121,165 @@ TEST_CASE("component_loader: drag_biaxial target_y survives load + round-trip")
   REQUIRE(g_handlers[0].strs.count("target_y") == 1);
   CHECK(g_handlers[0].strs.at("target_y") == "neui.param.y");
 }
+
+// --- shader layers -----------------------------------------------------------
+
+namespace
+{
+  struct ShaderHookCall { std::string name, source, base_dir; bool is_inline; };
+  std::vector<ShaderHookCall> g_shader_calls;
+
+  // Compiles everything but a shader named "broken"; ids from 3001 on.
+  neui_asset_t fake_shader_from(neui_session_t, const char* name, const char* source,
+                                uint32_t len, const char* base_dir)
+  {
+    ShaderHookCall c;
+    c.name = name ? name : "";
+    c.is_inline = source != nullptr;
+    if (source) c.source.assign(source, len);
+    c.base_dir = base_dir ? base_dir : "";
+    g_shader_calls.push_back(c);
+    if (c.name == "broken") return asset_none;
+    neui_asset_t a; a.id = 3000u + static_cast<uint32_t>(g_shader_calls.size());
+    return a;
+  }
+
+  BuiltComponent run_loader_with_shaders(const std::string& json, const char* base_dir)
+  {
+    reset_recorders();
+    g_shader_calls.clear();
+    neui_asset_api_t a; neui_compound_api_t c; neui_behavior_api_t b;
+    ComponentApis apis = make_fake_apis(a, c, b);
+    apis.shader_from = fake_shader_from;
+    neui_component_env_t env{};
+    env.base_dir = base_dir;
+    neui_session_t sess; sess.session = 1;
+    return build_component(sess, json.c_str(), static_cast<uint32_t>(json.size()), &env, apis);
+  }
+} // namespace
+
+static const char* kShaderJson = R"json(
+{
+  "component": "glow_knob",
+  "size": [110, 110],
+  "shaders": {
+    "ring": "shaders/ring.nsl",
+    "flat": { "source": "vec4 main(vec2 p) { return vec4(1.0); }" },
+    "broken": { "source": "nope" }
+  },
+  "layers": [
+    { "kind": "shader", "z": -2, "size": [104, 104], "shader": "ring",
+      "resolution": 0.5, "time": 2.5,
+      "uniforms": { "accent": "#FF3FA9F5", "radius": 0.4, "center": [0.25, 0.75] },
+      "bind": { "u.value": { "attr": "neui.param.value", "step": 0.0078125 } },
+      "fallback": "disc" },
+    { "kind": "rect", "name": "disc", "z": -1, "size": [84, 84], "fill_color": "#FF2A2E38" },
+    { "kind": "shader", "shader": "broken", "fallback": "nobody" },
+    { "kind": "shader", "bind": { "shader": { "attr": "my.shader" } } }
+  ]
+}
+)json";
+
+TEST_CASE("component_loader: shaders block + shader layer props")
+{
+  BuiltComponent bc = run_loader_with_shaders(kShaderJson, "skins/knob");
+  CHECK(bc.ok);
+  // Each entry goes to the hook once: a file with the document's base_dir,
+  // inline source without one.
+  REQUIRE(g_shader_calls.size() == 3);
+  CHECK(g_shader_calls[0].name == "shaders/ring.nsl");
+  CHECK_FALSE(g_shader_calls[0].is_inline);
+  CHECK(g_shader_calls[0].base_dir == "skins/knob");
+  CHECK(g_shader_calls[1].name == "flat");
+  CHECK(g_shader_calls[1].is_inline);
+  CHECK(g_shader_calls[1].source == "vec4 main(vec2 p) { return vec4(1.0); }");
+  CHECK(g_shader_calls[1].base_dir.empty());
+  // The compiled shaders are owned by the component; all three entries are
+  // kept for the round trip, the broken one without a handle.
+  CHECK(bc.owned_assets.size() == 2);
+  CHECK(bc.shader_sources.size() == 3);
+  CHECK(bc.shader_handle_names.size() == 2);
+
+  REQUIRE(g_layers.size() == 4);
+  const LayerRec& s = g_layers[0];
+  CHECK(s.kind == NEUI_COMPOUND_LAYER_SHADER);
+  CHECK(s.assets.at("shader") == 3001u);
+  CHECK(s.flts.at("resolution") == 0.5f);
+  CHECK(s.flts.at("time") == 2.5f);
+  CHECK(s.ints.at("u.accent") == static_cast<int>(0xFF3FA9F5u));
+  CHECK(s.flts.at("u.radius") == 0.4f);
+  CHECK(s.strs.at("u.center") == "0.25,0.75");
+  CHECK(s.binds.at("u.value").attr == "neui.param.value");
+  CHECK(s.flts.at("u.value.step") == 0.0078125f);
+  CHECK(s.ints.at("fallback") == 1);  // the "disc" layer, resolved after it was built
+  CHECK(g_layers[1].strs.at("name") == "disc");
+  // A shader that failed to compile leaves the layer without one; an unknown
+  // fallback name is dropped.
+  CHECK(g_layers[2].assets.count("shader") == 0);
+  CHECK(g_layers[2].ints.count("fallback") == 0);
+  CHECK(g_layers[3].bind_assets.at("shader") == "my.shader");
+}
+
+TEST_CASE("component_loader: shader layers load without the shader hook")
+{
+  BuiltComponent bc = run_loader(kShaderJson);
+  CHECK(bc.ok);
+  CHECK(bc.owned_assets.empty());
+  CHECK(bc.shader_sources.size() == 3);  // still round-trips
+  REQUIRE(g_layers.size() == 4);
+  CHECK(g_layers[0].kind == NEUI_COMPOUND_LAYER_SHADER);
+  CHECK(g_layers[0].assets.count("shader") == 0);
+  CHECK(g_layers[0].ints.at("fallback") == 1);  // so the fallback shows
+}
+
+TEST_CASE("serialize_component: round-trips shaders and a shader layer")
+{
+  HandBuilt hb;
+  hb.name = "glow";
+  const uint32_t ds = compound_add_layer(hb.ca, NEUI_COMPOUND_LAYER_RECT, -1);
+  apply_set_string(*compound_get_layer(hb.ca, ds), "name", "disc");
+  apply_set_int(*compound_get_layer(hb.ca, ds), "fill_color", static_cast<int>(0xFF2A2E38u));
+  const uint32_t ss = compound_add_layer(hb.ca, NEUI_COMPOUND_LAYER_SHADER, -2);
+  CompoundLayer* L = compound_get_layer(hb.ca, ss);
+  L->width = 104; L->height = 104;
+  apply_set_asset (*L, "shader", neui_asset_t{ 4242u });
+  apply_set_float (*L, "resolution", 0.5f);
+  apply_set_int   (*L, "u.accent", static_cast<int>(0xFF3FA9F5u));
+  apply_set_float (*L, "u.radius", 0.4f);
+  apply_set_string(*L, "u.center", "0.25 0.75");
+  apply_set_float (*L, "u.center.y", 0.5f);
+  apply_bind      (*L, "u.value", "neui.param.value", 1.0f, 0.0f);
+  apply_set_int   (*L, "fallback", static_cast<int>(ds));
+  std::vector<ComponentShaderSource> sources(2);
+  sources[0].name = "ring"; sources[0].path = "shaders/ring.nsl";
+  sources[1].name = "flat"; sources[1].source = "vec4 main(vec2 p) { return vec4(1.0); }";
+  sources[1].is_inline = true;
+  std::vector<std::pair<uint32_t, std::string>> shader_names = { { 4242u, "ring" } };
+
+  ComponentSerializeInput in;
+  in.name = &hb.name; in.width = 110.0f; in.height = 110.0f;
+  in.shader_sources = &sources;
+  in.shader_handle_names = &shader_names;
+  in.compound = &hb.ca; in.behavior = &hb.ba;
+  const std::string json = serialize_component(in, 0);
+
+  BuiltComponent rebuilt = run_loader_with_shaders(json, nullptr);
+  CHECK(rebuilt.ok);
+  REQUIRE(g_shader_calls.size() == 2);
+  CHECK(g_shader_calls[0].name == "shaders/ring.nsl");
+  CHECK(g_shader_calls[1].is_inline);
+  CHECK(g_shader_calls[1].source == sources[1].source);
+  REQUIRE(g_layers.size() == 2);
+  const LayerRec& s = g_layers[0];  // z -2 sorts first
+  CHECK(s.kind == NEUI_COMPOUND_LAYER_SHADER);
+  CHECK(s.assets.at("shader") == 3001u);  // "ring", recompiled
+  CHECK(s.flts.at("resolution") == 0.5f);
+  CHECK(s.flts.count("time") == 0);       // default, not emitted
+  CHECK(s.ints.at("u.accent") == static_cast<int>(0xFF3FA9F5u));
+  CHECK(s.flts.at("u.radius") == 0.4f);
+  CHECK(s.strs.at("u.center") == "0.25,0.75");
+  CHECK(s.flts.at("u.center.y") == 0.5f);
+  CHECK(s.binds.at("u.value").attr == "neui.param.value");
+  CHECK(s.ints.at("fallback") == 1);
+  CHECK(g_layers[1].strs.at("name") == "disc");
+}

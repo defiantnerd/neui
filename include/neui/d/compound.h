@@ -127,6 +127,13 @@ extern "C" {
     // ring; fill_color paints a filled wedge (pie); both may be set. Cheap
     // per-frame vector paint (never baked), so it animates with the value.
     NEUI_COMPOUND_LAYER_ARC   = 7,
+    // A shader (<neui/d/shader.h>) filling the layer rect. The "shader" prop
+    // names a SHADER asset; its uniforms are the "u.<name>" props, set and
+    // bound like any other prop, so the look follows widget attributes. The
+    // result is cached by content and re-shaded only when an input changes.
+    // Paints nothing on a host without NEUI_API_SHADER; a "fallback" layer
+    // can stand in there.
+    NEUI_COMPOUND_LAYER_SHADER = 8,
   } neui_compound_layer_kind_t;
 
   // QR error-correction levels for NEUI_COMPOUND_LAYER_QR's "ecc" prop.
@@ -335,6 +342,31 @@ extern "C" {
     //                          ROUND, 2 SQUARE.
     //     Set stroke_* for a ring, fill_color for a pie, or both. Falls back to
     //     nothing on a backend without the path API (graceful degradation).
+    //   shader layer props:
+    //     "shader"       asset the SHADER asset to run (set_asset / bind_asset).
+    //     "u.<name>"     the shader's uniform <name>:
+    //                    - set_float: every component (a float uniform's value);
+    //                    - set_int: a vec3 / vec4 takes an ARGB colour as
+    //                      straight RGB(A) of byte / 255, all 32 bits intact;
+    //                      a float / vec2 takes the number;
+    //                    - set_string: components, "0.25, 0.75";
+    //                    - bind: a float attr sets every component; an int
+    //                      attr on a vec3 / vec4 is unpacked as a colour.
+    //                    Names the shader does not declare are ignored, so a
+    //                    shader can be swapped under existing props.
+    //     "u.<name>.x"   one component (also .y .z .w and .r .g .b .a);
+    //                    set_float / set_int / bind. Applied after "u.<name>".
+    //     "resolution"   float shading density, (0, 4]; default 1 = one shader
+    //                    evaluation per device pixel. 0.5 shades a quarter of
+    //                    the pixels and scales the result up. Bindable.
+    //     "time"         float neui_time in seconds (wrapped to [0, 3600));
+    //                    default 0. Bind it to an attr to animate.
+    //     "fallback"     int   layer handle (.id) of a layer that paints only
+    //                    when this shader layer cannot: on a host without
+    //                    NEUI_API_SHADER, or with no shader asset set. 0 = none.
+    //     Uniforms that are neither set nor bound keep their declared defaults.
+    //     The shader sees neui_size = the layer rect and runs once per device
+    //     pixel, so the layer stays sharp at any display scale.
     //   any layer:
     //     "offset_x"  int     px, relative to anchor
     //     "offset_y"  int     px, relative to anchor
@@ -350,6 +382,8 @@ extern "C" {
     //     "show_when" int     bitmask of NEUI_LAYER_STATE_* flags; 0 (default)
     //                         = visible always; non-zero = visible only when
     //                         (current_state & show_when) != 0.
+    //     "name"      string  optional label; component JSON refers to layers
+    //                         by it (a shader layer's "fallback").
 
     void (NEUI_ABI *set_int)   (neui_session_t session, neui_asset_t asset,
                                   neui_compound_layer_t layer,

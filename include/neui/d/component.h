@@ -57,7 +57,14 @@
 //     // logical asset names -> resolved via neui_component_env_t (path or callback):
 //     "assets": { "bg": "knob_bg.png", "indicator": "knob_move.png" },
 //
-//     // compound layer stack (kind = asset | text | rect | path):
+//     // shaders (<neui/d/shader.h>): a .nsl file (client resource provider,
+//     // then base_dir) or inline source; owned by the component. Ignored on a
+//     // host without NEUI_API_SHADER.
+//     "shaders": { "glow": "shaders/glow.nsl",
+//                  "flat": { "source": "vec4 main(vec2 p) { return vec4(1.0); }" } },
+//
+//     // compound layer stack (kind = asset | text | rect | path | group | arc | shader);
+//     // any layer may have a "name":
 //     "layers": [
 //       { "kind": "asset", "z": 0, "anchor": ["center","center"], "size": "fill", "asset": "bg" },
 //       { "kind": "asset", "z": 1, "anchor": ["center","center"], "size": [70,70], "offset": [0,-15],
@@ -65,11 +72,18 @@
 //         "bind": { "rotation": { "attr": "neui.param.value", "scale": 4.71238898, "offset": 0 } } },
 //       { "kind": "text",  "z": 2, "anchor": ["bottom","bottom"], "size": ["fill", 22],
 //         "text": "{name}: {value}", "font_size": 14, "align": ["center","center"], "weight": 400 },
-//       { "kind": "rect",  "z": -1, "anchor": ["top_left","top_left"], "size": "fill",
+//       { "kind": "rect",  "name": "plate", "z": -1, "anchor": ["top_left","top_left"], "size": "fill",
 //         "fill_color": "#33336699", "stroke_color": "#FF6699CC", "stroke_width": 1.5, "corner_radius": 14 },
 //       { "kind": "path",  "z": 3, "anchor": ["bottom_right","bottom_right"], "size": [20,20],
 //         "offset": [-6,-6], "fill_color": "#FFFFFFFF",
-//         "path": [ {"m":[4,3]}, {"l":[15,10]}, {"l":[4,17]}, {"l":[9,10]}, {"z":true} ] }
+//         "path": [ {"m":[4,3]}, {"l":[15,10]}, {"l":[4,17]}, {"l":[9,10]}, {"z":true} ] },
+//       // a shader layer: uniforms are "#AARRGGBB" colours, numbers or arrays;
+//       // "u.<name>" props bind; "fallback" names the layer shown where the
+//       // shader cannot render (no NEUI_API_SHADER, or it failed to compile):
+//       { "kind": "shader", "z": -2, "size": "fill", "shader": "glow",
+//         "uniforms": { "accent": "#FF3FA9F5", "radius": 0.4 },
+//         "bind": { "u.value": { "attr": "neui.param.value", "step": 0.0078125 } },
+//         "fallback": "plate" }
 //     ],
 //
 //     // behavior handler list (kind -> NEUI_BEHAVIOR_KIND_*):

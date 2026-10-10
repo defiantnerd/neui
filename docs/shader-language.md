@@ -3,11 +3,12 @@
 # The neui shading language (`.nsl`), version 1
 
 **Status: implemented by the compiler and CPU executor in `src/shader/`**
-(the `neui-shader` library, API `src/shader/nsl.h`). Clients compile and
-bake shaders through the optional `NEUI_API_SHADER` (`include/neui/d/shader.h`,
-phase 2 of `plans/shader-effects.md`); the live compound layer comes in
-phase 3. Tests: `tests/test_shader_lang.cpp`, `tests/test_shader_exec.cpp` and
-`tests/test_shader_asset.cpp`.
+(the `neui-shader` library, API `src/shader/nsl.h`). Clients compile shaders
+through the optional `NEUI_API_SHADER` (`include/neui/d/shader.h`) and run
+them in a compound SHADER layer, with `draw` from a CUSTOMDRAW paint, or baked
+into bitmaps (phases 2 and 3 of `plans/shader-effects.md`). Tests:
+`tests/test_shader_lang.cpp`, `tests/test_shader_exec.cpp`,
+`tests/test_shader_asset.cpp` and `tests/test_shader_layer.cpp`.
 
 **What is normative:** this document for syntax, types and semantics. The
 exact polynomial behind each approximated built-in (§9.2) is defined by the
@@ -350,6 +351,15 @@ logical px**, **y-down**. The result covers whole device pixels and is never
 resampled. The phase-0 D2D spike confirmed that a GPU executor reproduces
 this grid exactly (approach B: draw at the floored device origin and pass the
 sub-pixel remainder `X0 - floor(X0)` as a constant).
+
+The live paths (the compound layer and `draw`) read `(tx, ty)` and `s` from
+the backend's current device transform. They snap the remainder
+`X0 - floor(X0)` to a multiple of 1/256 device px before shading, so float
+noise in a transform cannot change the pixels or split the image cache; a
+layer on whole logical px has an exact remainder at 100%, 150% and 200% anyway.
+Under a rotation, skew, mirror or uneven scale there is no device grid to
+match: the layer is shaded in its own space at the transform's average scale
+(`sqrt(|det|)`) and the result is drawn through the transform.
 
 **Output.** `main` returns **straight** (non-premultiplied) RGBA. Each device
 pixel becomes premultiplied 8-bit BGRA:

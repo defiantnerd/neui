@@ -1,6 +1,6 @@
-// shader_example - shaders through NEUI_API_SHADER, baked once into ordinary
-// bitmaps (plans/shader-effects.md, phase 2).
+// shader_example - shaders through NEUI_API_SHADER (plans/shader-effects.md).
 //
+// Baked once into ordinary bitmaps:
 //   * A brushed-metal banner: bake_bitmap at the banner's size, drawn by a
 //     compound ASSET layer with a TEXT layer on top.
 //   * Six glow knobs: bake_filmstrip sweeps the shader's `value` uniform over
@@ -8,8 +8,16 @@
 //     its "frame" prop to NEUI_PARAM_VALUE and a behavior drags the value, so
 //     a knob costs nothing per frame after the bake.
 //   * Three tiles: two plasma bakes at different `t`, one fbm marble.
-//   * A deliberately broken shader, whose compile error is shown in a label.
-//   * Without NEUI_API_SHADER (null platform, LVGL), plain KNOB widgets.
+// Live:
+//   * Three knobs whose compound has a SHADER layer: "u.value" is bound to
+//     NEUI_PARAM_VALUE (stepped to 1/256) and "u.accent" to an int attr that
+//     holds each knob's colour. Re-shaded only when the value changes, and
+//     cached by content, so knobs at one value share an image.
+//   * A knob from a JSON component with an inline shader and a fallback disc.
+//   * A CUSTOMDRAW panel drawn with shader_api->draw; the first live knob
+//     drives its `t`.
+// And a deliberately broken shader, whose compile error is shown in a label.
+// Without NEUI_API_SHADER (null platform, LVGL), plain KNOB widgets.
 //
 // The pixels are bit-identical on every platform: the CPU executor runs the
 // shaders with neui's own deterministic math.
@@ -142,10 +150,35 @@ vec4 main(vec2 p) {
   return vec4(col, rounded(p, 10.0));
 })";
 
+// A component: a ring knob with its shader inline and a plain disc as the
+// fallback where shaders are not supported.
+static const char* const k_ring_component = R"json({
+  "component": "ring_knob",
+  "size": [88, 88],
+  "params": [ { "key": "neui.param.value", "default": 0.5, "min": 0, "max": 1 } ],
+  "shaders": {
+    "ring": { "source": "uniform float value = 0.5;\nuniform vec4 accent = vec4(1.0);\nvec4 main(vec2 p) {\n  vec2 c = neui_size * 0.5;\n  vec2 d = p - c;\n  float R = min(c.x, c.y) * 0.78;\n  float ang = atan(d.x, -d.y);\n  float lit = step(abs(ang), 2.3561945) * step(ang, -2.3561945 + value * 4.712389);\n  float ring = 1.0 - smoothstep(-neui_px, neui_px, abs(length(d) - R) - R * 0.10);\n  float disc = 1.0 - smoothstep(-neui_px, neui_px, length(d) - R * 0.62);\n  vec3 col = mix(vec3(0.20, 0.22, 0.27), accent.rgb, lit);\n  return vec4(mix(col, vec3(0.13, 0.14, 0.17), disc), max(ring, disc));\n}\n" }
+  },
+  "layers": [
+    { "kind": "rect", "name": "disc", "z": 0, "size": [60, 60],
+      "fill_color": "#FF2A2E38", "corner_radius": 30 },
+    { "kind": "shader", "z": 1, "size": "fill", "shader": "ring",
+      "uniforms": { "accent": "#FFE05AD0" },
+      "bind": { "u.value": { "attr": "neui.param.value", "step": 0.00390625 } },
+      "fallback": "disc" }
+  ],
+  "behavior": [
+    { "kind": "drag_vertical", "target": "neui.param.value", "sweep": 160 },
+    { "kind": "wheel" },
+    { "kind": "context_reset" }
+  ]
+})json";
+
 // An unknown identifier: the compile error goes into a label.
 static const char* const k_broken = "vec4 main(vec2 p) {\n  return vec4(glow, 1.0);\n}\n";
 
 static const int k_knobs = 6;
+static const int k_live = 4;  // three compound knobs + one component
 static const int k_frames = 128;
 static const float k_bake_scale = 2.0f;  // sharp on a 2x display, downsampled on 1x
 
@@ -161,7 +194,13 @@ struct AppState
   neui_session_t       session  = { 0 };
 
   uint32_t knob_ids[k_knobs] = {};
+  uint32_t live_ids[k_live] = {};
   uint32_t readout_id = 0;
+
+  // The CUSTOMDRAW panel drawn with shader_api->draw; live knob 1 drives `t`.
+  uint32_t     panel_id = 0;
+  neui_asset_t plasma = asset_none;
+  float        plasma_t = 1.7f;
 };
 
 static neui_asset_t compile(AppState* a, const char* src, const char* name)
@@ -187,6 +226,31 @@ static neui_asset_t bitmap_compound(AppState* a, neui_asset_t bitmap, float fram
   return comp;
 }
 
+// A compound for a live knob: a SHADER layer over the whole widget, its
+// value and accent bound to attributes, and a plain disc that paints instead
+// where the shader cannot.
+static neui_asset_t live_knob_compound(AppState* a, neui_asset_t shader)
+{
+  neui_asset_t comp = a->assets->create_compound(a->session);
+  neui_compound_layer_t disc = a->compound->add_layer(a->session, comp, NEUI_COMPOUND_LAYER_RECT, 0);
+  a->compound->set_anchor(a->session, comp, disc, NEUI_ANCHOR_CENTER, NEUI_ANCHOR_CENTER);
+  a->compound->set_int(a->session, comp, disc, "width", 60);
+  a->compound->set_int(a->session, comp, disc, "height", 60);
+  a->compound->set_int(a->session, comp, disc, "fill_color", (int)0xFF2A2E38);
+  a->compound->set_float(a->session, comp, disc, "corner_radius", 30.0f);
+
+  neui_compound_layer_t L = a->compound->add_layer(a->session, comp, NEUI_COMPOUND_LAYER_SHADER, 1);
+  a->compound->set_anchor(a->session, comp, L, NEUI_ANCHOR_CENTER, NEUI_ANCHOR_CENTER);
+  a->compound->set_int(a->session, comp, L, "width", NEUI_COMPOUND_FILL);
+  a->compound->set_int(a->session, comp, L, "height", NEUI_COMPOUND_FILL);
+  a->compound->set_asset(a->session, comp, L, "shader", shader);
+  a->compound->bind(a->session, comp, L, "u.value", NEUI_PARAM_VALUE, 1.0f, 0.0f);
+  a->compound->set_float(a->session, comp, L, "u.value.step", 1.0f / 256.0f);
+  a->compound->bind(a->session, comp, L, "u.accent", "app.accent", 1.0f, 0.0f);  // an int: a colour
+  a->compound->set_int(a->session, comp, L, "fallback", (int)disc.id);
+  return comp;
+}
+
 static void set_readout(AppState* a, int knob, float value)
 {
   char buf[96];
@@ -203,6 +267,28 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
         set_readout(a, i, event->data.attr.value);
         return false;  // the compound binding repaints the knob
       }
+    for (int i = 0; i < k_live; ++i)
+      if (a->live_ids[i] && event->data.attr.widget.id == a->live_ids[i]) {
+        set_readout(a, k_knobs + i, event->data.attr.value);
+        if (i == 0 && a->panel_id) {
+          a->plasma_t = 1.7f + event->data.attr.value * 6.2831853f;
+          a->widgets->invalidate(a->session, { a->panel_id });
+        }
+        return false;
+      }
+  }
+  if (event->type == NEUI_EVENT_WIDGET_PAINT && a->panel_id &&
+      event->data.paint.widget.id == a->panel_id) {
+    const neui_shader_uniform_t t = { "t", { a->plasma_t, 0, 0, 0 } };
+    neui_shader_draw_t d{};
+    d.shader = a->plasma;
+    d.width = event->data.paint.width;
+    d.height = event->data.paint.height;
+    d.resolution = 0.5f;  // a soft background: shade a quarter of the pixels
+    d.uniforms = &t;
+    d.uniform_count = 1;
+    a->shaders->draw(event->data.paint.p, &d);
+    return true;
   }
   if (event->type == NEUI_EVENT_VALUE_CHANGED) {  // the plain-KNOB fallback
     for (int i = 0; i < k_knobs; ++i)
@@ -255,12 +341,13 @@ int main(int /*argc*/, char* /*argv*/[])
   const int pad = 12, knob = 88, knob_gap = 16, tile_w = 196, tile_h = 120;
   const int win_w = 2 * pad + k_knobs * knob + (k_knobs - 1) * knob_gap;  // 632
   const int banner_h = 64, knob_y = pad + banner_h + 16, readout_y = knob_y + knob + 10;
-  const int tile_y = readout_y + 32, error_y = tile_y + tile_h + 16, timing_y = error_y + 26;
+  const int tile_y = readout_y + 32, live_label_y = tile_y + tile_h + 16, live_y = live_label_y + 26;
+  const int error_y = live_y + knob + 16, timing_y = error_y + 26;
   const int win_h = timing_y + 22 + pad;
 
   neui_widget_t win = app.widgets->create(app.session, widget_none, NEUI_W_APPWINDOW,
                                           120, 120, win_w, win_h, nullptr);
-  app.widgets->set_text(app.session, win, "neui shaders (baked)");
+  app.widgets->set_text(app.session, win, "neui shaders");
 
   neui_widget_t readout = app.widgets->create(app.session, win, NEUI_W_LABEL,
                                               pad, readout_y, 300, 22, nullptr);
@@ -362,6 +449,40 @@ int main(int /*argc*/, char* /*argv*/[])
   const double ms =
     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
+  // Live: three compound knobs on the glow shader, one component knob, and a
+  // panel drawn with shader_api->draw.
+  neui_widget_t live_label = app.widgets->create(app.session, win, NEUI_W_LABEL,
+                                                 pad, live_label_y, win_w - 2 * pad, 22, nullptr);
+  app.widgets->set_text(app.session, live_label,
+                        "Live: re-shaded when the value changes (drag the knobs)");
+  neui_asset_t live_comp = live_knob_compound(&app, glow);
+  for (int i = 0; i < 3; ++i) {
+    neui_widget_t k = app.widgets->create(app.session, win, NEUI_W_CUSTOMDRAW,
+                                          pad + i * (knob + knob_gap), live_y, knob, knob, nullptr);
+    app.live_ids[i] = k.id;
+    app.widgets->set_asset(app.session, k, live_comp);
+    app.widgets->set_asset(app.session, k, behav);
+    app.attrs->set_int(app.session, k, "app.accent", (int)accents[i]);
+    const float v = 0.25f + 0.25f * (float)i;
+    app.attrs->set_float(app.session, k, NEUI_PARAM_DEFAULT, v);
+    app.attrs->set_float(app.session, k, NEUI_PARAM_VALUE, v);
+  }
+  neui_asset_t ring = app.assets->create_component_from_string(
+    app.session, k_ring_component, (uint32_t)strlen(k_ring_component), nullptr);
+  if (ring.id != asset_none.id) {
+    neui_widget_t k = app.widgets->create_from_component(app.session, win, ring,
+                                                         pad + 3 * (knob + knob_gap), live_y, knob, knob);
+    app.live_ids[3] = k.id;
+  } else {
+    dbglog("[shader] the ring component did not load\n");
+  }
+  app.plasma = plasma;
+  app.plasma_t = 1.7f + 0.25f * 6.2831853f;
+  const int panel_x = pad + 4 * (knob + knob_gap);
+  neui_widget_t panel = app.widgets->create(app.session, win, NEUI_W_CUSTOMDRAW,
+                                            panel_x, live_y, win_w - pad - panel_x, knob, nullptr);
+  app.panel_id = panel.id;
+
   // The broken shader's diagnostic.
   char err[256];
   neui_asset_t broken = app.shaders->create(app.session, k_broken, (uint32_t)strlen(k_broken),
@@ -385,6 +506,8 @@ int main(int /*argc*/, char* /*argv*/[])
   // Widgets reference these assets without a refcount: tear the window down first.
   app.widgets->destroy(app.session, win);
   app.assets->destroy(app.session, behav);
+  app.assets->destroy(app.session, live_comp);
+  if (ring.id != asset_none.id) app.assets->destroy(app.session, ring);
   app.assets->destroy(app.session, banner_comp);
   app.assets->destroy(app.session, banner_bmp);
   for (int c = 0; c < 3; ++c) {

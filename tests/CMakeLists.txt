@@ -33,6 +33,7 @@ add_executable(neui_tests
   test_shader_lang.cpp
   test_shader_exec.cpp
   test_shader_asset.cpp
+  test_shader_layer.cpp
   # mujson lives in the core lib, but the suite links no library, so its TU is
   # compiled directly into the test executable (same pattern as the *.cpp above).
   ${PROJECT_SOURCE_DIR}/src/mujson.cpp)
@@ -46,7 +47,9 @@ target_compile_features(neui_tests PRIVATE cxx_std_17)
 
 # The .nsl shader compiler + executor is a library of its own (its compile
 # flags must not leak into or come from the test TUs), so the suite links it.
-target_link_libraries(neui_tests PRIVATE neui-shader)
+# The QR encoder comes along because the compound paint walk
+# (widget_paint_compound.h, test_shader_layer.cpp) has a QR layer.
+target_link_libraries(neui_tests PRIVATE neui-shader neui-qrcodegen)
 
 # iOS: the suite is a console-style program, but iOS only installs/launches app
 # bundles - give it a deterministic bundle id so CI can install it on a booted

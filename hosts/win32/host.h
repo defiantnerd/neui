@@ -548,4 +548,9 @@ namespace win32_host {
     std::vector<uint32_t> _menubars;  // widget indices of MENUBAR widgets, for WM_COMMAND routing
   };
 
+  // Every painter's resolve_shader thunk (painter.h), defined with the
+  // shader API in widgets.cpp / .mm; null in a NEUI_NO_SHADERS build, where
+  // shader layers paint their fallback.
+  extern const neui_detail::resolve_shader_thunk_t w32_resolve_shader;
+
 }

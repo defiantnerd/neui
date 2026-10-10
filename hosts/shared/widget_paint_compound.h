@@ -9,6 +9,7 @@
 #include "painter.h"
 #include "theme_palette.h"
 #include "behavior_runtime.h"  // BEHAVIOR_PI / behavior_clamp (shared math)
+#include "shader_layer.h"      // paint_shader_layer / shader_fallback_hidden
 
 // Host-agnostic paint helper for compound drawables. Both the xpl host
 // (CustomDrawWidget::paint / paint_after_children) and the win32 native
@@ -440,6 +441,8 @@ namespace neui_detail
     // AND-filter: every bit set in show_when must be present in state_mask.
     // show_when == 0 (default) always passes.
     if ((L.show_when & ~state_mask) != 0u) return;
+    // A SHADER layer's fallback stands in only where that layer cannot render.
+    if (shader_fallback_hidden(p, ca, self_slot, bag)) return;
     float a = effective_float(L, "alpha", L.alpha, bag);
     if (a <= 0.0f) return;
     if (a > 1.0f)  a = 1.0f;
@@ -863,6 +866,9 @@ namespace neui_detail
         }
         break;
       }
+      case NEUI_COMPOUND_LAYER_SHADER:
+        paint_shader_layer(p, L, r.x, r.y, r.w, r.h, bag);
+        break;
       case NEUI_COMPOUND_LAYER_GROUP: {
         // Container: establish a local coordinate frame at the group rect and
         // clip children to it, then paint every direct child sorted by its own

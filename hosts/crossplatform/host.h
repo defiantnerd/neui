@@ -1266,4 +1266,9 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   void register_host();
 
+  // Every painter's resolve_shader thunk (painter.h), defined with the
+  // shader API in widgets.cpp / .mm; null in a NEUI_NO_SHADERS build, where
+  // shader layers paint their fallback.
+  extern const neui_detail::resolve_shader_thunk_t xpl_resolve_shader;
+
 } // namespace xpl_host

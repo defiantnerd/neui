@@ -59,6 +59,30 @@ namespace ios_host
     return s;
   }
 
+#if !defined(NEUI_NO_SHADERS)
+  // -------------------------------------------------------------------------
+  // Shader API (NEUI_API_SHADER) - shared implementation in shader_api.h.
+
+  struct IOSShaderHost {
+    static IOSAssetManager* store(neui_session_t session, uint32_t& session_id)
+    {
+      return store_from_token(get_session(session), session_id);
+    }
+    static IOSAssetManager* store_from_token(void* host_token, uint32_t& session_id)
+    {
+      auto* s = static_cast<Session*>(host_token);
+      if (!s) return nullptr;
+      session_id = s->session_id();
+      return &s->_asset_manager;
+    }
+  };
+  neui_shader_api_t shader_api = neui_detail::shader_api_table<IOSShaderHost>();
+  const neui_detail::resolve_shader_thunk_t ios_resolve_shader =
+    &neui_detail::ShaderApi<IOSShaderHost>::painter_resolve;
+#else
+  const neui_detail::resolve_shader_thunk_t ios_resolve_shader = nullptr;
+#endif
+
   // -------------------------------------------------------------------------
   // window.mm helpers (UIKit-coupled). Declared here so the C++ tables below
   // can drive native realization / text / geometry / paint.
@@ -1535,7 +1559,7 @@ namespace ios_host
     if (((surface.id >> 16) & 0xffff) != (s->session_id() & 0xffff)) return;
     s->_asset_manager.paint_surface(surface.id & 0xffff, clear_argb, fn, user,
                                     neui_cg_backend::get_backend(), s,
-                                    &ios_painter_draw_asset_thunk);
+                                    &ios_painter_draw_asset_thunk, ios_resolve_shader);
   }
   static void NEUI_ABI as_surface_blur(neui_session_t session, neui_asset_t surface,
                                        float sigma_x, float sigma_y)
@@ -1649,6 +1673,9 @@ namespace ios_host
     apis.compound = &compound_api;
     apis.behavior = &behavior_api;
     apis.bitmap_from_name = component_bitmap_from_name;
+#if !defined(NEUI_NO_SHADERS)
+    apis.shader_from      = neui_detail::ShaderApi<IOSShaderHost>::component_shader;
+#endif
     apis.user             = s;
     neui_detail::BuiltComponent built =
         neui_detail::build_component(session, json, len, env, apis);
@@ -1728,6 +1755,8 @@ namespace ios_host
     in.asset_names = &e->comp_asset_names;
     in.asset_handle_names = &e->comp_asset_handle_names;
     in.asset_frame_layouts = &e->comp_asset_frame_layouts;
+    in.shader_sources      = &e->comp_shader_sources;
+    in.shader_handle_names = &e->comp_shader_handle_names;
     auto* cce = s->_asset_manager.get_slot(e->comp_compound.id & 0xffff);
     auto* bbe = s->_asset_manager.get_slot(e->comp_behavior.id & 0xffff);
     in.compound = (cce && cce->compound) ? cce->compound.get() : nullptr;
@@ -2126,21 +2155,6 @@ namespace ios_host
     Session* s = nullptr; auto* P = resolve_filter_prim_ios(session, asset, prim, s);
     if (P) neui_detail::apply_filter_merge_add_input(*P, source);
   }
-#if !defined(NEUI_NO_SHADERS)
-  // -------------------------------------------------------------------------
-  // Shader API (NEUI_API_SHADER) - shared implementation in shader_api.h.
-
-  struct IOSShaderHost {
-    static IOSAssetManager* store(neui_session_t session, uint32_t& session_id)
-    {
-      Session* s = get_session(session);
-      if (!s) return nullptr;
-      session_id = s->session_id();
-      return &s->_asset_manager;
-    }
-  };
-  neui_shader_api_t shader_api = neui_detail::shader_api_table<IOSShaderHost>();
-#endif
 
   neui_filter_api_t filter_api = {
     NEUI_VERSION,

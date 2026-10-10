@@ -295,4 +295,9 @@ namespace ios_host
   // Process-wide session registry (defined in host.mm).
   extern std::vector<std::unique_ptr<Session>> sessions;
 
+  // Every painter's resolve_shader thunk (painter.h), defined with the
+  // shader API in widgets.cpp / .mm; null in a NEUI_NO_SHADERS build, where
+  // shader layers paint their fallback.
+  extern const neui_detail::resolve_shader_thunk_t ios_resolve_shader;
+
 } // namespace ios_host

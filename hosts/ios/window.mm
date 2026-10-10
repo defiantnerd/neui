@@ -2520,6 +2520,7 @@ namespace ios_host
       painter.ctx = wd.render_ctx;
       painter.host_token = s;
       painter.draw_asset_thunk = &ios_painter_draw_asset_thunk;
+      painter.resolve_shader = ios_resolve_shader;
       neui_detail::CompoundAsset* ca = nullptr;
       if (wd.compound_asset.id != asset_none.id) {
         auto* e = s->_asset_manager.get_slot(wd.compound_asset.id & 0xffff);

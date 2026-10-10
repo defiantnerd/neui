@@ -54,6 +54,19 @@ namespace neui_detail {
       uint32_t frame,
       uint32_t tint);
 
+  // Thunk that resolves a SHADER asset for the live shader paths (the
+  // compound SHADER layer, NEUI_API_SHADER's draw): the program and the
+  // session's image cache. False for a foreign or stale handle, and always on
+  // a host without shader support. Hosts install one per paint via the
+  // painter struct below; null = shaders paint nothing.
+  struct ShaderAsset;
+  class ShaderCache;
+  using resolve_shader_thunk_t = bool (NEUI_ABI *)(
+      void* host_token,
+      neui_asset_t shader,
+      const ShaderAsset** out_shader,
+      ShaderCache** out_cache);
+
   // Lazy GPU upload for the (entry, ctx) pair with device-loss check.
   // Returns the cached/freshly-uploaded backend bitmap handle, or nullptr
   // if the backend can't create one. If the backend has bumped its per-ctx
@@ -220,6 +233,7 @@ struct neui_painter {
   neui_render_ctx_t                ctx;
   void*                            host_token;       // session / asset mgr ptr (host-defined)
   neui_detail::draw_asset_thunk_t  draw_asset_thunk; // resolves neui_asset_t -> backend->draw_bitmap
+  neui_detail::resolve_shader_thunk_t resolve_shader; // SHADER asset -> program + cache; may be null
 };
 
 namespace neui_detail {

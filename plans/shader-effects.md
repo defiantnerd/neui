@@ -2,8 +2,17 @@
 
 ## Status
 
-**Phases 0, 1 and 2 done (2026-10-10); phase 3 next.** The prerequisite
-track, `plans/xpl-partial-repaint.md`, is implemented (P1-P4).
+**Phases 0-3 done (2026-10-10); phase 4 (D2D GPU path) or 6 (time and
+animation) next.** The prerequisite track, `plans/xpl-partial-repaint.md`, is
+implemented (P1-P4).
+
+Phase 3 produced the live paths: the compound SHADER layer
+(`NEUI_COMPOUND_LAYER_SHADER`, `u.*` uniform props, `resolution`, `time`,
+`fallback`), `shader_api->draw` for CUSTOMDRAW, the session image cache, the
+painter `resolve_shader` seam, a `get_device_transform` backend slot, and
+shader layers in component JSON (`hosts/shared/shader_layer.h`, plus
+additions to `shader_asset.h`, `compound.h`, `component_loader.h`). See
+"Phase 3 results".
 
 Phase 2 produced the client interface: `NEUI_API_SHADER`
 (`include/neui/d/shader.h`) with the SHADER asset kind, compile + uniform
@@ -351,13 +360,15 @@ asks for it. Importing `.sc` stays out.
 
 ### Bitmap cache
 
-Phase 3. A bake creates its own BITMAP asset and needs no cache; the cache
-serves the live layer and `draw`. Phase 2 already put `AssetEntry::shader`
-(`ShaderAsset`: the program and a process-unique `uid`) in place for it.
+Implemented in phase 3 (`ShaderCache`, `hosts/shared/shader_asset.h`). A bake
+creates its own BITMAP asset and needs no cache; the cache serves the live
+layer and `draw`.
 
-- **Where it lives:** on the **shader asset** (`AssetEntry::shader`, a
-  `unique_ptr<ShaderAsset>` holding the program, a monotonic `uid` and the
-  cache), **not** on the layer.
+- **Where it lives:** one per session, on the asset store
+  (`AssetStore::shader_cache()`), keyed by the program's `uid`, **not** on the
+  layer. (The design had one cache per shader asset; a store-wide one gives a
+  single LRU and budget across all shaders for the same lookup cost, and a
+  SHADER asset's release drops its entries by `uid`.)
 - **Why not copy the QR layer's cache:**
   - its FIFO of 16 would re-shade most of 50 knobs on every repaint;
   - it leaks GPU uploads (see §8);
@@ -384,6 +395,8 @@ serves the live layer and `draw`. Phase 2 already put `AssetEntry::shader`
   resampled.
 - **Live resize:** while the layer size is changing, draw the last bitmap
   stretched, and re-shade once the size has been stable for a frame.
+  **Not done in phase 3**: a resize re-shades every frame. Revisit if live
+  resizing of large shader layers proves slow.
 
 ### GPU executors
 
@@ -523,7 +536,8 @@ typedef struct neui_shader_api {
   neui_asset_t (*bake_bitmap)(neui_session_t, neui_asset_t shader, const neui_shader_bake_t*);
   neui_asset_t (*bake_filmstrip)(neui_session_t, neui_asset_t shader, const neui_shader_bake_t*,
                                  const char* sweep, float from, float to, uint32_t frames);
-  // phase 3 appends: void (*draw)(neui_painter_t* p, const neui_shader_draw_t* d);
+  // phase 3: draw a shader from a paint callback
+  bool (*draw)(neui_painter_t* p, const neui_shader_draw_t* d);
 } neui_shader_api_t;
 ```
 
@@ -542,15 +556,28 @@ typedef struct neui_shader_api {
 - Bakes use the scale the client passes. Clients have no display-scale query,
   and the xpl host only knows a scale once a window exists, so `scale <= 0`
   means 1, not "the display's". The example bakes at 2.
-- **Phase 3 appends** `draw(neui_painter_t*, const neui_shader_draw_t*)` for
+- **Phase 3 appended** `draw(neui_painter_t*, const neui_shader_draw_t*)` for
   CUSTOMDRAW, with `neui_shader_draw_t` carrying the asset, rect, uniforms,
-  `resolution` and a cache tag. It takes the opaque `neui_painter_t*`, so
-  **the public painter vtable does not change**. The host resolves the asset
-  through the painter's `host_token`. A painter exists only inside a paint
-  callback (`WIDGET_PAINT` or `paint_surface`), so `draw` works in both and
-  nowhere else.
+  `resolution` and `time` (no cache tag: content keying made it unneeded). It
+  takes the opaque `neui_painter_t*`, so **the public painter vtable does not
+  change**. The host resolves the asset through the painter's
+  `resolve_shader` thunk. A painter exists only inside a paint callback
+  (`WIDGET_PAINT` or `paint_surface`), so `draw` works in both and nowhere
+  else.
 
 ### Compound layer `NEUI_COMPOUND_LAYER_SHADER = 8`
+
+Implemented in phase 3 as designed below, with these differences:
+
+- **No `rev` counter.** Paint resolves the layer's statics and bindings
+  against the program directly (four passes over the layer's small maps, no
+  per-uniform string building). Cheap next to a cache lookup.
+- **`"time"` prop** (bindable float seconds) so a client can animate before
+  phase 6 adds a clock.
+- **`fallback` also covers a missing shader**: the fallback layer paints when
+  the host has no shader support *or* the layer has no valid shader asset
+  (e.g. a component shader that failed to compile).
+- **The `"name"` prop** is generic: any layer can carry one.
 
 - **Geometry and common props:** anchors, offset, size, `z`, `alpha` and
   `show_when` come from the shared layer prologue; nothing new is needed.
@@ -653,6 +680,15 @@ if (shaders) {
   image-cached.
 
 ### Internal painter seam
+
+Implemented in phase 3: `resolve_shader_thunk_t` returns the `ShaderAsset`
+and the session's `ShaderCache`; every host sets it to
+`ShaderApi<Host>::painter_resolve` (null under `NEUI_NO_SHADERS`), and
+`AssetStore::paint_surface` takes it as a trailing parameter. Placement also
+needed a backend slot the design missed: **`get_device_transform`**
+(appended to `neui_render_backend_t`, nullable), the current user -> device
+mapping, because the painter cannot otherwise know the layer's device origin
+under the host's and client's transforms (see the spec's pixel grid).
 
 - The compound paint path needs to resolve a SHADER asset from the painter,
   so the internal `struct neui_painter` (`hosts/shared/painter.h`) gains a
@@ -791,7 +827,7 @@ What this means:
 | 0 | **Done.** Language spec + edge-case table; executor micro-benchmark (MSVC, AppleClang arm64, GCC, Clang); D2D zero-input effect spike (`SCENE_POSITION` at 100/120/150/200% vs CPU) | `docs/shader-language.md`, `tests/shader_bench/`, branch `spike/d2d-shader-effect` |
 | 1 | **Done.** Front end + IR + optimiser; deterministic built-ins; SoA CPU executor; output packer (premultiply, optional dither) | `src/shader/{nsl.h,nsl_ir.h,nsl_math.h,nsl_compile.cpp,nsl_exec.cpp,CMakeLists.txt}`, `tests/test_shader_{lang,exec}.cpp` |
 | 2 | **Done.** `NEUI_API_SHADER` (`create`, `create_from_file`, introspection, **`bake_bitmap` / `bake_filmstrip`**); asset kind + resource kind; `ShaderAsset` on `AssetEntry`; QR leak fix. **First visible win:** baked shader filmstrips via the existing ASSET layer + `frame` binding, on every supporting host, zero per-frame cost | `include/neui/d/{shader.h,assets.h,resource.h}`, `hosts/shared/{shader_api.h,shader_asset.h,asset_store.h}`, the 4 hosts' `host.*` (`get_interface`) + `widgets.*` (a 10-line host policy each), `examples/shader_example.cpp` |
-| 3 | Live SHADER compound layer (`u.*`, `resolution`, `fallback`); `shader_api->draw`; the bitmap cache on the shader asset; painter `resolve_shader` seam; component JSON + serialize | `include/neui/d/compound.h`, `hosts/shared/{compound.h,shader_layer.h,widget_paint_compound.h,painter.h,component_loader.h}`, 6 painter construction sites |
+| 3 | **Done.** Live SHADER compound layer (`u.*`, `resolution`, `time`, `fallback`); `shader_api->draw`; the session image cache; painter `resolve_shader` seam; `get_device_transform` backend slot; component JSON + serialize | `include/neui/d/{compound.h,shader.h,renderer.h,component.h}`, `hosts/shared/{compound.h,shader_layer.h,shader_asset.h,shader_api.h,widget_paint_compound.h,painter.h,component_loader.h,asset_store.h}`, the backends' device transform, 9 painter sites in the 4 hosts |
 | 4 | D2D GPU path: HLSL emitter, runtime `D3DCompile`, custom effect, tolerance tests | `hosts/shared/shader_emit_hlsl.h`, `include/neui/d/renderer.h`, `backends/d2d/{d2d_backend.cpp,d2d_shader_effect.cpp}` |
 | 5 | **Partial repaint** - separate track, scheduled **first** (`plans/xpl-partial-repaint.md`) | see that plan |
 | 6 | Time + animation: clock, registry, generalised heartbeat, fps cap, pause / reduce-motion (**requires 5**) | `hosts/shared/anim_clock.h`, `hosts/crossplatform/{platform.h,platform_*}`, native hosts' timers |
@@ -822,28 +858,35 @@ null platform:
   `AssetStore` and a fake host policy: compile + diagnostics, introspection,
   bake == executor bytes, time wrap, bad input, the strip grid, the resource
   path, and a filmstrip golden.
-- **`tests/test_shader_cache.cpp`** (phase 3): uses a fake backend counting
-  create/destroy (in the style of `test_asset_font.cpp`). Covers:
-  - content sharing across AttrBags;
-  - LRU and the byte budget;
-  - eviction destroying every per-ctx upload;
+- **`tests/test_shader_layer.cpp`** (phase 3): a fake backend recording
+  uploads, draws and the device transform. Covers:
+  - `u.*` prop routing and uniform resolution (statics by kind, colours,
+    bindings, components, steps, order);
+  - placement against the executor: 1:1 at scale 1, whole device px under
+    150% + translation, a fractional origin, `resolution`, rotation;
+  - content sharing across contexts and positions, time keying;
+  - LRU and the byte budget, eviction destroying uploads;
   - re-upload on a generation bump;
-  - the `release_context` / `release_slot` / `clear` paths.
+  - the `release_context` / `release_slot` / `clear` paths;
+  - fallback layers through the real compound paint walk, `draw`, the
+    resolve thunk's session checks, and the component shader hook.
 - **`tests/test_shader_emit.cpp`:** HLSL (and later MSL) golden text.
-- **Extensions:** `tests/test_compound.cpp` (`u.*` routing, `.step`
-  interplay, raw-int colour unpack) and `tests/test_component_loader.cpp`
-  (shader layer JSON round trip, with the source served by a fake resource
-  provider).
+- **Extensions:** `tests/test_component_loader.cpp` (shader layer JSON load,
+  without the hook, and the serialize round trip). The `u.*` routing tests
+  went into `test_shader_layer.cpp` rather than `test_compound.cpp`.
 - **Windows-only smoke target:** an offscreen D2D ctx + `read_pixels_bgra`,
   comparing GPU against the CPU reference within the tolerance contract.
 
 ## 11. Example and built-in shader library
 
-`examples/shader_example.cpp` (target `neui_shader_example`), with
-`examples/components/glow_knob.json` and
-`examples/shaders/{ring_glow,brushed_metal,plasma,vu,grain}.nsl`. The library
-doubles as the golden-test corpus and gives skin authors working starting
-points. The example shows:
+`examples/shader_example.cpp` (target `neui_shader_example`). As built
+(phase 3), the shaders and the component are inline in the source rather than
+separate `.nsl` / `.json` files; the list below is the original target. It
+shows baked banner, knobs and tiles; three live knobs (SHADER layer, `u.value`
+bound with a step, `u.accent` bound to an int attr per knob, a fallback disc);
+a knob from a JSON component with an inline shader; a CUSTOMDRAW panel drawn
+with `draw` at `resolution` 0.5 whose `t` follows the first live knob; the
+broken-shader diagnostic; and the plain-KNOB fallback. The original plan:
 
 - a brushed-metal background **baked once** (`bake_bitmap`);
 - 8 `glow_knob` components with `u.value` bound to `neui.param.value` and
@@ -1088,10 +1131,74 @@ findings fixed:**
   - nesting after inlining (512);
   - compile work (1,048,576).
 
-**Next (phase 3):**
-- the live SHADER compound layer (`u.*`, `resolution`, `fallback`);
-- `shader_api->draw`;
-- the bitmap cache on the shader asset;
-- the painter `resolve_shader` seam;
-- component JSON.
+**Next (phase 3):** done, see "Phase 3 results".
 
+## 16. Phase 3 results (2026-10-10)
+
+**What exists:**
+- **The SHADER compound layer** (`NEUI_COMPOUND_LAYER_SHADER = 8`): props
+  `shader`, `u.<name>` / `u.<name>.<c>`, `resolution`, `time`, `fallback`,
+  and a generic `name` on every layer. All routed through the existing
+  `set_*` / `bind` / `bind_asset`: no compound vtable change. Storage on
+  `CompoundLayer` (`compound.h`); uniform resolution, placement and fallback
+  logic in `hosts/shared/shader_layer.h`, called from
+  `widget_paint_compound.h`.
+- **`shader_api->draw`** (appended), with `neui_shader_draw_t`.
+- **The image cache** (`ShaderCache`, one per session on the asset store):
+  content-keyed, LRU within 48 MB of CPU pixels, per-ctx uploads with
+  device-loss re-upload, released with the shader, the context and the
+  store.
+- **Seams:** the painter's `resolve_shader` thunk (9 construction sites:
+  5 window paints, 4 surface paints) and the component loader's
+  `shader_from` hook, both from `ShaderApi<Host>`; each host's policy gained
+  `store_from_token`.
+- **A backend slot, `get_device_transform`** (appended, nullable),
+  implemented by D2D, CG and Cairo. The design assumed the painter could
+  place the image without it; it cannot, because hosts and clients translate
+  (and may rotate or scale) before a layer paints.
+- **Component JSON:** a `"shaders"` map (file or inline `source`), `"kind":
+  "shader"` layers with `"uniforms"`, `"resolution"`, `"time"`,
+  `"fallback"` by layer `"name"`, binds on `u.*` and `shader`; full serialize
+  round trip.
+- **Example:** live knobs, a component knob and a `draw` panel added to
+  `neui_shader_example` (see §11).
+- **Tests:** 22 new cases (`test_shader_layer.cpp`, three in
+  `test_component_loader.cpp`): 420 pass on macOS, also under ASan + UBSan.
+  The suite now links `neui-qrcodegen`, so the compound paint walk itself is
+  under Tier-1 test for the first time.
+
+**Verified:**
+- **macOS**, native and xpl hosts: identical rendering; synthesized drags on
+  a live knob and the component knob re-shade them, and the `draw` panel
+  follows the first knob.
+- **Builds:** macOS (Ninja, Debug), the `NEUI_NO_SHADERS` configuration and
+  the iOS simulator (Xcode) build clean.
+
+**Decisions taken while building it:**
+- **Placement snaps the sub-pixel remainder to 1/256 device px.** Float
+  noise in a backend's transform (CG composes doubles, D2D floats) would
+  otherwise split the cache and could change pixels; whole logical px give
+  exact remainders at the usual scales anyway. Documented in the spec's
+  pixel grid.
+- **Under rotation, skew, mirror or uneven scale** the layer is shaded in
+  its own space at `sqrt(|det|)` and drawn through the transform (resampled);
+  there is no device grid to match.
+- **`resolution` is clamped to [1/16, 4].**
+- **A vec3 / vec4 bound as a whole to an int attr is a raw colour**;
+  scale, offset and step do not apply. A float attr splats.
+- **Uniform statics and bindings that the current program does not declare
+  are ignored**, so a shader can be swapped under existing props.
+- **`time` is a layer prop** for now (bind it to animate); phase 6 adds the
+  clock.
+
+**Not done (deliberately):**
+- **Live-resize stretch:** a resizing shader layer re-shades every frame.
+- **A per-layer `rev` cache** of the uniform resolution: not needed at the
+  measured cost.
+- **Windows and Linux on-screen checks** of the live layer: CI builds and
+  tests them; the D2D and Cairo `get_device_transform` implementations have
+  no on-screen verification yet.
+
+**Next:** phase 4 (D2D GPU path) or phase 6 (time and animation; partial
+repaint, its prerequisite, is done). Which one first depends on the client's
+use case.

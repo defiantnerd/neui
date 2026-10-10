@@ -73,6 +73,30 @@ namespace macos_host
     return s;
   }
 
+#if !defined(NEUI_NO_SHADERS)
+  // -------------------------------------------------------------------------
+  // Shader API (NEUI_API_SHADER) - shared implementation in shader_api.h.
+
+  struct MacShaderHost {
+    static MacOSAssetManager* store(neui_session_t session, uint32_t& session_id)
+    {
+      return store_from_token(get_session(session), session_id);
+    }
+    static MacOSAssetManager* store_from_token(void* host_token, uint32_t& session_id)
+    {
+      auto* s = static_cast<Session*>(host_token);
+      if (!s) return nullptr;
+      session_id = s->session_id();
+      return &s->_asset_manager;
+    }
+  };
+  neui_shader_api_t shader_api = neui_detail::shader_api_table<MacShaderHost>();
+  const neui_detail::resolve_shader_thunk_t macos_resolve_shader =
+    &neui_detail::ShaderApi<MacShaderHost>::painter_resolve;
+#else
+  const neui_detail::resolve_shader_thunk_t macos_resolve_shader = nullptr;
+#endif
+
   // Defined in window.mm. Realizes a widget's NSView immediately if its
   // containing frame is already shown (post-show dynamic creation); no-op
   // before widget_show (deferred to create_descendants_native). Declared
@@ -2319,7 +2343,8 @@ namespace macos_host
     s->_asset_manager.paint_surface(surface.id & 0xffff, clear_argb, fn, user,
                                      neui_cg_backend::get_backend(),
                                      /*host_token*/ s,
-                                     &macos_painter_draw_asset_thunk);
+                                     &macos_painter_draw_asset_thunk,
+                                     macos_resolve_shader);
   }
 
   static void NEUI_ABI a_surface_blur(neui_session_t session, neui_asset_t surface,
@@ -2446,6 +2471,9 @@ namespace macos_host
     apis.compound = &compound_api;
     apis.behavior = &behavior_api;
     apis.bitmap_from_name = component_bitmap_from_name;
+#if !defined(NEUI_NO_SHADERS)
+    apis.shader_from      = neui_detail::ShaderApi<MacShaderHost>::component_shader;
+#endif
     apis.user             = s;
     neui_detail::BuiltComponent built =
         neui_detail::build_component(session, json, len, env, apis);
@@ -2525,6 +2553,8 @@ namespace macos_host
     in.asset_names = &e->comp_asset_names;
     in.asset_handle_names = &e->comp_asset_handle_names;
     in.asset_frame_layouts = &e->comp_asset_frame_layouts;
+    in.shader_sources      = &e->comp_shader_sources;
+    in.shader_handle_names = &e->comp_shader_handle_names;
     auto* cce = s->_asset_manager.get_slot(e->comp_compound.id & 0xffff);
     auto* bbe = s->_asset_manager.get_slot(e->comp_behavior.id & 0xffff);
     in.compound = (cce && cce->compound) ? cce->compound.get() : nullptr;
@@ -3060,22 +3090,6 @@ namespace macos_host
     auto* P = resolve_filter_prim_macos(session, asset, prim, s);
     if (P) neui_detail::apply_filter_merge_add_input(*P, source);
   }
-
-#if !defined(NEUI_NO_SHADERS)
-  // -------------------------------------------------------------------------
-  // Shader API (NEUI_API_SHADER) - shared implementation in shader_api.h.
-
-  struct MacShaderHost {
-    static MacOSAssetManager* store(neui_session_t session, uint32_t& session_id)
-    {
-      Session* s = get_session(session);
-      if (!s) return nullptr;
-      session_id = s->session_id();
-      return &s->_asset_manager;
-    }
-  };
-  neui_shader_api_t shader_api = neui_detail::shader_api_table<MacShaderHost>();
-#endif
 
   neui_filter_api_t filter_api = {
     NEUI_VERSION,

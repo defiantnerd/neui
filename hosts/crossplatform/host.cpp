@@ -3181,6 +3181,7 @@ namespace xpl_host
     painter.ctx              = ctx;
     painter.host_token       = session;
     painter.draw_asset_thunk = &xpl_painter_draw_asset_thunk;
+    painter.resolve_shader   = xpl_resolve_shader;
 
     if (auto* ca = resolve_widget_compound(session, compound_asset)) {
       // Compound mode: paint z<0 layers here; z>=0 layers come from
@@ -3229,6 +3230,7 @@ namespace xpl_host
     painter.ctx              = ctx;
     painter.host_token       = session;
     painter.draw_asset_thunk = &xpl_painter_draw_asset_thunk;
+    painter.resolve_shader   = xpl_resolve_shader;
 
     bool selected = neui_detail::attr_as_float(
                       neui_detail::attrs_readonly(attrs), NEUI_ATTR_SELECTED, 0.0f) != 0.0f;

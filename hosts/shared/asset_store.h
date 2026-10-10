@@ -148,6 +148,8 @@ namespace neui_detail
     std::vector<std::pair<std::string, std::string>> comp_asset_names;
     std::vector<std::pair<uint32_t, std::string>>    comp_asset_handle_names;
     std::vector<std::pair<uint32_t, FilmstripLayout>> comp_asset_frame_layouts;
+    std::vector<ComponentShaderSource>               comp_shader_sources;
+    std::vector<std::pair<uint32_t, std::string>>    comp_shader_handle_names;
   };
 
   template <typename Loader>
@@ -576,6 +578,8 @@ namespace neui_detail
       entry->comp_asset_names       = built.asset_names;
       entry->comp_asset_handle_names = built.asset_handle_names;
       entry->comp_asset_frame_layouts = built.asset_frame_layouts;
+      entry->comp_shader_sources      = built.shader_sources;
+      entry->comp_shader_handle_names = built.shader_handle_names;
       return alloc_slot(std::move(entry));
     }
 
@@ -701,7 +705,8 @@ namespace neui_detail
                        void* user,
                        neui_render_backend_t* backend,
                        void* host_token,
-                       draw_asset_thunk_t draw_asset_thunk)
+                       draw_asset_thunk_t draw_asset_thunk,
+                       resolve_shader_thunk_t resolve_shader = nullptr)
     {
       if (slot == 0 || slot >= _handles.size() || !backend) return;
       auto& entry = _handles[slot];
@@ -729,6 +734,7 @@ namespace neui_detail
       painter.ctx              = ctx;
       painter.host_token       = host_token;
       painter.draw_asset_thunk = draw_asset_thunk;
+      painter.resolve_shader   = resolve_shader;
       fn(&painter, &k_painter_api,
          static_cast<float>(entry->width_px)  / entry->scale,
          static_cast<float>(entry->height_px) / entry->scale,
@@ -830,6 +836,8 @@ namespace neui_detail
       }
       // A COMPOUND's QR layers hold uploads of their own symbol bitmaps.
       if (entry->compound) compound_release_bitmaps(*entry->compound, backend);
+      // A SHADER's rendered images (and their uploads) go with it.
+      if (entry->shader) _shader_cache.release_uid(entry->shader->uid, backend);
       if (entry->surface_ctx && backend && backend->destroy_context) {
         backend->destroy_context(entry->surface_ctx);
         entry->surface_ctx = nullptr;
@@ -859,6 +867,10 @@ namespace neui_detail
       entry.reset();
       _free_slots.push_back(slot);
     }
+
+    // The session's cache of rendered shader images (shader_asset.h), which
+    // the live shader paths draw from.
+    ShaderCache& shader_cache() { return _shader_cache; }
 
     // Look up an asset by slot. Returns nullptr if the slot is unused or
     // out of range. Caller must not retain the pointer past the next
@@ -921,6 +933,7 @@ namespace neui_detail
             *entry->compound, ctx,
             [&](void* bmp) { backend->destroy_bitmap(ctx, bmp); });
       }
+      _shader_cache.release_ctx(ctx, backend);
     }
 
     void clear(neui_render_backend_t* backend)
@@ -934,6 +947,7 @@ namespace neui_detail
           if (entry->compound) compound_release_bitmaps(*entry->compound, backend);
         }
       }
+      _shader_cache.clear(backend);
       // Release any SURFACE entries' off-screen ctxs before dropping the
       // table; destroy_bitmap above only walks cached window-ctx uploads.
       if (backend && backend->destroy_context) {
@@ -1181,6 +1195,7 @@ namespace neui_detail
     // _handles[0] is intentionally unused so slot 0 maps to "invalid".
     std::vector<std::unique_ptr<AssetEntry>> _handles;
     std::vector<uint32_t>                    _free_slots;
+    ShaderCache                              _shader_cache;
 
     uint32_t alloc_slot(std::unique_ptr<AssetEntry> entry)
     {

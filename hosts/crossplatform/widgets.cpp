@@ -70,6 +70,30 @@ namespace xpl_host
     return s;
   }
 
+#if !defined(NEUI_NO_SHADERS)
+  // -------------------------------------------------------------------------
+  // Shader API (NEUI_API_SHADER) - shared implementation in shader_api.h.
+
+  struct XplShaderHost {
+    static neui_detail::AssetManager* store(neui_session_t session, uint32_t& session_id)
+    {
+      return store_from_token(get_session(session), session_id);
+    }
+    static neui_detail::AssetManager* store_from_token(void* host_token, uint32_t& session_id)
+    {
+      auto* s = static_cast<Session*>(host_token);
+      if (!s) return nullptr;
+      session_id = s->_session_id;
+      return &s->_asset_manager;
+    }
+  };
+  neui_shader_api_t shader_api = neui_detail::shader_api_table<XplShaderHost>();
+  const neui_detail::resolve_shader_thunk_t xpl_resolve_shader =
+    &neui_detail::ShaderApi<XplShaderHost>::painter_resolve;
+#else
+  const neui_detail::resolve_shader_thunk_t xpl_resolve_shader = nullptr;
+#endif
+
   // -------------------------------------------------------------------------
   // Recursive helpers
 
@@ -2210,7 +2234,8 @@ namespace xpl_host
     s->_asset_manager.paint_surface(surface.id & 0xffff, clear_argb, fn, user,
                                      s->_backend,
                                      /*host_token*/ s,
-                                     &xpl_painter_draw_asset_thunk);
+                                     &xpl_painter_draw_asset_thunk,
+                                     xpl_resolve_shader);
   }
 
   static void NEUI_ABI as_surface_blur(neui_session_t session, neui_asset_t surface,
@@ -2335,6 +2360,9 @@ namespace xpl_host
     apis.behavior = &behavior_api;
     apis.bitmap_from_name = component_bitmap_from_name;
     apis.user             = s;
+#if !defined(NEUI_NO_SHADERS)
+    apis.shader_from      = neui_detail::ShaderApi<XplShaderHost>::component_shader;
+#endif
     neui_detail::BuiltComponent built =
         neui_detail::build_component(session, json, len, env, apis);
     if (!built.ok) { release_built_component(session, built); return asset_none; }
@@ -2424,6 +2452,8 @@ namespace xpl_host
     in.asset_names        = &e->comp_asset_names;
     in.asset_handle_names = &e->comp_asset_handle_names;
     in.asset_frame_layouts = &e->comp_asset_frame_layouts;
+    in.shader_sources      = &e->comp_shader_sources;
+    in.shader_handle_names = &e->comp_shader_handle_names;
     auto* ce = s->_asset_manager.get_slot(e->comp_compound.id & 0xffff);
     auto* be = s->_asset_manager.get_slot(e->comp_behavior.id & 0xffff);
     in.compound = (ce && ce->compound) ? ce->compound.get() : nullptr;
@@ -3060,22 +3090,6 @@ namespace xpl_host
     auto* P = resolve_filter_prim(session, asset, prim, s);
     if (P) neui_detail::apply_filter_merge_add_input(*P, source);
   }
-
-#if !defined(NEUI_NO_SHADERS)
-  // -------------------------------------------------------------------------
-  // Shader API (NEUI_API_SHADER) - shared implementation in shader_api.h.
-
-  struct XplShaderHost {
-    static neui_detail::AssetManager* store(neui_session_t session, uint32_t& session_id)
-    {
-      Session* s = get_session(session);
-      if (!s) return nullptr;
-      session_id = s->_session_id;
-      return &s->_asset_manager;
-    }
-  };
-  neui_shader_api_t shader_api = neui_detail::shader_api_table<XplShaderHost>();
-#endif
 
   neui_filter_api_t filter_api = {
     NEUI_VERSION,

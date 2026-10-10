@@ -6,11 +6,16 @@
 //   struct MyShaderHost {
 //     // The session's AssetStore and its id (for packing handles), or null.
 //     static AssetStore<...>* store(neui_session_t session, uint32_t& session_id);
+//     // The same from a painter's host_token.
+//     static AssetStore<...>* store_from_token(void* host_token, uint32_t& session_id);
 //   };
 //   neui_shader_api_t shader_api = neui_detail::shader_api_table<MyShaderHost>();
 //
-// and returns &shader_api from get_interface, unless built with
-// NEUI_NO_SHADERS.
+// returns &shader_api from get_interface, installs
+// ShaderApi<MyShaderHost>::painter_resolve as every painter's resolve_shader
+// (that is what draws compound SHADER layers and serves draw), and
+// ShaderApi<MyShaderHost>::component_shader as the component loader's
+// shader hook - all unless built with NEUI_NO_SHADERS.
 
 #include <cstring>
 #include <string>
@@ -18,7 +23,10 @@
 
 #include <neui/neui.h>
 
+#include "component_loader.h"  // cl_detail::join_path
+#include "resource_provider.h"
 #include "shader_asset.h"
+#include "shader_layer.h"
 
 namespace neui_detail
 {
@@ -137,6 +145,51 @@ namespace neui_detail
       if (!sweep) return asset_none;
       return bake(session, shader, b, sweep, from, to, frames);
     }
+
+    // The painter's resolve_shader thunk (painter.h).
+    static bool NEUI_ABI painter_resolve(void* host_token, neui_asset_t shader,
+                                         const ShaderAsset** out_shader,
+                                         ShaderCache** out_cache)
+    {
+      uint32_t sid = 0;
+      auto* store = Host::store_from_token(host_token, sid);
+      if (!store || shader.id == asset_none.id) return false;
+      if (((shader.id >> 16) & 0xffff) != (sid & 0xffff)) return false;
+      const AssetEntry* e = store->get_slot(shader.id & 0xffff);
+      if (!e || e->kind != NEUI_ASSET_KIND_SHADER || !e->shader) return false;
+      *out_shader = e->shader.get();
+      *out_cache  = &store->shader_cache();
+      return true;
+    }
+
+    // The component loader's shader hook (ComponentApis::shader_from): an
+    // inline `source` of len bytes, or the file `name`, asked of the client
+    // resource provider with the document's base_dir first and then read
+    // from base_dir joined with name.
+    static neui_asset_t component_shader(neui_session_t session, const char* name,
+                                         const char* source, uint32_t len,
+                                         const char* base_dir)
+    {
+      uint32_t sid = 0;
+      auto* store = Host::store(session, sid);
+      if (!store) return asset_none;
+      std::string data;
+      if (source) {
+        data.assign(source, len);
+      } else {
+        if (!name || !*name) return asset_none;
+        const bool from_client = store->resource_provider().with_bytes(
+            NEUI_RESOURCE_KIND_SHADER, name, 0.0f, base_dir,
+            [&data](const uint8_t* d, uint32_t n, float) {
+              data.assign(reinterpret_cast<const char*>(d), n);
+              return true;
+            });
+        if (!from_client &&
+            !read_file_bytes(cl_detail::join_path(base_dir ? base_dir : "", name).c_str(), data))
+          return asset_none;
+      }
+      return compile(session, data.data(), data.size(), name, nullptr, 0);
+    }
   };
 
   template <typename Host>
@@ -151,6 +204,7 @@ namespace neui_detail
     t.uniform_at       = A::uniform_at;
     t.bake_bitmap      = A::bake_bitmap;
     t.bake_filmstrip   = A::bake_filmstrip;
+    t.draw             = shader_api_draw;
     return t;
   }
 }  // namespace neui_detail
