@@ -155,22 +155,53 @@ inline void pack1(float r, float g, float b, float a, float cov, float d, uint8_
   dst[3] = static_cast<uint8_t>(a8);
 }
 
+// Four pixels at once: the same operations as pack1, in the same order, on
+// the pixels at r[0..3] etc. with coverage cx[k] * cy and dither offsets
+// d[0..3]. Writes 16 bytes (little-endian BGRA words).
+#if NSL_X86 && !defined(NSL_FORCE_PORTABLE)
+// Raw SSE2 rather than the F4 / I4 wrappers: nested this deeply, MSVC keeps
+// every wrapper temporary on the stack (measured: 83 instructions per pixel,
+// slower than pack1). The op kernels are shallow and do not suffer from it.
+NSL_FI __m128 sse_clamp01(__m128 v, __m128 zero, __m128 one) {
+  const __m128 lt1 = _mm_cmplt_ps(v, one);
+  const __m128 inner = _mm_or_ps(_mm_and_ps(lt1, v), _mm_andnot_ps(lt1, one));
+  return _mm_and_ps(_mm_cmpgt_ps(v, zero), inner);  // NaN -> 0
+}
+NSL_FI __m128i sse_channel(__m128 c, __m128 al, __m128 k255, __m128 d, __m128i a8, __m128 zero, __m128 one) {
+  const __m128i c8 = _mm_cvttps_epi32(_mm_add_ps(_mm_mul_ps(_mm_mul_ps(sse_clamp01(c, zero, one), al), k255), d));
+  const __m128i lt = _mm_cmplt_epi32(c8, a8);  // min(c8, a8)
+  return _mm_or_si128(_mm_and_si128(lt, c8), _mm_andnot_si128(lt, a8));
+}
+NSL_FI void pack4(const float* r, const float* g, const float* b, const float* a, const float* cx, float cy,
+                  const float* d, uint8_t* dst) {
+  const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f), k255 = _mm_set1_ps(255.0f);
+  const __m128 dv = _mm_loadu_ps(d);
+  const __m128 al = _mm_mul_ps(sse_clamp01(_mm_loadu_ps(a), zero, one), _mm_mul_ps(_mm_loadu_ps(cx), _mm_set1_ps(cy)));
+  const __m128i a8 = _mm_cvttps_epi32(_mm_add_ps(_mm_mul_ps(al, k255), _mm_set1_ps(0.5f)));
+  const __m128i b8 = sse_channel(_mm_loadu_ps(b), al, k255, dv, a8, zero, one);
+  const __m128i g8 = sse_channel(_mm_loadu_ps(g), al, k255, dv, a8, zero, one);
+  const __m128i r8 = sse_channel(_mm_loadu_ps(r), al, k255, dv, a8, zero, one);
+  const __m128i word = _mm_or_si128(_mm_or_si128(b8, _mm_slli_epi32(g8, 8)),
+                                    _mm_or_si128(_mm_slli_epi32(r8, 16), _mm_slli_epi32(a8, 24)));
+  _mm_storeu_si128(reinterpret_cast<__m128i*>(dst), word);
+}
+#else
 NSL_FI F4 f4_clamp01(F4 v) {
   return f4_sel(f4_gt(v, f4(0.0f)), f4_sel(f4_lt(v, f4(1.0f)), v, f4(1.0f)), f4(0.0f));
 }
 NSL_FI I4 i4_min(I4 a, I4 b) { return i4_sel(i4_lt(a, b), a, b); }
 
-// Four pixels at once; the same operations as pack1, in the same order.
-// Writes 16 bytes (little-endian BGRA words).
-NSL_FI void pack4(F4 r, F4 g, F4 b, F4 a, F4 cov, F4 d, uint8_t* dst) {
-  const F4 k255 = f4(255.0f);
-  const F4 al = f4_clamp01(a) * cov;
+NSL_FI void pack4(const float* r, const float* g, const float* b, const float* a, const float* cx, float cy,
+                  const float* d, uint8_t* dst) {
+  const F4 k255 = f4(255.0f), dv = f4_load(d);
+  const F4 al = f4_clamp01(f4_load(a)) * (f4_load(cx) * f4(cy));
   const I4 a8 = f4_trunc(al * k255 + f4(0.5f));
-  const I4 b8 = i4_min(f4_trunc(f4_clamp01(b) * al * k255 + d), a8);
-  const I4 g8 = i4_min(f4_trunc(f4_clamp01(g) * al * k255 + d), a8);
-  const I4 r8 = i4_min(f4_trunc(f4_clamp01(r) * al * k255 + d), a8);
+  const I4 b8 = i4_min(f4_trunc(f4_clamp01(f4_load(b)) * al * k255 + dv), a8);
+  const I4 g8 = i4_min(f4_trunc(f4_clamp01(f4_load(g)) * al * k255 + dv), a8);
+  const I4 r8 = i4_min(f4_trunc(f4_clamp01(f4_load(r)) * al * k255 + dv), a8);
   i4_store(dst, b8 | i4_shl<8>(g8) | i4_shl<16>(r8) | i4_shl<24>(a8));
 }
+#endif
 
 const float k_bayer4[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
 
@@ -223,11 +254,8 @@ bool run(const Program& pg, const Draw& d, uint8_t* out, size_t stride) {
       const float* cx = cx_col.data() + x0;
       int i = 0;
       if constexpr (Simd) {
-        const F4 dvec = f4_load(dv);
-        const F4 cyv = f4(cy);
         for (; i + 4 <= n; i += 4)
-          pack4(f4_load(out_r + i), f4_load(out_g + i), f4_load(out_b + i), f4_load(out_a + i),
-                f4_load(cx + i) * cyv, dvec, dst + static_cast<size_t>(i) * 4u);
+          pack4(out_r + i, out_g + i, out_b + i, out_a + i, cx + i, cy, dv, dst + static_cast<size_t>(i) * 4u);
       }
       for (; i < n; ++i)
         pack1(out_r[i], out_g[i], out_b[i], out_a[i], cx[i] * cy, dv[(x0 + i) & 3],
