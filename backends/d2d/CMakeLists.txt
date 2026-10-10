@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 
 if(WIN32)
-  add_library(neui-backend-d2d d2d_backend.cpp)
+  add_library(neui-backend-d2d d2d_backend.cpp d2d_shader.cpp)
 
   target_include_directories(neui-backend-d2d
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}

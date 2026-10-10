@@ -40,8 +40,10 @@
 // cached per session by content (shader, size, scale, sub-pixel position,
 // uniform values, time), so fifty knobs at one value share one bitmap.
 //
-// The pixels are the same on every platform and compiler, bit for bit: neui
-// runs shaders on the CPU with its own deterministic math.
+// On the CPU the pixels are the same on every platform and compiler, bit for
+// bit: neui runs shaders with its own deterministic math. Where the renderer
+// can run them on the GPU (Direct2D), the live paths do so by default, within
+// a small tolerance of the CPU result; see set_gpu.
 
 #ifdef __cplusplus
 extern "C" {
@@ -167,6 +169,18 @@ extern "C" {
     // nothing for a bad handle, an empty or oversized rect (a side over 16384
     // device px), or a painter of another session.
     bool (NEUI_ABI *draw)(neui_painter_t* p, const neui_shader_draw_t* draw);
+
+    // -------- GPU (vtable-appended) -------------------------------------------
+
+    // Where the renderer has a GPU path (Direct2D on Windows), the compound
+    // SHADER layer and draw() run shaders on the GPU, within 2/255 of the CPU
+    // result per channel on 99.9% of pixels and 8/255 on all, except where
+    // the shader jumps (a step, a comparison): there a rounding difference
+    // can put a pixel on the other side of the edge. Off (false)
+    // makes this session run every shader on the CPU, with the same pixels
+    // on every platform; "#pragma neui cpu_only" does it per shader. On by
+    // default. The bakes always run on the CPU.
+    void (NEUI_ABI *set_gpu)(neui_session_t session, bool enabled);
   } neui_shader_api_t;
 
 #ifdef __cplusplus

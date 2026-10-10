@@ -16,6 +16,8 @@
 //   * A knob from a JSON component with an inline shader and a fallback disc.
 //   * A CUSTOMDRAW panel drawn with shader_api->draw; the first live knob
 //     drives its `t`.
+//   * A checkbox for set_gpu: where the renderer has a GPU path (Direct2D),
+//     the live row runs on the GPU by default; unticked, on the CPU.
 // And a deliberately broken shader, whose compile error is shown in a label.
 // Without NEUI_API_SHADER (null platform, LVGL), plain KNOB widgets.
 //
@@ -201,6 +203,7 @@ struct AppState
   uint32_t     panel_id = 0;
   neui_asset_t plasma = asset_none;
   float        plasma_t = 1.7f;
+  uint32_t     gpu_box_id = 0;
 };
 
 static neui_asset_t compile(AppState* a, const char* src, const char* name)
@@ -276,6 +279,14 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
         }
         return false;
       }
+  }
+  if (event->type == NEUI_EVENT_CHECKBOX_CHANGED && a->gpu_box_id &&
+      event->data.checkbox.widget.id == a->gpu_box_id) {
+    a->shaders->set_gpu(a->session, event->data.checkbox.state == NEUI_CHECK_CHECKED);
+    for (uint32_t id : a->live_ids)
+      if (id) a->widgets->invalidate(a->session, { id });
+    a->widgets->invalidate(a->session, { a->panel_id });
+    return false;
   }
   if (event->type == NEUI_EVENT_WIDGET_PAINT && a->panel_id &&
       event->data.paint.widget.id == a->panel_id) {
@@ -452,9 +463,14 @@ int main(int /*argc*/, char* /*argv*/[])
   // Live: three compound knobs on the glow shader, one component knob, and a
   // panel drawn with shader_api->draw.
   neui_widget_t live_label = app.widgets->create(app.session, win, NEUI_W_LABEL,
-                                                 pad, live_label_y, win_w - 2 * pad, 22, nullptr);
+                                                 pad, live_label_y, 380, 22, nullptr);
   app.widgets->set_text(app.session, live_label,
                         "Live: re-shaded when the value changes (drag the knobs)");
+  neui_widget_t gpu_box = app.widgets->create(app.session, win, NEUI_W_CHECKBOX,
+                                              win_w - pad - 200, live_label_y, 200, 22, nullptr);
+  app.widgets->set_text(app.session, gpu_box, "GPU where available");
+  app.widgets->set_check(app.session, gpu_box, NEUI_CHECK_CHECKED);
+  app.gpu_box_id = gpu_box.id;
   neui_asset_t live_comp = live_knob_compound(&app, glow);
   for (int i = 0; i < 3; ++i) {
     neui_widget_t k = app.widgets->create(app.session, win, NEUI_W_CUSTOMDRAW,

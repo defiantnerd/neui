@@ -146,6 +146,12 @@ namespace neui_detail
       return bake(session, shader, b, sweep, from, to, frames);
     }
 
+    static void NEUI_ABI set_gpu(neui_session_t session, bool enabled)
+    {
+      uint32_t sid = 0;
+      if (auto* store = Host::store(session, sid)) store->shader_cache().set_gpu(enabled);
+    }
+
     // The painter's resolve_shader thunk (painter.h).
     static bool NEUI_ABI painter_resolve(void* host_token, neui_asset_t shader,
                                          const ShaderAsset** out_shader,
@@ -205,6 +211,7 @@ namespace neui_detail
     t.bake_bitmap      = A::bake_bitmap;
     t.bake_filmstrip   = A::bake_filmstrip;
     t.draw             = shader_api_draw;
+    t.set_gpu          = A::set_gpu;
     return t;
   }
 }  // namespace neui_detail

@@ -315,6 +315,33 @@ float sweep_value(float from, float to, uint32_t i, uint32_t n) {
   return (1.0f - t) * from + t * to;  // lerp form: t = 0 and t = 1 are exact
 }
 
+size_t gpu_constant_count(const Program& p) {
+  if (p.flag_bits & NSL_CPU_ONLY) return 0;
+  const size_t n = detail::gpu_float_count(p);
+  return n <= detail::k_gpu_max_floats ? n : 0;
+}
+
+bool gpu_constants(const Program& p, const Draw& d, float* out) {
+  const size_t n = gpu_constant_count(p);
+  if (!n || !out) return false;
+  detail::FpEnvGuard fp;
+  const detail::Geometry g = detail::geometry(d);
+  if (!g.ok) return false;
+  std::fill(out, out + n, 0.0f);
+  const float fi0 = static_cast<float>(g.i0), fj0 = static_cast<float>(g.j0);
+  out[0] = g.fx;
+  out[1] = g.fy;
+  out[2] = g.X1 - fi0;  // the far edges, relative to the floored origin
+  out[3] = g.Y1 - fj0;
+  out[4] = d.scale;
+  out[k_gpu_opacity] = 1.0f;
+  const std::vector<float> pool = detail::make_pool(p, detail::run_draw(p, d));
+  const std::vector<int> slot = detail::gpu_pool_slots(p);
+  for (size_t i = 0; i < slot.size(); ++i)
+    if (slot[i] >= 0) out[slot[i]] = pool[i];
+  return true;
+}
+
 Placement placement(const Draw& d) {
   const detail::Geometry g = detail::geometry(d);
   Placement p;

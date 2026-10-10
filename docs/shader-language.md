@@ -414,10 +414,21 @@ moves.
   - no libm;
   - the FP environment is pinned per draw and per compile.
 - **GPU executor (D2D):** emits neui's own polynomials and the same pixel
-  grid, but GPUs may fuse multiply-adds, flush denormals and round division
-  differently. Contract: within 2/255 per channel on ≥ 99.9% of pixels, and
-  within 8/255 on all pixels. `#pragma neui cpu_only` and a session switch
-  force the CPU path when exact pixels matter more than speed.
+  grid, coverage, rounding and dithering (`src/shader/nsl_gpu.cpp`); the
+  draw-time part of a program (work on constants and uniforms) still runs on
+  the CPU, bit-exactly. Every shader variable is `precise`, so no
+  multiply-add is fused, but GPUs flush denormals and round division and
+  square root differently. Contract: within 2/255 per channel on ≥ 99.9% of
+  pixels, and within 8/255 on all pixels except those on a discontinuity of
+  the shader (`step`, a comparison, `floor` / `fract` / `mod` crossing an
+  integer): there a last-bit difference can put a pixel on the other side of
+  the jump, and it takes the other side's colour. Measured on a GTX 1080 and
+  on WARP: at most 1/255 for continuous shaders
+  (`tests/shader_gpu_smoke.cpp`); a hard-edged ring knob showed 3 such pixels
+  out of about 120 000.
+  `#pragma neui cpu_only` and `shader_api->set_gpu(session, false)` force the
+  CPU path when exact pixels matter more than speed. Bakes always run on the
+  CPU.
 
 ## 13. Limits
 

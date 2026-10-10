@@ -2,6 +2,7 @@
 #include "api.h"
 #include "gradient.h"
 #include "path_style.h"
+#include <stddef.h>   // size_t
 
 #ifdef __cplusplus
 extern "C" {
@@ -368,7 +369,44 @@ typedef struct neui_render_backend {
   // m = { s, 0, 0, s, 0, 0 } with s = get_scale_factor.
   void (NEUI_ABI *get_device_transform)(neui_render_ctx_t ctx, float m[6]);
 
+  // --- GPU shader programs (vtable-appended; NULL = CPU only) ------------
+  //
+  // Programs are the GPU form of a .nsl shader (the host emits them; the
+  // backend only compiles and draws). Without these slots, or when
+  // create_shader_program fails, the host renders shaders on the CPU.
+  //
+  // Compile `src` (`len` bytes) written in `lang` (NEUI_SHADER_LANG_*).
+  // Returns an opaque program usable with every ctx of this backend, or NULL
+  // when the backend cannot run it (no compiler, a GPU too old). The host
+  // calls it once per shader, during a paint, so it must not block: a
+  // backend may compile in the background and decline draws (return false)
+  // until the program is ready, or for good if it fails to compile.
+  void* (NEUI_ABI *create_shader_program)(int lang, const char* src, size_t len);
+
+  // Release a program and everything the backend holds for it in any ctx.
+  void  (NEUI_ABI *destroy_shader_program)(void* program);
+
+  // Draw `program` over the device pixels [x, x + w) x [y, y + h) of the
+  // ctx's target. The position is in device pixels and ignores the current
+  // transform; the clip and the alpha stack apply. `constants` (`count`
+  // floats, a multiple of 4) is the program's constant buffer; the backend
+  // multiplies its current opacity into constants[NEUI_SHADER_OPACITY_INDEX]
+  // (on a copy). Returns false when nothing was drawn, and the host then
+  // draws the CPU result instead.
+  bool  (NEUI_ABI *draw_shader_program)(neui_render_ctx_t ctx, void* program,
+                                        int32_t x, int32_t y, uint32_t w, uint32_t h,
+                                        const float* constants, uint32_t count);
+
 } neui_render_backend_t;
+
+// Languages for create_shader_program. HLSL_D2D: an HLSL ps_4_0 pixel shader
+// for a zero-input Direct2D custom effect, entry `main(float4 pos :
+// SV_POSITION, float4 scene : SCENE_POSITION) : SV_Target`, constant buffer
+// b0; SCENE_POSITION is 0 at the drawn rect's top-left, in device pixels.
+#define NEUI_SHADER_LANG_HLSL_D2D 1
+
+// The constant the backend multiplies its opacity into.
+#define NEUI_SHADER_OPACITY_INDEX 6
 
 #ifdef __cplusplus
 }

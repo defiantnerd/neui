@@ -90,6 +90,32 @@ constexpr int k_max_bitmap_side = 16384;
 // nothing) when the placement is empty.
 bool execute(const Program& p, const Draw& d, uint8_t* bgra, size_t stride);
 
+// ---- GPU executors -----------------------------------------------------------
+//
+// emit_hlsl() writes the pixel program, neui's math and the output rule as a
+// ps_4_0 pixel shader for a zero-input Direct2D custom effect: entry `main`
+// with SV_POSITION and SCENE_POSITION inputs, constant buffer b0. The effect
+// is drawn over the device pixels placement() names, with SCENE_POSITION
+// starting at 0 at their top-left. It outputs premultiplied colour already
+// rounded to 8 bits as the CPU does (coverage, dithering included), times an
+// opacity (k_gpu_opacity). Empty when the program must stay on the CPU
+// (#pragma neui cpu_only, or more constants than a constant buffer holds).
+std::string emit_hlsl(const Program& p);
+
+// Floats in the constant buffer of one draw (a multiple of 4; 0 when
+// emit_hlsl is empty).
+size_t gpu_constant_count(const Program& p);
+
+// Fills the constant buffer for draw `d`: the pixel grid of placement(d) and
+// the values the pixel program loads, the draw program run here on the CPU.
+// False (nothing written) when placement(d) is empty or the program has no
+// GPU form.
+bool gpu_constants(const Program& p, const Draw& d, float* out);
+
+// The constant a backend multiplies its opacity (alpha stack) into: 1 as
+// gpu_constants writes it.
+constexpr size_t k_gpu_opacity = 6;
+
 // Test hook: the same draw through scalar kernels, one pixel at a time. Must
 // produce exactly the bytes execute() does.
 bool execute_scalar(const Program& p, const Draw& d, uint8_t* bgra, size_t stride);

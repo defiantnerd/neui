@@ -117,5 +117,34 @@ struct Program {
   Stats stat;
 };
 
+namespace detail {
+
+// The GPU constant buffer (nsl_gpu.cpp writes the shader that reads it,
+// nsl_exec.cpp fills it): two float4 of pixel grid, then the draw-program
+// values the pixel program loads, one float each, in pixel_pool order:
+//   c[0] = (fx, fy, X1, Y1)   origin remainder and far edges, relative to
+//                             the floored origin (device px)
+//   c[1] = (scale, 0, opacity, 0)
+constexpr size_t k_gpu_header = 8;
+constexpr size_t k_gpu_max_floats = 4096 * 4;  // one D3D constant buffer
+
+// For each pixel_pool entry, its float index in the constant buffer, or -1
+// for a constant (emitted into the shader text).
+inline std::vector<int> gpu_pool_slots(const Program& p) {
+  std::vector<int> slot(p.pixel_pool.size(), -1);
+  size_t n = k_gpu_header;
+  for (size_t i = 0; i < slot.size(); ++i)
+    if (p.pixel_pool[i].draw_reg >= 0) slot[i] = static_cast<int>(n++);
+  return slot;
+}
+
+inline size_t gpu_float_count(const Program& p) {
+  size_t n = k_gpu_header;
+  for (const auto& e : p.pixel_pool)
+    if (e.draw_reg >= 0) ++n;
+  return (n + 3) / 4 * 4;
+}
+
+}  // namespace detail
 }  // namespace nsl
 }  // namespace neui

@@ -2,9 +2,14 @@
 
 ## Status
 
-**Phases 0-3 done (2026-10-10); phase 4 (D2D GPU path) or 6 (time and
-animation) next.** The prerequisite track, `plans/xpl-partial-repaint.md`, is
-implemented (P1-P4).
+**Phases 0-4 done (2026-10-10); phase 6 (time and animation) next.** The
+prerequisite track, `plans/xpl-partial-repaint.md`, is implemented (P1-P4).
+
+Phase 4 produced the D2D GPU path: the library emits each program's pixel
+part as HLSL (`src/shader/nsl_gpu.cpp`), the D2D backend compiles it in the
+background and draws it as a custom effect (`backends/d2d/d2d_shader.cpp`),
+and live layers and `draw` use it on the device grid; within 1/255 of the CPU
+on a GTX 1080 and on WARP. See "Phase 4 results".
 
 Phase 3 produced the live paths: the compound SHADER layer
 (`NEUI_COMPOUND_LAYER_SHADER`, `u.*` uniform props, `resolution`, `time`,
@@ -403,8 +408,9 @@ layer and `draw`.
 **D2D (Windows): the only planned GPU path.**
 
 - **Program creation:**
-  - HLSL is emitted from the IR in `hosts/shared/shader_emit_hlsl.h`, so its
-    output is Tier-1 golden-testable on every platform.
+  - HLSL is emitted from the IR in the library (`src/shader/nsl_gpu.cpp`,
+    which can see the IR), so its output is Tier-1 golden-testable on every
+    platform.
   - The backend compiles it with `D3DCompile`, loaded at runtime with
     `LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)`.
     That DLL is an OS component on Windows 10+, so there is no link
@@ -417,9 +423,10 @@ layer and `draw`.
   - an `ID2D1EffectImpl` + `ID2D1DrawTransform` with **zero inputs**, whose
     output rect is the layer rect in pixels;
   - uniforms travel in a constant buffer (16-byte padded) set in
-    `PrepareForRender`;
-  - one effect instance per ctx, cached like `tint_effect` and released with
-    the target objects.
+    `PrepareForRender`, delivered through one blob property;
+  - one effect instance per program per device context (its pixel shader is
+    fixed at creation), reused like `tint_effect` and released with the
+    target objects.
 - **Shader identity:** the shader GUID is a hash of HLSL text + profile. A
   backend-wide GUID → bytecode map plus `IsShaderLoaded` makes shaders reload
   transparently after device loss.
@@ -472,22 +479,32 @@ decision.
 
 ### Backend ABI (vtable-append, every slot nullable)
 
+As implemented in phase 4 (`include/neui/d/renderer.h`):
+
 ```c
-uint32_t (*shader_caps)(neui_render_ctx_t);        // bitmask, 0 = CPU only
-void*    (*create_program)(const char* src, size_t len, uint64_t uid, int lang);
-void     (*destroy_program)(void* prog);
-bool     (*draw_program)(neui_render_ctx_t, void* prog,
-                         float x, float y, float w, float h,
-                         const float* constants, int count);  // false → CPU this frame
+void* (*create_shader_program)(int lang, const char* src, size_t len);  // NULL = CPU
+void  (*destroy_shader_program)(void* program);
+bool  (*draw_shader_program)(neui_render_ctx_t, void* program,
+                             int32_t x, int32_t y, uint32_t w, uint32_t h,  // device px
+                             const float* constants, uint32_t count);       // false -> CPU
+#define NEUI_SHADER_LANG_HLSL_D2D 1
+#define NEUI_SHADER_OPACITY_INDEX 6   // the backend multiplies its alpha in
 ```
 
-The backend only compiles emitted text and draws. It never sees `.nsl`.
+The backend only compiles emitted text and draws. It never sees `.nsl`. No
+`shader_caps`: a null `create_shader_program` result says the same, per
+shader. Programs are process-wide; per-context state (D2D's effect
+instances) is the backend's business. The draw position is in device pixels,
+because the GPU path draws only on the device grid (phase 0, approach B).
 
 ### Fidelity contract
 
 - **CPU:** bit-identical on every platform, enforced by CRC goldens.
 - **GPU vs CPU:** within 2/255 per channel on ≥ 99.9% of pixels and within
   8/255 on all pixels, checked over the golden corpus at 1×, 1.5× and 2×.
+  Exception (found in phase 4): pixels on a discontinuity of the shader
+  (`step`, a comparison) can flip to the other side's colour, since a
+  last-bit difference moves the edge.
 - **Escape hatches:** a `#pragma neui cpu_only` per shader, and a session
   switch that forces the CPU everywhere. Use them for golden screenshots or
   when exact identity matters more than speed.
@@ -815,10 +832,12 @@ What this means:
   value (alpha `0x01`-`0xFE`) has a magnitude above 2^24 as an int32, so its
   low blue / green bits are rounded away. Opaque `0xFF…` values survive
   because they wrap to a small negative int.
-- **Stale D2D documentation.** `docs/rendering-and-assets.md`, the comment in
-  `backends/d2d/d2d_backend.h` and `plans/winui3-host.md` (~185-210) still
-  describe a WIC / `ID2D1HwndRenderTarget` backend. The code has been D2D 1.1
-  on D3D11 + DXGI flip swap chains for a while.
+- **Stale D2D documentation. Fixed in phase 4** for
+  `docs/rendering-and-assets.md` and the comment in
+  `backends/d2d/d2d_backend.h`. `plans/winui3-host.md` (~185-210) still
+  describes a WIC / `ID2D1HwndRenderTarget` backend; it is a deferred
+  analysis and is left as written. The code has been D2D 1.1 on D3D11 + DXGI
+  flip swap chains for a while.
 
 ## 9. Phases
 
@@ -828,7 +847,7 @@ What this means:
 | 1 | **Done.** Front end + IR + optimiser; deterministic built-ins; SoA CPU executor; output packer (premultiply, optional dither) | `src/shader/{nsl.h,nsl_ir.h,nsl_math.h,nsl_compile.cpp,nsl_exec.cpp,CMakeLists.txt}`, `tests/test_shader_{lang,exec}.cpp` |
 | 2 | **Done.** `NEUI_API_SHADER` (`create`, `create_from_file`, introspection, **`bake_bitmap` / `bake_filmstrip`**); asset kind + resource kind; `ShaderAsset` on `AssetEntry`; QR leak fix. **First visible win:** baked shader filmstrips via the existing ASSET layer + `frame` binding, on every supporting host, zero per-frame cost | `include/neui/d/{shader.h,assets.h,resource.h}`, `hosts/shared/{shader_api.h,shader_asset.h,asset_store.h}`, the 4 hosts' `host.*` (`get_interface`) + `widgets.*` (a 10-line host policy each), `examples/shader_example.cpp` |
 | 3 | **Done.** Live SHADER compound layer (`u.*`, `resolution`, `time`, `fallback`); `shader_api->draw`; the session image cache; painter `resolve_shader` seam; `get_device_transform` backend slot; component JSON + serialize | `include/neui/d/{compound.h,shader.h,renderer.h,component.h}`, `hosts/shared/{compound.h,shader_layer.h,shader_asset.h,shader_api.h,widget_paint_compound.h,painter.h,component_loader.h,asset_store.h}`, the backends' device transform, 9 painter sites in the 4 hosts |
-| 4 | D2D GPU path: HLSL emitter, runtime `D3DCompile`, custom effect, tolerance tests | `hosts/shared/shader_emit_hlsl.h`, `include/neui/d/renderer.h`, `backends/d2d/{d2d_backend.cpp,d2d_shader_effect.cpp}` |
+| 4 | **Done.** D2D GPU path: HLSL emitter, runtime `D3DCompile` on a worker thread, custom effect, `set_gpu`, tolerance smoke test; canonical IR numbering | `src/shader/{nsl_gpu.cpp,nsl_compile.cpp,nsl.h}`, `include/neui/d/{renderer.h,shader.h}`, `hosts/shared/{shader_asset.h,shader_layer.h,shader_api.h}`, `backends/d2d/{d2d_backend.cpp,d2d_shader.cpp}`, `tests/{test_shader_gpu.cpp,shader_gpu_smoke.cpp}` |
 | 5 | **Partial repaint** - separate track, scheduled **first** (`plans/xpl-partial-repaint.md`) | see that plan |
 | 6 | Time + animation: clock, registry, generalised heartbeat, fps cap, pause / reduce-motion (**requires 5**) | `hosts/shared/anim_clock.h`, `hosts/crossplatform/{platform.h,platform_*}`, native hosts' timers |
 | 7 | Only if measured necessary: Metal executor on Apple; opt-in CPU fork-join pool | `hosts/shared/shader_emit_msl.h`, `backends/cg/cg_backend.mm`, `src/shader/nsl_exec.cpp` |
@@ -870,12 +889,15 @@ null platform:
   - the `release_context` / `release_slot` / `clear` paths;
   - fallback layers through the real compound paint walk, `draw`, the
     resolve thunk's session checks, and the component shader hook.
-- **`tests/test_shader_emit.cpp`:** HLSL (and later MSL) golden text.
+- **`tests/test_shader_gpu.cpp`** (phase 4): HLSL golden text, the
+  constant buffer, and the host's GPU / CPU choice with a fake backend.
 - **Extensions:** `tests/test_component_loader.cpp` (shader layer JSON load,
   without the hook, and the serialize round trip). The `u.*` routing tests
   went into `test_shader_layer.cpp` rather than `test_compound.cpp`.
-- **Windows-only smoke target:** an offscreen D2D ctx + `read_pixels_bgra`,
-  comparing GPU against the CPU reference within the tolerance contract.
+- **Windows-only smoke target** (`neui_shader_gpu_smoke`, phase 4,
+  ctest-registered): an offscreen D2D ctx + `read_pixels_bgra`, comparing GPU
+  against the CPU reference within the tolerance contract, plus two draws per
+  frame, a pushed clip and the alpha stack. Runs on WARP in CI.
 
 ## 11. Example and built-in shader library
 
@@ -1215,3 +1237,91 @@ findings fixed:**
 **Next:** phase 4 (D2D GPU path) or phase 6 (time and animation; partial
 repaint, its prerequisite, is done). Which one first depends on the client's
 use case.
+
+## 17. Phase 4 results (2026-10-10)
+
+**What exists:**
+- **The GPU form of a program** (`src/shader/nsl_gpu.cpp`, in the library):
+  - `emit_hlsl` writes the pixel program as a `ps_4_0` pixel shader for a
+    zero-input D2D effect. It uses neui's own polynomials and hash (no GPU
+    intrinsics), the spec's pixel grid, coverage, rounding and dithering,
+    and marks every variable `precise`, so no multiply-add is fused. The
+    shader outputs the 8-bit values as exact multiples of 1/255, times an
+    opacity.
+  - `gpu_constants` fills the constant buffer: two float4 of pixel grid,
+    then the values the pixel program loads. The draw program runs on the
+    CPU, so everything computed once per draw is bit-exact.
+- **The backend ABI** (§3, "Backend ABI"): `create_shader_program`,
+  `destroy_shader_program`, `draw_shader_program` (device pixels), appended
+  and nullable.
+- **D2D** (`backends/d2d/d2d_shader.cpp`):
+  - `D3DCompile` from System32's `d3dcompiler_47.dll`, on a worker thread;
+    draws are declined until the compile is done, so no paint waits for it;
+  - one custom effect class (zero inputs, one blob property: output size +
+    constants), one instance per program per device context, shaders keyed
+    by a GUID hashed from the text;
+  - drawn at the floored device origin with `SetDpi(96)` + identity, the
+    clip and the alpha stack honoured;
+  - feature level 10_0 or the CPU.
+- **Host:** `shader_paint` uses the GPU on the device grid (translation +
+  uniform scale, resolution 1) when the session's `ShaderCache` has a
+  program for the shader; everything else, and any declined draw, goes to
+  the CPU image. `shader_api->set_gpu(session, false)` and `#pragma neui
+  cpu_only` force the CPU. Bakes stay on the CPU.
+- **Tests:** `tests/test_shader_gpu.cpp` (8 cases) and the Windows smoke
+  target `neui_shader_gpu_smoke` (ctest, WARP in CI).
+- **Example:** a "GPU where available" checkbox over the live row.
+
+**Measured** (neui-win, GTX 1080, i7-6800K, MSVC; and WARP in CI):
+- GPU vs CPU over 6 programs at 1×, 1.25×, 1.5× and 2× with fractional
+  origins: **at most 1/255**, no pixel over 2/255, nothing outside the rect.
+  Two draws of one program in one frame, a pushed clip and alpha 0.5 are
+  right too.
+- In the example at 150%: GPU vs CPU differ in 34 of 121 030 pixels of the
+  live row, 31 of them by 1-2/255. The other 3 sit on the ring knob's hard
+  `step()` edge and flip colour (see "Fidelity contract": the exception for
+  discontinuities was added because of them).
+- Plasma, 240×240 px per frame: **GPU 0.10 ms, CPU 2.19 ms**.
+- Compile time per shader: 15-136 ms on the worker thread; creating the
+  program returns in about 0.1 ms. (A first "compile" of 183 ms in an
+  early run was the D3D device being created, which a window has already
+  done.)
+- With the background compile, the first frame is the CPU image and the
+  GPU takes over at the next repaint; an idle UI keeps the CPU image until
+  something invalidates. Indistinguishable on screen. Phase 6's clock
+  repaints animated shaders anyway; a "program ready" invalidate is
+  possible if profiling ever needs it.
+
+- **Bench after the canonical IR order** (MSVC, SIMD ns/px): flat 2.75,
+  ring_glow 14.1, plasma 34-36, fbm5 136-144 (was 145), metal_knob 64: no
+  regression.
+
+**Found and fixed on the way:**
+- **The compiler's IR depended on the C++ compiler.** Lowering builds IR
+  nodes inside function argument lists, which MSVC and GCC evaluate right to
+  left and Clang left to right, and it merged `if` branches in hash-map
+  order. Values were never affected (every CPU golden matched everywhere),
+  but register numbers, the schedule and so the HLSL text differed between
+  compilers, and with an `if` even between runs. `finalize` now renumbers
+  the live IR canonically (the inputs, then a post-order walk from the
+  outputs), found by neui-win.
+  - Side effect: the post-order schedules each value just before its use.
+    Register pressure only drops (one limit test had to be rewritten to
+    still exceed 256 live values). The SIMD kernels are as fast as before
+    on the M1 and on MSVC; the scalar test hook, which runs one pixel at a
+    time, got slower on the M1 on long dependency chains (fbm5 591 to 1180
+    ns/px; not on MSVC). Production never uses it.
+- **Stale D2D descriptions** (§8): `d2d_backend.h` and
+  `docs/rendering-and-assets.md` no longer describe WIC /
+  `ID2D1HwndRenderTarget`. (`plans/winui3-host.md` still does; it is a
+  deferred analysis of the old design.)
+
+**Decisions:**
+- **GPU always when eligible, no image cache:** a GPU draw costs about as
+  much as a cached bitmap draw plus a small effect overhead, and it keeps
+  automation and large layers cheap.
+- **Resolution below 1 stays on the CPU:** it is the cheap path anyway.
+- **No `shader_caps` slot:** a null program says the same, per shader.
+
+**Next:** phase 6 (time and animation). Phase 7 (Metal, CPU thread pool)
+only if measured necessary.

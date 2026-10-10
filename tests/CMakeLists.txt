@@ -34,6 +34,7 @@ add_executable(neui_tests
   test_shader_exec.cpp
   test_shader_asset.cpp
   test_shader_layer.cpp
+  test_shader_gpu.cpp
   # mujson lives in the core lib, but the suite links no library, so its TU is
   # compiled directly into the test executable (same pattern as the *.cpp above).
   ${PROJECT_SOURCE_DIR}/src/mujson.cpp)
@@ -108,6 +109,21 @@ if(WIN32)
   target_compile_features(neui_embed_smoke_win32 PRIVATE cxx_std_17)
   target_link_libraries(neui_embed_smoke_win32 PRIVATE
     neui neui-xplhost neui-win32host)
+endif()
+
+# Windows-only: .nsl programs on the GPU through the real D2D backend, held
+# against the CPU executor with the fidelity contract. Runs on WARP where
+# there is no GPU (CI), and reports SKIP without d3dcompiler_47.dll or a
+# feature level 10_0 device.
+if(WIN32 AND TARGET neui-backend-d2d)
+  add_executable(neui_shader_gpu_smoke shader_gpu_smoke.cpp)
+  target_include_directories(neui_shader_gpu_smoke PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/backends/d2d)
+  target_compile_features(neui_shader_gpu_smoke PRIVATE cxx_std_17)
+  target_link_libraries(neui_shader_gpu_smoke PRIVATE neui-shader neui-backend-d2d)
+  add_test(NAME neui_shader_gpu_smoke COMMAND neui_shader_gpu_smoke)
 endif()
 
 # Linux-only: Cairo software backend offscreen smoke test. Unlike neui_tests

@@ -40,6 +40,7 @@ namespace neui_detail
   struct ShaderGrid
   {
     float k = 1.0f, ox = 0.0f, oy = 0.0f;
+    bool  device = false;  // shader px are device px (aligned, resolution 1)
   };
 
   inline ShaderGrid shader_grid(neui_painter_t* p, float resolution)
@@ -58,6 +59,7 @@ namespace neui_detail
       g.k  = m[0] * resolution;
       g.ox = m[4] * resolution;
       g.oy = m[5] * resolution;
+      g.device = resolution == 1.0f;
     } else {
       g.k = std::sqrt(std::fabs(m[0] * m[3] - m[1] * m[2])) * resolution;
     }
@@ -67,6 +69,10 @@ namespace neui_detail
   // Draws `sa` over (x, y, w, h) of the painter's current space with the
   // given uniform values (uniform_components floats; null = the defaults)
   // and neui_time `time` (already wrapped). False when nothing was drawn.
+  //
+  // On the device grid, a backend with GPU programs runs the shader straight
+  // on the target's pixels (no image); everywhere else the CPU renders an
+  // image into the cache.
   inline bool shader_paint(neui_painter_t* p, const ShaderAsset& sa, ShaderCache& cache,
                            float x, float y, float w, float h,
                            float resolution, float time, const float* uniforms)
@@ -107,6 +113,21 @@ namespace neui_detail
     d.scale = g.k;
     d.time = (nsl::flags(prog) & nsl::NSL_READS_TIME) ? time : 0.0f;
     d.uniforms = n ? uniforms : nullptr;
+
+    if (g.device) {
+      if (void* gp = cache.gpu_program(sa, p->backend)) {
+        const nsl::Placement pl = nsl::placement(d);
+        std::vector<float> cbuf(nsl::gpu_constant_count(prog));
+        if (pl.w > 0 && pl.h > 0 && nsl::gpu_constants(prog, d, cbuf.data()) &&
+            p->backend->draw_shader_program(p->ctx, gp,
+                                            static_cast<int32_t>(I) + pl.x,
+                                            static_cast<int32_t>(J) + pl.y,
+                                            static_cast<uint32_t>(pl.w),
+                                            static_cast<uint32_t>(pl.h), cbuf.data(),
+                                            static_cast<uint32_t>(cbuf.size())))
+          return true;
+      }
+    }
 
     ShaderCacheKey key;
     key.uid = sa.uid;

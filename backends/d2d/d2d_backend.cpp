@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "d2d_backend.h"
+#include "d2d_shader.h"
 #include "../shared/backend_util.h"
 
 #pragma comment(lib, "d2d1")
@@ -624,6 +625,8 @@ namespace neui_d2d_backend
   {
     if (!ctx) return;
     if (ctx->tint_effect) { ctx->tint_effect->Release(); ctx->tint_effect = nullptr; }
+    // Shader programs' effects made on this device context.
+    if (ctx->target) shader::release_dc(ctx->target);
     // The canvas belongs to the device; canvas_mode survives so the rebuilt
     // ctx draws through a fresh canvas again (refusing damage until full).
     if (ctx->frame_mask)  { ctx->frame_mask->Release();  ctx->frame_mask  = nullptr; }
@@ -1791,6 +1794,28 @@ namespace neui_d2d_backend
     if (ctx->target) ctx->target->SetTransform(ctx->current);
   }
 
+  // GPU shader programs (d2d_shader.cpp). Programs are process-wide; their
+  // effects live per device context.
+  static void* d2d_create_shader_program(int lang, const char* src, size_t len)
+  {
+    if (!ensure_factory() || !ensure_device_chain()) return nullptr;
+    return shader::create_program(g_factory, g_d3d_device->GetFeatureLevel(), lang, src, len);
+  }
+
+  static void d2d_destroy_shader_program(void* program)
+  {
+    shader::destroy_program(program);
+  }
+
+  static bool d2d_draw_shader_program(neui_render_ctx_t raw, void* program,
+                                      int32_t x, int32_t y, uint32_t w, uint32_t h,
+                                      const float* constants, uint32_t count)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx || !ctx->target) return false;
+    return shader::draw(ctx->target, current_alpha(ctx), program, x, y, w, h, constants, count);
+  }
+
   // `current` is in DIPs; the target's DPI maps a DIP to dpi/96 pixels.
   static void d2d_get_device_transform(neui_render_ctx_t raw, float m[6])
   {
@@ -2102,6 +2127,9 @@ namespace neui_d2d_backend
     d2d_stroke_path_gradient,
     d2d_set_frame_damage,
     d2d_get_device_transform,
+    d2d_create_shader_program,
+    d2d_destroy_shader_program,
+    d2d_draw_shader_program,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

@@ -17,6 +17,7 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -50,6 +51,9 @@ namespace neui_detail
   // ".step" quantisation bounds the images automation can produce. Least
   // recently used images go once the CPU pixels exceed a byte budget; each
   // keeps one upload per render context (re-made after device loss).
+  //
+  // It also owns each shader's GPU program where the backend has them
+  // (draw_shader_program): shaders drawn that way need no image.
 
   // The inputs an image is rendered from. `time` is 0 for a program that
   // does not read neui_time; `uniforms` holds uniform_components floats.
@@ -160,14 +164,44 @@ namespace neui_detail
       return it->second.bmp;
     }
 
-    // Every image of a program, when its SHADER asset goes.
+    // Every image and the GPU program of a shader, when its SHADER asset goes.
     void release_uid(uint64_t uid, neui_render_backend_t* backend)
     {
       for (auto it = _map.begin(); it != _map.end();) {
         if (it->second->uid == uid) it = erase(it, backend);
         else ++it;
       }
+      auto g = _gpu.find(uid);
+      if (g != _gpu.end()) {
+        destroy_gpu(g->second, backend);
+        _gpu.erase(g);
+      }
     }
+
+    // The backend's GPU program for `sa`, made on first use (the backend may
+    // compile it in the background and decline draws until it is ready). Null
+    // when GPU use is off, the backend has no GPU programs, the shader is
+    // #pragma neui cpu_only, or the backend could not make it; a failure is
+    // remembered, not retried.
+    void* gpu_program(const ShaderAsset& sa, neui_render_backend_t* backend)
+    {
+      if (!_gpu_enabled || !sa.program || !backend || !backend->create_shader_program ||
+          !backend->draw_shader_program)
+        return nullptr;
+      auto it = _gpu.find(sa.uid);
+      if (it != _gpu.end()) return it->second;
+      void* prog = nullptr;
+      const std::string src = neui::nsl::emit_hlsl(*sa.program);
+      if (!src.empty())
+        prog = backend->create_shader_program(NEUI_SHADER_LANG_HLSL_D2D, src.data(), src.size());
+      _gpu.emplace(sa.uid, prog);
+      return prog;
+    }
+
+    // GPU use for this session: on by default. Off draws every shader on the
+    // CPU (exact pixels everywhere).
+    void set_gpu(bool on) { _gpu_enabled = on; }
+    bool gpu() const { return _gpu_enabled; }
 
     // A render context is dying: its uploads go, the images stay.
     void release_ctx(neui_render_ctx_t ctx, neui_render_backend_t* backend)
@@ -186,6 +220,8 @@ namespace neui_detail
       for (auto& kv : _map) destroy_uploads(*kv.second, backend);
       _map.clear();
       _bytes = 0;
+      for (auto& kv : _gpu) destroy_gpu(kv.second, backend);
+      _gpu.clear();
     }
 
     void set_budget(size_t bytes, neui_render_backend_t* backend)
@@ -211,6 +247,11 @@ namespace neui_detail
              e.uniforms.size() == k.uniform_count &&
              (k.uniform_count == 0 ||
               std::memcmp(e.uniforms.data(), k.uniforms, sizeof(float) * k.uniform_count) == 0);
+    }
+
+    static void destroy_gpu(void* prog, neui_render_backend_t* backend)
+    {
+      if (prog && backend && backend->destroy_shader_program) backend->destroy_shader_program(prog);
     }
 
     static void destroy_uploads(ShaderCacheEntry& e, neui_render_backend_t* backend)
@@ -242,6 +283,8 @@ namespace neui_detail
     }
 
     Map      _map;
+    std::unordered_map<uint64_t, void*> _gpu;  // shader uid -> GPU program (null: none)
+    bool     _gpu_enabled = true;
     size_t   _bytes   = 0;
     size_t   _budget  = k_default_budget;
     uint64_t _clock   = 0;
