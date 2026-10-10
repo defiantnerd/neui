@@ -15,11 +15,13 @@ endif()
 
 # Shader arithmetic is always optimised and never FMA-contracted, in every
 # build type: a Debug executor is 10-50x slower, and contraction changes bits.
-# MSVC Debug carries /Od + /RTC1, which conflict with /O2; drop them for this
-# directory only.
+# MSVC Debug carries /Od + /RTC1, which conflict with /O2, and /Ob0, which
+# turns off all inlining (__forceinline included) and makes the SIMD kernels
+# 6-11x slower; drop all three for this directory only.
 if(MSVC)
   string(REPLACE "/RTC1" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
   string(REPLACE "/Od" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+  string(REPLACE "/Ob0" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
 endif()
 
 add_executable(neui_shader_bench shader_bench.cpp)

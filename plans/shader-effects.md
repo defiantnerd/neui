@@ -298,7 +298,11 @@ asks for it. Importing `.sc` stays out.
 - **Where:** `src/shader_exec.{h,cpp}`. It is a `.cpp` rather than
   header-only so it can be compiled at `-O2` / `/O2` even in Debug builds
   (Debug builds are 10-50× slower). This follows the `src/mujson.cpp`
-  precedent, which Tier-1 also compiles directly.
+  precedent, which Tier-1 also compiles directly. On MSVC, Debug's `/Od`,
+  `/RTC1` **and `/Ob0`** must be stripped for that TU. `/Ob0` disables all
+  inlining, `__forceinline` included, and phase 0 measured the SIMD kernels
+  6-11× slower with it. `tests/shader_bench/CMakeLists.txt` shows the
+  directory-scoped way.
 - **How it runs:** a batched structure-of-arrays interpreter. Each IR op
   processes a lane of 64 pixels held in float arrays, so dispatch is
   amortised over the lane.
