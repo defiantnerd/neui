@@ -2307,7 +2307,56 @@ int debug_pin_policy() {
   return buf[0] == '0' ? 0 : buf[0] == '1' ? 1 : -1;
 }
 
-void finalize(const IR& ir, const int out[4], int main_line, int main_col, Program& pg) {
+// The live part of the IR, renumbered in a canonical order: the two pixel
+// inputs, then a post-order walk from the outputs (operands a, b, c in turn).
+// Lowering creates nodes in the order the C++ compiler evaluates function
+// arguments (MSVC and GCC right to left, Clang left to right) and in hash-map
+// order where it merges an if; the DAG is the same either way, the numbering
+// is not. The walk depends only on the DAG, so every compiler produces the
+// same program and the same GPU source.
+IR canonical(const IR& ir, const int out_in[4], int out[4]) {
+  IR c;
+  std::vector<int> id(ir.v.size(), -1);
+  auto take = [&](int old) {
+    if (id[static_cast<size_t>(old)] >= 0) return;
+    IR::Val v = ir.v[static_cast<size_t>(old)];
+    if (v.kind == IR::K_INS) {
+      v.a = id[static_cast<size_t>(v.a)];
+      if (v.b >= 0) v.b = id[static_cast<size_t>(v.b)];
+      if (v.c >= 0) v.c = id[static_cast<size_t>(v.c)];
+    }
+    id[static_cast<size_t>(old)] = static_cast<int>(c.v.size());
+    c.v.push_back(v);
+  };
+  for (int k = 0; k < 2; ++k) {
+    if (ir.input_ids[k] < 0) continue;
+    take(ir.input_ids[k]);
+    c.input_ids[k] = id[static_cast<size_t>(ir.input_ids[k])];
+  }
+  std::vector<std::pair<int, int>> stack;  // node, next operand to visit
+  for (int o = 0; o < 4; ++o) {
+    stack.push_back({out_in[o], 0});
+    while (!stack.empty()) {
+      const int node = stack.back().first;
+      const int k = stack.back().second;
+      const IR::Val& v = ir.v[static_cast<size_t>(node)];
+      if (id[static_cast<size_t>(node)] < 0 && v.kind == IR::K_INS && k < 3) {
+        stack.back().second = k + 1;
+        const int s = k == 0 ? v.a : k == 1 ? v.b : v.c;
+        if (s >= 0 && id[static_cast<size_t>(s)] < 0) stack.push_back({s, 0});
+        continue;
+      }
+      take(node);
+      stack.pop_back();
+    }
+    out[o] = id[static_cast<size_t>(out_in[o])];
+  }
+  return c;
+}
+
+void finalize(const IR& ir_in, const int out_in[4], int main_line, int main_col, Program& pg) {
+  int out[4];
+  const IR ir = canonical(ir_in, out_in, out);
   const size_t n = ir.v.size();
   std::vector<char> live(n, 0);
   std::vector<int> work(out, out + 4);

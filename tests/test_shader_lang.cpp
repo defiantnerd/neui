@@ -261,12 +261,14 @@ TEST_CASE("shader lang: size limits")
                              "    s = sin(s * 1.01 + float(i * j)) * cos(s) + sqrt(abs(s)) + 0.5;\n"
                              "  return vec4(s);"),
                    "operations after inlining and unrolling; the limit is 8192"));
-  // More than 256 values alive at once.
+  // More than 256 values alive at once: every v is read by two sums, the
+  // second in reverse, so all of them live across the first in any schedule.
   std::string many;
   for (int i = 0; i < 270; ++i) many += "  float v" + std::to_string(i) + " = p.x * " + std::to_string(i + 2) + ".0;\n";
-  many += "  float s = 0.0;\n";
+  many += "  float s = 0.0;\n  float t = 0.0;\n";
   for (int i = 0; i < 270; ++i) many += "  s += v" + std::to_string(i) + ";\n";
-  many += "  return vec4(s);";
+  for (int i = 269; i >= 0; --i) many += "  t = t * 0.5 + v" + std::to_string(i) + ";\n";
+  many += "  return vec4(s, t, 0.0, 1.0);";
   CHECK(fails_with(with_main(many), "live values per pixel after inlining and unrolling; the limit is 256"));
 }
 
