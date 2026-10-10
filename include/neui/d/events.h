@@ -36,6 +36,10 @@ extern "C" {
 
   typedef enum neui_event_type
   {
+    // A frame is about to close (its close button, or endsession). The
+    // client's onevent return value decides: true lets it close, false keeps
+    // it open. data.mouse.widget is the frame (every payload starts with its
+    // widget, so any member's .widget reads the same).
     NEUI_EVENT_APP_QUIT                 = DEF_APP_EVENT(1),
 
     NEUI_EVENT_MOUSE_MOVE               = DEF_MOUSE_EVENT(1),

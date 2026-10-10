@@ -1242,6 +1242,7 @@ namespace xpl_host
     if (wd->type && !strcmp(wd->type, NEUI_W_APPWINDOW)) {
       neui_event_t ev = {};
       ev.type = NEUI_EVENT_APP_QUIT;
+      ev.data.mouse.widget.id = wd->widget_id;  // the frame closing
       if (!s->dispatch_event(&ev)) return;   // client vetoed the close
     }
     close_window_silently(w);

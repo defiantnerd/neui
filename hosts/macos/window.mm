@@ -2555,6 +2555,8 @@ static float neui_snap_to_steps(float v, int steps)
   // dialogs and appwindows go through the same dispatch.
   neui_event_t ev = {};
   ev.type = NEUI_EVENT_APP_QUIT;
+  if (session->_widgets.exists(widget_index))
+    ev.data.mouse.widget.id = session->_widgets[widget_index].widget_id;  // the frame closing
   if (!session->dispatch_event(&ev)) return NO;
 
   // For a modal sheet, returning YES would cause AppKit to call -close on

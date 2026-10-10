@@ -24,7 +24,8 @@
 //   * The same shader drawn with shader_api->draw at half resolution, with
 //     animation_time() as its time; it counts its paints for an fps readout.
 //   * An fps cap (set_animation_fps) and a pause toggle (set_animation_paused).
-// And a deliberately broken shader, whose compile error is shown in a label.
+// And a deliberately broken shader, whose compile error is shown in a label
+// (how a client reports a skin's shader error).
 // Without NEUI_API_SHADER (null platform, LVGL), plain KNOB widgets.
 //
 // The pixels are bit-identical on every platform: the CPU executor runs the
@@ -295,6 +296,7 @@ static void set_readout(AppState* a, int knob, float value)
 static bool NEUI_ABI on_event(void* token, neui_event_t* event)
 {
   auto* a = static_cast<AppState*>(token);
+  if (event->type == NEUI_EVENT_APP_QUIT) return true;  // let the window close
   if (event->type == NEUI_EVENT_ATTR_CHANGED) {
     for (int i = 0; i < k_knobs; ++i)
       if (a->knob_ids[i] && event->data.attr.widget.id == a->knob_ids[i]) {
@@ -615,7 +617,8 @@ int main(int argc, char* argv[])
   neui_asset_t broken = app.shaders->create(app.session, k_broken, (uint32_t)strlen(k_broken),
                                             "broken.nsl", err, sizeof err);
   char line[320];
-  snprintf(line, sizeof line, "Broken shader: %s", broken.id == asset_none.id ? err : "compiled?");
+  snprintf(line, sizeof line, "Compile-error demo (broken on purpose): %s",
+           broken.id == asset_none.id ? err : "it compiled?");
   neui_widget_t error = app.widgets->create(app.session, win, NEUI_W_LABEL,
                                             pad, error_y, win_w - 2 * pad, 22, nullptr);
   app.widgets->set_text(app.session, error, line);

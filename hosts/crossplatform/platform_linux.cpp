@@ -450,6 +450,8 @@ namespace
     Session* s = lw->session;
     neui_event_t ev = {};
     ev.type = NEUI_EVENT_APP_QUIT;
+    if (auto* fw = s ? s->get_widget(lw->widget_index) : nullptr)
+      ev.data.mouse.widget.id = fw->widget_id;  // the frame closing
     if (s && !s->dispatch_event(&ev)) return;   // client vetoed
 
     auto* backend = platform_get_backend();

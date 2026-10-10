@@ -456,6 +456,8 @@ namespace xpl_host
       if (wud) {
         neui_event_t ev = {};
         ev.type = NEUI_EVENT_APP_QUIT;
+        if (auto* fw = wud->session->get_widget(wud->widget_index))
+          ev.data.mouse.widget.id = fw->widget_id;  // the frame closing
         bool allow = wud->session->dispatch_event(&ev);
         if (allow)
           DestroyWindow(hwnd);

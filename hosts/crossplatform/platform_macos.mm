@@ -1229,6 +1229,8 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
   // event first and may veto the close by returning false.
   neui_event_t ev = {};
   ev.type = NEUI_EVENT_APP_QUIT;
+  if (auto* fw = session->get_widget(widget_index))
+    ev.data.mouse.widget.id = fw->widget_id;  // the frame closing
   bool allow = session->dispatch_event(&ev);
   return allow ? YES : NO;
 }
