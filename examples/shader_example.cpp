@@ -392,7 +392,8 @@ int main(int /*argc*/, char* /*argv*/[])
     app.assets->destroy(app.session, strips[c]);
   }
   for (neui_asset_t t : tiles) app.assets->destroy(app.session, t);
-  for (neui_asset_t s : { metal, glow, plasma, marble }) app.assets->destroy(app.session, s);
+  const neui_asset_t programs[] = { metal, glow, plasma, marble };
+  for (neui_asset_t s : programs) app.assets->destroy(app.session, s);
   host->destroy(app.session);
   return 0;
 }
