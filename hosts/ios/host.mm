@@ -358,6 +358,7 @@ namespace ios_host
     uint32_t i = session.session - 1;
     if (i < sessions.size() && sessions[i]) {
       void* tok = sessions[i]->get_token();
+      set_animation_timer(sessions[i].get(), 0);
       sessions[i] = nullptr;
       return tok;
     }

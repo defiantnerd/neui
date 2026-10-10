@@ -77,6 +77,8 @@ namespace macos_host
   // -------------------------------------------------------------------------
   // Shader API (NEUI_API_SHADER) - shared implementation in shader_api.h.
 
+  void mark_widget_dirty_for_paint(WidgetData& wd);  // window.mm
+
   struct MacShaderHost {
     static MacOSAssetManager* store(neui_session_t session, uint32_t& session_id)
     {
@@ -88,6 +90,12 @@ namespace macos_host
       if (!s) return nullptr;
       session_id = s->session_id();
       return &s->_asset_manager;
+    }
+    static void invalidate_widget(neui_session_t session, uint32_t widget_id)
+    {
+      auto* s = get_session_for_widget(session, neui_widget_t{ widget_id });
+      if (s && s->_widgets.exists(widget_id & 0xffff))
+        mark_widget_dirty_for_paint(s->_widgets[widget_id & 0xffff]);
     }
   };
   neui_shader_api_t shader_api = neui_detail::shader_api_table<MacShaderHost>();

@@ -86,6 +86,11 @@ namespace xpl_host
       session_id = s->_session_id;
       return &s->_asset_manager;
     }
+    static void invalidate_widget(neui_session_t session, uint32_t widget_id)
+    {
+      auto* s = get_session_for_widget(session, neui_widget_t{ widget_id });
+      if (s && s->_widgets.exists(widget_id & 0xffff)) s->invalidate_widget_rect(widget_id & 0xffff);
+    }
   };
   neui_shader_api_t shader_api = neui_detail::shader_api_table<XplShaderHost>();
   const neui_detail::resolve_shader_thunk_t xpl_resolve_shader =

@@ -2,8 +2,16 @@
 
 ## Status
 
-**Phases 0-4 done (2026-10-10); phase 6 (time and animation) next.** The
-prerequisite track, `plans/xpl-partial-repaint.md`, is implemented (P1-P4).
+**Phases 0-4 and 6 done (2026-10-10).** Phase 7 (Metal, a CPU thread pool)
+only if measured necessary; phase 8 is research. The prerequisite track,
+`plans/xpl-partial-repaint.md`, is implemented (P1-P4).
+
+Phase 6 produced animation: a session clock (`hosts/shared/anim_clock.h`)
+that a SHADER layer reading `neui_time` runs on by itself, and that
+`shader_api->animation_time` exposes to `draw` and any CUSTOMDRAW; an fps
+cap, a pause, the OS reduced-motion setting, and a timer per frame (xpl,
+win32) or per session (macOS, iOS) that repaints only the widgets that
+animate. See "Phase 6 results".
 
 Phase 4 produced the D2D GPU path: the library emits each program's pixel
 part as HLSL (`src/shader/nsl_gpu.cpp`), the D2D backend compiles it in the
@@ -733,6 +741,10 @@ under the host's and client's transforms (see the spec's pixel grid).
 
 ## 5. Time and animation
 
+Implemented in phase 6; "Phase 6 results" lists where it differs from this
+design (no new attrs, a timer of its own rather than a generalised toast
+heartbeat, no visibility tracking).
+
 - **Clock and registry:** a shared clock + animating-widget registry
   (`hosts/shared/anim_clock.h`), Tier-1 testable.
 - **When a widget animates:** while it shows a compound whose SHADER layer
@@ -849,7 +861,7 @@ What this means:
 | 3 | **Done.** Live SHADER compound layer (`u.*`, `resolution`, `time`, `fallback`); `shader_api->draw`; the session image cache; painter `resolve_shader` seam; `get_device_transform` backend slot; component JSON + serialize | `include/neui/d/{compound.h,shader.h,renderer.h,component.h}`, `hosts/shared/{compound.h,shader_layer.h,shader_asset.h,shader_api.h,widget_paint_compound.h,painter.h,component_loader.h,asset_store.h}`, the backends' device transform, 9 painter sites in the 4 hosts |
 | 4 | **Done.** D2D GPU path: HLSL emitter, runtime `D3DCompile` on a worker thread, custom effect, `set_gpu`, tolerance smoke test; canonical IR numbering | `src/shader/{nsl_gpu.cpp,nsl_compile.cpp,nsl.h}`, `include/neui/d/{renderer.h,shader.h}`, `hosts/shared/{shader_asset.h,shader_layer.h,shader_api.h}`, `backends/d2d/{d2d_backend.cpp,d2d_shader.cpp}`, `tests/{test_shader_gpu.cpp,shader_gpu_smoke.cpp}` |
 | 5 | **Partial repaint** - separate track, scheduled **first** (`plans/xpl-partial-repaint.md`) | see that plan |
-| 6 | Time + animation: clock, registry, generalised heartbeat, fps cap, pause / reduce-motion (**requires 5**) | `hosts/shared/anim_clock.h`, `hosts/crossplatform/{platform.h,platform_*}`, native hosts' timers |
+| 6 | **Done.** Time + animation: session clock + animating-widget registry, per-frame / per-session timers, fps cap, pause, OS reduced motion, clock images dropped per frame | `hosts/shared/{anim_clock.h,shader_asset.h,shader_layer.h,shader_api.h}`, `include/neui/d/shader.h`, `hosts/crossplatform/{platform.h,platform_*,host.cpp}`, the native hosts' CUSTOMDRAW paint + timers, `tests/test_anim_clock.cpp` |
 | 7 | Only if measured necessary: Metal executor on Apple; opt-in CPU fork-join pool | `hosts/shared/shader_emit_msl.h`, `backends/cg/cg_backend.mm`, `src/shader/nsl_exec.cpp` |
 | 8 | Research: post-processing of existing UI. Bake-time `NEUI_FE_SHADER` with `sample(in, uv)` over a SURFACE fits the CPU filter graph directly. Live scene post-processing needs the rendered region as input: cheap on Cairo (the window surface is CPU memory) and feasible on D2D (copy the target region into an effect input), but CG's `drawRect:` context is not readable, so Apple would need an offscreen-then-blit frame | `hosts/shared/filter_graph.h`, `include/neui/d/filter.h` |
 
@@ -919,7 +931,10 @@ broken-shader diagnostic; and the plain-KNOB fallback. The original plan:
 - a `NEUI_API_SHADER == nullptr` path that falls back to plain knobs, like
   `filter_knob_example`;
 - a deliberately broken shader whose compile error appears in a LABEL;
-- from phase 6: an animated plasma with an fps cap and a pause toggle.
+- from phase 6: an animated plasma with an fps cap and a pause toggle (done:
+  the "Animated on the session clock" row, a self-animating SHADER layer
+  next to the same shader drawn with `draw` + `animation_time` at half
+  resolution, with a paints/s readout).
 
 ## 12. Risks and open questions
 
@@ -1325,3 +1340,119 @@ use case.
 
 **Next:** phase 6 (time and animation). Phase 7 (Metal, CPU thread pool)
 only if measured necessary.
+
+## 18. Phase 6 results (2026-10-10)
+
+**What exists:**
+- **The clock** (`hosts/shared/anim_clock.h`, one per session, owned by the
+  `ShaderCache`): seconds of running time on `std::chrono::steady_clock`;
+  stands while paused or while the OS asks for reduced motion and continues
+  from where it stopped. Every widget painted in one frame reads the same
+  frame time.
+- **Which widgets animate** is learned from paints, not declared: each host
+  brackets a CUSTOMDRAW paint with `begin_widget` / `end_widget` and marks a
+  widget whose paint read the clock, with an owner (its frame on xpl and
+  win32, the session on macOS and iOS). A timer per owner calls `tick`;
+  when a frame is due (fps cap) it invalidates the widgets painted since the
+  last frame and drops the ones that did not paint again. A dropped widget
+  that paints again (shown, scrolled back, window restored) is marked again
+  and restarts the timer, so nothing tracks visibility, minimised windows
+  stop on their own, and a widget whose layer gets a set time stops too.
+- **Readers:** a SHADER layer whose shader reads `neui_time` and whose
+  `"time"` is neither set nor bound (`CompoundLayer::shader_time_set`, and
+  component serialize now emits `"time"` whenever it was set, also 0); and
+  `shader_api->animation_time(sess)`, for `draw` or anything else a
+  CUSTOMDRAW animates.
+- **API** (appended to `neui_shader_api_t`): `animation_time`,
+  `set_animation_fps` (default 30, clamped to [1, 120]),
+  `set_animation_paused` (resuming invalidates the marked widgets through a
+  new host-policy hook, `invalidate_widget`).
+- **Timers:** xpl: `platform_set_animation_timer(native, ms)` +
+  `Session::animation_tick(frame)` (win32 `SetTimer` on the frame HWND,
+  macOS / iOS an `NSTimer` on the frame's view, Linux the shared 16 ms
+  timerfd heartbeat, stubs on null and LVGL); win32 native: a `WM_TIMER` on
+  the frame HWND; macOS and iOS native: one block `NSTimer` per session
+  (looked up by session id, stopped on session destroy). The interval is
+  half a frame (at least 8 ms) so a frame is never more than half a frame
+  late; a stall resyncs instead of bursting.
+- **Reduced motion:** Windows `SPI_GETCLIENTAREAANIMATION` ("Show
+  animations in Windows" off), macOS `accessibilityDisplayShouldReduceMotion`,
+  iOS `UIAccessibilityIsReduceMotionEnabled`, read at each tick and after a
+  paint that marks; while it holds the clock the timer polls every 500 ms,
+  so animation comes back when it is turned off. Not read on Linux.
+- **Cache:** an image made at the clock's time drops the clock images of
+  other times, so an animation keeps one image per widget instead of filling
+  the 48 MB budget and pushing out the knobs' images. A `draw` whose time
+  equals the clock's frame counts as clock-driven.
+- **Tests:** `tests/test_anim_clock.cpp` (8 cases: frame gating, agreement
+  within a frame, dropping, stalls, pause, reduced motion, owners) and 3 more
+  in `test_shader_layer.cpp` (clock vs set / bound time, clock images
+  dropped, `animation_time` + pause / resume through the API). 439 cases on
+  macOS, 441 on Windows.
+- **Example:** an "Animated on the session clock" row: the plasma on
+  `neui_time` as a SHADER layer next to the same shader drawn with `draw` +
+  `animation_time` at half resolution, an fps combobox, a Pause checkbox and
+  a paints/s readout. `neui_shader_example <host id>` picks the host.
+
+**Measured** (M1, macOS, 2x):
+- Both hosts animate at 30.2-30.4 paints/s at the default 30 fps.
+- xpl with `NEUI_DEBUG_PAINT_STATS`: every animation frame is partial
+  (30-31 frames/s, 3.3-3.7 ms average).
+- 10-13% of one core for the two panels (302 x 88 logical px each, the left
+  at full resolution on the CPU).
+
+**Measured** (neui-win: GTX 1080, i7-6800K, 4K 60 Hz at 150%, MSVC Debug
+`/W4` warning-free; 441 tests, `neui_shader_gpu_smoke` PASS; CPU from
+`QueryProcessCycleTime`, as `GetProcessTimes` under-counts short bursts):
+- **Rate:** native 9.8 / 29.6-30.7 / 60.0 paints/s for 10 / 30 / 60 fps;
+  xpl 11.0 / 30.5-31.6 / 58.3-58.7 (`SetTimer`'s ~15.6 ms grid). Both panels
+  in phase in every shot.
+- **Pause:** frames bit-identical 1.5 s apart, 0.1% CPU, resumes at ~30.
+  **Minimise** (and `SW_HIDE`, as DAWs hide editors): 0.1-0.3% CPU, no
+  frames; restore animates again. **Reduced motion** toggled at runtime:
+  froze within 0.7 s, 0.1% CPU, resumed within 1.2 s.
+- **CPU, both panels** (% of one 3.4 GHz core, native / xpl): GPU path
+  2.5 / 2.6 at 10 fps, 6.8 / 7.1-7.3 at 30, 13.6 / 12.8 at 60; CPU path
+  15.5 / 15.6 at 30, 31.1 / 30.4 at 60. About 0.23 ms of CPU per frame on the
+  GPU path and 0.53 ms on the CPU path.
+- **xpl partial repaint:** every animation frame partial; at 30 fps
+  1.6-1.7 ms a frame on the GPU path, 4.2-4.4 ms on the CPU path.
+- **At 60 fps on the 60 Hz display `paint_frame` averages ~16.4 ms on both
+  paths:** frames arrive slightly faster than vblank and `Present1(1, ...)`
+  on the 2-buffer flip chain waits for it on the UI thread. Not CPU (13%),
+  but the thread waits for most of every frame; in a DAW that is the host's
+  UI thread. With several sessions on one thread all of them share about
+  170-180 presents/s (8 editors: 21 fps each). Presenting with sync interval
+  0 measured 1.6-1.8 ms a frame and full rate for 8 sessions, without
+  tearing (DWM still composites at vblank); but it also stops pacing
+  input-driven paints (a 1000 Hz drag then paints ~3x the refresh rate at
+  2.5-3x the CPU), so it needs a paint-rate cap too. Recorded with that design
+  in `docs/deferred-issues.md` rather than made here. The 30 fps default does
+  not hit it.
+- **DAW embedding** (review): `SetTimer` with no `TIMERPROC` on the frame
+  HWND is the right shape (no code pointer into the plugin DLL, the timer
+  dies with the HWND, ids cannot collide between instances, the DAW's pump
+  dispatches it). `WM_TIMER` is the lowest-priority message, so a busy DAW
+  UI stretches frames; the clock uses elapsed time, so that lowers the frame
+  rate, not the speed.
+
+**Found and fixed on the way:** the win32 host's `WinMain` handed the
+client's `main` UTF-16 `wchar_t**` arguments while every example declares
+`int main(int, char**)` (MSVC does not mangle `main`, so it linked):
+`argv[1]` read as `"n"`. It now passes UTF-8 and frees the
+`CommandLineToArgvW` block. This affected `neui_partial_repaint_example`'s
+argument too.
+
+**Decisions:**
+- **API slots, not attrs.** The plan had `NEUI_ATTR_ANIMATION_FPS` and a
+  per-widget `NEUI_ATTR_ANIMATE`; the rate and the pause are per session, so
+  they sit on the shader interface next to the clock, and a layer opts out by
+  setting or binding `"time"`.
+- **A timer of its own** instead of generalising the toast heartbeat into a
+  ref-counted one: separate flags per user cannot stop each other, and the
+  clock asks for its own interval.
+- **No visibility tracking:** dropping widgets that do not paint after an
+  invalidation covers hidden widgets, scrolled-away ones and minimised
+  windows on every host with one rule.
+- **`platform_now_ms` stays** (`GetTickCount64` on Windows): the clock reads
+  `steady_clock`, which is `QueryPerformanceCounter` on MSVC.

@@ -108,7 +108,13 @@ struct TestHost {
     sid = k_sid;
     return g_store;
   }
+  static std::vector<uint32_t> invalidated;
+  static void invalidate_widget(neui_session_t session, uint32_t widget)
+  {
+    if (session.session == k_sid) invalidated.push_back(widget);
+  }
 };
+std::vector<uint32_t> TestHost::invalidated;
 using Api = ShaderApi<TestHost>;
 
 neui_render_ctx_t ctx_a() { return reinterpret_cast<neui_render_ctx_t>(uintptr_t(0xA0)); }
@@ -671,6 +677,149 @@ TEST_CASE("shader api: draw renders through the cache with named uniforms")
   p.resolve_shader = nullptr;
   CHECK_FALSE(fx.api.draw(&p, &d));
   CHECK_EQ(fx.fb.draws, 2);
+}
+
+// ---- The animation clock -------------------------------------------------------------
+
+namespace {
+uint64_t g_now = 0;
+uint64_t fake_now() { return g_now; }
+const uint64_t k_ms = 1000000ull;
+
+// A 10 x 10 SHADER layer over the whole widget.
+CompoundLayer& clock_layer(CompoundAsset& ca, neui_asset_t sh)
+{
+  const uint32_t s = compound_add_layer(ca, NEUI_COMPOUND_LAYER_SHADER, 0);
+  CompoundLayer& L = *compound_get_layer(ca, s);
+  L.width = 10; L.height = 10;
+  apply_set_asset(L, "shader", sh);
+  return L;
+}
+
+// Paints the compound as a host paints a widget; true when it read the clock.
+bool paint_widget(Fixture& fx, neui_painter& p, const CompoundAsset& ca, const AttrBag* bag,
+                  uint32_t widget)
+{
+  AnimClock& c = fx.store.shader_cache().clock();
+  c.begin_widget();
+  paint_compound_above(&p, ca, 10.0f, 10.0f, bag, NEUI_LAYER_STATE_ENABLED);
+  if (!c.end_widget()) return false;
+  c.mark(widget, 1);
+  return true;
+}
+}  // namespace
+
+TEST_CASE("shader layer: a time neither set nor bound runs on the animation clock")
+{
+  Fixture fx;
+  g_now = 0;
+  fx.store.shader_cache().clock() = AnimClock(&fake_now);
+  const neui_asset_t sh = fx.create(k_clock);
+  CompoundAsset ca;
+  CompoundLayer& L = clock_layer(ca, sh);
+  AttrBag bag;
+  neui_painter p = fx.painter(ctx_a());
+
+  g_now = 250 * k_ms;
+  CHECK(paint_widget(fx, p, ca, &bag, 42));
+  CHECK_EQ(fx.last_upload().pixels[2], uint8_t(64));  // fract(0.25) * 255, rounded
+  AnimClock& c = fx.store.shader_cache().clock();
+  CHECK(c.has_owner(1));
+
+  // A frame later the image follows the clock.
+  g_now = 300 * k_ms;
+  std::vector<uint32_t> inv;
+  c.tick([&](uint32_t w, uint32_t) { inv.push_back(w); });
+  REQUIRE(inv.size() == 1u);
+  CHECK_EQ(inv[0], 42u);
+  CHECK(paint_widget(fx, p, ca, &bag, 42));
+  CHECK_EQ(fx.last_upload().pixels[2], uint8_t(77));  // fract(0.3) * 255
+
+  // A bound time is the client's: no clock.
+  bag.set_float("t", 0.5f);
+  apply_bind(L, "time", "t", 1.0f, 0.0f);
+  CHECK_FALSE(paint_widget(fx, p, ca, &bag, 42));
+  CHECK_EQ(fx.last_upload().pixels[2], uint8_t(128));
+  // So is a set one, even 0.
+  CompoundAsset ca2;
+  CompoundLayer& L2 = clock_layer(ca2, sh);
+  apply_set_float(L2, "time", 0.0f);
+  CHECK_FALSE(paint_widget(fx, p, ca2, &bag, 43));
+  // A shader that does not read neui_time never touches the clock.
+  CompoundAsset ca3;
+  clock_layer(ca3, fx.create(k_disc));
+  CHECK_FALSE(paint_widget(fx, p, ca3, &bag, 44));
+}
+
+TEST_CASE("shader cache: a clock image goes when the next frame's is made")
+{
+  Fixture fx;
+  g_now = 0;
+  fx.store.shader_cache().clock() = AnimClock(&fake_now);
+  ShaderCache& cache = fx.store.shader_cache();
+  const neui_asset_t sh = fx.create(k_clock);
+  const neui_asset_t still = fx.create(k_disc);
+  CompoundAsset ca, cb;
+  clock_layer(ca, sh);
+  clock_layer(cb, still);
+  AttrBag bag;
+  neui_painter p = fx.painter(ctx_a());
+  paint_widget(fx, p, cb, &bag, 2);
+  for (int frame = 1; frame <= 5; ++frame) {
+    g_now = uint64_t(frame) * 40 * k_ms;
+    cache.clock().tick([](uint32_t, uint32_t) {});
+    CHECK(paint_widget(fx, p, ca, &bag, 1));
+    CHECK(paint_widget(fx, p, ca, &bag, 3));  // a second widget shares the frame's image
+  }
+  CHECK_EQ(cache.size(), 2u);    // this frame's clock image and the still one
+  CHECK_EQ(cache.renders(), 6u);
+  CHECK_EQ(fx.fb.live.size(), 2u);  // the dropped images' uploads went with them
+}
+
+TEST_CASE("shader api: animation_time, pause and resume")
+{
+  Fixture fx;
+  g_now = 0;
+  fx.store.shader_cache().clock() = AnimClock(&fake_now);
+  AnimClock& c = fx.store.shader_cache().clock();
+  REQUIRE(fx.api.animation_time != nullptr);
+  REQUIRE(fx.api.set_animation_fps != nullptr);
+  REQUIRE(fx.api.set_animation_paused != nullptr);
+
+  // Read in a paint, it makes the widget animate; draw() at that time keeps
+  // one image per frame.
+  const neui_asset_t sh = fx.create(k_clock);
+  neui_painter p = fx.painter(ctx_a());
+  neui_shader_draw_t d{};
+  d.shader = sh;
+  d.width = 8; d.height = 8;
+  for (int frame = 0; frame < 3; ++frame) {
+    g_now = uint64_t(frame) * 40 * k_ms + 100 * k_ms;
+    c.tick([](uint32_t, uint32_t) {});
+    c.begin_widget();
+    d.time = fx.api.animation_time(k_sess);
+    CHECK(fx.api.draw(&p, &d));
+    REQUIRE(c.end_widget());
+    c.mark(9, 0);
+  }
+  CHECK_APPROX(d.time, 0.18f);
+  CHECK_EQ(fx.store.shader_cache().size(), 1u);
+  CHECK_EQ(fx.api.animation_time(neui_session_t{ 99 }), 0.0f);
+
+  fx.api.set_animation_fps(k_sess, 60);
+  CHECK_EQ(c.fps(), 60u);
+
+  TestHost::invalidated.clear();
+  fx.api.set_animation_paused(k_sess, true);
+  CHECK(c.paused());
+  CHECK_EQ(c.heartbeat_ms(0), 0u);
+  fx.api.set_animation_paused(k_sess, true);
+  CHECK(TestHost::invalidated.empty());
+  fx.api.set_animation_paused(k_sess, false);  // resuming repaints the animating widgets
+  REQUIRE(TestHost::invalidated.size() == 1u);
+  CHECK_EQ(TestHost::invalidated[0], 9u);
+  fx.api.set_animation_paused(k_sess, false);
+  CHECK_EQ(TestHost::invalidated.size(), 1u);
 }
 
 // ---- The component hook ---------------------------------------------------------------

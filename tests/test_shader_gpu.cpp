@@ -235,6 +235,7 @@ struct Host {
     sid = 7;
     return g_store;
   }
+  static void invalidate_widget(neui_session_t, uint32_t) {}
 };
 
 struct Fixture {

@@ -1590,6 +1590,11 @@ namespace xpl_host
     w->toast_timer = nullptr;
   }
 
+  // Shaders are compiled out of the LVGL build (NEUI_NO_SHADERS), so nothing
+  // reads the animation clock.
+  void platform_set_animation_timer(void*, uint32_t) {}
+  bool platform_reduced_motion() { return false; }
+
   uint64_t platform_now_ms()
   {
     return GetTickCount64();

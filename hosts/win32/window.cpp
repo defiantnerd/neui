@@ -1101,8 +1101,16 @@ namespace win32_host
         }
       }
       return 0;
+    case WM_TIMER:
+      if (wParam == k_anim_timer_id) {
+        if (wd && wd->session) wd->session->animation_tick(*wd);
+        else KillTimer(hwnd, k_anim_timer_id);
+        return 0;
+      }
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
     case WM_DESTROY:
       {
+        if (wd) wd->anim_timer_ms = 0;  // the timer dies with the HWND
         if (wd && wd->type && !strcmp(wd->type, NEUI_W_APPWINDOW)) {
           --g_appwindow_count;
           if (g_appwindow_count <= 0) {

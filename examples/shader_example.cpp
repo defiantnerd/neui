@@ -18,6 +18,12 @@
 //     drives its `t`.
 //   * A checkbox for set_gpu: where the renderer has a GPU path (Direct2D),
 //     the live row runs on the GPU by default; unticked, on the CPU.
+// Animated, on the session's animation clock:
+//   * A panel whose compound SHADER layer reads neui_time and sets no "time":
+//     it animates by itself.
+//   * The same shader drawn with shader_api->draw at half resolution, with
+//     animation_time() as its time; it counts its paints for an fps readout.
+//   * An fps cap (set_animation_fps) and a pause toggle (set_animation_paused).
 // And a deliberately broken shader, whose compile error is shown in a label.
 // Without NEUI_API_SHADER (null platform, LVGL), plain KNOB widgets.
 //
@@ -134,6 +140,19 @@ vec4 main(vec2 p) {
   return vec4(col, rounded(p, 10.0));
 })";
 
+// The plasma on the animation clock: neui_time instead of a `t` uniform.
+static const char* const k_plasma_anim = NSL_ROUNDED R"(
+vec4 main(vec2 p) {
+  float t = neui_time * 1.5;
+  vec2 u = p / neui_size.y * 4.0;
+  float v = sin(u.x + t) + sin((u.y + t) * 0.5) + sin((u.x + u.y + t) * 0.5);
+  vec2 c = u + vec2(sin(t * 0.33), cos(t * 0.5)) * 5.0;
+  v += sin(sqrt(dot(c, c) + 1.0) + t);
+  v *= 3.14159;
+  vec3 col = vec3(sin(v), sin(v + 2.094), sin(v + 4.189)) * 0.5 + 0.5;
+  return vec4(col, rounded(p, 10.0));
+})";
+
 static const char* const k_marble = NSL_ROUNDED R"(
 uniform vec4 dark  = vec4(0.10, 0.12, 0.20, 1.0);
 uniform vec4 light = vec4(0.85, 0.80, 0.70, 1.0);
@@ -193,6 +212,7 @@ struct AppState
   neui_compound_api_t* compound = nullptr;
   neui_behavior_api_t* behavior = nullptr;
   neui_shader_api_t*   shaders  = nullptr;  // null where shaders are unsupported
+  neui_items_api_t*    items    = nullptr;
   neui_session_t       session  = { 0 };
 
   uint32_t knob_ids[k_knobs] = {};
@@ -204,7 +224,18 @@ struct AppState
   neui_asset_t plasma = asset_none;
   float        plasma_t = 1.7f;
   uint32_t     gpu_box_id = 0;
+
+  // The animated row: the draw() panel, its fps readout and the controls.
+  uint32_t     anim_panel_id = 0;
+  neui_asset_t plasma_anim = asset_none;
+  uint32_t     fps_combo_id = 0;
+  uint32_t     pause_box_id = 0;
+  uint32_t     fps_label_id = 0;
+  int          anim_paints = 0;
+  std::chrono::steady_clock::time_point anim_t0 = std::chrono::steady_clock::now();
 };
+
+static const uint32_t k_fps_choices[] = { 10, 30, 60 };
 
 static neui_asset_t compile(AppState* a, const char* src, const char* name)
 {
@@ -288,6 +319,42 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
     a->widgets->invalidate(a->session, { a->panel_id });
     return false;
   }
+  if (event->type == NEUI_EVENT_CHECKBOX_CHANGED && a->pause_box_id &&
+      event->data.checkbox.widget.id == a->pause_box_id) {
+    const bool paused = event->data.checkbox.state == NEUI_CHECK_CHECKED;
+    a->shaders->set_animation_paused(a->session, paused);
+    if (paused) a->widgets->set_text(a->session, { a->fps_label_id }, "paused");
+    a->anim_paints = 0;
+    a->anim_t0 = std::chrono::steady_clock::now();
+    return false;
+  }
+  if (event->type == NEUI_EVENT_ITEM_SELECTED && a->fps_combo_id &&
+      event->data.item.widget.id == a->fps_combo_id && event->data.item.index < 3) {
+    a->shaders->set_animation_fps(a->session, k_fps_choices[event->data.item.index]);
+    return false;
+  }
+  if (event->type == NEUI_EVENT_WIDGET_PAINT && a->anim_panel_id &&
+      event->data.paint.widget.id == a->anim_panel_id) {
+    // Reading the clock in the paint is what keeps this widget animating.
+    neui_shader_draw_t d{};
+    d.shader = a->plasma_anim;
+    d.width = event->data.paint.width;
+    d.height = event->data.paint.height;
+    d.resolution = 0.5f;
+    d.time = a->shaders->animation_time(a->session);
+    a->shaders->draw(event->data.paint.p, &d);
+    ++a->anim_paints;
+    const auto now = std::chrono::steady_clock::now();
+    const double s = std::chrono::duration<double>(now - a->anim_t0).count();
+    if (s >= 1.0) {
+      char buf[48];
+      snprintf(buf, sizeof buf, "%.1f paints/s", a->anim_paints / s);
+      a->widgets->set_text(a->session, { a->fps_label_id }, buf);
+      a->anim_paints = 0;
+      a->anim_t0 = now;
+    }
+    return true;
+  }
   if (event->type == NEUI_EVENT_WIDGET_PAINT && a->panel_id &&
       event->data.paint.widget.id == a->panel_id) {
     const neui_shader_uniform_t t = { "t", { a->plasma_t, 0, 0, 0 } };
@@ -323,10 +390,11 @@ static void* NEUI_ABI get_interface(void* /*token*/, const char* iface)
   return nullptr;
 }
 
-int main(int /*argc*/, char* /*argv*/[])
+int main(int argc, char* argv[])
 {
   neui_init();
-  neui_api_t* host = neui_get_api(ACTIVE_HOST);
+  // An optional host id, e.g. neui.host.crossplatform, to compare the hosts.
+  neui_api_t* host = neui_get_api(argc > 1 ? argv[1] : ACTIVE_HOST);
   if (!host) host = neui_get_api(nullptr);
   if (!host) { dbglog("[shader] no host\n"); return 1; }
 
@@ -344,7 +412,8 @@ int main(int /*argc*/, char* /*argv*/[])
   app.compound = (neui_compound_api_t*)host->get_interface(app.session, NEUI_API_COMPOUND);
   app.behavior = (neui_behavior_api_t*)host->get_interface(app.session, NEUI_API_BEHAVIOR);
   app.shaders  = (neui_shader_api_t*)host->get_interface(app.session, NEUI_API_SHADER);
-  if (!app.widgets || !app.assets || !app.attrs || !app.compound || !app.behavior) {
+  app.items    = (neui_items_api_t*)host->get_interface(app.session, NEUI_API_ITEMS);
+  if (!app.widgets || !app.assets || !app.attrs || !app.compound || !app.behavior || !app.items) {
     dbglog("[shader] missing API\n");
     return 1;
   }
@@ -353,7 +422,8 @@ int main(int /*argc*/, char* /*argv*/[])
   const int win_w = 2 * pad + k_knobs * knob + (k_knobs - 1) * knob_gap;  // 632
   const int banner_h = 64, knob_y = pad + banner_h + 16, readout_y = knob_y + knob + 10;
   const int tile_y = readout_y + 32, live_label_y = tile_y + tile_h + 16, live_y = live_label_y + 26;
-  const int error_y = live_y + knob + 16, timing_y = error_y + 26;
+  const int anim_label_y = live_y + knob + 16, anim_y = anim_label_y + 30;
+  const int error_y = anim_y + knob + 16, timing_y = error_y + 26;
   const int win_h = timing_y + 22 + pad;
 
   neui_widget_t win = app.widgets->create(app.session, widget_none, NEUI_W_APPWINDOW,
@@ -499,6 +569,47 @@ int main(int /*argc*/, char* /*argv*/[])
                                             panel_x, live_y, win_w - pad - panel_x, knob, nullptr);
   app.panel_id = panel.id;
 
+  // Animated: the plasma on neui_time as a self-animating SHADER layer, and
+  // drawn with draw() + animation_time(); an fps cap and a pause toggle.
+  neui_asset_t plasma_anim = compile(&app, k_plasma_anim, "plasma_anim.nsl");
+  app.plasma_anim = plasma_anim;
+  neui_widget_t anim_label = app.widgets->create(app.session, win, NEUI_W_LABEL,
+                                                 pad, anim_label_y + 2, 220, 22, nullptr);
+  app.widgets->set_text(app.session, anim_label, "Animated on the session clock");
+  neui_widget_t fps_combo = app.widgets->create(app.session, win, NEUI_W_COMBOBOX,
+                                                pad + 228, anim_label_y, 96, 26, nullptr);
+  for (uint32_t fps : k_fps_choices) {
+    char item[16];
+    snprintf(item, sizeof item, "%u fps", fps);
+    app.items->add(app.session, fps_combo, item, nullptr);
+  }
+  app.items->set_selected(app.session, fps_combo, 1);  // the default, 30
+  app.fps_combo_id = fps_combo.id;
+  neui_widget_t pause_box = app.widgets->create(app.session, win, NEUI_W_CHECKBOX,
+                                                pad + 336, anim_label_y + 2, 80, 22, nullptr);
+  app.widgets->set_text(app.session, pause_box, "Pause");
+  app.pause_box_id = pause_box.id;
+  neui_widget_t fps_label = app.widgets->create(app.session, win, NEUI_W_LABEL,
+                                                pad + 424, anim_label_y + 2, win_w - 2 * pad - 424, 22,
+                                                nullptr);
+  app.fps_label_id = fps_label.id;
+  const int anim_w = (win_w - 2 * pad - 16) / 2;
+  neui_asset_t anim_comp = app.assets->create_compound(app.session);
+  {
+    neui_compound_layer_t L = app.compound->add_layer(app.session, anim_comp,
+                                                      NEUI_COMPOUND_LAYER_SHADER, 0);
+    app.compound->set_anchor(app.session, anim_comp, L, NEUI_ANCHOR_CENTER, NEUI_ANCHOR_CENTER);
+    app.compound->set_int(app.session, anim_comp, L, "width", NEUI_COMPOUND_FILL);
+    app.compound->set_int(app.session, anim_comp, L, "height", NEUI_COMPOUND_FILL);
+    app.compound->set_asset(app.session, anim_comp, L, "shader", plasma_anim);  // no "time": the clock
+  }
+  neui_widget_t anim_layer = app.widgets->create(app.session, win, NEUI_W_CUSTOMDRAW,
+                                                 pad, anim_y, anim_w, knob, nullptr);
+  app.widgets->set_asset(app.session, anim_layer, anim_comp);
+  neui_widget_t anim_panel = app.widgets->create(app.session, win, NEUI_W_CUSTOMDRAW,
+                                                 win_w - pad - anim_w, anim_y, anim_w, knob, nullptr);
+  app.anim_panel_id = anim_panel.id;
+
   // The broken shader's diagnostic.
   char err[256];
   neui_asset_t broken = app.shaders->create(app.session, k_broken, (uint32_t)strlen(k_broken),
@@ -523,6 +634,7 @@ int main(int /*argc*/, char* /*argv*/[])
   app.widgets->destroy(app.session, win);
   app.assets->destroy(app.session, behav);
   app.assets->destroy(app.session, live_comp);
+  app.assets->destroy(app.session, anim_comp);
   if (ring.id != asset_none.id) app.assets->destroy(app.session, ring);
   app.assets->destroy(app.session, banner_comp);
   app.assets->destroy(app.session, banner_bmp);
@@ -531,7 +643,7 @@ int main(int /*argc*/, char* /*argv*/[])
     app.assets->destroy(app.session, strips[c]);
   }
   for (neui_asset_t t : tiles) app.assets->destroy(app.session, t);
-  const neui_asset_t programs[] = { metal, glow, plasma, marble };
+  const neui_asset_t programs[] = { metal, glow, plasma, marble, plasma_anim };
   for (neui_asset_t s : programs) app.assets->destroy(app.session, s);
   host->destroy(app.session);
   return 0;

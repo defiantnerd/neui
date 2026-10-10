@@ -55,6 +55,8 @@ namespace xpl_host
     // Same pattern for the scrolling SECTION's spring-back (kinetics live
     // in the section's SectionScrollState.kin_v/_h).
     uint32_t bouncing_section_index = 0;
+    // Interval of the shader animation timer (anim_clock.h), 0 = off.
+    uint32_t anim_timer_ms = 0;
   };
 
   // Timer ID for the grid spring-back animation on the frame's HWND.
@@ -63,6 +65,8 @@ namespace xpl_host
   static constexpr UINT_PTR XPL_SECTION_BOUNCE_TIMER_ID = 0x6E787363;  // 'nxsc'
   // Timer ID for the toast animation heartbeat (16 ms tick).
   static constexpr UINT_PTR XPL_TOAST_TIMER_ID = 0x6E78746F;  // 'nxto'
+  // Timer ID for the animation clock's heartbeat (Session::animation_tick).
+  static constexpr UINT_PTR XPL_ANIM_TIMER_ID = 0x6E78616E;  // 'nxan'
 
   // UTF-8 -> UTF-16 helper used by menubar platform functions.
   static std::wstring to_wide(const char* utf8)
@@ -1127,6 +1131,12 @@ namespace xpl_host
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
+      if (wParam == XPL_ANIM_TIMER_ID) {
+        auto* awud = get_wud(hwnd);
+        if (awud && awud->session) awud->session->animation_tick(awud->widget_index);
+        else KillTimer(hwnd, XPL_ANIM_TIMER_ID);
+        return 0;
+      }
       // Scrolling-SECTION spring-back tick - same shape as the grid timer
       // below; both axes step in one tick (a "both" section can overscroll
       // vertically and horizontally in the same gesture).
@@ -2157,6 +2167,23 @@ namespace xpl_host
   {
     if (!native_handle) return;
     KillTimer(static_cast<HWND>(native_handle), XPL_TOAST_TIMER_ID);
+  }
+
+  void platform_set_animation_timer(void* native_handle, uint32_t interval_ms)
+  {
+    HWND hwnd = static_cast<HWND>(native_handle);
+    auto* wud = hwnd ? get_wud(hwnd) : nullptr;
+    if (!wud || wud->anim_timer_ms == interval_ms) return;  // SetTimer would restart it
+    wud->anim_timer_ms = interval_ms;
+    if (interval_ms) SetTimer(hwnd, XPL_ANIM_TIMER_ID, interval_ms, nullptr);
+    else             KillTimer(hwnd, XPL_ANIM_TIMER_ID);
+  }
+
+  bool platform_reduced_motion()
+  {
+    // "Show animations in Windows" (Settings > Accessibility > Visual effects).
+    BOOL on = TRUE;
+    return SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &on, 0) && !on;
   }
 
   uint64_t platform_now_ms()

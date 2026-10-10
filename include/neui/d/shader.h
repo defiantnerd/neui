@@ -95,6 +95,7 @@ extern "C" {
     float                        x, y, width, height;  // logical px, painter space
     float                        resolution;  // shading density, (0, 4]; <= 0 means 1
     float                        time;        // neui_time in seconds; wrapped to [0, 3600)
+                                              // (animation_time() to animate)
     const neui_shader_uniform_t* uniforms;    // values by name; may be NULL
     uint32_t                     uniform_count;
   } neui_shader_draw_t;
@@ -181,6 +182,29 @@ extern "C" {
     // on every platform; "#pragma neui cpu_only" does it per shader. On by
     // default. The bakes always run on the CPU.
     void (NEUI_ABI *set_gpu)(neui_session_t session, bool enabled);
+
+    // -------- Animation (vtable-appended) -------------------------------------
+
+    // The session's animation clock: seconds of running time, wrapped to
+    // [0, 3600) like neui_time. A compound SHADER layer whose shader reads
+    // neui_time and whose "time" is neither set nor bound runs on it by
+    // itself. Read in a paint callback, it also makes that widget repaint at
+    // the animation rate for as long as its paints keep reading it (pass it to
+    // draw() as `time`, or animate anything else with it). Every widget
+    // painted in one frame reads the same value.
+    float (NEUI_ABI *animation_time)(neui_session_t session);
+
+    // Frames per second of the animation, clamped to [1, 120]; 30 by default.
+    // Approximate (OS timers; Windows ticks on a ~15.6 ms grid). Stay below
+    // the display's refresh rate: at or above it, Direct2D waits for vblank
+    // on the UI thread every frame, which in a plugin is the host's.
+    void  (NEUI_ABI *set_animation_fps)(neui_session_t session, uint32_t fps);
+
+    // Paused, the clock stands still and nothing repaints for it; resuming
+    // continues from where it stopped. The clock also stands while the OS asks
+    // for reduced motion ("Show animations in Windows" off, Reduce motion on
+    // macOS and iOS).
+    void  (NEUI_ABI *set_animation_paused)(neui_session_t session, bool paused);
   } neui_shader_api_t;
 
 #ifdef __cplusplus

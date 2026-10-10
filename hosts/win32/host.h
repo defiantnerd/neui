@@ -27,6 +27,9 @@
 
 namespace win32_host {
 
+  // WM_TIMER id of a frame's animation clock heartbeat (Session::animation_tick).
+  constexpr UINT_PTR k_anim_timer_id = 0x6E77616E;  // 'nwan'
+
   using neui_detail::Tree;
 
   // Register the Win32 host with the neui core registry.
@@ -108,6 +111,7 @@ namespace win32_host {
     bool has_subclass = false;
     wchar_t pending_surrogate = 0;  // high surrogate waiting for its low pair in WM_CHAR
     uint32_t widget_id = 0;    // stored as uint32_t for packing math; wrap as neui_widget_t when returning to public API
+    uint32_t anim_timer_ms = 0;  // frames: interval of the animation clock's WM_TIMER, 0 = off
     std::string text;          // copy of the last set_text value; applied on HWND creation if set before show
     struct PendingItem { std::string text; void* userdata; };
     std::vector<PendingItem> pending_items;     // items queued before HWND exists
@@ -392,6 +396,15 @@ namespace win32_host {
     // True if the frame owning `wd` has NEUI_ATTR_FOLLOW_SYSTEM_THEME = 1.
     // Climbs the parent chain to the nearest frame.
     bool frame_follows_theme(WidgetData* wd);
+
+    // ---- Animation clock (hosts/shared/anim_clock.h) ----
+    // A CUSTOMDRAW paint that reads the clock marks its widget with its frame
+    // (animation_after_paint, after a begin_widget before the paint). The
+    // frame's HWND runs a WM_TIMER (k_anim_timer_id) at the interval the
+    // clock asks for; each tick repaints the animating widgets.
+    void animation_after_paint(WidgetData& wd);
+    void animation_tick(WidgetData& frame);
+    void animation_set_timer(WidgetData& frame, uint32_t ms);
 
     // Invalidate every CUSTOMDRAW widget in this session whose
     // compound_asset.id matches `asset_id`. Called from the compound API

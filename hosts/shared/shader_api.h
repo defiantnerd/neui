@@ -8,6 +8,8 @@
 //     static AssetStore<...>* store(neui_session_t session, uint32_t& session_id);
 //     // The same from a painter's host_token.
 //     static AssetStore<...>* store_from_token(void* host_token, uint32_t& session_id);
+//     // Repaint a widget (by id) that animates; ignores a stale id.
+//     static void invalidate_widget(neui_session_t session, uint32_t widget_id);
 //   };
 //   neui_shader_api_t shader_api = neui_detail::shader_api_table<MyShaderHost>();
 //
@@ -20,6 +22,7 @@
 #include <cstring>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <neui/neui.h>
 
@@ -152,6 +155,35 @@ namespace neui_detail
       if (auto* store = Host::store(session, sid)) store->shader_cache().set_gpu(enabled);
     }
 
+    static float NEUI_ABI animation_time(neui_session_t session)
+    {
+      uint32_t sid = 0;
+      auto* store = Host::store(session, sid);
+      return store ? neui::nsl::wrap_time(store->shader_cache().clock().time()) : 0.0f;
+    }
+
+    static void NEUI_ABI set_animation_fps(neui_session_t session, uint32_t fps)
+    {
+      uint32_t sid = 0;
+      if (auto* store = Host::store(session, sid)) store->shader_cache().clock().set_fps(fps);
+    }
+
+    // Resuming repaints the animating widgets: their paints mark them again,
+    // which restarts the timers that the pause stopped.
+    static void NEUI_ABI set_animation_paused(neui_session_t session, bool paused)
+    {
+      uint32_t sid = 0;
+      auto* store = Host::store(session, sid);
+      if (!store) return;
+      AnimClock& clock = store->shader_cache().clock();
+      const bool resume = clock.paused() && !paused;
+      clock.set_paused(paused);
+      if (!resume) return;
+      std::vector<uint32_t> widgets;
+      clock.for_each([&](uint32_t w, uint32_t) { widgets.push_back(w); });
+      for (uint32_t w : widgets) Host::invalidate_widget(session, w);
+    }
+
     // The painter's resolve_shader thunk (painter.h).
     static bool NEUI_ABI painter_resolve(void* host_token, neui_asset_t shader,
                                          const ShaderAsset** out_shader,
@@ -212,6 +244,9 @@ namespace neui_detail
     t.bake_filmstrip   = A::bake_filmstrip;
     t.draw             = shader_api_draw;
     t.set_gpu          = A::set_gpu;
+    t.animation_time       = A::animation_time;
+    t.set_animation_fps    = A::set_animation_fps;
+    t.set_animation_paused = A::set_animation_paused;
     return t;
   }
 }  // namespace neui_detail

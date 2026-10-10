@@ -537,6 +537,24 @@ namespace xpl_host
     platform_invalidate_rect(frame, r.x, r.y, r.w, r.h);
   }
 
+  uint32_t Session::animation_interval(uint32_t frame_index)
+  {
+    neui_detail::AnimClock& clock = anim_clock();
+    if (!clock.has_owner(frame_index)) return 0;
+    clock.set_reduced_motion(platform_reduced_motion());
+    return clock.heartbeat_ms(frame_index);
+  }
+
+  uint32_t Session::animation_tick(uint32_t frame_index)
+  {
+    WidgetData* fw = get_widget(frame_index);
+    if (!fw || !fw->native_handle) return 0;  // the frame went away
+    neui_detail::AnimClock& clock = anim_clock();
+    clock.set_reduced_motion(platform_reduced_motion());
+    clock.tick([this](uint32_t widget, uint32_t) { invalidate_widget_rect(widget & 0xffff); });
+    return clock.heartbeat_ms(frame_index);
+  }
+
   int Session::frame_client_height(uint32_t widget_index)
   {
     auto parents = _widgets.get_all_parents(widget_index);
@@ -2368,6 +2386,7 @@ namespace xpl_host
                             const neui_detail::DamageRegion* damage)
   {
     if (!_backend || !ctx) return;
+    _anim_frame = parent_index;
     static const bool paint_stats = env_flag("NEUI_DEBUG_PAINT_STATS");
     const auto paint_t0 = paint_stats ? PaintStats::clock::now()
                                       : PaintStats::clock::time_point{};
@@ -2491,6 +2510,10 @@ namespace xpl_host
     // handlers, theme provider, other frames painted in the same pump
     // iteration) see the session's default tracking palette again.
     neui_detail::set_active_palette_override(prev_override);
+
+    // Widgets that read the animation clock keep the frame's timer running.
+    if (WidgetData* fw = get_widget(parent_index); fw && fw->native_handle)
+      platform_set_animation_timer(fw->native_handle, animation_interval(parent_index));
   }
 
 #ifdef NEUI_PLATFORM_LVGL
@@ -3182,6 +3205,8 @@ namespace xpl_host
     painter.host_token       = session;
     painter.draw_asset_thunk = &xpl_painter_draw_asset_thunk;
     painter.resolve_shader   = xpl_resolve_shader;
+    neui_detail::AnimClock& clock = session->anim_clock();
+    clock.begin_widget();
 
     if (auto* ca = resolve_widget_compound(session, compound_asset)) {
       // Compound mode: paint z<0 layers here; z>=0 layers come from
@@ -3203,6 +3228,7 @@ namespace xpl_host
       ev.data.paint.focused     = is_focused;
       session->dispatch_event(&ev);
     }
+    if (clock.end_widget()) clock.mark(widget_id, session->_anim_frame);
 
     if (backend->pop_clip) backend->pop_clip(ctx);
     if (backend->pop_transform) backend->pop_transform(ctx);
@@ -3235,9 +3261,12 @@ namespace xpl_host
     bool selected = neui_detail::attr_as_float(
                       neui_detail::attrs_readonly(attrs), NEUI_ATTR_SELECTED, 0.0f) != 0.0f;
     uint32_t state_mask = neui_detail::compose_widget_state(enabled, hovered, pressed, selected);
+    neui_detail::AnimClock& clock = session->anim_clock();
+    clock.begin_widget();
     neui_detail::paint_compound_above(&painter, *ca, fw, fh,
                                         neui_detail::attrs_readonly(attrs),
                                         state_mask);
+    if (clock.end_widget()) clock.mark(widget_id, session->_anim_frame);
 
     if (backend->pop_clip) backend->pop_clip(ctx);
   }

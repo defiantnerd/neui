@@ -155,9 +155,13 @@ uniform vec4  accent = vec4(1.0, 0.5, 0.0, 1.0);
 **Time** is wrapped because DAW sessions run for hours and a float loses
 precision as it grows. 3600 has many divisors, so loops whose period divides
 it stay seamless: `sin(neui_time * 6.2831853 / 4.0)` repeats exactly every 4
-s. A program that reads `neui_time` is time-dependent: it animates (phase 6)
-and is re-run when the clock ticks. A program that does not read it is re-run
-only when its inputs change.
+s. A program that reads `neui_time` is time-dependent: on a compound SHADER
+layer that neither sets nor binds `"time"` it runs on the session's animation
+clock (seconds of running time; it stands while paused or while the OS asks
+for reduced motion) and is re-run every frame of the clock, at 30 fps by
+default. A program that does not read it is re-run only when its inputs
+change. The wrap jumps once an hour; a loop whose period divides 3600 does
+not show it.
 
 ## 7. Expressions
 

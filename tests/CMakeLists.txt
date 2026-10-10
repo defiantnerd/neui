@@ -35,6 +35,7 @@ add_executable(neui_tests
   test_shader_asset.cpp
   test_shader_layer.cpp
   test_shader_gpu.cpp
+  test_anim_clock.cpp
   # mujson lives in the core lib, but the suite links no library, so its TU is
   # compiled directly into the test executable (same pattern as the *.cpp above).
   ${PROJECT_SOURCE_DIR}/src/mujson.cpp)

@@ -191,6 +191,12 @@ namespace win32_host
       session_id = s->session_id();
       return &s->_asset_manager;
     }
+    static void invalidate_widget(neui_session_t session, uint32_t widget_id)
+    {
+      auto* s = get_session_for_widget(session, neui_widget_t{ widget_id });
+      auto* wd = s ? s->get_widget(widget_id & 0xffff) : nullptr;
+      if (wd && wd->hwnd) InvalidateRect(wd->hwnd, nullptr, FALSE);
+    }
   };
   neui_shader_api_t shader_api = neui_detail::shader_api_table<W32ShaderHost>();
   const neui_detail::resolve_shader_thunk_t w32_resolve_shader =
@@ -883,6 +889,7 @@ namespace win32_host
     painter.host_token       = wd.session;
     painter.draw_asset_thunk = &w32_painter_draw_asset_thunk;
     painter.resolve_shader   = w32_resolve_shader;
+    wd.session->_asset_manager.shader_cache().clock().begin_widget();
 
     if (auto* ca = resolve_widget_compound_w32(wd)) {
       // Compound mode: paint z<0 then z>=0 back-to-back. Child HWNDs
@@ -906,6 +913,7 @@ namespace win32_host
       ev.data.paint.focused     = focused;
       wd.session->dispatch_event(&ev);
     }
+    wd.session->animation_after_paint(wd);
 
     if (backend->pop_clip)      backend->pop_clip(ctx);
     if (backend->pop_transform) backend->pop_transform(ctx);

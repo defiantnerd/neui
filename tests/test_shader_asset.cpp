@@ -40,6 +40,7 @@ struct TestShaderHost {
     session_id = k_sid;
     return g_store;
   }
+  static void invalidate_widget(neui_session_t, uint32_t) {}
 };
 
 // One fresh store per test case.

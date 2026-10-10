@@ -144,6 +144,55 @@ namespace ios_host {
                                     neui_render_backend_t* backend,
                                     float w, float h);
   void mark_widget_dirty_for_paint(WidgetData& wd);
+
+  // ---- Animation clock (hosts/shared/anim_clock.h) --------------------------
+  // One timer per session. A CUSTOMDRAW paint that reads the clock marks its
+  // widget (owner 0) and starts the timer; each tick repaints the animating
+  // widgets and returns the interval to continue at.
+
+  static uint32_t animation_tick(Session* s)
+  {
+    neui_detail::AnimClock& clock = s->_asset_manager.shader_cache().clock();
+    clock.set_reduced_motion(UIAccessibilityIsReduceMotionEnabled());
+    clock.tick([s](uint32_t widget, uint32_t) {
+      const uint32_t i = widget & 0xffff;
+      if (s->_widgets.exists(i)) mark_widget_dirty_for_paint(s->_widgets[i]);
+    });
+    return clock.heartbeat_ms(0);
+  }
+
+  void set_animation_timer(Session* s, uint32_t ms)
+  {
+    if (!s || ms == s->_anim_ms) return;
+    if (s->_anim_timer) {
+      NSTimer* old = (__bridge_transfer NSTimer*)s->_anim_timer;
+      s->_anim_timer = nullptr;
+      [old invalidate];
+    }
+    s->_anim_ms = ms;
+    if (!ms) return;
+    // By id, not pointer: the block must not outlive the session.
+    const uint32_t sid = s->session_id();
+    NSTimer* t = [NSTimer timerWithTimeInterval:ms / 1000.0 repeats:YES block:^(NSTimer* timer) {
+      const size_t i = static_cast<size_t>(sid & 0xffff) - 1;
+      Session* cur = i < sessions.size() ? sessions[i].get() : nullptr;
+      if (!cur || cur->_anim_timer != (__bridge void*)timer) { [timer invalidate]; return; }
+      set_animation_timer(cur, animation_tick(cur));
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
+    s->_anim_timer = (__bridge_retained void*)t;
+  }
+
+  // After a CUSTOMDRAW paint: when it read the clock, the widget animates.
+  static void animation_after_paint(Session* s, const WidgetData& wd)
+  {
+    neui_detail::AnimClock& clock = s->_asset_manager.shader_cache().clock();
+    if (!clock.end_widget()) return;
+    clock.mark(wd.widget_id, 0);
+    clock.set_reduced_motion(UIAccessibilityIsReduceMotionEnabled());
+    set_animation_timer(s, clock.heartbeat_ms(0));
+  }
+
   // LISTBOX / TREEVIEW (native UITableView) helpers defined later in this TU.
   void tree_rebuild_visible_rows_ios(WidgetData& wd);
   void reload_native_tree_selection_ios(WidgetData& wd);
@@ -2521,6 +2570,7 @@ namespace ios_host
       painter.host_token = s;
       painter.draw_asset_thunk = &ios_painter_draw_asset_thunk;
       painter.resolve_shader = ios_resolve_shader;
+      s->_asset_manager.shader_cache().clock().begin_widget();
       neui_detail::CompoundAsset* ca = nullptr;
       if (wd.compound_asset.id != asset_none.id) {
         auto* e = s->_asset_manager.get_slot(wd.compound_asset.id & 0xffff);
@@ -2543,6 +2593,7 @@ namespace ios_host
         ev.data.paint.focused = false;
         s->dispatch_event(&ev);
       }
+      animation_after_paint(s, wd);
       if (backend->pop_clip) backend->pop_clip(wd.render_ctx);
     }
     else if (is_section) {

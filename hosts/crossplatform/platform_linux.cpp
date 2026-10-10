@@ -113,6 +113,9 @@ namespace
     bool         needs_paint  = false;
     neui_detail::DamageRegion damage;
     bool         toast_anim   = false;
+    // The animation clock wants ticks (Session::animation_tick). The shared
+    // 16 ms heartbeat serves it; the clock gates frames to its fps itself.
+    bool         clock_anim   = false;
     // Modal blocking: set while a modal child dialog is up (X11 has no native
     // per-window input disable, so dispatch_x_event swallows input to a
     // disabled window). See platform_set_window_enabled.
@@ -317,7 +320,7 @@ namespace
   bool any_window_animating()
   {
     for (auto& kv : g_windows)
-      if (kv.second->toast_anim ||
+      if (kv.second->toast_anim || kv.second->clock_anim ||
           kv.second->bouncing_grid_index || kv.second->bouncing_section_index)
         return true;
     return false;
@@ -395,11 +398,22 @@ namespace
       if (g_windows.count(lw->win)) paint_window(lw);
   }
 
+  void tick_clock(LinuxWindow* lw)
+  {
+    if (lw->clock_anim && lw->session)
+      lw->clock_anim = lw->session->animation_tick(lw->widget_index) != 0;
+  }
+
   void tick_animations()
   {
-    for (auto& kv : g_windows) {
-      if (kv.second->toast_anim) kv.second->needs_paint = true;
-      step_scroll_bounce(kv.second);
+    // Snapshot: a tick only invalidates, but stay safe against window churn.
+    std::vector<LinuxWindow*> wins;
+    wins.reserve(g_windows.size());
+    for (auto& kv : g_windows) wins.push_back(kv.second);
+    for (auto* lw : wins) {
+      if (lw->toast_anim) lw->needs_paint = true;
+      step_scroll_bounce(lw);
+      tick_clock(lw);
     }
     // Once nothing is animating, drop back to a blocking select() (no 60 Hz
     // wakeups). Toast start/stop also touch arm_timer; this catches the
@@ -1986,6 +2000,7 @@ namespace
       lw->last_tick_ms = now;
       if (lw->toast_anim) lw->needs_paint = true;
       step_scroll_bounce(lw);   // advance any GRID/SECTION spring-back
+      tick_clock(lw);
       neui_detail::theme_dbus_dispatch();   // pick up system dark/light changes
     }
     if (paint_pending(lw)) paint_window(lw);
@@ -2601,6 +2616,24 @@ namespace
     static_cast<LinuxWindow*>(native_handle)->toast_anim = false;
     if (!any_window_animating()) arm_timer(false);   // back to idle: no wakeups
   }
+
+  void platform_set_animation_timer(void* native_handle, uint32_t interval_ms)
+  {
+    if (!native_handle) return;
+    auto* lw = static_cast<LinuxWindow*>(native_handle);
+    if (lw->clock_anim == (interval_ms != 0)) return;  // re-arming would reset it
+    lw->clock_anim = interval_ms != 0;
+    if (lw->clock_anim) {
+      ensure_timerfd();
+      arm_timer(true);
+    } else if (!any_window_animating()) {
+      arm_timer(false);
+    }
+  }
+
+  // No reduced-motion source is read on Linux yet (the desktop portal only
+  // carries it on recent versions); animation always runs.
+  bool platform_reduced_motion() { return false; }
 
   uint64_t platform_now_ms()
   {

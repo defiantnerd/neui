@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -68,14 +69,16 @@ namespace neui_detail
 
   // Draws `sa` over (x, y, w, h) of the painter's current space with the
   // given uniform values (uniform_components floats; null = the defaults)
-  // and neui_time `time` (already wrapped). False when nothing was drawn.
+  // and neui_time `time` (already wrapped; `clock` when it is the animation
+  // clock's frame). False when nothing was drawn.
   //
   // On the device grid, a backend with GPU programs runs the shader straight
   // on the target's pixels (no image); everywhere else the CPU renders an
   // image into the cache.
   inline bool shader_paint(neui_painter_t* p, const ShaderAsset& sa, ShaderCache& cache,
                            float x, float y, float w, float h,
-                           float resolution, float time, const float* uniforms)
+                           float resolution, float time, const float* uniforms,
+                           bool clock = false)
   {
     namespace nsl = neui::nsl;
     if (!p || !p->backend || !p->ctx || !sa.program || !p->backend->draw_bitmap) return false;
@@ -139,6 +142,7 @@ namespace neui_detail
     key.time = d.time;
     key.uniforms = d.uniforms;
     key.uniform_count = n;
+    key.clock = clock && (nsl::flags(prog) & nsl::NSL_READS_TIME);
     ShaderCacheEntry* e = cache.get(key, [&](ShaderCacheEntry& out) {
       const nsl::Placement pl = nsl::placement(d);
       if (pl.w <= 0 || pl.h <= 0) return false;
@@ -293,8 +297,14 @@ namespace neui_detail
     std::vector<float> values;
     shader_layer_uniforms(L, *sa->program, bag, values);
     const float res = effective_float(L, "resolution", L.shader_resolution, bag);
-    const float t = neui::nsl::wrap_time(effective_float(L, "time", L.shader_time, bag));
-    shader_paint(p, *sa, *cache, x, y, w, h, res, t, values.empty() ? nullptr : values.data());
+    // Neither set nor bound, the time is the animation clock's, read only by
+    // a program that uses it: reading it makes the widget animate.
+    const bool clock = !L.shader_time_set && L.bindings.find("time") == L.bindings.end() &&
+                       (neui::nsl::flags(*sa->program) & neui::nsl::NSL_READS_TIME);
+    const float t = neui::nsl::wrap_time(clock ? cache->clock().time()
+                                               : effective_float(L, "time", L.shader_time, bag));
+    shader_paint(p, *sa, *cache, x, y, w, h, res, t, values.empty() ? nullptr : values.data(),
+                 clock);
   }
 
   // True when the layer at `slot` is the fallback of a SHADER layer that can
@@ -322,7 +332,12 @@ namespace neui_detail
       return false;
     std::vector<float> values;
     shader_uniform_values(*sa->program, d->uniforms, d->uniform_count, values);
-    return shader_paint(p, *sa, *cache, d->x, d->y, d->width, d->height, d->resolution,
-                        neui::nsl::wrap_time(d->time), values.empty() ? nullptr : values.data());
+    // A time read from animation_time is the clock's frame: its images are
+    // dropped frame by frame like the layer's.
+    const float t  = neui::nsl::wrap_time(d->time);
+    const float ct = neui::nsl::wrap_time(cache->clock().frame());
+    return shader_paint(p, *sa, *cache, d->x, d->y, d->width, d->height, d->resolution, t,
+                        values.empty() ? nullptr : values.data(),
+                        std::memcmp(&t, &ct, sizeof t) == 0);
   }
 }  // namespace neui_detail

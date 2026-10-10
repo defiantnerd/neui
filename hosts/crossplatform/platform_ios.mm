@@ -303,6 +303,9 @@ API_AVAILABLE(ios(13.4))
   // animation invalidates it (which paint_toast itself triggers when the toast
   // finishes its lifetime, so the link doesn't spin forever).
   CADisplayLink*     _toast_link;
+  // Animation clock heartbeat (Session::animation_tick); _anim_ms its interval.
+  NSTimer*           _anim_timer;
+  uint32_t           _anim_ms;
   // iPad pointer hover (MILESTONE 6). A UIHoverGestureRecognizer fires only for
   // a pointing device (trackpad / mouse), never for a finger, so it drives
   // wd.hovered without breaking the "no hover on touch" divergence. nil until
@@ -318,6 +321,7 @@ API_AVAILABLE(ios(13.4))
 // rather than stacking a second one; toastStop is a silent no-op if none runs.
 - (void)toastStart;
 - (void)toastStop;
+- (void)animSetInterval:(uint32_t)ms;
 // Attach the iPad pointer hover gesture + pointer interaction. Idempotent; a
 // no-op on iOS < 13.4 (the UIKey / hover machinery doesn't exist there).
 - (void)installEnhancedInput;
@@ -1622,12 +1626,35 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer*)other
 
 // Stop the heartbeat when the view leaves the hierarchy so a stray link can't
 // outlive its frame (e.g. a frame destroyed mid-toast).
+// Animation clock heartbeat. An NSTimer rather than a display link: the clock
+// gates frames to its fps, and the interval it asks for is often longer.
+- (void)animSetInterval:(uint32_t)ms
+{
+  if (ms == _anim_ms) return;
+  if (_anim_timer) { [_anim_timer invalidate]; _anim_timer = nil; }
+  _anim_ms = ms;
+  if (!ms) return;
+  _anim_timer = [NSTimer timerWithTimeInterval:ms / 1000.0
+                                         target:self
+                                       selector:@selector(animTick:)
+                                       userInfo:nil
+                                        repeats:YES];
+  [[NSRunLoop mainRunLoop] addTimer:_anim_timer forMode:NSRunLoopCommonModes];
+}
+
+- (void)animTick:(NSTimer*)timer
+{
+  (void)timer;
+  [self animSetInterval:session ? session->animation_tick(widget_index) : 0];
+}
+
 - (void)willMoveToWindow:(UIWindow*)newWindow
 {
   [super willMoveToWindow:newWindow];
   if (!newWindow) {
     [self toastStop];
     [self scrollLinkStop];   // don't let a momentum glide outlive the frame
+    [self animSetInterval:0];
   }
 }
 
@@ -2341,6 +2368,8 @@ namespace xpl_host
     // recycled, and a new frame must not inherit the old one's status bar.
     neui_detail::ios_frame_forget(neui_widget_t{ wd.widget_id });
     if (!wd.native_handle) return;
+    // The timer retains the view, which would outlive the session.
+    [neui_view_for_window(wd.native_handle) animSetInterval:0];
 
     // Tear down the render context before the view goes away.
     auto* backend = xpl_host::platform_get_backend();
@@ -2636,6 +2665,16 @@ namespace xpl_host
     NEUIView* view = neui_view_for_window(native_handle);
     [view toastStop];
   }
+  void platform_set_animation_timer(void* native_handle, uint32_t interval_ms)
+  {
+    [neui_view_for_window(native_handle) animSetInterval:interval_ms];
+  }
+
+  bool platform_reduced_motion()
+  {
+    return UIAccessibilityIsReduceMotionEnabled();
+  }
+
   // Monotonic clock (ms) for the shared toast phase math. CACurrentMediaTime is
   // mach_absolute_time-backed (seconds since boot, unaffected by wall-clock
   // changes); the shared code only ever reads differences, so the absolute

@@ -268,6 +268,9 @@ namespace neui_detail
     neui_asset_t             shader            = asset_none;
     float                    shader_resolution = 1.0f;
     float                    shader_time       = 0.0f;
+    // Whether "time" was set. A layer with neither a set nor a bound time
+    // runs on the session's animation clock (anim_clock.h).
+    bool                     shader_time_set   = false;
     // Slot of the layer that paints instead when this one cannot render
     // (no shader support, no shader asset). 0 = none.
     uint32_t                 fallback          = 0;
@@ -768,7 +771,7 @@ namespace neui_detail
         return true;
       }
       if (prop == "resolution") { L.shader_resolution = v; return true; }
-      if (prop == "time")       { L.shader_time       = v; return true; }
+      if (prop == "time")       { L.shader_time = v; L.shader_time_set = true; return true; }
     }
     // "<prop>.step" is the quantisation of THAT prop's binding (see
     // eval_binding_float). The compound API has no bind-with-step entry point

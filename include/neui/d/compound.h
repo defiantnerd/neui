@@ -359,8 +359,12 @@ extern "C" {
     //     "resolution"   float shading density, (0, 4]; default 1 = one shader
     //                    evaluation per device pixel. 0.5 shades a quarter of
     //                    the pixels and scales the result up. Bindable.
-    //     "time"         float neui_time in seconds (wrapped to [0, 3600));
-    //                    default 0. Bind it to an attr to animate.
+    //     "time"         float neui_time in seconds (wrapped to [0, 3600)).
+    //                    Neither set nor bound, a shader that reads neui_time
+    //                    runs on the session's animation clock and the widget
+    //                    repaints by itself (NEUI_API_SHADER animation_time,
+    //                    set_animation_fps, set_animation_paused). Set or bind
+    //                    it to drive the time yourself; set to 0 to freeze.
     //     "fallback"     int   layer handle (.id) of a layer that paints only
     //                    when this shader layer cannot: on a host without
     //                    NEUI_API_SHADER, or with no shader asset set. 0 = none.

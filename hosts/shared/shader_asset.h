@@ -25,6 +25,7 @@
 #include <neui/d/shader.h>
 
 #include "../../src/shader/nsl.h"
+#include "anim_clock.h"
 
 namespace neui_detail
 {
@@ -53,7 +54,13 @@ namespace neui_detail
   // keeps one upload per render context (re-made after device loss).
   //
   // It also owns each shader's GPU program where the backend has them
-  // (draw_shader_program): shaders drawn that way need no image.
+  // (draw_shader_program): shaders drawn that way need no image, and the
+  // session's animation clock (anim_clock.h), which the paths that read it
+  // reach through the same painter thunk.
+  //
+  // Images made at the clock's time are only good for one frame: making one
+  // drops the clock images of other times, so an animation keeps one image
+  // per widget instead of filling the budget and pushing out the rest.
 
   // The inputs an image is rendered from. `time` is 0 for a program that
   // does not read neui_time; `uniforms` holds uniform_components floats.
@@ -66,6 +73,7 @@ namespace neui_detail
     float        time = 0.0f;
     const float* uniforms = nullptr;
     size_t       uniform_count = 0;
+    bool         clock = false;       // `time` is the animation clock's frame
   };
 
   struct ShaderCacheEntry
@@ -77,6 +85,7 @@ namespace neui_detail
     float              w = 0.0f, h = 0.0f, scale = 1.0f, fx = 0.0f, fy = 0.0f, time = 0.0f;
     std::vector<float> uniforms;
     uint64_t           hash = 0;
+    bool               clock = false;
 
     // The image: BGRA8 premultiplied, w_px x h_px, belonging (px, py) shader
     // px from the floored origin (always 0 in practice).
@@ -118,7 +127,7 @@ namespace neui_detail
       auto range = _map.equal_range(h);
       for (auto it = range.first; it != range.second; ++it) {
         ShaderCacheEntry& e = *it->second;
-        if (matches(e, key)) { e.stamp = ++_clock; ++_hits; return &e; }
+        if (matches(e, key)) { e.stamp = ++_stamp; ++_hits; return &e; }
       }
       auto e = std::make_unique<ShaderCacheEntry>();
       e->uid = key.uid;
@@ -126,13 +135,15 @@ namespace neui_detail
       e->fx = key.fx; e->fy = key.fy; e->time = key.time;
       e->uniforms.assign(key.uniforms, key.uniforms + key.uniform_count);
       e->hash = h;
+      e->clock = key.clock;
+      if (key.clock) drop_clock_images(key.time, backend);
       try {
         if (!render(*e)) return nullptr;
       } catch (const std::bad_alloc&) {
         return nullptr;
       }
       ++_renders;
-      e->stamp = ++_clock;
+      e->stamp = ++_stamp;
       _bytes += e->pixels.size();
       ShaderCacheEntry* out = e.get();
       _map.emplace(h, std::move(e));
@@ -230,6 +241,10 @@ namespace neui_detail
       evict_to_budget(nullptr, backend);
     }
 
+    // The session's animation clock.
+    AnimClock&       clock()       { return _anim; }
+    const AnimClock& clock() const { return _anim; }
+
     size_t   budget() const  { return _budget; }
     size_t   bytes() const   { return _bytes; }
     size_t   size() const    { return _map.size(); }
@@ -269,6 +284,16 @@ namespace neui_detail
       return _map.erase(it);
     }
 
+    void drop_clock_images(float time, neui_render_backend_t* backend)
+    {
+      for (auto it = _map.begin(); it != _map.end();) {
+        if (it->second->clock && std::memcmp(&it->second->time, &time, sizeof time) != 0)
+          it = erase(it, backend);
+        else
+          ++it;
+      }
+    }
+
     void evict_to_budget(const ShaderCacheEntry* keep, neui_render_backend_t* backend)
     {
       while (_bytes > _budget) {
@@ -287,9 +312,10 @@ namespace neui_detail
     bool     _gpu_enabled = true;
     size_t   _bytes   = 0;
     size_t   _budget  = k_default_budget;
-    uint64_t _clock   = 0;
+    uint64_t _stamp   = 0;
     uint64_t _renders = 0;
     uint64_t _hits    = 0;
+    AnimClock _anim;
   };
 
   // The uniform value array execute() takes: every declared default, then

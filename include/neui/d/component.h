@@ -79,7 +79,8 @@
 //         "path": [ {"m":[4,3]}, {"l":[15,10]}, {"l":[4,17]}, {"l":[9,10]}, {"z":true} ] },
 //       // a shader layer: uniforms are "#AARRGGBB" colours, numbers or arrays;
 //       // "u.<name>" props bind; "fallback" names the layer shown where the
-//       // shader cannot render (no NEUI_API_SHADER, or it failed to compile):
+//       // shader cannot render (no NEUI_API_SHADER, or it failed to compile);
+//       // a shader that reads neui_time animates unless "time" is set or bound:
 //       { "kind": "shader", "z": -2, "size": "fill", "shader": "glow",
 //         "uniforms": { "accent": "#FF3FA9F5", "radius": 0.4 },
 //         "bind": { "u.value": { "attr": "neui.param.value", "step": 0.0078125 } },

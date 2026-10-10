@@ -111,9 +111,13 @@ void wake_app_event_pump()
   // Toast animation heartbeat. 60 Hz tick that just invalidates the view;
   // paint_toast self-terminates when the toast lifetime expires.
   NSTimer*           _toast_timer;
+  // Animation clock heartbeat (Session::animation_tick); _anim_ms its interval.
+  NSTimer*           _anim_timer;
+  uint32_t           _anim_ms;
 }
 - (void)toastStart;
 - (void)toastStop;
+- (void)animSetInterval:(uint32_t)ms;
 @end
 
 @implementation NEUIView
@@ -522,6 +526,28 @@ void wake_app_event_pump()
 {
   (void)timer;
   [self setNeedsDisplay:YES];
+}
+
+// --- Animation clock heartbeat ----------------------------------------------
+
+- (void)animSetInterval:(uint32_t)ms
+{
+  if (ms == _anim_ms) return;
+  if (_anim_timer) { [_anim_timer invalidate]; _anim_timer = nil; }
+  _anim_ms = ms;
+  if (!ms) return;
+  _anim_timer = [NSTimer timerWithTimeInterval:ms / 1000.0
+                                         target:self
+                                       selector:@selector(animTick:)
+                                       userInfo:nil
+                                        repeats:YES];
+  [[NSRunLoop currentRunLoop] addTimer:_anim_timer forMode:NSRunLoopCommonModes];
+}
+
+- (void)animTick:(NSTimer*)timer
+{
+  (void)timer;
+  [self animSetInterval:session ? session->animation_tick(widget_index) : 0];
 }
 
 // Feed a wheel NSEvent into a scrolling SECTION's per-axis kinetics. The
@@ -1564,6 +1590,9 @@ namespace xpl_host
   void platform_destroy_window(WidgetData& wd)
   {
     if (!wd.native_handle) return;
+    // The timer retains the view, which would outlive the session.
+    if (NSView* cv = frame_content_view(wd.native_handle); [cv isKindOfClass:[NEUIView class]])
+      [(NEUIView*)cv animSetInterval:0];
 
     // Embedded PLUGWINDOW: no NSWindow, no delegate - release the render ctx
     // here (standalone frames do it in the delegate's windowWillClose:) and
@@ -2085,6 +2114,18 @@ namespace xpl_host
     if ([cv isKindOfClass:[NEUIView class]]) {
       [(NEUIView*)cv toastStop];
     }
+  }
+
+  void platform_set_animation_timer(void* native_handle, uint32_t interval_ms)
+  {
+    if (!native_handle) return;
+    NSView* cv = frame_content_view(native_handle);
+    if ([cv isKindOfClass:[NEUIView class]]) [(NEUIView*)cv animSetInterval:interval_ms];
+  }
+
+  bool platform_reduced_motion()
+  {
+    return [[NSWorkspace sharedWorkspace] accessibilityDisplayShouldReduceMotion];
   }
 
   uint64_t platform_now_ms()

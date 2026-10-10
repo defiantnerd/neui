@@ -130,6 +130,16 @@ namespace xpl_host
   void platform_start_toast_animation(void* native_handle);
   void platform_stop_toast_animation(void* native_handle);
 
+  // Run a frame's animation timer every interval_ms, calling
+  // Session::animation_tick(frame index) and continuing at the interval it
+  // returns; 0 stops it. Setting the interval it already runs at leaves it
+  // undisturbed. A platform may run a fixed heartbeat instead (Linux: the
+  // shared 16 ms one), as the clock gates frames itself.
+  void platform_set_animation_timer(void* native_handle, uint32_t interval_ms);
+
+  // Whether the OS asks for reduced motion (the animation clock stands).
+  bool platform_reduced_motion();
+
   // Returns monotonic milliseconds since some fixed reference. Used by
   // the toast overlay to drive phase math independently of frame-rate.
   uint64_t platform_now_ms();

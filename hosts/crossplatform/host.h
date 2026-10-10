@@ -890,6 +890,18 @@ namespace xpl_host
     // rect computed from stale abs_x / abs_y is never the only repaint.
     void invalidate_widget_rect(uint32_t widget_index);
 
+    // ---- Animation clock (hosts/shared/anim_clock.h) ----
+    // A CUSTOMDRAW paint that reads the session's animation clock (a SHADER
+    // layer on neui_time, shader_api->animation_time) marks its widget with
+    // the frame being painted (_anim_frame); after the frame, paint_frame
+    // runs the frame's timer (platform_set_animation_timer) while it has
+    // animating widgets. The timer calls animation_tick, which returns the
+    // interval to continue at (0 = stop).
+    uint32_t animation_tick(uint32_t frame_index);
+    uint32_t animation_interval(uint32_t frame_index);
+    neui_detail::AnimClock& anim_clock() { return _asset_manager.shader_cache().clock(); }
+    uint32_t _anim_frame = 0;
+
 #ifdef NEUI_PLATFORM_LVGL
     // Retained-mode paint entries (LVGL Option C prototype). The LVGL
     // platform dispatches one widget at a time from per-object draw events;

@@ -1186,7 +1186,7 @@ namespace neui_detail
               lo.emplace_back("shader", njson_str(*nm));
           if (L->shader_resolution != defL.shader_resolution)
             lo.emplace_back("resolution", njson_num(L->shader_resolution));
-          if (L->shader_time != defL.shader_time)
+          if (L->shader_time_set)
             lo.emplace_back("time", njson_num(L->shader_time));
           if (!L->shader_uniforms.empty()) {
             std::vector<std::string> keys;

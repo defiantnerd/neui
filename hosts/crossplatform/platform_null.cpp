@@ -132,6 +132,8 @@ namespace xpl_host
   // still paint a single frame if the client invalidates manually.
   void platform_start_toast_animation(void* /*native_handle*/)                {}
   void platform_stop_toast_animation(void* /*native_handle*/)                 {}
+  void platform_set_animation_timer(void* /*native_handle*/, uint32_t /*ms*/) {}
+  bool platform_reduced_motion()                                              { return false; }
   uint64_t platform_now_ms()                                                  { return 0; }
 
   // No surface to show a message box on; 0 = failure per the contract.
