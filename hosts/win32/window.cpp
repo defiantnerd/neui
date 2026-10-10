@@ -16,10 +16,16 @@
 #include "../shared/win32/dark_menu_win32.h"
 #include "../shared/win32/dark_menubar_win32.h"
 
+#include <string>
+#include <vector>
+
 #include <winrt/windows.foundation.h>
 #include <winrt/Windows.UI.ViewManagement.h>
 
-int main(int argc, wchar_t** argv);
+// The client's main, called from WinMain below. Clients write the standard
+// `int main(int, char**)` (MSVC does not mangle main, so a mismatch would
+// still link and hand them UTF-16), so it gets UTF-8 arguments.
+int main(int argc, char** argv);
 
 namespace win32_host
 {
@@ -1605,7 +1611,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
   win32_host::set_hinstance(hInstance);
   win32_host::register_classes();
   win32_host::register_host();
-  int argc;
-  wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-  return main(argc, argv);
+  int wargc = 0;
+  wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+  std::vector<std::string> args;
+  for (int i = 0; wargv && i < wargc; ++i) {
+    const int wl = static_cast<int>(wcslen(wargv[i]));
+    const int n = WideCharToMultiByte(CP_UTF8, 0, wargv[i], wl, nullptr, 0, nullptr, nullptr);
+    std::string a(n > 0 ? static_cast<size_t>(n) : 0u, '\0');
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, wargv[i], wl, &a[0], n, nullptr, nullptr);
+    args.push_back(std::move(a));
+  }
+  if (wargv) LocalFree(wargv);
+  std::vector<char*> argv;
+  for (auto& a : args) argv.push_back(&a[0]);
+  argv.push_back(nullptr);
+  return main(static_cast<int>(args.size()), argv.data());
 }
