@@ -66,6 +66,13 @@ endif()
 
 add_test(NAME neui_tests COMMAND neui_tests)
 
+# Shader phase 0: CPU executor prototype + benchmark. Its ctest entry checks
+# that every compiler / CPU produces the same shader bits. Not on iOS (a plain
+# console program; iOS only launches app bundles).
+if(NOT NEUI_IOS)
+  add_subdirectory(shader_bench)
+endif()
+
 # macOS-only: DAW-embedding harness (fake host NSWindow + NSView slot,
 # embeds a PLUGWINDOW via NEUI_API_EMBED). Needs a GUI session, so it is
 # built but NOT registered with ctest; run
