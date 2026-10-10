@@ -403,46 +403,55 @@ class Builder {
 // the same bits; the checksums compare them.
 // ---------------------------------------------------------------------------
 
+// The SIMD helpers must inline into the kernels; MSVC's heuristics otherwise
+// leave the larger ones (sin, exp2, ...) as calls that pass vectors through
+// memory.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define NSB_FI __forceinline
+#else
+#define NSB_FI inline __attribute__((always_inline))
+#endif
+
 // -DNSB_FORCE_PORTABLE builds the fallback on any CPU, to test it.
 #if NSB_X86 && !defined(NSB_FORCE_PORTABLE)
 #include <emmintrin.h>
 struct F4 { __m128 v; };
 struct I4 { __m128i v; };  // int32 lanes; a mask is all-ones / all-zeros
-inline F4 f4_load(const float* p) { return {_mm_loadu_ps(p)}; }
-inline void f4_store(float* p, F4 a) { _mm_storeu_ps(p, a.v); }
-inline F4 f4(float f) { return {_mm_set1_ps(f)}; }
-inline I4 i4(int32_t i) { return {_mm_set1_epi32(i)}; }
-inline F4 operator+(F4 a, F4 b) { return {_mm_add_ps(a.v, b.v)}; }
-inline F4 operator-(F4 a, F4 b) { return {_mm_sub_ps(a.v, b.v)}; }
-inline F4 operator*(F4 a, F4 b) { return {_mm_mul_ps(a.v, b.v)}; }
-inline F4 operator/(F4 a, F4 b) { return {_mm_div_ps(a.v, b.v)}; }
-inline F4 f4_sqrt(F4 a) { return {_mm_sqrt_ps(a.v)}; }
-inline I4 f4_lt(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmplt_ps(a.v, b.v))}; }
-inline I4 f4_gt(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpgt_ps(a.v, b.v))}; }
-inline I4 f4_ge(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpge_ps(a.v, b.v))}; }
-inline I4 f4_eq(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpeq_ps(a.v, b.v))}; }
-inline I4 f4_ne(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpneq_ps(a.v, b.v))}; }
-inline F4 f4_sel(I4 m, F4 a, F4 b) {
+NSB_FI F4 f4_load(const float* p) { return {_mm_loadu_ps(p)}; }
+NSB_FI void f4_store(float* p, F4 a) { _mm_storeu_ps(p, a.v); }
+NSB_FI F4 f4(float f) { return {_mm_set1_ps(f)}; }
+NSB_FI I4 i4(int32_t i) { return {_mm_set1_epi32(i)}; }
+NSB_FI F4 operator+(F4 a, F4 b) { return {_mm_add_ps(a.v, b.v)}; }
+NSB_FI F4 operator-(F4 a, F4 b) { return {_mm_sub_ps(a.v, b.v)}; }
+NSB_FI F4 operator*(F4 a, F4 b) { return {_mm_mul_ps(a.v, b.v)}; }
+NSB_FI F4 operator/(F4 a, F4 b) { return {_mm_div_ps(a.v, b.v)}; }
+NSB_FI F4 f4_sqrt(F4 a) { return {_mm_sqrt_ps(a.v)}; }
+NSB_FI I4 f4_lt(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmplt_ps(a.v, b.v))}; }
+NSB_FI I4 f4_gt(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpgt_ps(a.v, b.v))}; }
+NSB_FI I4 f4_ge(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpge_ps(a.v, b.v))}; }
+NSB_FI I4 f4_eq(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpeq_ps(a.v, b.v))}; }
+NSB_FI I4 f4_ne(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpneq_ps(a.v, b.v))}; }
+NSB_FI F4 f4_sel(I4 m, F4 a, F4 b) {
   const __m128 mm = _mm_castsi128_ps(m.v);
   return {_mm_or_ps(_mm_and_ps(mm, a.v), _mm_andnot_ps(mm, b.v))};
 }
-inline I4 i4_sel(I4 m, I4 a, I4 b) {
+NSB_FI I4 i4_sel(I4 m, I4 a, I4 b) {
   return {_mm_or_si128(_mm_and_si128(m.v, a.v), _mm_andnot_si128(m.v, b.v))};
 }
-inline I4 f4_bits(F4 a) { return {_mm_castps_si128(a.v)}; }
-inline F4 f4_from_bits(I4 a) { return {_mm_castsi128_ps(a.v)}; }
-inline I4 f4_trunc(F4 a) { return {_mm_cvttps_epi32(a.v)}; }  // in-range values only
-inline F4 i4_to_f4(I4 a) { return {_mm_cvtepi32_ps(a.v)}; }
-inline I4 operator+(I4 a, I4 b) { return {_mm_add_epi32(a.v, b.v)}; }
-inline I4 operator-(I4 a, I4 b) { return {_mm_sub_epi32(a.v, b.v)}; }
-inline I4 operator&(I4 a, I4 b) { return {_mm_and_si128(a.v, b.v)}; }
-inline I4 operator|(I4 a, I4 b) { return {_mm_or_si128(a.v, b.v)}; }
-inline I4 operator^(I4 a, I4 b) { return {_mm_xor_si128(a.v, b.v)}; }
-template <int N> inline I4 i4_shl(I4 a) { return {_mm_slli_epi32(a.v, N)}; }
-template <int N> inline I4 i4_shr(I4 a) { return {_mm_srli_epi32(a.v, N)}; }  // logical
-inline I4 i4_lt(I4 a, I4 b) { return {_mm_cmplt_epi32(a.v, b.v)}; }
-inline I4 i4_eq(I4 a, I4 b) { return {_mm_cmpeq_epi32(a.v, b.v)}; }
-inline I4 i4_mul(I4 a, I4 b) {  // low 32 bits; SSE2 has no pmulld
+NSB_FI I4 f4_bits(F4 a) { return {_mm_castps_si128(a.v)}; }
+NSB_FI F4 f4_from_bits(I4 a) { return {_mm_castsi128_ps(a.v)}; }
+NSB_FI I4 f4_trunc(F4 a) { return {_mm_cvttps_epi32(a.v)}; }  // in-range values only
+NSB_FI F4 i4_to_f4(I4 a) { return {_mm_cvtepi32_ps(a.v)}; }
+NSB_FI I4 operator+(I4 a, I4 b) { return {_mm_add_epi32(a.v, b.v)}; }
+NSB_FI I4 operator-(I4 a, I4 b) { return {_mm_sub_epi32(a.v, b.v)}; }
+NSB_FI I4 operator&(I4 a, I4 b) { return {_mm_and_si128(a.v, b.v)}; }
+NSB_FI I4 operator|(I4 a, I4 b) { return {_mm_or_si128(a.v, b.v)}; }
+NSB_FI I4 operator^(I4 a, I4 b) { return {_mm_xor_si128(a.v, b.v)}; }
+template <int N> NSB_FI I4 i4_shl(I4 a) { return {_mm_slli_epi32(a.v, N)}; }
+template <int N> NSB_FI I4 i4_shr(I4 a) { return {_mm_srli_epi32(a.v, N)}; }  // logical
+NSB_FI I4 i4_lt(I4 a, I4 b) { return {_mm_cmplt_epi32(a.v, b.v)}; }
+NSB_FI I4 i4_eq(I4 a, I4 b) { return {_mm_cmpeq_epi32(a.v, b.v)}; }
+NSB_FI I4 i4_mul(I4 a, I4 b) {  // low 32 bits; SSE2 has no pmulld
   const __m128i p02 = _mm_mul_epu32(a.v, b.v);
   const __m128i p13 = _mm_mul_epu32(_mm_srli_epi64(a.v, 32), _mm_srli_epi64(b.v, 32));
   return {_mm_unpacklo_epi32(_mm_shuffle_epi32(p02, 0x08), _mm_shuffle_epi32(p13, 0x08))};
@@ -451,85 +460,85 @@ inline I4 i4_mul(I4 a, I4 b) {  // low 32 bits; SSE2 has no pmulld
 #include <arm_neon.h>
 struct F4 { float32x4_t v; };
 struct I4 { int32x4_t v; };
-inline F4 f4_load(const float* p) { return {vld1q_f32(p)}; }
-inline void f4_store(float* p, F4 a) { vst1q_f32(p, a.v); }
-inline F4 f4(float f) { return {vdupq_n_f32(f)}; }
-inline I4 i4(int32_t i) { return {vdupq_n_s32(i)}; }
-inline F4 operator+(F4 a, F4 b) { return {vaddq_f32(a.v, b.v)}; }
-inline F4 operator-(F4 a, F4 b) { return {vsubq_f32(a.v, b.v)}; }
-inline F4 operator*(F4 a, F4 b) { return {vmulq_f32(a.v, b.v)}; }
-inline F4 operator/(F4 a, F4 b) { return {vdivq_f32(a.v, b.v)}; }
-inline F4 f4_sqrt(F4 a) { return {vsqrtq_f32(a.v)}; }
-inline I4 m4(uint32x4_t m) { return {vreinterpretq_s32_u32(m)}; }
-inline I4 f4_lt(F4 a, F4 b) { return m4(vcltq_f32(a.v, b.v)); }
-inline I4 f4_gt(F4 a, F4 b) { return m4(vcgtq_f32(a.v, b.v)); }
-inline I4 f4_ge(F4 a, F4 b) { return m4(vcgeq_f32(a.v, b.v)); }
-inline I4 f4_eq(F4 a, F4 b) { return m4(vceqq_f32(a.v, b.v)); }
-inline I4 f4_ne(F4 a, F4 b) { return m4(vmvnq_u32(vceqq_f32(a.v, b.v))); }
-inline F4 f4_sel(I4 m, F4 a, F4 b) { return {vbslq_f32(vreinterpretq_u32_s32(m.v), a.v, b.v)}; }
-inline I4 i4_sel(I4 m, I4 a, I4 b) { return {vbslq_s32(vreinterpretq_u32_s32(m.v), a.v, b.v)}; }
-inline I4 f4_bits(F4 a) { return {vreinterpretq_s32_f32(a.v)}; }
-inline F4 f4_from_bits(I4 a) { return {vreinterpretq_f32_s32(a.v)}; }
-inline I4 f4_trunc(F4 a) { return {vcvtq_s32_f32(a.v)}; }  // in-range values only
-inline F4 i4_to_f4(I4 a) { return {vcvtq_f32_s32(a.v)}; }
-inline I4 operator+(I4 a, I4 b) { return {vaddq_s32(a.v, b.v)}; }
-inline I4 operator-(I4 a, I4 b) { return {vsubq_s32(a.v, b.v)}; }
-inline I4 operator&(I4 a, I4 b) { return {vandq_s32(a.v, b.v)}; }
-inline I4 operator|(I4 a, I4 b) { return {vorrq_s32(a.v, b.v)}; }
-inline I4 operator^(I4 a, I4 b) { return {veorq_s32(a.v, b.v)}; }
-template <int N> inline I4 i4_shl(I4 a) { return {vshlq_n_s32(a.v, N)}; }
-template <int N> inline I4 i4_shr(I4 a) {  // logical
+NSB_FI F4 f4_load(const float* p) { return {vld1q_f32(p)}; }
+NSB_FI void f4_store(float* p, F4 a) { vst1q_f32(p, a.v); }
+NSB_FI F4 f4(float f) { return {vdupq_n_f32(f)}; }
+NSB_FI I4 i4(int32_t i) { return {vdupq_n_s32(i)}; }
+NSB_FI F4 operator+(F4 a, F4 b) { return {vaddq_f32(a.v, b.v)}; }
+NSB_FI F4 operator-(F4 a, F4 b) { return {vsubq_f32(a.v, b.v)}; }
+NSB_FI F4 operator*(F4 a, F4 b) { return {vmulq_f32(a.v, b.v)}; }
+NSB_FI F4 operator/(F4 a, F4 b) { return {vdivq_f32(a.v, b.v)}; }
+NSB_FI F4 f4_sqrt(F4 a) { return {vsqrtq_f32(a.v)}; }
+NSB_FI I4 m4(uint32x4_t m) { return {vreinterpretq_s32_u32(m)}; }
+NSB_FI I4 f4_lt(F4 a, F4 b) { return m4(vcltq_f32(a.v, b.v)); }
+NSB_FI I4 f4_gt(F4 a, F4 b) { return m4(vcgtq_f32(a.v, b.v)); }
+NSB_FI I4 f4_ge(F4 a, F4 b) { return m4(vcgeq_f32(a.v, b.v)); }
+NSB_FI I4 f4_eq(F4 a, F4 b) { return m4(vceqq_f32(a.v, b.v)); }
+NSB_FI I4 f4_ne(F4 a, F4 b) { return m4(vmvnq_u32(vceqq_f32(a.v, b.v))); }
+NSB_FI F4 f4_sel(I4 m, F4 a, F4 b) { return {vbslq_f32(vreinterpretq_u32_s32(m.v), a.v, b.v)}; }
+NSB_FI I4 i4_sel(I4 m, I4 a, I4 b) { return {vbslq_s32(vreinterpretq_u32_s32(m.v), a.v, b.v)}; }
+NSB_FI I4 f4_bits(F4 a) { return {vreinterpretq_s32_f32(a.v)}; }
+NSB_FI F4 f4_from_bits(I4 a) { return {vreinterpretq_f32_s32(a.v)}; }
+NSB_FI I4 f4_trunc(F4 a) { return {vcvtq_s32_f32(a.v)}; }  // in-range values only
+NSB_FI F4 i4_to_f4(I4 a) { return {vcvtq_f32_s32(a.v)}; }
+NSB_FI I4 operator+(I4 a, I4 b) { return {vaddq_s32(a.v, b.v)}; }
+NSB_FI I4 operator-(I4 a, I4 b) { return {vsubq_s32(a.v, b.v)}; }
+NSB_FI I4 operator&(I4 a, I4 b) { return {vandq_s32(a.v, b.v)}; }
+NSB_FI I4 operator|(I4 a, I4 b) { return {vorrq_s32(a.v, b.v)}; }
+NSB_FI I4 operator^(I4 a, I4 b) { return {veorq_s32(a.v, b.v)}; }
+template <int N> NSB_FI I4 i4_shl(I4 a) { return {vshlq_n_s32(a.v, N)}; }
+template <int N> NSB_FI I4 i4_shr(I4 a) {  // logical
   return {vreinterpretq_s32_u32(vshrq_n_u32(vreinterpretq_u32_s32(a.v), N))};
 }
-inline I4 i4_lt(I4 a, I4 b) { return m4(vcltq_s32(a.v, b.v)); }
-inline I4 i4_eq(I4 a, I4 b) { return m4(vceqq_s32(a.v, b.v)); }
-inline I4 i4_mul(I4 a, I4 b) { return {vmulq_s32(a.v, b.v)}; }  // low 32 bits
+NSB_FI I4 i4_lt(I4 a, I4 b) { return m4(vcltq_s32(a.v, b.v)); }
+NSB_FI I4 i4_eq(I4 a, I4 b) { return m4(vceqq_s32(a.v, b.v)); }
+NSB_FI I4 i4_mul(I4 a, I4 b) { return {vmulq_s32(a.v, b.v)}; }  // low 32 bits
 #else
 // Portable fallback: four scalars per value.
 struct F4 { float v[4]; };
 struct I4 { int32_t v[4]; };
 #define NSB_F4_LOOP(expr) for (int k_ = 0; k_ < 4; ++k_) { expr; }
-inline F4 f4_load(const float* p) { F4 r; NSB_F4_LOOP(r.v[k_] = p[k_]) return r; }
-inline void f4_store(float* p, F4 a) { NSB_F4_LOOP(p[k_] = a.v[k_]) }
-inline F4 f4(float f) { F4 r; NSB_F4_LOOP(r.v[k_] = f) return r; }
-inline I4 i4(int32_t i) { I4 r; NSB_F4_LOOP(r.v[k_] = i) return r; }
-inline F4 operator+(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] + b.v[k_]) return r; }
-inline F4 operator-(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] - b.v[k_]) return r; }
-inline F4 operator*(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] * b.v[k_]) return r; }
-inline F4 operator/(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] / b.v[k_]) return r; }
-inline F4 f4_sqrt(F4 a) { F4 r; NSB_F4_LOOP(r.v[k_] = std::sqrt(a.v[k_])) return r; }
-inline I4 f4_lt(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] < b.v[k_] ? -1 : 0) return r; }
-inline I4 f4_gt(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] > b.v[k_] ? -1 : 0) return r; }
-inline I4 f4_ge(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] >= b.v[k_] ? -1 : 0) return r; }
-inline I4 f4_eq(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] == b.v[k_] ? -1 : 0) return r; }
-inline I4 f4_ne(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] != b.v[k_] ? -1 : 0) return r; }
-inline F4 f4_sel(I4 m, F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = m.v[k_] ? a.v[k_] : b.v[k_]) return r; }
-inline I4 i4_sel(I4 m, I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = m.v[k_] ? a.v[k_] : b.v[k_]) return r; }
-inline I4 f4_bits(F4 a) { I4 r; std::memcpy(r.v, a.v, 16); return r; }
-inline F4 f4_from_bits(I4 a) { F4 r; std::memcpy(r.v, a.v, 16); return r; }
-inline I4 f4_trunc(F4 a) { I4 r; NSB_F4_LOOP(r.v[k_] = static_cast<int32_t>(a.v[k_])) return r; }
-inline F4 i4_to_f4(I4 a) { F4 r; NSB_F4_LOOP(r.v[k_] = static_cast<float>(a.v[k_])) return r; }
-inline uint32_t u_(int32_t x) { return static_cast<uint32_t>(x); }
-inline int32_t s_(uint32_t x) { return static_cast<int32_t>(x); }
-inline I4 operator+(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) + u_(b.v[k_]))) return r; }
-inline I4 operator-(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) - u_(b.v[k_]))) return r; }
-inline I4 operator&(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] & b.v[k_]) return r; }
-inline I4 operator|(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] | b.v[k_]) return r; }
-inline I4 operator^(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] ^ b.v[k_]) return r; }
-template <int N> inline I4 i4_shl(I4 a) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) << N)) return r; }
-template <int N> inline I4 i4_shr(I4 a) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) >> N)) return r; }
-inline I4 i4_lt(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] < b.v[k_] ? -1 : 0) return r; }
-inline I4 i4_eq(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] == b.v[k_] ? -1 : 0) return r; }
-inline I4 i4_mul(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) * u_(b.v[k_]))) return r; }
+NSB_FI F4 f4_load(const float* p) { F4 r; NSB_F4_LOOP(r.v[k_] = p[k_]) return r; }
+NSB_FI void f4_store(float* p, F4 a) { NSB_F4_LOOP(p[k_] = a.v[k_]) }
+NSB_FI F4 f4(float f) { F4 r; NSB_F4_LOOP(r.v[k_] = f) return r; }
+NSB_FI I4 i4(int32_t i) { I4 r; NSB_F4_LOOP(r.v[k_] = i) return r; }
+NSB_FI F4 operator+(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] + b.v[k_]) return r; }
+NSB_FI F4 operator-(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] - b.v[k_]) return r; }
+NSB_FI F4 operator*(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] * b.v[k_]) return r; }
+NSB_FI F4 operator/(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] / b.v[k_]) return r; }
+NSB_FI F4 f4_sqrt(F4 a) { F4 r; NSB_F4_LOOP(r.v[k_] = std::sqrt(a.v[k_])) return r; }
+NSB_FI I4 f4_lt(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] < b.v[k_] ? -1 : 0) return r; }
+NSB_FI I4 f4_gt(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] > b.v[k_] ? -1 : 0) return r; }
+NSB_FI I4 f4_ge(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] >= b.v[k_] ? -1 : 0) return r; }
+NSB_FI I4 f4_eq(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] == b.v[k_] ? -1 : 0) return r; }
+NSB_FI I4 f4_ne(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] != b.v[k_] ? -1 : 0) return r; }
+NSB_FI F4 f4_sel(I4 m, F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = m.v[k_] ? a.v[k_] : b.v[k_]) return r; }
+NSB_FI I4 i4_sel(I4 m, I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = m.v[k_] ? a.v[k_] : b.v[k_]) return r; }
+NSB_FI I4 f4_bits(F4 a) { I4 r; std::memcpy(r.v, a.v, 16); return r; }
+NSB_FI F4 f4_from_bits(I4 a) { F4 r; std::memcpy(r.v, a.v, 16); return r; }
+NSB_FI I4 f4_trunc(F4 a) { I4 r; NSB_F4_LOOP(r.v[k_] = static_cast<int32_t>(a.v[k_])) return r; }
+NSB_FI F4 i4_to_f4(I4 a) { F4 r; NSB_F4_LOOP(r.v[k_] = static_cast<float>(a.v[k_])) return r; }
+NSB_FI uint32_t u_(int32_t x) { return static_cast<uint32_t>(x); }
+NSB_FI int32_t s_(uint32_t x) { return static_cast<int32_t>(x); }
+NSB_FI I4 operator+(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) + u_(b.v[k_]))) return r; }
+NSB_FI I4 operator-(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) - u_(b.v[k_]))) return r; }
+NSB_FI I4 operator&(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] & b.v[k_]) return r; }
+NSB_FI I4 operator|(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] | b.v[k_]) return r; }
+NSB_FI I4 operator^(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] ^ b.v[k_]) return r; }
+template <int N> NSB_FI I4 i4_shl(I4 a) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) << N)) return r; }
+template <int N> NSB_FI I4 i4_shr(I4 a) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) >> N)) return r; }
+NSB_FI I4 i4_lt(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] < b.v[k_] ? -1 : 0) return r; }
+NSB_FI I4 i4_eq(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] == b.v[k_] ? -1 : 0) return r; }
+NSB_FI I4 i4_mul(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) * u_(b.v[k_]))) return r; }
 #undef NSB_F4_LOOP
 #endif
 
-inline F4 f4_neg(F4 a) { return f4_from_bits(f4_bits(a) ^ i4(INT32_MIN)); }
-inline F4 f4_abs(F4 a) { return f4_from_bits(f4_bits(a) & i4(0x7fffffff)); }
-inline F4 f4_min(F4 x, F4 y) { return f4_sel(f4_lt(y, x), y, x); }
-inline F4 f4_max(F4 x, F4 y) { return f4_sel(f4_lt(x, y), y, x); }
+NSB_FI F4 f4_neg(F4 a) { return f4_from_bits(f4_bits(a) ^ i4(INT32_MIN)); }
+NSB_FI F4 f4_abs(F4 a) { return f4_from_bits(f4_bits(a) & i4(0x7fffffff)); }
+NSB_FI F4 f4_min(F4 x, F4 y) { return f4_sel(f4_lt(y, x), y, x); }
+NSB_FI F4 f4_max(F4 x, F4 y) { return f4_sel(f4_lt(x, y), y, x); }
 
-inline F4 f4_floor(F4 x) {
+NSB_FI F4 f4_floor(F4 x) {
   const I4 in = f4_lt(f4_abs(x), f4(8388608.0f));
   const F4 xc = f4_sel(in, x, f4(0.0f));
   const F4 t  = i4_to_f4(f4_trunc(xc));
@@ -537,36 +546,36 @@ inline F4 f4_floor(F4 x) {
   return f4_sel(in, f, x);
 }
 
-inline void f4_sincos_reduce(F4 x, F4& r, I4& q) {
+NSB_FI void f4_sincos_reduce(F4 x, F4& r, I4& q) {
   const F4 k = f4_floor(x * f4(0.636619772f) + f4(0.5f));
   r = ((x - k * f4(1.5703125f)) - k * f4(4.837512969970703125e-4f)) - k * f4(7.54978995489188216e-8f);
   F4 m = k - f4(4.0f) * f4_floor(k * f4(0.25f));
   m = f4_sel(f4_eq(m, m), m, f4(0.0f));
   q = f4_trunc(m);
 }
-inline F4 f4_sin_poly(F4 r) {
+NSB_FI F4 f4_sin_poly(F4 r) {
   const F4 z = r * r;
   return ((f4(-1.9515295891e-4f) * z + f4(8.3321608736e-3f)) * z - f4(1.6666654611e-1f)) * z * r + r;
 }
-inline F4 f4_cos_poly(F4 r) {
+NSB_FI F4 f4_cos_poly(F4 r) {
   const F4 z = r * r;
   return ((f4(2.443315711809948e-5f) * z - f4(1.388731625493765e-3f)) * z + f4(4.166664568298827e-2f)) * z * z
          - f4(0.5f) * z + f4(1.0f);
 }
-inline F4 f4_sin(F4 x) {
+NSB_FI F4 f4_sin(F4 x) {
   F4 r; I4 q; f4_sincos_reduce(x, r, q);
   const F4 s = f4_sin_poly(r), c = f4_cos_poly(r);
   const F4 v = f4_sel(i4_eq(q & i4(1), i4(1)), c, s);
   return f4_sel(i4_eq(q & i4(2), i4(2)), f4_neg(v), v);
 }
-inline F4 f4_cos(F4 x) {
+NSB_FI F4 f4_cos(F4 x) {
   F4 r; I4 q; f4_sincos_reduce(x, r, q);
   const F4 s = f4_sin_poly(r), c = f4_cos_poly(r);
   const F4 v = f4_sel(i4_eq(q & i4(1), i4(1)), s, c);
   return f4_sel(i4_eq((q + i4(1)) & i4(2), i4(2)), f4_neg(v), v);
 }
 
-inline F4 f4_exp2(F4 x) {
+NSB_FI F4 f4_exp2(F4 x) {
   F4 xc = f4_sel(f4_lt(x, f4(-126.0f)), f4(-126.0f), x);
   xc = f4_sel(f4_gt(xc, f4(127.99999f)), f4(127.99999f), xc);
   xc = f4_sel(f4_eq(xc, xc), xc, f4(0.0f));
@@ -589,7 +598,7 @@ inline F4 f4_exp2(F4 x) {
   return f4_sel(f4_eq(x, x), r, x);
 }
 
-inline F4 f4_log2(F4 x) {
+NSB_FI F4 f4_log2(F4 x) {
   const I4 den = f4_lt(x, f4(1.17549435e-38f));
   const F4 xs = f4_sel(den, x * f4(8388608.0f), x);
   const I4 u = f4_bits(xs);
@@ -611,7 +620,7 @@ inline F4 f4_log2(F4 x) {
   return f4_sel(f4_eq(x, x), r, x);
 }
 
-inline F4 f4_atan2(F4 y, F4 x) {
+NSB_FI F4 f4_atan2(F4 y, F4 x) {
   const F4 ax = f4_abs(x), ay = f4_abs(y);
   const I4 xbig = f4_gt(ax, ay);
   const F4 mx = f4_sel(xbig, ax, ay);
@@ -628,14 +637,14 @@ inline F4 f4_atan2(F4 y, F4 x) {
   return f4_sel(f4_lt(y, f4(0.0f)), f4_neg(r), r);
 }
 
-inline I4 f4_hash_coord(F4 v) {
+NSB_FI I4 f4_hash_coord(F4 v) {
   v = f4_sel(f4_eq(v, v), v, f4(0.0f));
   v = f4_floor(v);
   v = f4_sel(f4_lt(v, f4(-16777216.0f)), f4(-16777216.0f),
              f4_sel(f4_gt(v, f4(16777216.0f)), f4(16777216.0f), v));
   return f4_trunc(v);
 }
-inline F4 f4_hash2(F4 x, F4 y) {
+NSB_FI F4 f4_hash2(F4 x, F4 y) {
   I4 h = i4_mul(f4_hash_coord(x), i4(static_cast<int32_t>(0x8da6b343u))) ^
          i4_mul(f4_hash_coord(y), i4(static_cast<int32_t>(0xd8163841u)));
   h = h ^ i4_shr<16>(h); h = i4_mul(h, i4(0x7feb352d));
@@ -712,31 +721,60 @@ void run_block(const Program& pg, float (*R)[L]) {
   }
 }
 
-// Output rule: clamp to [0, 1] with NaN -> 0, premultiply in float, then
-// round half up to 8 bits. Premultiplied channels never exceed alpha.
-inline float clamp01(float v) { return v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f; }
-inline uint8_t q8(float v) { return static_cast<uint8_t>(static_cast<int32_t>(v * 255.0f + 0.5f)); }
+// A layer as the executor sees it: logical origin (translation included),
+// logical size, effective scale, and the dither pragma.
+struct Layer {
+  float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f, s = 1.0f;
+  bool dither = false;
+  // Device rect [X0, X1) x [Y0, Y1) and the whole device pixels it touches.
+  float X0() const { return x * s; }
+  float Y0() const { return y * s; }
+  float X1() const { return X0() + w * s; }
+  float Y1() const { return Y0() + h * s; }
+  int i0() const { return static_cast<int>(m_floor(X0())); }
+  int j0() const { return static_cast<int>(m_floor(Y0())); }
+  int w_px() const { return static_cast<int>(-m_floor(-X1())) - i0(); }
+  int h_px() const { return static_cast<int>(-m_floor(-Y1())) - j0(); }
+};
 
-// Renders a w_px x h_px premultiplied BGRA8 bitmap for a layer of size
-// (w_log, h_log) logical px. Pixel (i, j) is evaluated at
-// p = ((i + 0.5) * (w_log / w_px), (j + 0.5) * (h_log / h_px)).
+// Output rule (docs/shader-language.md section 11): clamp to [0, 1] with
+// NaN -> 0, multiply alpha by the pixel's coverage of the layer rect,
+// premultiply in float, round alpha half up, and round colour with the
+// dither offset d (0.5 without dithering), never above alpha.
+inline float clamp01(float v) { return v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f; }
+inline int32_t q8(float v, float d) { return static_cast<int32_t>(v * 255.0f + d); }
+const float k_bayer4[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+
+// Renders the layer's w_px x h_px premultiplied BGRA8 bitmap. Bitmap pixel
+// (i, j) is evaluated at p = ((i + 0.5 - fx) / s, (j + 0.5 - fy) / s), where
+// fx = X0 - floor(X0) is the sub-pixel remainder of the layer origin.
 template <int L, bool Simd>
-void render(const Program& pg, int w_px, int h_px, float w_log, float h_log,
-            uint8_t* out, std::vector<float>& regs) {
+void render(const Program& pg, const Layer& ly, uint8_t* out, std::vector<float>& regs) {
   FpEnvGuard fp;
   regs.assign(static_cast<size_t>(pg.nregs) * L, 0.0f);
   float (*R)[L] = reinterpret_cast<float (*)[L]>(regs.data());
   for (const auto& kv : pg.consts)
     for (int i = 0; i < L; ++i) R[kv.first][i] = kv.second;
-  const float sx = w_log / static_cast<float>(w_px);
-  const float sy = h_log / static_cast<float>(h_px);
+  const int w_px = ly.w_px(), h_px = ly.h_px();
+  const float X0 = ly.X0(), X1 = ly.X1(), Y0 = ly.Y0(), Y1 = ly.Y1();
+  const float fi0 = static_cast<float>(ly.i0()), fj0 = static_cast<float>(ly.j0());
+  const float fx = X0 - fi0, fy = Y0 - fj0;
+  // p.x and the column coverage depend only on the column: computed once per
+  // draw, padded to whole lanes.
+  const int w_pad = (w_px + L - 1) / L * L;
+  std::vector<float> px_col(static_cast<size_t>(w_pad)), cx_col(static_cast<size_t>(w_pad));
+  for (int i = 0; i < w_pad; ++i) {
+    const float col = fi0 + static_cast<float>(i);
+    px_col[static_cast<size_t>(i)] = ((static_cast<float>(i) + 0.5f) - fx) / ly.s;
+    cx_col[static_cast<size_t>(i)] = m_min(col + 1.0f, X1) - m_max(col, X0);
+  }
   for (int y = 0; y < h_px; ++y) {
-    const float pyv = (static_cast<float>(y) + 0.5f) * sy;
+    const float pyv = ((static_cast<float>(y) + 0.5f) - fy) / ly.s;
+    const float row = fj0 + static_cast<float>(y);
+    const float cy = m_min(row + 1.0f, Y1) - m_max(row, Y0);
     for (int x0 = 0; x0 < w_px; x0 += L) {
-      for (int i = 0; i < L; ++i) {
-        R[pg.px][i] = (static_cast<float>(x0 + i) + 0.5f) * sx;
-        R[pg.py][i] = pyv;
-      }
+      std::memcpy(R[pg.px], px_col.data() + x0, sizeof(float) * L);
+      for (int i = 0; i < L; ++i) R[pg.py][i] = pyv;
       if constexpr (Simd) run_block_simd<L>(pg, R); else run_block<L>(pg, R);
       const int n = std::min(L, w_px - x0);
       uint8_t* dst = out + (static_cast<size_t>(y) * static_cast<size_t>(w_px) + static_cast<size_t>(x0)) * 4u;
@@ -745,11 +783,13 @@ void render(const Program& pg, int w_px, int h_px, float w_log, float h_log,
       const float* cb = R[pg.out[2]];
       const float* ca = R[pg.out[3]];
       for (int i = 0; i < n; ++i) {
-        const float a = clamp01(ca[i]);
-        dst[4 * i + 0] = q8(clamp01(cb[i]) * a);
-        dst[4 * i + 1] = q8(clamp01(cg[i]) * a);
-        dst[4 * i + 2] = q8(clamp01(cr[i]) * a);
-        dst[4 * i + 3] = q8(a);
+        const float a = clamp01(ca[i]) * (cx_col[static_cast<size_t>(x0 + i)] * cy);
+        const float d = ly.dither ? (k_bayer4[(y & 3) * 4 + ((x0 + i) & 3)] + 0.5f) / 16.0f : 0.5f;
+        const int32_t a8 = q8(a, 0.5f);
+        dst[4 * i + 0] = static_cast<uint8_t>(std::min(q8(clamp01(cb[i]) * a, d), a8));
+        dst[4 * i + 1] = static_cast<uint8_t>(std::min(q8(clamp01(cg[i]) * a, d), a8));
+        dst[4 * i + 2] = static_cast<uint8_t>(std::min(q8(clamp01(cr[i]) * a, d), a8));
+        dst[4 * i + 3] = static_cast<uint8_t>(a8);
       }
     }
   }
@@ -759,25 +799,25 @@ void render(const Program& pg, int w_px, int h_px, float w_log, float h_log,
 // SIMD kernels (L >= 4).
 enum Exec { EXEC_AUTO, EXEC_SIMD };
 
-void render_lane(int lane, Exec exec, const Program& pg, int w_px, int h_px, float w_log, float h_log,
-                 uint8_t* out, std::vector<float>& regs) {
+void render_lane(int lane, Exec exec, const Program& pg, const Layer& ly, uint8_t* out,
+                 std::vector<float>& regs) {
   if (exec == EXEC_SIMD && lane >= 4) {
     switch (lane) {
-      case 8:   render<8, true>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-      case 32:  render<32, true>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-      case 64:  render<64, true>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-      case 128: render<128, true>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-      default:  render<256, true>(pg, w_px, h_px, w_log, h_log, out, regs); break;
+      case 8:   render<8, true>(pg, ly, out, regs); break;
+      case 32:  render<32, true>(pg, ly, out, regs); break;
+      case 64:  render<64, true>(pg, ly, out, regs); break;
+      case 128: render<128, true>(pg, ly, out, regs); break;
+      default:  render<256, true>(pg, ly, out, regs); break;
     }
     return;
   }
   switch (lane) {
-    case 1:   render<1, false>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-    case 8:   render<8, false>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-    case 32:  render<32, false>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-    case 64:  render<64, false>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-    case 128: render<128, false>(pg, w_px, h_px, w_log, h_log, out, regs); break;
-    default:  render<256, false>(pg, w_px, h_px, w_log, h_log, out, regs); break;
+    case 1:   render<1, false>(pg, ly, out, regs); break;
+    case 8:   render<8, false>(pg, ly, out, regs); break;
+    case 32:  render<32, false>(pg, ly, out, regs); break;
+    case 64:  render<64, false>(pg, ly, out, regs); break;
+    case 128: render<128, false>(pg, ly, out, regs); break;
+    default:  render<256, false>(pg, ly, out, regs); break;
   }
 }
 
@@ -944,20 +984,30 @@ void run_sweeps(uint32_t out[SW_COUNT]) {
   out[SW_HASH] = crc_floats(r);
 }
 
-// Program output checksums: every program at 64x64 logical px, 1x / 1.5x / 2x.
-const float k_check_scales[3] = {1.0f, 1.5f, 2.0f};
+// Program output checksums: every program on a 64x64 logical layer at 1x,
+// 1.5x and 2x, plus one at a fractional origin (sub-pixel remainder and edge
+// coverage) with dithering.
+const int k_check_cases = 4;
+const char* const k_case_names[k_check_cases] = {"@1x", "@1.5x", "@2x", "@1.5x+(10.5,7.25) dither"};
 
-void run_programs(int lane, Exec exec, uint32_t out[k_program_count][3]) {
+Layer check_layer(int c) {
+  Layer ly;
+  ly.w = 64.0f; ly.h = 64.0f;
+  ly.s = c == 0 ? 1.0f : (c == 2 ? 2.0f : 1.5f);
+  if (c == 3) { ly.x = 10.5f; ly.y = 7.25f; ly.dither = true; }
+  return ly;
+}
+
+void run_programs(int lane, Exec exec, uint32_t out[k_program_count][k_check_cases]) {
   std::vector<float> regs;
   std::vector<uint8_t> px;
   for (int p = 0; p < k_program_count; ++p) {
-    for (int s = 0; s < 3; ++s) {
-      const float scale = k_check_scales[s];
-      const int wpx = static_cast<int>(64.0f * scale + 0.5f);
-      const Program pg = k_programs[p](64.0f, 64.0f, scale);
-      px.assign(static_cast<size_t>(wpx) * static_cast<size_t>(wpx) * 4u, 0);
-      render_lane(lane, exec, pg, wpx, wpx, 64.0f, 64.0f, px.data(), regs);
-      out[p][s] = crc32(px.data(), px.size());
+    for (int c = 0; c < k_check_cases; ++c) {
+      const Layer ly = check_layer(c);
+      const Program pg = k_programs[p](ly.w, ly.h, ly.s);
+      px.assign(static_cast<size_t>(ly.w_px()) * static_cast<size_t>(ly.h_px()) * 4u, 0);
+      render_lane(lane, exec, pg, ly, px.data(), regs);
+      out[p][c] = crc32(px.data(), px.size());
     }
   }
 }
@@ -966,11 +1016,11 @@ void run_programs(int lane, Exec exec, uint32_t out[k_program_count][3]) {
 // compiler and CPU must reproduce them bit for bit.
 const uint32_t k_expected_sweeps[SW_COUNT] = {
   0xa7b0f0d9u, 0x29044e7au, 0x874e33a3u, 0xee75588du, 0x1604235bu, 0x63c4a42du};
-const uint32_t k_expected_programs[k_program_count][3] = {
-  {0x2a9a8213u, 0x54e1557bu, 0xee728ee9u},   // ring_glow
-  {0x7c0c8a88u, 0x7b1f3ef3u, 0xc3a5be00u},   // plasma
-  {0xb5c47a56u, 0x0aa70a77u, 0xece030ddu},   // fbm5
-  {0x2f875d31u, 0x4368de7bu, 0x6d3adc5au}};  // synthetic150
+const uint32_t k_expected_programs[k_program_count][k_check_cases] = {
+  {0x2a9a8213u, 0x54e1557bu, 0xee728ee9u, 0x5df3967cu},   // ring_glow
+  {0x7c0c8a88u, 0x4b5d1775u, 0xc3a5be00u, 0x31e6247au},   // plasma
+  {0xb5c47a56u, 0x0aa70a77u, 0xece030ddu, 0x2a990a46u},   // fbm5
+  {0x2f875d31u, 0x4368de7bu, 0x6d3adc5au, 0x5ef500b2u}};  // synthetic150
 
 // Returns the number of mismatches; prints every checksum.
 int check(bool verbose) {
@@ -982,21 +1032,21 @@ int check(bool verbose) {
     bad += ok ? 0 : 1;
     std::printf("  sweep %-6s 0x%08x %s\n", k_sweep_names[i], static_cast<unsigned>(sw[i]), ok ? "ok" : "MISMATCH");
   }
-  uint32_t pr[k_program_count][3];
+  uint32_t pr[k_program_count][k_check_cases];
   run_programs(64, EXEC_SIMD, pr);
   for (int p = 0; p < k_program_count; ++p) {
     const Program pg = k_programs[p](64.0f, 64.0f, 1.0f);
-    for (int s = 0; s < 3; ++s) {
-      const bool ok = pr[p][s] == k_expected_programs[p][s];
+    for (int c = 0; c < k_check_cases; ++c) {
+      const bool ok = pr[p][c] == k_expected_programs[p][c];
       bad += ok ? 0 : 1;
-      std::printf("  prog  %-12s @%.1fx 0x%08x %s\n", pg.name, static_cast<double>(k_check_scales[s]),
-                  static_cast<unsigned>(pr[p][s]), ok ? "ok" : "MISMATCH");
+      std::printf("  prog  %-12s %-26s 0x%08x %s\n", pg.name, k_case_names[c],
+                  static_cast<unsigned>(pr[p][c]), ok ? "ok" : "MISMATCH");
     }
   }
 
   // Neither the lane width nor the kernel flavour may change a single bit:
   // scalar one pixel at a time, auto-vectorised and explicit SIMD.
-  uint32_t pr1[k_program_count][3], pr2[k_program_count][3];
+  uint32_t pr1[k_program_count][k_check_cases], pr2[k_program_count][k_check_cases];
   run_programs(1, EXEC_AUTO, pr1);
   run_programs(64, EXEC_AUTO, pr2);
   const bool lanes_ok = std::memcmp(pr, pr1, sizeof(pr)) == 0 && std::memcmp(pr, pr2, sizeof(pr)) == 0;
@@ -1008,7 +1058,7 @@ int check(bool verbose) {
     HostFlushToZero host;
     uint32_t sw2[SW_COUNT];
     run_sweeps(sw2);
-    uint32_t pr3[k_program_count][3];
+    uint32_t pr3[k_program_count][k_check_cases];
     run_programs(64, EXEC_SIMD, pr3);
     const bool env_ok = std::memcmp(sw, sw2, sizeof(sw)) == 0 && std::memcmp(pr, pr3, sizeof(pr)) == 0;
     bad += env_ok ? 0 : 1;
@@ -1037,17 +1087,23 @@ double now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-double ns_per_px(int lane, Exec exec, const Program& pg, int wpx, int hpx, float wl, float hl, int reps) {
+double ns_per_px(int lane, Exec exec, const Program& pg, const Layer& ly, int reps) {
   std::vector<float> regs;
-  std::vector<uint8_t> px(static_cast<size_t>(wpx) * static_cast<size_t>(hpx) * 4u);
-  render_lane(lane, exec, pg, wpx, hpx, wl, hl, px.data(), regs);  // warm up
+  std::vector<uint8_t> px(static_cast<size_t>(ly.w_px()) * static_cast<size_t>(ly.h_px()) * 4u);
+  render_lane(lane, exec, pg, ly, px.data(), regs);  // warm up
   double best = 1e30;
   for (int r = 0; r < reps; ++r) {
     const double t0 = now_s();
-    render_lane(lane, exec, pg, wpx, hpx, wl, hl, px.data(), regs);
+    render_lane(lane, exec, pg, ly, px.data(), regs);
     best = std::min(best, now_s() - t0);
   }
-  return best * 1e9 / (static_cast<double>(wpx) * static_cast<double>(hpx));
+  return best * 1e9 / (static_cast<double>(ly.w_px()) * static_cast<double>(ly.h_px()));
+}
+
+Layer timing_layer(float w, float h, float s) {
+  Layer ly;
+  ly.w = w; ly.h = h; ly.s = s;
+  return ly;
 }
 
 void accuracy() {
@@ -1104,10 +1160,11 @@ void report() {
   std::printf("\n");
   for (int p = 0; p < k_program_count; ++p) {
     const Program pg = k_programs[p](120.0f, 120.0f, 2.0f);
+    const Layer knob_ly = timing_layer(120.0f, 120.0f, 2.0f);
     std::printf("  %-13s %4d %5d %4d", pg.name, static_cast<int>(pg.code.size()), pg.transcendentals, pg.nregs);
-    std::printf(" %9.2f", ns_per_px(1, EXEC_AUTO, pg, 240, 240, 120.0f, 120.0f, 7));
-    std::printf(" %9.2f", ns_per_px(64, EXEC_AUTO, pg, 240, 240, 120.0f, 120.0f, 7));
-    for (int l : lanes) std::printf(" %9.2f", ns_per_px(l, EXEC_SIMD, pg, 240, 240, 120.0f, 120.0f, 7));
+    std::printf(" %9.2f", ns_per_px(1, EXEC_AUTO, pg, knob_ly, 7));
+    std::printf(" %9.2f", ns_per_px(64, EXEC_AUTO, pg, knob_ly, 7));
+    for (int l : lanes) std::printf(" %9.2f", ns_per_px(l, EXEC_SIMD, pg, knob_ly, 7));
     std::printf("\n");
   }
 
@@ -1116,9 +1173,10 @@ void report() {
   for (int p = 0; p < k_program_count; ++p) {
     const Program knob = k_programs[p](120.0f, 120.0f, 2.0f);
     const Program bg   = k_programs[p](800.0f, 600.0f, 2.0f);
-    const double knob_ms = ns_per_px(64, EXEC_SIMD, knob, 240, 240, 120.0f, 120.0f, 7) * 240.0 * 240.0 * 1e-6;
-    const double bg_ms   = ns_per_px(64, EXEC_SIMD, bg, 1600, 1200, 800.0f, 600.0f, 2) * 1600.0 * 1200.0 * 1e-6;
-    const double half_ms = ns_per_px(64, EXEC_SIMD, bg, 800, 600, 800.0f, 600.0f, 3) * 800.0 * 600.0 * 1e-6;
+    const Program bg_half = k_programs[p](800.0f, 600.0f, 1.0f);
+    const double knob_ms = ns_per_px(64, EXEC_SIMD, knob, timing_layer(120.0f, 120.0f, 2.0f), 7) * 240.0 * 240.0 * 1e-6;
+    const double bg_ms   = ns_per_px(64, EXEC_SIMD, bg, timing_layer(800.0f, 600.0f, 2.0f), 2) * 1600.0 * 1200.0 * 1e-6;
+    const double half_ms = ns_per_px(64, EXEC_SIMD, bg_half, timing_layer(800.0f, 600.0f, 1.0f), 3) * 800.0 * 600.0 * 1e-6;
     std::printf("  %-13s %11.2f ms %17.1f ms %15.1f ms\n", knob.name, knob_ms, bg_ms, half_ms);
   }
 
