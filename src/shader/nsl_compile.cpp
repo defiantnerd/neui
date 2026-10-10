@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -2133,6 +2134,125 @@ class Lowerer {
 // Finalisation: dead-code removal, the draw / pixel split, register allocation
 // ---------------------------------------------------------------------------
 
+// One register allocation of the pixel program. A linear scan; a destination
+// never shares a register with its own operands, so the kernels may assume no
+// aliasing. Constants and draw values reach registers through OP_LOAD from the
+// pool: all of them up front when `pin` is set, else right before first use.
+struct PixelAlloc {
+  std::vector<Ins> code;
+  std::vector<Program::PoolEntry> pool;
+  int prologue = 0;  // leading OP_LOADs that run once per draw
+  int regs = 0, peak = 0, real_ops = 0, transcendentals = 0;
+  uint16_t px = 0, py = 0, out[4] = {0, 0, 0, 0};
+};
+
+PixelAlloc allocate_pixels(const IR& ir, const std::vector<char>& live, const std::vector<int>& draw_reg,
+                           const int out[4], bool pin) {
+  const size_t n = ir.v.size();
+  PixelAlloc r;
+  std::vector<int> pix_reg(n, -1), pool_index(n, -1), last_use(n, -1);
+  std::vector<char> pinned(n, 0);
+  std::vector<uint16_t> free_regs;
+  int next_reg = 0, live_now = 0;
+  auto alloc = [&]() -> uint16_t {
+    ++live_now;
+    r.peak = std::max(r.peak, live_now);
+    if (!free_regs.empty()) {
+      const uint16_t reg = free_regs.back();
+      free_regs.pop_back();
+      return reg;
+    }
+    return static_cast<uint16_t>(next_reg++);
+  };
+  for (int k = 0; k < 2; ++k) {
+    const uint16_t reg = alloc();
+    pix_reg[static_cast<size_t>(ir.input_ids[k])] = reg;
+    (k == 0 ? r.px : r.py) = reg;
+  }
+  auto pixel_ins = [&](size_t i) { return live[i] && ir.v[i].kind == IR::K_INS && ir.v[i].varying; };
+  for (size_t i = 0; i < n; ++i) {
+    if (!pixel_ins(i)) continue;
+    for (int s : {ir.v[i].a, ir.v[i].b, ir.v[i].c})
+      if (s >= 0) last_use[static_cast<size_t>(s)] = static_cast<int>(i);
+  }
+  for (int c = 0; c < 4; ++c) last_use[static_cast<size_t>(out[c])] = static_cast<int>(n);  // live to the end
+  // Puts a non-varying value into a register.
+  auto load = [&](int id) {
+    if (pix_reg[static_cast<size_t>(id)] >= 0) return;
+    const IR::Val& v = ir.v[static_cast<size_t>(id)];
+    if (pool_index[static_cast<size_t>(id)] < 0) {
+      Program::PoolEntry e;
+      if (v.kind == IR::K_CONST) e.value = v.value;
+      else e.draw_reg = draw_reg[static_cast<size_t>(id)];
+      pool_index[static_cast<size_t>(id)] = static_cast<int>(r.pool.size());
+      r.pool.push_back(e);
+    }
+    Ins in;
+    in.op = OP_LOAD;
+    in.d = alloc();
+    in.a = in.b = in.c = static_cast<uint16_t>(pool_index[static_cast<size_t>(id)]);
+    pix_reg[static_cast<size_t>(id)] = in.d;
+    r.code.push_back(in);
+  };
+  if (pin) {
+    for (size_t i = 0; i < n; ++i) {
+      if (!pixel_ins(i)) continue;
+      for (int s : {ir.v[i].a, ir.v[i].b, ir.v[i].c})
+        if (s >= 0 && !ir.v[static_cast<size_t>(s)].varying) { load(s); pinned[static_cast<size_t>(s)] = 1; }
+    }
+    for (int c = 0; c < 4; ++c)
+      if (!ir.v[static_cast<size_t>(out[c])].varying) { load(out[c]); pinned[static_cast<size_t>(out[c])] = 1; }
+    r.prologue = static_cast<int>(r.code.size());
+  }
+  for (size_t i = 0; i < n; ++i) {
+    if (!pixel_ins(i)) continue;
+    const IR::Val& v = ir.v[i];
+    const int operands[3] = {v.a, v.b, v.c};
+    for (int s : operands)
+      if (s >= 0 && !ir.v[static_cast<size_t>(s)].varying) load(s);
+    Ins in;
+    in.op = v.op;
+    in.d = alloc();
+    pix_reg[i] = in.d;
+    in.a = static_cast<uint16_t>(pix_reg[static_cast<size_t>(v.a)]);
+    in.b = static_cast<uint16_t>(v.b >= 0 ? pix_reg[static_cast<size_t>(v.b)] : in.a);
+    in.c = static_cast<uint16_t>(v.c >= 0 ? pix_reg[static_cast<size_t>(v.c)] : in.a);
+    r.code.push_back(in);
+    ++r.real_ops;
+    if (op_is_transcendental(v.op)) ++r.transcendentals;
+    for (int k = 0; k < 3; ++k) {
+      const int s = operands[k];
+      if (s < 0 || ir.v[static_cast<size_t>(s)].kind == IR::K_INPUT || pinned[static_cast<size_t>(s)]) continue;
+      bool seen = false;  // an operand used twice is freed once
+      for (int j = 0; j < k; ++j) seen = seen || operands[j] == s;
+      if (seen || last_use[static_cast<size_t>(s)] != static_cast<int>(i)) continue;
+      free_regs.push_back(static_cast<uint16_t>(pix_reg[static_cast<size_t>(s)]));
+      pix_reg[static_cast<size_t>(s)] = -1;
+      --live_now;
+    }
+  }
+  for (int c = 0; c < 4; ++c)
+    if (!ir.v[static_cast<size_t>(out[c])].varying) load(out[c]);
+  for (int c = 0; c < 4; ++c) r.out[c] = static_cast<uint16_t>(pix_reg[static_cast<size_t>(out[c])]);
+  r.regs = next_reg;
+  return r;
+}
+
+// NEUI_DEBUG_SHADER_PIN=0 / 1 forces load-on-demand / pinned constants (for
+// measuring the two policies); unset leaves the choice to finalize().
+int debug_pin_policy() {
+  char buf[8] = {0};
+#if defined(_MSC_VER)
+  size_t len = 0;
+  if (getenv_s(&len, buf, sizeof(buf), "NEUI_DEBUG_SHADER_PIN") != 0 || len == 0) return -1;
+#else
+  const char* v = std::getenv("NEUI_DEBUG_SHADER_PIN");
+  if (!v) return -1;
+  std::snprintf(buf, sizeof(buf), "%s", v);
+#endif
+  return buf[0] == '0' ? 0 : buf[0] == '1' ? 1 : -1;
+}
+
 void finalize(const IR& ir, const int out[4], int main_line, int main_col, Program& pg) {
   const size_t n = ir.v.size();
   std::vector<char> live(n, 0);
@@ -2178,99 +2298,32 @@ void finalize(const IR& ir, const int out[4], int main_line, int main_col, Progr
   }
   pg.draw_regs = draw_regs;
 
-  // Pixel program. The position is pinned; constants and draw values come
-  // from the pool through OP_LOAD right before their first use. A linear scan
-  // allocates registers; a destination never shares a register with its own
-  // operands, so the kernels may assume no aliasing.
-  std::vector<int> pix_reg(n, -1);
-  std::vector<int> pool_index(n, -1);
-  int next_reg = 0, transcendentals = 0, live_now = 0, live_peak = 0, real_ops = 0;
-  std::vector<uint16_t> free_regs;
-  auto alloc = [&]() -> uint16_t {
-    ++live_now;
-    live_peak = std::max(live_peak, live_now);
-    if (!free_regs.empty()) {
-      const uint16_t r = free_regs.back();
-      free_regs.pop_back();
-      return r;
-    }
-    return static_cast<uint16_t>(next_reg++);
-  };
-  for (int k = 0; k < 2; ++k) {
-    const int id = ir.input_ids[k];
-    const uint16_t r = static_cast<uint16_t>(next_reg++);
-    pix_reg[static_cast<size_t>(id)] = r;
-    (k == 0 ? pg.px : pg.py) = r;
-  }
-  const int pinned = next_reg;
-  std::vector<int> last_use(n, -1);
-  for (size_t i = 0; i < n; ++i) {
-    const IR::Val& v = ir.v[i];
-    if (!live[i] || v.kind != IR::K_INS || !v.varying) continue;
-    for (int s : {v.a, v.b, v.c})
-      if (s >= 0) last_use[static_cast<size_t>(s)] = static_cast<int>(i);
-  }
-  for (int c = 0; c < 4; ++c) last_use[static_cast<size_t>(out[c])] = static_cast<int>(n);  // live to the end
-  // Makes sure a non-varying value sits in a register.
-  auto load = [&](int id) {
-    if (pix_reg[static_cast<size_t>(id)] >= 0) return;
-    const IR::Val& v = ir.v[static_cast<size_t>(id)];
-    if (pool_index[static_cast<size_t>(id)] < 0) {
-      Program::PoolEntry e;
-      if (v.kind == IR::K_CONST) e.value = v.value;
-      else e.draw_reg = draw_reg[static_cast<size_t>(id)];
-      pool_index[static_cast<size_t>(id)] = static_cast<int>(pg.pixel_pool.size());
-      pg.pixel_pool.push_back(e);
-    }
-    Ins in;
-    in.op = OP_LOAD;
-    in.d = alloc();
-    in.a = in.b = in.c = static_cast<uint16_t>(pool_index[static_cast<size_t>(id)]);
-    pix_reg[static_cast<size_t>(id)] = in.d;
-    pg.pixel_code.push_back(in);
-  };
-  for (size_t i = 0; i < n; ++i) {
-    const IR::Val& v = ir.v[i];
-    if (!live[i] || v.kind != IR::K_INS || !v.varying) continue;
-    const int operands[3] = {v.a, v.b, v.c};
-    for (int s : operands)
-      if (s >= 0 && !ir.v[static_cast<size_t>(s)].varying) load(s);
-    Ins in;
-    in.op = v.op;
-    in.d = alloc();
-    pix_reg[i] = in.d;
-    in.a = static_cast<uint16_t>(pix_reg[static_cast<size_t>(v.a)]);
-    in.b = static_cast<uint16_t>(v.b >= 0 ? pix_reg[static_cast<size_t>(v.b)] : in.a);
-    in.c = static_cast<uint16_t>(v.c >= 0 ? pix_reg[static_cast<size_t>(v.c)] : in.a);
-    pg.pixel_code.push_back(in);
-    ++real_ops;
-    if (op_is_transcendental(v.op)) ++transcendentals;
-    for (int k = 0; k < 3; ++k) {
-      const int s = operands[k];
-      if (s < 0 || ir.v[static_cast<size_t>(s)].kind == IR::K_INPUT) continue;
-      bool seen = false;  // an operand used twice is freed once
-      for (int j = 0; j < k; ++j) seen = seen || operands[j] == s;
-      if (seen || last_use[static_cast<size_t>(s)] != static_cast<int>(i)) continue;
-      free_regs.push_back(static_cast<uint16_t>(pix_reg[static_cast<size_t>(s)]));
-      pix_reg[static_cast<size_t>(s)] = -1;
-      --live_now;
-    }
-  }
-  for (int c = 0; c < 4; ++c)
-    if (!ir.v[static_cast<size_t>(out[c])].varying) load(out[c]);
-  for (int c = 0; c < 4; ++c) pg.out[c] = static_cast<uint16_t>(pix_reg[static_cast<size_t>(out[c])]);
-  pg.pixel_regs = next_reg;
-
-  const int ops = real_ops + static_cast<int>(pg.draw_code.size());
+  // Pixel program. Two allocations: with every constant and draw value
+  // pinned (loaded once per draw by a prologue of OP_LOADs), and with each one
+  // loaded right before its first use and freed after its last. The second
+  // needs the fewest registers and decides the live-value limit; the first is
+  // faster and is used whenever it fits within that limit.
+  PixelAlloc tight = allocate_pixels(ir, live, draw_reg, out, false);
+  const int ops = tight.real_ops + static_cast<int>(pg.draw_code.size());
   if (ops > k_max_ops)
     fail(main_line, main_col, "shader needs " + std::to_string(ops) + " operations; the limit is " + std::to_string(k_max_ops));
-  if (pinned + live_peak > k_max_live)
-    fail(main_line, main_col, "shader needs " + std::to_string(pinned + live_peak) +
+  if (tight.peak > k_max_live)
+    fail(main_line, main_col, "shader needs " + std::to_string(tight.peak) +
                                   " live values per pixel; the limit is " + std::to_string(k_max_live));
-  pg.stat.pixel_ops = real_ops;
+  PixelAlloc pinned = allocate_pixels(ir, live, draw_reg, out, true);
+  const int policy = debug_pin_policy();
+  PixelAlloc& use = (policy != 0 && pinned.peak <= k_max_live) ? pinned : tight;
+  pg.pixel_code = std::move(use.code);
+  pg.pixel_pool = std::move(use.pool);
+  pg.pixel_prologue = use.prologue;
+  pg.pixel_regs = use.regs;
+  pg.px = use.px;
+  pg.py = use.py;
+  for (int c = 0; c < 4; ++c) pg.out[c] = use.out[c];
+  pg.stat.pixel_ops = use.real_ops;
   pg.stat.draw_ops = static_cast<int>(pg.draw_code.size());
   pg.stat.pixel_regs = pg.pixel_regs;
-  pg.stat.transcendentals = transcendentals;
+  pg.stat.transcendentals = use.transcendentals;
 }
 
 }  // namespace

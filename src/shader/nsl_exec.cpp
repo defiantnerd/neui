@@ -83,14 +83,18 @@ std::vector<float> make_pool(const Program& pg, const std::vector<float>& DR) {
   return pool;
 }
 
-void run_pixels_scalar(const Program& pg, const float* pool, float* R) {
-  for (const Ins& in : pg.pixel_code)
+// Runs pixel_code[begin, end).
+void run_pixels_scalar(const Program& pg, size_t begin, size_t end, const float* pool, float* R) {
+  for (size_t k = begin; k < end; ++k) {
+    const Ins& in = pg.pixel_code[k];
     R[in.d] = in.op == OP_LOAD ? pool[in.a] : eval_op(in.op, R[in.a], R[in.b], R[in.c]);
+  }
 }
 
-void run_pixels_simd(const Program& pg, const float* pool, float* R) {
+void run_pixels_simd(const Program& pg, size_t begin, size_t end, const float* pool, float* R) {
   constexpr int L = k_lanes;
-  for (const Ins& in : pg.pixel_code) {
+  for (size_t k = begin; k < end; ++k) {
+    const Ins& in = pg.pixel_code[k];
     float* d = R + static_cast<size_t>(in.d) * L;
     const float* a = R + static_cast<size_t>(in.a) * L;
     const float* b = R + static_cast<size_t>(in.b) * L;
@@ -180,6 +184,9 @@ bool run(const Program& pg, const Draw& d, uint8_t* out, size_t stride) {
   std::vector<float> regs(static_cast<size_t>(pg.pixel_regs) * L);
   float* R = regs.data();
   auto reg = [&](uint16_t r) { return R + static_cast<size_t>(r) * L; };
+  const size_t pro = static_cast<size_t>(pg.pixel_prologue), all = pg.pixel_code.size();
+  if constexpr (Simd) run_pixels_simd(pg, 0, pro, pool.data(), R);  // pinned values, once
+  else run_pixels_scalar(pg, 0, pro, pool.data(), R);
 
   // p.x and the column coverage depend only on the column.
   const int w_pad = (g.w + L - 1) / L * L;
@@ -209,8 +216,8 @@ bool run(const Program& pg, const Draw& d, uint8_t* out, size_t stride) {
     for (int x0 = 0; x0 < g.w; x0 += L) {
       std::memcpy(px, px_col.data() + x0, sizeof(float) * L);
       std::fill(py, py + L, pyv);
-      if constexpr (Simd) run_pixels_simd(pg, pool.data(), R);
-      else run_pixels_scalar(pg, pool.data(), R);
+      if constexpr (Simd) run_pixels_simd(pg, pro, all, pool.data(), R);
+      else run_pixels_scalar(pg, pro, all, pool.data(), R);
       const int n = std::min(L, g.w - x0);
       uint8_t* dst = dst_row + static_cast<size_t>(x0) * 4u;
       const float* cx = cx_col.data() + x0;
@@ -238,6 +245,9 @@ void eval_points(const Program& pg, const Draw& d, const float* xs, const float*
   std::vector<float> regs(static_cast<size_t>(pg.pixel_regs) * L);
   float* R = regs.data();
   auto reg = [&](uint16_t r) { return R + static_cast<size_t>(r) * L; };
+  const size_t pro = static_cast<size_t>(pg.pixel_prologue), all = pg.pixel_code.size();
+  if constexpr (Simd) run_pixels_simd(pg, 0, pro, pool.data(), R);
+  else run_pixels_scalar(pg, 0, pro, pool.data(), R);
   for (int base = 0; base < n; base += L) {
     const int m = std::min(L, n - base);
     float* px = reg(pg.px);
@@ -246,8 +256,8 @@ void eval_points(const Program& pg, const Draw& d, const float* xs, const float*
       px[i] = i < m ? xs[base + i] : 0.0f;
       py[i] = i < m ? ys[base + i] : 0.0f;
     }
-    if constexpr (Simd) run_pixels_simd(pg, pool.data(), R);
-    else run_pixels_scalar(pg, pool.data(), R);
+    if constexpr (Simd) run_pixels_simd(pg, pro, all, pool.data(), R);
+    else run_pixels_scalar(pg, pro, all, pool.data(), R);
     for (int i = 0; i < m; ++i)
       for (int c = 0; c < 4; ++c) out[static_cast<size_t>(base + i) * 4u + static_cast<size_t>(c)] = reg(pg.out[c])[i];
   }

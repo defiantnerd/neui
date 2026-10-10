@@ -97,13 +97,15 @@ struct Program {
   std::vector<detail::RegInit<uint8_t>> draw_reserved;   // <- Reserved
 
   // Pixel program (SIMD, 64 pixels at a time). Constants and draw values
-  // live in a pool and are loaded into registers right before their first
-  // use (OP_LOAD), so they occupy registers only while they are needed.
+  // live in a pool and reach registers through OP_LOAD: normally all of them
+  // in a prologue that runs once per draw (pixel_prologue instructions); when
+  // that would need too many registers, each right before its first use.
   struct PoolEntry {
     float value = 0.0f;
     int draw_reg = -1;  // >= 0: the value is that draw-program register
   };
   std::vector<detail::Ins> pixel_code;
+  int pixel_prologue = 0;
   int pixel_regs = 0;
   std::vector<PoolEntry> pixel_pool;
   uint16_t px = 0, py = 0;         // the pixel position
