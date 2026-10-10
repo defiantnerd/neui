@@ -23,6 +23,12 @@ struct Shader {
 };
 
 const Shader k_shaders[] = {
+  // No per-pixel work: measures the fixed cost per pixel (block loop, output
+  // packing, coverage).
+  {"flat", R"(
+uniform vec4 col = vec4(0.2, 0.4, 0.6, 1.0);
+vec4 main(vec2 p) { return col; }
+)"},
   {"ring_glow", R"(
 uniform float value = 0.65;
 uniform vec4  accent = vec4(0.2, 0.7, 1.0, 1.0);
