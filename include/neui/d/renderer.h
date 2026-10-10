@@ -356,6 +356,18 @@ typedef struct neui_render_backend {
   bool (NEUI_ABI *set_frame_damage)(neui_render_ctx_t ctx,
                                     const float* rects_xywh, int count);
 
+  // --- Device mapping (vtable-appended; NULL = untransformed) -------------
+  //
+  // The current mapping from logical user space to the target's device
+  // pixels (y-down, origin at the target's top-left) as an affine matrix:
+  //   device_x = m[0] * x + m[2] * y + m[4]
+  //   device_y = m[1] * x + m[3] * y + m[5]
+  // It includes the display scale and every transform pushed since
+  // begin_frame. The host uses it to draw a bitmap 1:1 onto whole device
+  // pixels (shader layers). A backend without it is treated as
+  // m = { s, 0, 0, s, 0, 0 } with s = get_scale_factor.
+  void (NEUI_ABI *get_device_transform)(neui_render_ctx_t ctx, float m[6]);
+
 } neui_render_backend_t;
 
 #ifdef __cplusplus

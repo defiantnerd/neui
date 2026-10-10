@@ -1046,6 +1046,19 @@ namespace neui_cairo_backend
     if (st && st->cr) cairo_scale(st->cr, sx, sy);
   }
 
+  // The CTM already maps to the surface's device pixels (begin_frame applies
+  // the display scale), so it is the answer as is.
+  static void cairo_get_device_transform(neui_render_ctx_t raw, float m[6])
+  {
+    auto* st = static_cast<CairoCtx*>(raw);
+    cairo_matrix_t t;
+    if (st && st->cr) cairo_get_matrix(st->cr, &t);
+    else cairo_matrix_init_scale(&t, st ? st->scale : 1.0, st ? st->scale : 1.0);
+    m[0] = static_cast<float>(t.xx); m[1] = static_cast<float>(t.yx);
+    m[2] = static_cast<float>(t.xy); m[3] = static_cast<float>(t.yy);
+    m[4] = static_cast<float>(t.x0); m[5] = static_cast<float>(t.y0);
+  }
+
   // Software backend never device-loses.
   static uint32_t cairo_get_context_generation(neui_render_ctx_t) { return 0u; }
 
@@ -1301,6 +1314,7 @@ namespace neui_cairo_backend
     cairo_stroke_path_styled,
     cairo_stroke_path_gradient,
     cairo_set_frame_damage,
+    cairo_get_device_transform,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

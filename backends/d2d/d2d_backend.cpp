@@ -1791,6 +1791,17 @@ namespace neui_d2d_backend
     if (ctx->target) ctx->target->SetTransform(ctx->current);
   }
 
+  // `current` is in DIPs; the target's DPI maps a DIP to dpi/96 pixels.
+  static void d2d_get_device_transform(neui_render_ctx_t raw, float m[6])
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    const float s = ctx ? static_cast<float>(ctx->dpi) / 96.0f : 1.0f;
+    const D2D1::Matrix3x2F t = ctx ? ctx->current : D2D1::Matrix3x2F::Identity();
+    m[0] = t._11 * s; m[1] = t._12 * s;
+    m[2] = t._21 * s; m[3] = t._22 * s;
+    m[4] = t._31 * s; m[5] = t._32 * s;
+  }
+
   // ---------------------------------------------------------------------------
   // Alpha stack
 
@@ -2090,6 +2101,7 @@ namespace neui_d2d_backend
     d2d_stroke_path_styled,
     d2d_stroke_path_gradient,
     d2d_set_frame_damage,
+    d2d_get_device_transform,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

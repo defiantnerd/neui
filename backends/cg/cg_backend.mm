@@ -85,6 +85,10 @@ namespace neui_cg_backend
     // screen ctxs keep their own buffer, valid once one frame has been drawn.
     std::vector<CGRect> pending_damage;
     bool                has_frame = false;   // off-screen: buffer holds a complete frame
+
+    // The CTM at begin_frame: logical user space, y-down, before any
+    // push_transform. get_device_transform reports the CTM relative to it.
+    CGAffineTransform   base_ctm = CGAffineTransformIdentity;
   };
 
   // ---------------------------------------------------------------------------
@@ -352,6 +356,7 @@ namespace neui_cg_backend
     // Pair with cg_end_frame's restore - keeps clip / transform changes from
     // leaking past one frame even if a widget forgot a pop.
     CGContextSaveGState(st->cg_ctx);
+    st->base_ctm = CGContextGetCTM(st->cg_ctx);
     st->alpha_stack.clear();
     st->font_stack.clear();
     // Partial frame: clip to the accepted damage. AppKit / UIKit already clip
@@ -951,6 +956,22 @@ namespace neui_cg_backend
     CGContextScaleCTM(st->cg_ctx, sx, sy);
   }
 
+  // The CTM's device space is the backing store (y-up for a flipped view), so
+  // report the transforms pushed since begin_frame instead: CTM * base^-1 is
+  // the logical transform, and the backing scale maps it to device pixels.
+  static void cg_get_device_transform(neui_render_ctx_t raw, float m[6])
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    const CGFloat s = st ? st->backing_scale : 1.0;
+    CGAffineTransform t = CGAffineTransformIdentity;
+    if (st && st->cg_ctx)
+      t = CGAffineTransformConcat(CGContextGetCTM(st->cg_ctx),
+                                  CGAffineTransformInvert(st->base_ctm));
+    m[0] = static_cast<float>(t.a * s);  m[1] = static_cast<float>(t.b * s);
+    m[2] = static_cast<float>(t.c * s);  m[3] = static_cast<float>(t.d * s);
+    m[4] = static_cast<float>(t.tx * s); m[5] = static_cast<float>(t.ty * s);
+  }
+
   // CoreGraphics contexts are recreated per draw cycle via set_current_frame
   // and never silently invalidate the way a D3D-backed D2D target can, so
   // there's no generation to advance. Cached target-bound resources are
@@ -1298,6 +1319,7 @@ namespace neui_cg_backend
     cg_stroke_path_styled,
     cg_stroke_path_gradient,
     cg_set_frame_damage,
+    cg_get_device_transform,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }
