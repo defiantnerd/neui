@@ -12,10 +12,18 @@ Implementation-specific constants, scrollbar geometry, multiline cursor math, ed
 
 ## Partial repaint (xpl host)
 
-Status and design record: `plans/xpl-partial-repaint.md`. **Live on Linux / Cairo (P1) and macOS + iOS / CG (P2)**; win32 / D2D still paints full frames (P4), and LVGL has its own retained invalidation.
+Status and design record: `plans/xpl-partial-repaint.md`. **Live on Linux / Cairo and macOS + iOS / CG (P1-P3)**; win32 / D2D still paints full frames (P4 open), and LVGL has its own retained invalidation.
 
-- **What is partial:** client-driven visual changes funnel through `invalidate_widget_visual` (`widgets.cpp`) -> `Session::invalidate_widget_rect`: attr writes, `set_text` / `set_asset` / `set_enabled`, the public `invalidate`, GRID content. That queues the widget's damage footprint (cached frame-local `abs_x` / `abs_y` + `paint_bounds()` + a 4 px margin) via `platform_invalidate_rect`. Everything else stays full-frame until P3: geometry, focus, hover / press (`WidgetData::repaint()`), scroll, overlays.
-- **Invariant 1 - geometry changes repaint fully.** A rect queued from the previous paint's `abs_x` / `abs_y` is only safe because any move / resize / show / hide / scroll requests a full repaint, and a pending full repaint absorbs the rects queued alongside it. Converting a geometry path to rect invalidation means damaging both the old and the new rect.
+- **What is partial:** every invalidation that concerns one widget's own pixels goes through `Session::invalidate_widget_rect`. It queues the widget's damage footprint via `platform_invalidate_rect`: cached frame-local `abs_x` / `abs_y` + `paint_bounds()` + a 4 px margin.
+  - **Client-driven:** the `invalidate_widget_visual` funnel in `widgets.cpp` - attr writes, `set_text` / `set_asset` / `set_enabled`, the public `invalidate`, GRID content.
+  - **Widget-internal:** `WidgetData::repaint()` (caret, typing, value drags, list / tree / grid state, tab switch); hover / press / focus transitions (old + new widget); behavior-driven attr writes.
+  - **Scrolling:** SECTION / GRID scroll and spring-back ticks damage just that container, which covers its children since they are clipped to it (Linux + macOS platform paths).
+  - **Whole-frame:** overlays reaching outside any widget (combo drop list, popup menus, in-frame menubar, toast), theme / DPI / OS-focus changes, expose / resize, and every geometry change.
+- **Invariant 1 - geometry changes repaint fully.**
+  - **Why:** a rect queued from the previous paint's `abs_x` / `abs_y` is only safe because every create / destroy / show / hide / `set_pos` / `set_size` requests a FULL repaint, which absorbs the rects queued alongside it.
+  - **Where:** `notify_tree_changed` in `widgets.cpp`. Before P3 this was an LVGL-only hook, and off LVGL such changes invalidated nothing at all.
+  - **Scrolling** is the one geometry change that stays partial: children of a SECTION / GRID / TABVIEW stay inside the container's rect.
+  - **Converting a geometry path** to rect invalidation means damaging both the old and the new rect.
 - **Invariant 2 - a widget that paints outside its rect overrides `WidgetData::paint_bounds()`.** Otherwise a change leaves stale overflow behind and a neighbour's repaint culls or clips it. `ImageWidget` does this (`NEUI_ATTR_ROTATION` rotates it unclipped; it reports the half-diagonal square whenever the attr exists). CUSTOMDRAW / compound widgets are clipped to their own rect, and focus rings fit in the margin.
 - **Frame path:** `Session::paint_frame(ctx, frame, damage)` hands non-trivial damage (< 60% coverage, `hosts/shared/damage.h`) to the backend's `set_frame_damage`. It culls (`paint_widgets_recursive`: no PREUPDATE / paint for widgets missing the damage, `abs_x` / `abs_y` still refreshed for hit-testing) **only when the backend returned true**. A refusing backend clears everything. Overlays aren't culled; the backend clip limits them.
 - **Per platform:**

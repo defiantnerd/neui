@@ -454,7 +454,7 @@ void wake_app_event_pump()
     neui_detail::grid_compute_viewport(*model, hw->width, hw->height,
                                         cfg.row_h, cfg.header_h);
   bool more = neui_detail::grid_scroll_bounce_step(*model, vp, cfg.row_h);
-  [self setNeedsDisplay:YES];
+  session->invalidate_widget_rect(_grid_bounce_widget);   // the grid only
   if (!more) [self gridStopBounce];
 }
 
@@ -493,7 +493,8 @@ void wake_app_event_pump()
   if (!st || !L) { [self sectionStopBounce]; return; }
   bool more_v = neui_detail::section_scroll_bounce_step(*st, *L, false);
   bool more_h = neui_detail::section_scroll_bounce_step(*st, *L, true);
-  [self setNeedsDisplay:YES];
+  // The section's rect covers its scrolled children (clipped to it).
+  session->invalidate_widget_rect(_section_bounce_widget);
   hw->notify_scroll_changed();
   if (!more_v && !more_h) [self sectionStopBounce];
 }
@@ -576,7 +577,7 @@ void wake_app_event_pump()
       changed = true;
     if (changed) {
       [self sectionStopBounce];
-      [self setNeedsDisplay:YES];
+      session->invalidate_widget_rect(secIdx);
       sw->notify_scroll_changed();
     }
     return;
@@ -602,7 +603,7 @@ void wake_app_event_pump()
 
   if (act_v.stop_bounce  || act_h.stop_bounce)  [self sectionStopBounce];
   if (act_v.changed      || act_h.changed) {
-    [self setNeedsDisplay:YES];
+    session->invalidate_widget_rect(secIdx);
     sw->notify_scroll_changed();
   }
   if (act_v.start_bounce || act_h.start_bounce) [self sectionStartBounce:secIdx];
@@ -665,7 +666,7 @@ void wake_app_event_pump()
       if (delta == 0) return;
       [self gridStopBounce];
       if (grid_scroll_step_rows(*model, vp, cfg.row_h, -delta))
-        [self setNeedsDisplay:YES];
+        session->invalidate_widget_rect(hit);
       return;
     }
 
@@ -682,7 +683,7 @@ void wake_app_event_pump()
 
     GridWheelAction act = grid_scroll_wheel(*model, vp, cfg.row_h, in);
     if (act.stop_bounce)  [self gridStopBounce];
-    if (act.changed)      [self setNeedsDisplay:YES];
+    if (act.changed)      session->invalidate_widget_rect(hit);
     if (act.start_bounce) [self gridStartBounce:hit];
     return;
   }

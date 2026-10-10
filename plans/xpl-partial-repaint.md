@@ -31,7 +31,25 @@ Two deviations from the design below:
   - `neui_partial_repaint_example`.
 - **Reference:** `docs/widget-internals.md`, "Partial repaint".
 
-The P3-P4 and design text below is unchanged.
+**P3 implemented (macOS verified on screen; Linux pending the real machine).** The internal invalidation paths now repaint only the widget:
+- `WidgetData::repaint()` (114 widget-internal call sites);
+- hover / press / focus transitions (old + new widget);
+- `InputBoxWidget::on_keychar`;
+- behavior-driven writes;
+- SECTION / GRID scroll + spring-back ticks on Linux and macOS (the container's rect).
+
+Deviations from the P3 plan:
+- **Geometry changes stay FULL instead of damaging old + new.** They are rare, and full is simpler and always correct.
+- **The audit turned up a gap:** off LVGL, `create` / `destroy` / `show` / `hide` / `set_pos` / `set_size` invalidated nothing at all. `notify_tree_changed` was an LVGL-only hook. It now requests a full repaint, which is what invariant 1 needs.
+- **No "compound bounds margin" is needed:** CUSTOMDRAW / compound widgets are clipped to their own rect.
+
+Measured in `neui_example` on the xpl host, macOS:
+- **Interaction frames** (hover, typing, checkbox, slider drag): all partial, 0.15-0.42 ms, against 7.5-15 ms for this example's full frames.
+- **SECTION / GRID scroll:** correct, but full by coverage, since each container fills most of its example's window.
+
+P4 baseline from Windows: a D2D full frame of the 48-knob example costs 4.1-4.7 ms (Debug, 150%, GTX 1080) regardless of how many knobs change.
+
+The P4 and design text below is unchanged.
 
 This is the first track ahead of
 `plans/shader-effects.md`. It is worth doing on its own merits, because the

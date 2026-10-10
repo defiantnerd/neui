@@ -907,9 +907,10 @@ namespace xpl_host
     platform_retained_widget_invalidate(this, new_idx);
     platform_retained_widget_invalidate(this, prev_focus);
 #else
-    uint32_t ref = (new_idx != 0) ? new_idx : prev_focus;
-    void* frame = find_parent_native_handle(ref);
-    if (frame) platform_invalidate(frame);
+    // Focus decorations (ring, caret) paint inside each widget's damage
+    // footprint: repaint the losing + gaining widgets only.
+    if (new_idx    != 0) invalidate_widget_rect(new_idx);
+    if (prev_focus != 0) invalidate_widget_rect(prev_focus);
 #endif
   }
 
@@ -942,17 +943,14 @@ namespace xpl_host
       }
     }
 
-    // Repaint the frame so widgets whose paint reacts to .hovered (BUTTON, ...)
-    // swap visuals. Hover transitions happen at human pointer speed - cheap.
+    // Repaint the widgets whose paint reacts to .hovered (BUTTON, ...) - the
+    // one losing hover and the one gaining it.
 #ifdef NEUI_PLATFORM_LVGL
     platform_retained_widget_invalidate(this, old_idx);
     platform_retained_widget_invalidate(this, new_idx);
 #else
-    uint32_t ref = (new_idx != 0) ? new_idx : old_idx;
-    if (ref != 0) {
-      if (void* frame = find_parent_native_handle(ref))
-        platform_invalidate(frame);
-    }
+    if (old_idx != 0) invalidate_widget_rect(old_idx);
+    if (new_idx != 0) invalidate_widget_rect(new_idx);
 #endif
   }
 
@@ -969,17 +967,14 @@ namespace xpl_host
     if (new_idx != 0 && _widgets.exists(new_idx))
       _widgets[new_idx].pressed = true;
 
-    // Same rationale as set_hovered: frame repaint so .pressed-aware widgets
-    // (BUTTON) flip to their pressed visual immediately.
+    // Same rationale as set_hovered: repaint the .pressed-aware widgets
+    // (BUTTON) on both sides of the transition.
 #ifdef NEUI_PLATFORM_LVGL
     platform_retained_widget_invalidate(this, old_idx);
     platform_retained_widget_invalidate(this, new_idx);
 #else
-    uint32_t ref = (new_idx != 0) ? new_idx : old_idx;
-    if (ref != 0) {
-      if (void* frame = find_parent_native_handle(ref))
-        platform_invalidate(frame);
-    }
+    if (old_idx != 0) invalidate_widget_rect(old_idx);
+    if (new_idx != 0) invalidate_widget_rect(new_idx);
 #endif
   }
 
@@ -1572,14 +1567,19 @@ namespace xpl_host
     return false;
   }
 
+  // A widget repaints itself after its own visual state changed (hover,
+  // press, caret, value, scroll offset of its own content, ...). Off LVGL
+  // that is just its damage footprint - a container (SECTION, TABVIEW, GRID)
+  // repainting after a scroll / page switch covers its children too, since
+  // they are clipped to it. Anything reaching outside the widget (combo drop
+  // list, popups, menubar, toast) invalidates the whole frame on its own path.
   void WidgetData::repaint()
   {
     if (session) {
 #ifdef NEUI_PLATFORM_LVGL
       platform_retained_widget_invalidate(session, index);
 #else
-      void* frame = session->find_parent_native_handle(index);
-      if (frame) platform_invalidate(frame);
+      session->invalidate_widget_rect(index);
 #endif
     }
   }
@@ -1913,10 +1913,7 @@ namespace xpl_host
     int  n = te_encode_utf8(codepoint, buf);
     te_insert_utf8(text, cursor_pos, sel_anchor, overwrite_mode, buf, n,
                    &history);
-    if (session) {
-      void* frame = session->find_parent_native_handle(index);
-      if (frame) platform_invalidate(frame);
-    }
+    repaint();
     return true;
   }
 
@@ -3258,8 +3255,7 @@ namespace xpl_host
     if (!wd || !wd->session) return;
     // Mirrors WidgetData::repaint() but that method is protected, so
     // duplicate its body (single line) rather than friend the dispatch.
-    void* frame = wd->session->find_parent_native_handle(wd->index);
-    if (frame) platform_invalidate(frame);
+    wd->session->invalidate_widget_rect(wd->index);
   }
 
   static void xpl_behavior_emit_attr_changed(void* host_data,

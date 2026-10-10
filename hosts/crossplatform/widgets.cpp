@@ -134,12 +134,19 @@ namespace xpl_host
 #endif
   }
 
+  // Geometry / structure changed for idx (create, destroy, show, hide,
+  // set_pos, set_size). Called BEFORE a destroyed subtree is removed so the
+  // owning frame still resolves. Off LVGL this repaints the WHOLE frame - the
+  // invariant partial repaint relies on: a rect queued from a widget's cached
+  // abs_x / abs_y is only safe because every geometry change also requests a
+  // full repaint, which absorbs it (see Session::invalidate_widget_rect).
   static void notify_tree_changed(Session* s, uint32_t idx)
   {
 #ifdef NEUI_PLATFORM_LVGL
     platform_retained_tree_changed(s, idx);
 #else
-    (void)s; (void)idx;
+    if (void* frame = s->find_parent_native_handle(idx))
+      platform_invalidate(frame);
 #endif
   }
 

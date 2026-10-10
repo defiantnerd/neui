@@ -341,7 +341,7 @@ namespace
         GridViewport vp = grid_compute_viewport(*model, hw->width, hw->height,
                                                  cfg.row_h, cfg.header_h);
         bool more = grid_scroll_bounce_step(*model, vp, cfg.row_h);
-        lw->needs_paint = true;
+        s->invalidate_widget_rect(lw->bouncing_grid_index);   // the grid only
         if (!more) lw->bouncing_grid_index = 0;
       }
     }
@@ -354,7 +354,8 @@ namespace
       } else {
         bool more_v = section_scroll_bounce_step(*st, *L, false);
         bool more_h = section_scroll_bounce_step(*st, *L, true);
-        lw->needs_paint = true;
+        // The section's rect covers its scrolled children (clipped to it).
+        s->invalidate_widget_rect(lw->bouncing_section_index);
         sw->notify_scroll_changed();
         if (!more_v && !more_h) lw->bouncing_section_index = 0;
       }
@@ -1175,7 +1176,7 @@ namespace
       if (has_v && dv != 0.0 && section_scroll_step_px(*st, *L, dv, false)) changed = true;
       if (has_h && dh != 0.0 && section_scroll_step_px(*st, *L, dh, true))  changed = true;
     }
-    if (changed) { lw->needs_paint = true; sw->notify_scroll_changed(); }
+    if (changed) { lw->session->invalidate_widget_rect(sec_idx); sw->notify_scroll_changed(); }
     if (start_bounce) { lw->bouncing_section_index = sec_idx; arm_timer(true); }
   }
 
@@ -1208,7 +1209,7 @@ namespace
         in.precise  = true;
         in.delta_px = dv * (double)LINUX_WHEEL_LINES * (double)cfg.row_h;
         GridWheelAction act = grid_scroll_wheel(*model, vp, cfg.row_h, in);
-        if (act.changed) lw->needs_paint = true;
+        if (act.changed) s->invalidate_widget_rect(hit);
         if (act.start_bounce) { lw->bouncing_grid_index = hit; arm_timer(true); }
         return;
       }
