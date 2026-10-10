@@ -1,1200 +1,143 @@
-// Shader phase 0 (plans/shader-effects.md): a prototype of the CPU shader
-// executor and of neui's deterministic built-in math. It answers two
-// questions before the executor design is frozen:
+// Shader executor benchmark: compiles a few .nsl programs with the real
+// compiler (src/shader/nsl.h) and times execute() at widget and background
+// sizes. Report only; correctness and the cross-platform goldens live in
+// neui_tests (test_shader_exec.cpp).
 //
-//   1. Cost: ns per pixel for representative shaders, per lane width.
-//   2. Determinism: the same bits from every compiler and CPU.
-//
-// There is no front end yet. Programs are built by hand through a small
-// builder that scalarises, folds constant work and allocates registers the way
-// the phase-1 compiler will. Phase 1 replaces this file with
-// hosts/shared/shader_lang.h + src/shader_exec.cpp and moves the checksums
-// into neui_tests.
-//
-//   neui_shader_bench           report: timings, accuracy, checksums
-//   neui_shader_bench --check   checksums only; exit 1 when any differs from
-//                               the expected values below (ctest-registered)
-//
-// Every shader-arithmetic TU must be built without FMA contraction
-// (-ffp-contract=off); CMakeLists.txt does that for this one.
+//   neui_shader_bench
+
+#include "shader/nsl.h"
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <limits>
 #include <vector>
-
-#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
-#include <xmmintrin.h>
-#define NSB_X86 1
-#elif defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
-#define NSB_A64 1
-#endif
 
 namespace {
 
-// ---------------------------------------------------------------------------
-// Deterministic math. Only IEEE-754 binary32 +, -, *, /, sqrt, comparisons and
-// float <-> int conversions of in-range values: every one of them is exactly
-// specified, so the results are the same bits everywhere. No libm.
-// ---------------------------------------------------------------------------
+namespace nsl = neui::nsl;
 
-inline uint32_t bits(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
-inline float from_bits(uint32_t u) { float f; std::memcpy(&f, &u, 4); return f; }
-
-const float k_inf = std::numeric_limits<float>::infinity();
-const float k_nan = std::numeric_limits<float>::quiet_NaN();
-
-inline float m_abs(float x) { return from_bits(bits(x) & 0x7fffffffu); }
-
-// floor: |x| >= 2^23 is already integral; NaN and inf fall through unchanged.
-inline float m_floor(float x) {
-  const float ax = m_abs(x);
-  const float xc = ax < 8388608.0f ? x : 0.0f;  // keep the conversion in range
-  const float t  = static_cast<float>(static_cast<int32_t>(xc));
-  const float f  = t > xc ? t - 1.0f : t;
-  return ax < 8388608.0f ? f : x;
-}
-
-// GLSL: min(x, y) = y < x ? y : x; max(x, y) = x < y ? y : x.
-inline float m_min(float x, float y) { return y < x ? y : x; }
-inline float m_max(float x, float y) { return x < y ? y : x; }
-
-// sin / cos: Cody-Waite reduction by pi/2 (three-part constant), then the
-// Cephes single-precision polynomials on [-pi/4, pi/4].
-inline void m_sincos_reduce(float x, float& r, int32_t& q) {
-  const float k = m_floor(x * 0.636619772f + 0.5f);
-  r = ((x - k * 1.5703125f) - k * 4.837512969970703125e-4f) - k * 7.54978995489188216e-8f;
-  float m = k - 4.0f * m_floor(k * 0.25f);  // k mod 4, exact; NaN for inf / NaN input
-  m = m == m ? m : 0.0f;
-  q = static_cast<int32_t>(m);
-}
-inline float m_sin_poly(float r) {
-  const float z = r * r;
-  return ((-1.9515295891e-4f * z + 8.3321608736e-3f) * z - 1.6666654611e-1f) * z * r + r;
-}
-inline float m_cos_poly(float r) {
-  const float z = r * r;
-  return ((2.443315711809948e-5f * z - 1.388731625493765e-3f) * z + 4.166664568298827e-2f) * z * z
-         - 0.5f * z + 1.0f;
-}
-inline float m_sin(float x) {
-  float r; int32_t q; m_sincos_reduce(x, r, q);
-  const float s = m_sin_poly(r), c = m_cos_poly(r);
-  const float v = (q & 1) ? c : s;
-  return (q & 2) ? -v : v;
-}
-inline float m_cos(float x) {
-  float r; int32_t q; m_sincos_reduce(x, r, q);
-  const float s = m_sin_poly(r), c = m_cos_poly(r);
-  const float v = (q & 1) ? s : c;
-  return ((q + 1) & 2) ? -v : v;
-}
-
-// exp2: x >= 128 -> +inf; x < -126 -> 0 (never a denormal result); NaN -> NaN.
-inline float m_exp2(float x) {
-  float xc = x < -126.0f ? -126.0f : x;
-  xc = xc > 127.99999f ? 127.99999f : xc;
-  xc = xc == xc ? xc : 0.0f;
-  const float n = m_floor(xc + 0.5f);  // [-126, 128]
-  const float f = xc - n;              // [-0.5, 0.5)
-  float p = 1.535336188319500e-4f;
-  p = p * f + 1.339887440266574e-3f;
-  p = p * f + 9.618437357674640e-3f;
-  p = p * f + 5.550332471162809e-2f;
-  p = p * f + 2.402264791363012e-1f;
-  p = p * f + 6.931472028550421e-1f;
-  p = p * f + 1.0f;
-  // 2^128 is not a float: scale by 2^127 and double once more.
-  const int32_t ni = static_cast<int32_t>(n);
-  const float s = from_bits(static_cast<uint32_t>((ni < 128 ? ni : 127) + 127) << 23);
-  float r = p * s;
-  r = ni == 128 ? r * 2.0f : r;
-  r = x < -126.0f ? 0.0f : r;
-  r = x >= 128.0f ? k_inf : r;
-  return x == x ? r : x;
-}
-
-// log2: x < 0 -> NaN; 0 -> -inf; +inf -> +inf; NaN -> NaN; denormals exact.
-inline float m_log2(float x) {
-  const bool den = x < 1.17549435e-38f;
-  const float xs = den ? x * 8388608.0f : x;
-  const uint32_t u = bits(xs);
-  int32_t e = static_cast<int32_t>((u >> 23) & 0xffu) - 127 - (den ? 23 : 0);
-  float m = from_bits((u & 0x007fffffu) | 0x3f800000u);  // [1, 2)
-  const bool big = m > 1.41421356f;
-  m = big ? m * 0.5f : m;
-  e = big ? e + 1 : e;
-  const float t  = (m - 1.0f) / (m + 1.0f);
-  const float t2 = t * t;
-  float p = 0.412198583111132f;
-  p = p * t2 + 0.577078016355585f;
-  p = p * t2 + 0.961796693925976f;
-  p = p * t2 + 2.885390081777927f;
-  float r = static_cast<float>(e) + t * p;
-  r = x == 0.0f ? -k_inf : r;
-  r = x < 0.0f ? k_nan : r;
-  r = x == k_inf ? k_inf : r;
-  return x == x ? r : x;
-}
-
-// atan(y, x): reduce to [0, 1], then to [-tan(pi/8), tan(pi/8)], Cephes
-// polynomial; atan(0, 0) = 0.
-inline float m_atan2(float y, float x) {
-  const float ax = m_abs(x), ay = m_abs(y);
-  const float mx = ax > ay ? ax : ay;
-  const float mn = ax > ay ? ay : ax;
-  const float a  = mx > 0.0f ? mn / mx : 0.0f;
-  const bool red = a > 0.414213562f;
-  const float aa = red ? (a - 1.0f) / (a + 1.0f) : a;
-  const float z  = aa * aa;
-  float r = (((8.05374449538e-2f * z - 1.38776856032e-1f) * z + 1.99777106478e-1f) * z
-             - 3.33329491539e-1f) * z * aa + aa;
-  r = red ? r + 0.785398163f : r;
-  r = ay > ax ? 1.57079633f - r : r;
-  r = x < 0.0f ? 3.14159265f - r : r;
-  return y < 0.0f ? -r : r;
-}
-
-// neui_hash(vec2): floor, NaN -> 0, clamp to +-2^24, then a 32-bit integer
-// hash; the top 24 bits map to [0, 1). Integer-exact, so a GPU emitter (SM4
-// has integer ops) produces the same values.
-inline uint32_t m_hash_coord(float v) {
-  v = v == v ? v : 0.0f;
-  v = m_floor(v);
-  v = v < -16777216.0f ? -16777216.0f : (v > 16777216.0f ? 16777216.0f : v);
-  return static_cast<uint32_t>(static_cast<int32_t>(v));
-}
-inline float m_hash2(float x, float y) {
-  uint32_t h = (m_hash_coord(x) * 0x8da6b343u) ^ (m_hash_coord(y) * 0xd8163841u);
-  h ^= h >> 16; h *= 0x7feb352du;
-  h ^= h >> 15; h *= 0x846ca68bu;
-  h ^= h >> 16;
-  return static_cast<float>(h >> 8) * (1.0f / 16777216.0f);
-}
-
-// ---------------------------------------------------------------------------
-// FP environment. A host (a DAW) may run its UI thread with flush-to-zero /
-// denormals-are-zero set; the executor pins round-to-nearest + IEEE
-// denormals for the duration of a draw and restores the caller's state.
-// ---------------------------------------------------------------------------
-
-struct FpEnvGuard {
-#if NSB_X86
-  unsigned saved;
-  FpEnvGuard() : saved(_mm_getcsr()) { _mm_setcsr(0x1F80u); }
-  ~FpEnvGuard() { _mm_setcsr(saved); }
-#elif NSB_A64
-  uint64_t saved;
-  FpEnvGuard() {
-    __asm__ volatile("mrs %0, fpcr" : "=r"(saved) : : "memory");
-    __asm__ volatile("msr fpcr, %0" : : "r"(uint64_t(0)) : "memory");
-  }
-  ~FpEnvGuard() { __asm__ volatile("msr fpcr, %0" : : "r"(saved) : "memory"); }
-#endif
+struct Shader {
+  const char* name;
+  const char* src;
 };
 
-// Simulates a host that flushes denormals on its UI thread.
-struct HostFlushToZero {
-#if NSB_X86
-  unsigned saved;
-  HostFlushToZero() : saved(_mm_getcsr()) { _mm_setcsr(saved | 0x8040u); }  // FTZ | DAZ
-  ~HostFlushToZero() { _mm_setcsr(saved); }
-#elif NSB_A64
-  uint64_t saved;
-  HostFlushToZero() {
-    __asm__ volatile("mrs %0, fpcr" : "=r"(saved) : : "memory");
-    __asm__ volatile("msr fpcr, %0" : : "r"(saved | (uint64_t(1) << 24)) : "memory");  // FZ
+const Shader k_shaders[] = {
+  {"ring_glow", R"(
+uniform float value = 0.65;
+uniform vec4  accent = vec4(0.2, 0.7, 1.0, 1.0);
+vec4 main(vec2 p) {
+  vec2  c    = neui_size * 0.5;
+  float r    = min(c.x, c.y) * 0.8;
+  float d    = abs(length(p - c) - r);
+  float ring = 1.0 - smoothstep(0.0, 1.5 * neui_px, d - 2.0);
+  float glow = exp(-d * mix(0.6, 0.15, value));
+  float a    = saturate(ring + glow * value);
+  return vec4(accent.rgb, a * accent.a);
+})"},
+  {"plasma", R"(
+vec4 main(vec2 p) {
+  vec2 u = p / neui_size;
+  float t = neui_time;
+  float v = sin(u.x * 10.0 + t) + sin(10.0 * (u.x * sin(t / 2.0) + u.y * cos(t / 3.0)) + t);
+  vec2 c = u + 0.5 * vec2(sin(t / 5.0), cos(t / 3.0));
+  v += sin(sqrt(100.0 * dot(c, c) + 1.0) + t);
+  v *= 3.14159265;
+  return vec4(0.5 + 0.5 * sin(v), 0.5 + 0.5 * sin(v + 2.0943951), 0.5 + 0.5 * sin(v + 4.1887902), 1.0);
+})"},
+  {"fbm5", R"(
+vec4 main(vec2 p) {
+  vec2 q = p / 24.0;
+  float sum = 0.0;
+  float amp = 0.5;
+  for (int o = 0; o < 5; o++) {
+    sum += amp * neui_noise(q);
+    q = vec2(q.x * 2.03 + 1.7, q.y * 2.03 - 0.9);
+    amp *= 0.5;
   }
-  ~HostFlushToZero() { __asm__ volatile("msr fpcr, %0" : : "r"(saved) : "memory"); }
-#endif
+  float t = smoothstep(0.3, 0.8, sum);
+  return vec4(mix(0.08, 0.95, t), mix(0.10, 0.80, t), mix(0.16, 0.55, t), 1.0);
+})"},
+  {"metal_knob", R"(
+uniform float value = 0.4;
+const float PI = 3.14159265;
+float ring(float d, float r, float w) { return 1.0 - smoothstep(w - neui_px, w, abs(d - r)); }
+vec4 main(vec2 p) {
+  vec2 c = neui_size * 0.5;
+  vec2 v = p - c;
+  float d = length(v);
+  float R = min(c.x, c.y) * 0.9;
+  if (d > R + 1.0) return vec4(0.0);
+  float ang = atan(v.x, -v.y);
+  float lit = 0.55 + 0.25 * cos(ang * 2.0) + 0.04 * neui_noise(vec2(ang * 40.0, d * 0.5));
+  vec3 col = vec3(lit) * (0.85 + 0.15 * (1.0 - d / R));
+  float sweep = (ang + PI * 0.75) / (PI * 1.5);
+  float arc = ring(d, R * 0.82, 2.5) * step(sweep, value) * step(0.0, sweep);
+  col = mix(col, vec3(0.2, 0.75, 1.0), arc);
+  float tick = ring(d, R * 0.82, 1.0) * (1.0 - step(0.08, abs(mod(sweep * 10.0 + 0.5, 1.0) - 0.5)));
+  col = mix(col, vec3(0.1), tick * 0.6);
+  float edge = 1.0 - smoothstep(R - neui_px, R, d);
+  return vec4(col, edge);
+})"},
 };
-
-// ---------------------------------------------------------------------------
-// IR + builder. The builder hands out SSA values; operations whose operands
-// are all constant (literals or uniforms) are folded at build time with the
-// same math, which is the "hoist uniform-only work" step. finish() runs a
-// linear-scan register allocation in which a destination never shares a
-// register with its own operands, so kernels may use __restrict.
-// ---------------------------------------------------------------------------
-
-enum Op : uint8_t {
-  OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MIN, OP_MAX, OP_ABS, OP_FLOOR, OP_SQRT,
-  OP_SIN, OP_COS, OP_EXP2, OP_LOG2, OP_ATAN2, OP_LT, OP_SEL, OP_HASH2, OP_COUNT
-};
-
-inline bool op_is_transcendental(Op op) {
-  return op == OP_SIN || op == OP_COS || op == OP_EXP2 || op == OP_LOG2 || op == OP_ATAN2;
-}
-
-inline float eval_op(Op op, float a, float b, float c) {
-  switch (op) {
-    case OP_ADD:   return a + b;
-    case OP_SUB:   return a - b;
-    case OP_MUL:   return a * b;
-    case OP_DIV:   return a / b;
-    case OP_MIN:   return m_min(a, b);
-    case OP_MAX:   return m_max(a, b);
-    case OP_ABS:   return m_abs(a);
-    case OP_FLOOR: return m_floor(a);
-    case OP_SQRT:  return std::sqrt(a);
-    case OP_SIN:   return m_sin(a);
-    case OP_COS:   return m_cos(a);
-    case OP_EXP2:  return m_exp2(a);
-    case OP_LOG2:  return m_log2(a);
-    case OP_ATAN2: return m_atan2(a, b);
-    case OP_LT:    return a < b ? 1.0f : 0.0f;
-    case OP_SEL:   return a != 0.0f ? b : c;
-    case OP_HASH2: return m_hash2(a, b);
-    default:       return 0.0f;
-  }
-}
-
-struct Ins { Op op; uint16_t d, a, b, c; };
-
-struct Program {
-  const char* name = "";
-  std::vector<Ins> code;                          // physical registers
-  std::vector<std::pair<uint16_t, float>> consts; // filled once per draw
-  int nregs = 0;
-  uint16_t px = 0, py = 0;
-  uint16_t out[4] = {0, 0, 0, 0};
-  int transcendentals = 0;
-};
-
-class Builder {
- public:
-  struct V { int id; };
-
-  explicit Builder(const char* name) : name_(name) {
-    px = input();
-    py = input();
-  }
-
-  V px, py;
-
-  V k(float v) {
-    Val val; val.kind = Val::CONST; val.value = v;
-    vals_.push_back(val);
-    return V{static_cast<int>(vals_.size()) - 1};
-  }
-
-  V op(Op o, V a, V b = V{-1}, V c = V{-1}) {
-    const bool fa = is_const(a), fb = b.id < 0 || is_const(b), fc = c.id < 0 || is_const(c);
-    if (fa && fb && fc)
-      return k(eval_op(o, cval(a), b.id < 0 ? 0.0f : cval(b), c.id < 0 ? 0.0f : cval(c)));
-    Val val; val.kind = Val::INS; val.op = o; val.a = a.id; val.b = b.id; val.c = c.id;
-    vals_.push_back(val);
-    return V{static_cast<int>(vals_.size()) - 1};
-  }
-
-  V add(V a, V b) { return op(OP_ADD, a, b); }
-  V sub(V a, V b) { return op(OP_SUB, a, b); }
-  V mul(V a, V b) { return op(OP_MUL, a, b); }
-  V div(V a, V b) { return op(OP_DIV, a, b); }
-  V min(V a, V b) { return op(OP_MIN, a, b); }
-  V max(V a, V b) { return op(OP_MAX, a, b); }
-  V abs(V a) { return op(OP_ABS, a); }
-  V floor(V a) { return op(OP_FLOOR, a); }
-  V sqrt(V a) { return op(OP_SQRT, a); }
-  V sin(V a) { return op(OP_SIN, a); }
-  V cos(V a) { return op(OP_COS, a); }
-  V exp2(V a) { return op(OP_EXP2, a); }
-  V log2(V a) { return op(OP_LOG2, a); }
-  V atan2(V y, V x) { return op(OP_ATAN2, y, x); }
-  V hash2(V x, V y) { return op(OP_HASH2, x, y); }
-  V fract(V a) { return sub(a, floor(a)); }
-  V clamp(V a, V lo, V hi) { return min(max(a, lo), hi); }
-  V mix(V a, V b, V t) { return add(mul(a, sub(k(1.0f), t)), mul(b, t)); }  // GLSL formula
-  V exp(V a) { return exp2(mul(a, k(1.44269504f))); }
-  V smoothstep(V e0, V e1, V x) {
-    V t = clamp(div(sub(x, e0), sub(e1, e0)), k(0.0f), k(1.0f));
-    return mul(mul(t, t), sub(k(3.0f), mul(k(2.0f), t)));
-  }
-
-  Program finish(V r, V g, V b, V a) {
-    Program pg;
-    pg.name = name_;
-    const int n = static_cast<int>(vals_.size());
-    std::vector<int> last_use(n, -1);
-    const V outs[4] = {r, g, b, a};
-    for (int i = 0; i < n; ++i) {
-      if (vals_[i].kind != Val::INS) continue;
-      for (int s : {vals_[i].a, vals_[i].b, vals_[i].c})
-        if (s >= 0) last_use[s] = i;
-    }
-    for (const V& o : outs) last_use[o.id] = n;  // live to the end
-
-    std::vector<int> phys(n, -1);
-    std::vector<uint16_t> free_regs;
-    int next = 0;
-    auto alloc = [&]() -> uint16_t {
-      if (!free_regs.empty()) { uint16_t r0 = free_regs.back(); free_regs.pop_back(); return r0; }
-      return static_cast<uint16_t>(next++);
-    };
-    // Inputs and constants are pinned: constants are filled once per draw and
-    // the inputs once per block.
-    for (int i = 0; i < n; ++i) {
-      if (vals_[i].kind == Val::INS) continue;
-      if (vals_[i].kind == Val::CONST && last_use[i] < 0) continue;  // folded away
-      phys[i] = alloc();
-      if (vals_[i].kind == Val::CONST)
-        pg.consts.push_back({static_cast<uint16_t>(phys[i]), vals_[i].value});
-    }
-    pg.px = static_cast<uint16_t>(phys[px.id]);
-    pg.py = static_cast<uint16_t>(phys[py.id]);
-    for (int i = 0; i < n; ++i) {
-      const Val& v = vals_[i];
-      if (v.kind != Val::INS) continue;
-      if (last_use[i] < 0) continue;  // dead
-      Ins in;
-      in.op = v.op;
-      in.a = static_cast<uint16_t>(phys[v.a]);
-      in.b = static_cast<uint16_t>(v.b >= 0 ? phys[v.b] : phys[v.a]);
-      in.c = static_cast<uint16_t>(v.c >= 0 ? phys[v.c] : phys[v.a]);
-      phys[i] = alloc();
-      in.d = static_cast<uint16_t>(phys[i]);
-      pg.code.push_back(in);
-      if (op_is_transcendental(v.op)) pg.transcendentals++;
-      for (int s : {v.a, v.b, v.c}) {
-        if (s < 0 || vals_[s].kind != Val::INS || last_use[s] != i) continue;
-        free_regs.push_back(static_cast<uint16_t>(phys[s]));
-        last_use[s] = -2;  // freed once even when used twice by this instruction
-      }
-    }
-    // A constant or input used directly as an output stays pinned; give every
-    // output its own register only if it is not already one.
-    for (int c = 0; c < 4; ++c) pg.out[c] = static_cast<uint16_t>(phys[outs[c].id]);
-    pg.nregs = next;
-    return pg;
-  }
-
- private:
-  struct Val {
-    enum Kind { INPUT, CONST, INS } kind = INPUT;
-    Op op = OP_ADD;
-    int a = -1, b = -1, c = -1;
-    float value = 0.0f;
-  };
-
-  V input() { vals_.push_back(Val{}); return V{static_cast<int>(vals_.size()) - 1}; }
-  bool is_const(V v) const { return vals_[v.id].kind == Val::CONST; }
-  float cval(V v) const { return vals_[v.id].value; }
-
-  const char* name_;
-  std::vector<Val> vals_;
-};
-
-// ---------------------------------------------------------------------------
-// Executor: a batched structure-of-arrays interpreter. Each instruction runs
-// over a lane of L pixels held in float arrays, so dispatch is paid once per
-// lane and the inner loops auto-vectorise.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Explicit 4-wide SIMD: SSE2 on x86-64, NEON on arm64, plain arrays
-// elsewhere. Phase 0 showed that auto-vectorisation of the scalar kernels
-// depends on the compiler: clang vectorises everything, GCC part of it, and
-// MSVC only add / sub / mul / div / min / max / sqrt / lt. The f4_* math
-// mirrors the scalar m_* functions operation for operation, so both produce
-// the same bits; the checksums compare them.
-// ---------------------------------------------------------------------------
-
-// The SIMD helpers must inline into the kernels; MSVC's heuristics otherwise
-// leave the larger ones (sin, exp2, ...) as calls that pass vectors through
-// memory.
-#if defined(_MSC_VER) && !defined(__clang__)
-#define NSB_FI __forceinline
-#else
-#define NSB_FI inline __attribute__((always_inline))
-#endif
-
-// -DNSB_FORCE_PORTABLE builds the fallback on any CPU, to test it.
-#if NSB_X86 && !defined(NSB_FORCE_PORTABLE)
-#include <emmintrin.h>
-struct F4 { __m128 v; };
-struct I4 { __m128i v; };  // int32 lanes; a mask is all-ones / all-zeros
-NSB_FI F4 f4_load(const float* p) { return {_mm_loadu_ps(p)}; }
-NSB_FI void f4_store(float* p, F4 a) { _mm_storeu_ps(p, a.v); }
-NSB_FI F4 f4(float f) { return {_mm_set1_ps(f)}; }
-NSB_FI I4 i4(int32_t i) { return {_mm_set1_epi32(i)}; }
-NSB_FI F4 operator+(F4 a, F4 b) { return {_mm_add_ps(a.v, b.v)}; }
-NSB_FI F4 operator-(F4 a, F4 b) { return {_mm_sub_ps(a.v, b.v)}; }
-NSB_FI F4 operator*(F4 a, F4 b) { return {_mm_mul_ps(a.v, b.v)}; }
-NSB_FI F4 operator/(F4 a, F4 b) { return {_mm_div_ps(a.v, b.v)}; }
-NSB_FI F4 f4_sqrt(F4 a) { return {_mm_sqrt_ps(a.v)}; }
-NSB_FI I4 f4_lt(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmplt_ps(a.v, b.v))}; }
-NSB_FI I4 f4_gt(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpgt_ps(a.v, b.v))}; }
-NSB_FI I4 f4_ge(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpge_ps(a.v, b.v))}; }
-NSB_FI I4 f4_eq(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpeq_ps(a.v, b.v))}; }
-NSB_FI I4 f4_ne(F4 a, F4 b) { return {_mm_castps_si128(_mm_cmpneq_ps(a.v, b.v))}; }
-NSB_FI F4 f4_sel(I4 m, F4 a, F4 b) {
-  const __m128 mm = _mm_castsi128_ps(m.v);
-  return {_mm_or_ps(_mm_and_ps(mm, a.v), _mm_andnot_ps(mm, b.v))};
-}
-NSB_FI I4 i4_sel(I4 m, I4 a, I4 b) {
-  return {_mm_or_si128(_mm_and_si128(m.v, a.v), _mm_andnot_si128(m.v, b.v))};
-}
-NSB_FI I4 f4_bits(F4 a) { return {_mm_castps_si128(a.v)}; }
-NSB_FI F4 f4_from_bits(I4 a) { return {_mm_castsi128_ps(a.v)}; }
-NSB_FI I4 f4_trunc(F4 a) { return {_mm_cvttps_epi32(a.v)}; }  // in-range values only
-NSB_FI F4 i4_to_f4(I4 a) { return {_mm_cvtepi32_ps(a.v)}; }
-NSB_FI I4 operator+(I4 a, I4 b) { return {_mm_add_epi32(a.v, b.v)}; }
-NSB_FI I4 operator-(I4 a, I4 b) { return {_mm_sub_epi32(a.v, b.v)}; }
-NSB_FI I4 operator&(I4 a, I4 b) { return {_mm_and_si128(a.v, b.v)}; }
-NSB_FI I4 operator|(I4 a, I4 b) { return {_mm_or_si128(a.v, b.v)}; }
-NSB_FI I4 operator^(I4 a, I4 b) { return {_mm_xor_si128(a.v, b.v)}; }
-template <int N> NSB_FI I4 i4_shl(I4 a) { return {_mm_slli_epi32(a.v, N)}; }
-template <int N> NSB_FI I4 i4_shr(I4 a) { return {_mm_srli_epi32(a.v, N)}; }  // logical
-NSB_FI I4 i4_lt(I4 a, I4 b) { return {_mm_cmplt_epi32(a.v, b.v)}; }
-NSB_FI I4 i4_eq(I4 a, I4 b) { return {_mm_cmpeq_epi32(a.v, b.v)}; }
-NSB_FI I4 i4_mul(I4 a, I4 b) {  // low 32 bits; SSE2 has no pmulld
-  const __m128i p02 = _mm_mul_epu32(a.v, b.v);
-  const __m128i p13 = _mm_mul_epu32(_mm_srli_epi64(a.v, 32), _mm_srli_epi64(b.v, 32));
-  return {_mm_unpacklo_epi32(_mm_shuffle_epi32(p02, 0x08), _mm_shuffle_epi32(p13, 0x08))};
-}
-#elif NSB_A64 && !defined(NSB_FORCE_PORTABLE)
-#include <arm_neon.h>
-struct F4 { float32x4_t v; };
-struct I4 { int32x4_t v; };
-NSB_FI F4 f4_load(const float* p) { return {vld1q_f32(p)}; }
-NSB_FI void f4_store(float* p, F4 a) { vst1q_f32(p, a.v); }
-NSB_FI F4 f4(float f) { return {vdupq_n_f32(f)}; }
-NSB_FI I4 i4(int32_t i) { return {vdupq_n_s32(i)}; }
-NSB_FI F4 operator+(F4 a, F4 b) { return {vaddq_f32(a.v, b.v)}; }
-NSB_FI F4 operator-(F4 a, F4 b) { return {vsubq_f32(a.v, b.v)}; }
-NSB_FI F4 operator*(F4 a, F4 b) { return {vmulq_f32(a.v, b.v)}; }
-NSB_FI F4 operator/(F4 a, F4 b) { return {vdivq_f32(a.v, b.v)}; }
-NSB_FI F4 f4_sqrt(F4 a) { return {vsqrtq_f32(a.v)}; }
-NSB_FI I4 m4(uint32x4_t m) { return {vreinterpretq_s32_u32(m)}; }
-NSB_FI I4 f4_lt(F4 a, F4 b) { return m4(vcltq_f32(a.v, b.v)); }
-NSB_FI I4 f4_gt(F4 a, F4 b) { return m4(vcgtq_f32(a.v, b.v)); }
-NSB_FI I4 f4_ge(F4 a, F4 b) { return m4(vcgeq_f32(a.v, b.v)); }
-NSB_FI I4 f4_eq(F4 a, F4 b) { return m4(vceqq_f32(a.v, b.v)); }
-NSB_FI I4 f4_ne(F4 a, F4 b) { return m4(vmvnq_u32(vceqq_f32(a.v, b.v))); }
-NSB_FI F4 f4_sel(I4 m, F4 a, F4 b) { return {vbslq_f32(vreinterpretq_u32_s32(m.v), a.v, b.v)}; }
-NSB_FI I4 i4_sel(I4 m, I4 a, I4 b) { return {vbslq_s32(vreinterpretq_u32_s32(m.v), a.v, b.v)}; }
-NSB_FI I4 f4_bits(F4 a) { return {vreinterpretq_s32_f32(a.v)}; }
-NSB_FI F4 f4_from_bits(I4 a) { return {vreinterpretq_f32_s32(a.v)}; }
-NSB_FI I4 f4_trunc(F4 a) { return {vcvtq_s32_f32(a.v)}; }  // in-range values only
-NSB_FI F4 i4_to_f4(I4 a) { return {vcvtq_f32_s32(a.v)}; }
-NSB_FI I4 operator+(I4 a, I4 b) { return {vaddq_s32(a.v, b.v)}; }
-NSB_FI I4 operator-(I4 a, I4 b) { return {vsubq_s32(a.v, b.v)}; }
-NSB_FI I4 operator&(I4 a, I4 b) { return {vandq_s32(a.v, b.v)}; }
-NSB_FI I4 operator|(I4 a, I4 b) { return {vorrq_s32(a.v, b.v)}; }
-NSB_FI I4 operator^(I4 a, I4 b) { return {veorq_s32(a.v, b.v)}; }
-template <int N> NSB_FI I4 i4_shl(I4 a) { return {vshlq_n_s32(a.v, N)}; }
-template <int N> NSB_FI I4 i4_shr(I4 a) {  // logical
-  return {vreinterpretq_s32_u32(vshrq_n_u32(vreinterpretq_u32_s32(a.v), N))};
-}
-NSB_FI I4 i4_lt(I4 a, I4 b) { return m4(vcltq_s32(a.v, b.v)); }
-NSB_FI I4 i4_eq(I4 a, I4 b) { return m4(vceqq_s32(a.v, b.v)); }
-NSB_FI I4 i4_mul(I4 a, I4 b) { return {vmulq_s32(a.v, b.v)}; }  // low 32 bits
-#else
-// Portable fallback: four scalars per value.
-struct F4 { float v[4]; };
-struct I4 { int32_t v[4]; };
-#define NSB_F4_LOOP(expr) for (int k_ = 0; k_ < 4; ++k_) { expr; }
-NSB_FI F4 f4_load(const float* p) { F4 r; NSB_F4_LOOP(r.v[k_] = p[k_]) return r; }
-NSB_FI void f4_store(float* p, F4 a) { NSB_F4_LOOP(p[k_] = a.v[k_]) }
-NSB_FI F4 f4(float f) { F4 r; NSB_F4_LOOP(r.v[k_] = f) return r; }
-NSB_FI I4 i4(int32_t i) { I4 r; NSB_F4_LOOP(r.v[k_] = i) return r; }
-NSB_FI F4 operator+(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] + b.v[k_]) return r; }
-NSB_FI F4 operator-(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] - b.v[k_]) return r; }
-NSB_FI F4 operator*(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] * b.v[k_]) return r; }
-NSB_FI F4 operator/(F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] / b.v[k_]) return r; }
-NSB_FI F4 f4_sqrt(F4 a) { F4 r; NSB_F4_LOOP(r.v[k_] = std::sqrt(a.v[k_])) return r; }
-NSB_FI I4 f4_lt(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] < b.v[k_] ? -1 : 0) return r; }
-NSB_FI I4 f4_gt(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] > b.v[k_] ? -1 : 0) return r; }
-NSB_FI I4 f4_ge(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] >= b.v[k_] ? -1 : 0) return r; }
-NSB_FI I4 f4_eq(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] == b.v[k_] ? -1 : 0) return r; }
-NSB_FI I4 f4_ne(F4 a, F4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] != b.v[k_] ? -1 : 0) return r; }
-NSB_FI F4 f4_sel(I4 m, F4 a, F4 b) { F4 r; NSB_F4_LOOP(r.v[k_] = m.v[k_] ? a.v[k_] : b.v[k_]) return r; }
-NSB_FI I4 i4_sel(I4 m, I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = m.v[k_] ? a.v[k_] : b.v[k_]) return r; }
-NSB_FI I4 f4_bits(F4 a) { I4 r; std::memcpy(r.v, a.v, 16); return r; }
-NSB_FI F4 f4_from_bits(I4 a) { F4 r; std::memcpy(r.v, a.v, 16); return r; }
-NSB_FI I4 f4_trunc(F4 a) { I4 r; NSB_F4_LOOP(r.v[k_] = static_cast<int32_t>(a.v[k_])) return r; }
-NSB_FI F4 i4_to_f4(I4 a) { F4 r; NSB_F4_LOOP(r.v[k_] = static_cast<float>(a.v[k_])) return r; }
-NSB_FI uint32_t u_(int32_t x) { return static_cast<uint32_t>(x); }
-NSB_FI int32_t s_(uint32_t x) { return static_cast<int32_t>(x); }
-NSB_FI I4 operator+(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) + u_(b.v[k_]))) return r; }
-NSB_FI I4 operator-(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) - u_(b.v[k_]))) return r; }
-NSB_FI I4 operator&(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] & b.v[k_]) return r; }
-NSB_FI I4 operator|(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] | b.v[k_]) return r; }
-NSB_FI I4 operator^(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] ^ b.v[k_]) return r; }
-template <int N> NSB_FI I4 i4_shl(I4 a) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) << N)) return r; }
-template <int N> NSB_FI I4 i4_shr(I4 a) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) >> N)) return r; }
-NSB_FI I4 i4_lt(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] < b.v[k_] ? -1 : 0) return r; }
-NSB_FI I4 i4_eq(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = a.v[k_] == b.v[k_] ? -1 : 0) return r; }
-NSB_FI I4 i4_mul(I4 a, I4 b) { I4 r; NSB_F4_LOOP(r.v[k_] = s_(u_(a.v[k_]) * u_(b.v[k_]))) return r; }
-#undef NSB_F4_LOOP
-#endif
-
-NSB_FI F4 f4_neg(F4 a) { return f4_from_bits(f4_bits(a) ^ i4(INT32_MIN)); }
-NSB_FI F4 f4_abs(F4 a) { return f4_from_bits(f4_bits(a) & i4(0x7fffffff)); }
-NSB_FI F4 f4_min(F4 x, F4 y) { return f4_sel(f4_lt(y, x), y, x); }
-NSB_FI F4 f4_max(F4 x, F4 y) { return f4_sel(f4_lt(x, y), y, x); }
-
-NSB_FI F4 f4_floor(F4 x) {
-  const I4 in = f4_lt(f4_abs(x), f4(8388608.0f));
-  const F4 xc = f4_sel(in, x, f4(0.0f));
-  const F4 t  = i4_to_f4(f4_trunc(xc));
-  const F4 f  = f4_sel(f4_gt(t, xc), t - f4(1.0f), t);
-  return f4_sel(in, f, x);
-}
-
-NSB_FI void f4_sincos_reduce(F4 x, F4& r, I4& q) {
-  const F4 k = f4_floor(x * f4(0.636619772f) + f4(0.5f));
-  r = ((x - k * f4(1.5703125f)) - k * f4(4.837512969970703125e-4f)) - k * f4(7.54978995489188216e-8f);
-  F4 m = k - f4(4.0f) * f4_floor(k * f4(0.25f));
-  m = f4_sel(f4_eq(m, m), m, f4(0.0f));
-  q = f4_trunc(m);
-}
-NSB_FI F4 f4_sin_poly(F4 r) {
-  const F4 z = r * r;
-  return ((f4(-1.9515295891e-4f) * z + f4(8.3321608736e-3f)) * z - f4(1.6666654611e-1f)) * z * r + r;
-}
-NSB_FI F4 f4_cos_poly(F4 r) {
-  const F4 z = r * r;
-  return ((f4(2.443315711809948e-5f) * z - f4(1.388731625493765e-3f)) * z + f4(4.166664568298827e-2f)) * z * z
-         - f4(0.5f) * z + f4(1.0f);
-}
-NSB_FI F4 f4_sin(F4 x) {
-  F4 r; I4 q; f4_sincos_reduce(x, r, q);
-  const F4 s = f4_sin_poly(r), c = f4_cos_poly(r);
-  const F4 v = f4_sel(i4_eq(q & i4(1), i4(1)), c, s);
-  return f4_sel(i4_eq(q & i4(2), i4(2)), f4_neg(v), v);
-}
-NSB_FI F4 f4_cos(F4 x) {
-  F4 r; I4 q; f4_sincos_reduce(x, r, q);
-  const F4 s = f4_sin_poly(r), c = f4_cos_poly(r);
-  const F4 v = f4_sel(i4_eq(q & i4(1), i4(1)), s, c);
-  return f4_sel(i4_eq((q + i4(1)) & i4(2), i4(2)), f4_neg(v), v);
-}
-
-NSB_FI F4 f4_exp2(F4 x) {
-  F4 xc = f4_sel(f4_lt(x, f4(-126.0f)), f4(-126.0f), x);
-  xc = f4_sel(f4_gt(xc, f4(127.99999f)), f4(127.99999f), xc);
-  xc = f4_sel(f4_eq(xc, xc), xc, f4(0.0f));
-  const F4 n = f4_floor(xc + f4(0.5f));
-  const F4 f = xc - n;
-  F4 p = f4(1.535336188319500e-4f);
-  p = p * f + f4(1.339887440266574e-3f);
-  p = p * f + f4(9.618437357674640e-3f);
-  p = p * f + f4(5.550332471162809e-2f);
-  p = p * f + f4(2.402264791363012e-1f);
-  p = p * f + f4(6.931472028550421e-1f);
-  p = p * f + f4(1.0f);
-  const I4 ni = f4_trunc(n);
-  const I4 e  = i4_sel(i4_lt(ni, i4(128)), ni, i4(127));
-  const F4 s  = f4_from_bits(i4_shl<23>(e + i4(127)));
-  F4 r = p * s;
-  r = f4_sel(i4_eq(ni, i4(128)), r * f4(2.0f), r);
-  r = f4_sel(f4_lt(x, f4(-126.0f)), f4(0.0f), r);
-  r = f4_sel(f4_ge(x, f4(128.0f)), f4(k_inf), r);
-  return f4_sel(f4_eq(x, x), r, x);
-}
-
-NSB_FI F4 f4_log2(F4 x) {
-  const I4 den = f4_lt(x, f4(1.17549435e-38f));
-  const F4 xs = f4_sel(den, x * f4(8388608.0f), x);
-  const I4 u = f4_bits(xs);
-  I4 e = (i4_shr<23>(u) & i4(0xff)) - i4(127) - (den & i4(23));
-  F4 m = f4_from_bits((u & i4(0x007fffff)) | i4(0x3f800000));
-  const I4 big = f4_gt(m, f4(1.41421356f));
-  m = f4_sel(big, m * f4(0.5f), m);
-  e = e + (big & i4(1));
-  const F4 t  = (m - f4(1.0f)) / (m + f4(1.0f));
-  const F4 t2 = t * t;
-  F4 p = f4(0.412198583111132f);
-  p = p * t2 + f4(0.577078016355585f);
-  p = p * t2 + f4(0.961796693925976f);
-  p = p * t2 + f4(2.885390081777927f);
-  F4 r = i4_to_f4(e) + t * p;
-  r = f4_sel(f4_eq(x, f4(0.0f)), f4(-k_inf), r);
-  r = f4_sel(f4_lt(x, f4(0.0f)), f4(k_nan), r);
-  r = f4_sel(f4_eq(x, f4(k_inf)), f4(k_inf), r);
-  return f4_sel(f4_eq(x, x), r, x);
-}
-
-NSB_FI F4 f4_atan2(F4 y, F4 x) {
-  const F4 ax = f4_abs(x), ay = f4_abs(y);
-  const I4 xbig = f4_gt(ax, ay);
-  const F4 mx = f4_sel(xbig, ax, ay);
-  const F4 mn = f4_sel(xbig, ay, ax);
-  const F4 a  = f4_sel(f4_gt(mx, f4(0.0f)), mn / mx, f4(0.0f));
-  const I4 red = f4_gt(a, f4(0.414213562f));
-  const F4 aa = f4_sel(red, (a - f4(1.0f)) / (a + f4(1.0f)), a);
-  const F4 z  = aa * aa;
-  F4 r = (((f4(8.05374449538e-2f) * z - f4(1.38776856032e-1f)) * z + f4(1.99777106478e-1f)) * z
-          - f4(3.33329491539e-1f)) * z * aa + aa;
-  r = f4_sel(red, r + f4(0.785398163f), r);
-  r = f4_sel(f4_gt(ay, ax), f4(1.57079633f) - r, r);
-  r = f4_sel(f4_lt(x, f4(0.0f)), f4(3.14159265f) - r, r);
-  return f4_sel(f4_lt(y, f4(0.0f)), f4_neg(r), r);
-}
-
-NSB_FI I4 f4_hash_coord(F4 v) {
-  v = f4_sel(f4_eq(v, v), v, f4(0.0f));
-  v = f4_floor(v);
-  v = f4_sel(f4_lt(v, f4(-16777216.0f)), f4(-16777216.0f),
-             f4_sel(f4_gt(v, f4(16777216.0f)), f4(16777216.0f), v));
-  return f4_trunc(v);
-}
-NSB_FI F4 f4_hash2(F4 x, F4 y) {
-  I4 h = i4_mul(f4_hash_coord(x), i4(static_cast<int32_t>(0x8da6b343u))) ^
-         i4_mul(f4_hash_coord(y), i4(static_cast<int32_t>(0xd8163841u)));
-  h = h ^ i4_shr<16>(h); h = i4_mul(h, i4(0x7feb352d));
-  h = h ^ i4_shr<15>(h); h = i4_mul(h, i4(static_cast<int32_t>(0x846ca68bu)));
-  h = h ^ i4_shr<16>(h);
-  return i4_to_f4(i4_shr<8>(h)) * f4(1.0f / 16777216.0f);
-}
-
-template <int L>
-void run_block_simd(const Program& pg, float (*R)[L]) {
-  static_assert(L % 4 == 0, "SIMD lanes come in fours");
-  for (const Ins& in : pg.code) {
-    float* d = R[in.d];
-    const float* a = R[in.a];
-    const float* b = R[in.b];
-    const float* c = R[in.c];
-#define NSB_K1(expr) for (int i = 0; i < L; i += 4) { const F4 x = f4_load(a + i); f4_store(d + i, expr); } break;
-#define NSB_K2(expr) for (int i = 0; i < L; i += 4) { const F4 x = f4_load(a + i), y = f4_load(b + i); f4_store(d + i, expr); } break;
-    switch (in.op) {
-      case OP_ADD:   NSB_K2(x + y)
-      case OP_SUB:   NSB_K2(x - y)
-      case OP_MUL:   NSB_K2(x * y)
-      case OP_DIV:   NSB_K2(x / y)
-      case OP_MIN:   NSB_K2(f4_min(x, y))
-      case OP_MAX:   NSB_K2(f4_max(x, y))
-      case OP_ABS:   NSB_K1(f4_abs(x))
-      case OP_FLOOR: NSB_K1(f4_floor(x))
-      case OP_SQRT:  NSB_K1(f4_sqrt(x))
-      case OP_SIN:   NSB_K1(f4_sin(x))
-      case OP_COS:   NSB_K1(f4_cos(x))
-      case OP_EXP2:  NSB_K1(f4_exp2(x))
-      case OP_LOG2:  NSB_K1(f4_log2(x))
-      case OP_ATAN2: NSB_K2(f4_atan2(x, y))
-      case OP_LT:    NSB_K2(f4_sel(f4_lt(x, y), f4(1.0f), f4(0.0f)))
-      case OP_SEL:
-        for (int i = 0; i < L; i += 4)
-          f4_store(d + i, f4_sel(f4_ne(f4_load(a + i), f4(0.0f)), f4_load(b + i), f4_load(c + i)));
-        break;
-      case OP_HASH2: NSB_K2(f4_hash2(x, y))
-      default: break;
-    }
-#undef NSB_K1
-#undef NSB_K2
-  }
-}
-
-template <int L>
-void run_block(const Program& pg, float (*R)[L]) {
-  for (const Ins& in : pg.code) {
-    float* __restrict d = R[in.d];
-    const float* __restrict a = R[in.a];
-    const float* __restrict b = R[in.b];
-    const float* __restrict c = R[in.c];
-    switch (in.op) {
-      case OP_ADD:   for (int i = 0; i < L; ++i) d[i] = a[i] + b[i]; break;
-      case OP_SUB:   for (int i = 0; i < L; ++i) d[i] = a[i] - b[i]; break;
-      case OP_MUL:   for (int i = 0; i < L; ++i) d[i] = a[i] * b[i]; break;
-      case OP_DIV:   for (int i = 0; i < L; ++i) d[i] = a[i] / b[i]; break;
-      case OP_MIN:   for (int i = 0; i < L; ++i) d[i] = m_min(a[i], b[i]); break;
-      case OP_MAX:   for (int i = 0; i < L; ++i) d[i] = m_max(a[i], b[i]); break;
-      case OP_ABS:   for (int i = 0; i < L; ++i) d[i] = m_abs(a[i]); break;
-      case OP_FLOOR: for (int i = 0; i < L; ++i) d[i] = m_floor(a[i]); break;
-      case OP_SQRT:  for (int i = 0; i < L; ++i) d[i] = std::sqrt(a[i]); break;
-      case OP_SIN:   for (int i = 0; i < L; ++i) d[i] = m_sin(a[i]); break;
-      case OP_COS:   for (int i = 0; i < L; ++i) d[i] = m_cos(a[i]); break;
-      case OP_EXP2:  for (int i = 0; i < L; ++i) d[i] = m_exp2(a[i]); break;
-      case OP_LOG2:  for (int i = 0; i < L; ++i) d[i] = m_log2(a[i]); break;
-      case OP_ATAN2: for (int i = 0; i < L; ++i) d[i] = m_atan2(a[i], b[i]); break;
-      case OP_LT:    for (int i = 0; i < L; ++i) d[i] = a[i] < b[i] ? 1.0f : 0.0f; break;
-      case OP_SEL:   for (int i = 0; i < L; ++i) d[i] = a[i] != 0.0f ? b[i] : c[i]; break;
-      case OP_HASH2: for (int i = 0; i < L; ++i) d[i] = m_hash2(a[i], b[i]); break;
-      default: break;
-    }
-  }
-}
-
-// A layer as the executor sees it: logical origin (translation included),
-// logical size, effective scale, and the dither pragma.
-struct Layer {
-  float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f, s = 1.0f;
-  bool dither = false;
-  // Device rect [X0, X1) x [Y0, Y1) and the whole device pixels it touches.
-  float X0() const { return x * s; }
-  float Y0() const { return y * s; }
-  float X1() const { return X0() + w * s; }
-  float Y1() const { return Y0() + h * s; }
-  int i0() const { return static_cast<int>(m_floor(X0())); }
-  int j0() const { return static_cast<int>(m_floor(Y0())); }
-  int w_px() const { return static_cast<int>(-m_floor(-X1())) - i0(); }
-  int h_px() const { return static_cast<int>(-m_floor(-Y1())) - j0(); }
-};
-
-// Output rule (docs/shader-language.md section 11): clamp to [0, 1] with
-// NaN -> 0, multiply alpha by the pixel's coverage of the layer rect,
-// premultiply in float, round alpha half up, and round colour with the
-// dither offset d (0.5 without dithering), never above alpha.
-inline float clamp01(float v) { return v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f; }
-inline int32_t q8(float v, float d) { return static_cast<int32_t>(v * 255.0f + d); }
-const float k_bayer4[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
-
-// Renders the layer's w_px x h_px premultiplied BGRA8 bitmap. Bitmap pixel
-// (i, j) is evaluated at p = ((i + 0.5 - fx) / s, (j + 0.5 - fy) / s), where
-// fx = X0 - floor(X0) is the sub-pixel remainder of the layer origin.
-template <int L, bool Simd>
-void render(const Program& pg, const Layer& ly, uint8_t* out, std::vector<float>& regs) {
-  FpEnvGuard fp;
-  regs.assign(static_cast<size_t>(pg.nregs) * L, 0.0f);
-  float (*R)[L] = reinterpret_cast<float (*)[L]>(regs.data());
-  for (const auto& kv : pg.consts)
-    for (int i = 0; i < L; ++i) R[kv.first][i] = kv.second;
-  const int w_px = ly.w_px(), h_px = ly.h_px();
-  const float X0 = ly.X0(), X1 = ly.X1(), Y0 = ly.Y0(), Y1 = ly.Y1();
-  const float fi0 = static_cast<float>(ly.i0()), fj0 = static_cast<float>(ly.j0());
-  const float fx = X0 - fi0, fy = Y0 - fj0;
-  // p.x and the column coverage depend only on the column: computed once per
-  // draw, padded to whole lanes.
-  const int w_pad = (w_px + L - 1) / L * L;
-  std::vector<float> px_col(static_cast<size_t>(w_pad)), cx_col(static_cast<size_t>(w_pad));
-  for (int i = 0; i < w_pad; ++i) {
-    const float col = fi0 + static_cast<float>(i);
-    px_col[static_cast<size_t>(i)] = ((static_cast<float>(i) + 0.5f) - fx) / ly.s;
-    cx_col[static_cast<size_t>(i)] = m_min(col + 1.0f, X1) - m_max(col, X0);
-  }
-  for (int y = 0; y < h_px; ++y) {
-    const float pyv = ((static_cast<float>(y) + 0.5f) - fy) / ly.s;
-    const float row = fj0 + static_cast<float>(y);
-    const float cy = m_min(row + 1.0f, Y1) - m_max(row, Y0);
-    for (int x0 = 0; x0 < w_px; x0 += L) {
-      std::memcpy(R[pg.px], px_col.data() + x0, sizeof(float) * L);
-      for (int i = 0; i < L; ++i) R[pg.py][i] = pyv;
-      if constexpr (Simd) run_block_simd<L>(pg, R); else run_block<L>(pg, R);
-      const int n = std::min(L, w_px - x0);
-      uint8_t* dst = out + (static_cast<size_t>(y) * static_cast<size_t>(w_px) + static_cast<size_t>(x0)) * 4u;
-      const float* cr = R[pg.out[0]];
-      const float* cg = R[pg.out[1]];
-      const float* cb = R[pg.out[2]];
-      const float* ca = R[pg.out[3]];
-      for (int i = 0; i < n; ++i) {
-        const float a = clamp01(ca[i]) * (cx_col[static_cast<size_t>(x0 + i)] * cy);
-        const float d = ly.dither ? (k_bayer4[(y & 3) * 4 + ((x0 + i) & 3)] + 0.5f) / 16.0f : 0.5f;
-        const int32_t a8 = q8(a, 0.5f);
-        dst[4 * i + 0] = static_cast<uint8_t>(std::min(q8(clamp01(cb[i]) * a, d), a8));
-        dst[4 * i + 1] = static_cast<uint8_t>(std::min(q8(clamp01(cg[i]) * a, d), a8));
-        dst[4 * i + 2] = static_cast<uint8_t>(std::min(q8(clamp01(cr[i]) * a, d), a8));
-        dst[4 * i + 3] = static_cast<uint8_t>(a8);
-      }
-    }
-  }
-}
-
-// Executor variants: lane width L, auto-vectorised scalar kernels or explicit
-// SIMD kernels (L >= 4).
-enum Exec { EXEC_AUTO, EXEC_SIMD };
-
-void render_lane(int lane, Exec exec, const Program& pg, const Layer& ly, uint8_t* out,
-                 std::vector<float>& regs) {
-  if (exec == EXEC_SIMD && lane >= 4) {
-    switch (lane) {
-      case 8:   render<8, true>(pg, ly, out, regs); break;
-      case 32:  render<32, true>(pg, ly, out, regs); break;
-      case 64:  render<64, true>(pg, ly, out, regs); break;
-      case 128: render<128, true>(pg, ly, out, regs); break;
-      default:  render<256, true>(pg, ly, out, regs); break;
-    }
-    return;
-  }
-  switch (lane) {
-    case 1:   render<1, false>(pg, ly, out, regs); break;
-    case 8:   render<8, false>(pg, ly, out, regs); break;
-    case 32:  render<32, false>(pg, ly, out, regs); break;
-    case 64:  render<64, false>(pg, ly, out, regs); break;
-    case 128: render<128, false>(pg, ly, out, regs); break;
-    default:  render<256, false>(pg, ly, out, regs); break;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Programs, written as the phase-1 front end would scalarise them.
-// ---------------------------------------------------------------------------
-
-// ring_glow.nsl from the plan: a value-driven glow ring for a knob.
-Program prog_ring_glow(float w, float h, float scale) {
-  Builder b("ring_glow");
-  using V = Builder::V;
-  const float value = 0.65f;
-  V cx = b.mul(b.k(w), b.k(0.5f)), cy = b.mul(b.k(h), b.k(0.5f));
-  V r  = b.mul(b.min(cx, cy), b.k(0.8f));
-  V dx = b.sub(b.px, cx), dy = b.sub(b.py, cy);
-  V d  = b.abs(b.sub(b.sqrt(b.add(b.mul(dx, dx), b.mul(dy, dy))), r));
-  V npx = b.div(b.k(1.0f), b.k(scale));
-  V ring = b.sub(b.k(1.0f), b.smoothstep(b.k(0.0f), b.mul(b.k(1.5f), npx), b.sub(d, b.k(2.0f))));
-  V glow = b.exp(b.mul(b.mul(d, b.k(-1.0f)), b.mix(b.k(0.6f), b.k(0.15f), b.k(value))));
-  V a = b.clamp(b.add(ring, b.mul(glow, b.k(value))), b.k(0.0f), b.k(1.0f));
-  return b.finish(b.k(0.2f), b.k(0.7f), b.k(1.0f), b.mul(a, b.k(1.0f)));
-}
-
-// Classic sine plasma: transcendental-heavy.
-Program prog_plasma(float w, float h, float /*scale*/) {
-  Builder b("plasma");
-  using V = Builder::V;
-  V t  = b.k(1.7f);
-  V ux = b.div(b.px, b.k(w)), uy = b.div(b.py, b.k(h));
-  V v1 = b.sin(b.add(b.mul(ux, b.k(10.0f)), t));
-  V v2 = b.sin(b.add(b.mul(b.k(10.0f), b.add(b.mul(ux, b.sin(b.div(t, b.k(2.0f)))),
-                                                b.mul(uy, b.cos(b.div(t, b.k(3.0f)))))), t));
-  V cx = b.add(ux, b.mul(b.k(0.5f), b.sin(b.div(t, b.k(5.0f)))));
-  V cy = b.add(uy, b.mul(b.k(0.5f), b.cos(b.div(t, b.k(3.0f)))));
-  V v3 = b.sin(b.add(b.sqrt(b.add(b.mul(b.k(100.0f), b.add(b.mul(cx, cx), b.mul(cy, cy))), b.k(1.0f))), t));
-  V v  = b.mul(b.add(b.add(v1, v2), v3), b.k(3.14159265f));
-  V half = b.k(0.5f);
-  V cr = b.add(b.mul(b.sin(v), half), half);
-  V cg = b.add(b.mul(b.sin(b.add(v, b.k(2.0943951f))), half), half);
-  V cb = b.add(b.mul(b.sin(b.add(v, b.k(4.1887902f))), half), half);
-  return b.finish(cr, cg, cb, b.k(1.0f));
-}
-
-// Five octaves of value noise (integer hash) mapped onto a two-colour ramp.
-Program prog_fbm(float /*w*/, float /*h*/, float /*scale*/) {
-  Builder b("fbm5");
-  using V = Builder::V;
-  V qx = b.div(b.px, b.k(24.0f)), qy = b.div(b.py, b.k(24.0f));
-  V sum = b.k(0.0f);
-  float amp = 0.5f;
-  for (int o = 0; o < 5; ++o) {
-    V ix = b.floor(qx), iy = b.floor(qy);
-    V fx = b.sub(qx, ix), fy = b.sub(qy, iy);
-    V ux = b.mul(b.mul(fx, fx), b.sub(b.k(3.0f), b.mul(b.k(2.0f), fx)));
-    V uy = b.mul(b.mul(fy, fy), b.sub(b.k(3.0f), b.mul(b.k(2.0f), fy)));
-    V ix1 = b.add(ix, b.k(1.0f)), iy1 = b.add(iy, b.k(1.0f));
-    V n = b.mix(b.mix(b.hash2(ix, iy), b.hash2(ix1, iy), ux),
-                b.mix(b.hash2(ix, iy1), b.hash2(ix1, iy1), ux), uy);
-    sum = b.add(sum, b.mul(b.k(amp), n));
-    qx = b.add(b.mul(qx, b.k(2.03f)), b.k(1.7f));
-    qy = b.sub(b.mul(qy, b.k(2.03f)), b.k(0.9f));
-    amp *= 0.5f;
-  }
-  V t = b.smoothstep(b.k(0.3f), b.k(0.8f), sum);
-  return b.finish(b.mix(b.k(0.08f), b.k(0.95f), t), b.mix(b.k(0.10f), b.k(0.80f), t),
-                  b.mix(b.k(0.16f), b.k(0.55f), t), b.k(1.0f));
-}
-
-// The plan's budget case: ~150 scalar ops, ~10% transcendental.
-Program prog_synthetic(float /*w*/, float /*h*/, float /*scale*/) {
-  Builder b("synthetic150");
-  using V = Builder::V;
-  V x = b.mul(b.px, b.k(0.013f)), y = b.mul(b.py, b.k(0.017f)), acc = b.k(0.0f);
-  for (int i = 0; i < 15; ++i) {
-    const float k1 = 0.3f + 0.05f * static_cast<float>(i), k2 = 0.7f - 0.03f * static_cast<float>(i);
-    V arg = b.add(b.mul(x, b.k(k1)), b.mul(y, b.k(k2)));
-    V s;
-    switch (i % 4) {
-      case 0:  s = b.sin(arg); break;
-      case 1:  s = b.atan2(arg, b.add(y, b.k(1.5f))); break;
-      case 2:  s = b.exp2(b.mul(b.abs(arg), b.k(-1.0f))); break;
-      default: s = b.log2(b.add(b.abs(arg), b.k(1.0f))); break;
-    }
-    x = b.add(x, b.mul(s, b.k(0.37f)));
-    y = b.add(b.min(b.mul(y, b.k(0.93f)), x), s);
-    acc = b.add(acc, y);
-  }
-  return b.finish(b.fract(acc), b.fract(x), b.fract(y), b.k(1.0f));
-}
-
-using ProgFn = Program (*)(float, float, float);
-const ProgFn k_programs[] = {prog_ring_glow, prog_plasma, prog_fbm, prog_synthetic};
-const int k_program_count = 4;
-
-// ---------------------------------------------------------------------------
-// Checksums.
-// ---------------------------------------------------------------------------
-
-uint32_t crc32(const void* data, size_t len, uint32_t crc = 0) {
-  static uint32_t table[256];
-  static bool init = false;
-  if (!init) {
-    for (uint32_t i = 0; i < 256; ++i) {
-      uint32_t c = i;
-      for (int j = 0; j < 8; ++j) c = (c & 1u) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-      table[i] = c;
-    }
-    init = true;
-  }
-  crc = ~crc;
-  const uint8_t* p = static_cast<const uint8_t*>(data);
-  for (size_t i = 0; i < len; ++i) crc = table[(crc ^ p[i]) & 0xffu] ^ (crc >> 8);
-  return ~crc;
-}
-
-uint32_t crc_floats(const std::vector<float>& v) {
-  uint32_t crc = 0;
-  for (float f : v) {
-    uint32_t u = f == f ? bits(f) : 0x7fc00000u;  // NaN payload and sign are not observable
-    crc = crc32(&u, 4, crc);
-  }
-  return crc;
-}
-
-// Built-in sweeps: raw result bits of every built-in over a fixed set of
-// inputs, including denormals. The strongest determinism check.
-enum { SW_SIN, SW_COS, SW_EXP2, SW_LOG2, SW_ATAN2, SW_HASH, SW_COUNT };
-const char* const k_sweep_names[SW_COUNT] = {"sin", "cos", "exp2", "log2", "atan2", "hash2"};
-
-void sweep_inputs(std::vector<float>& xs, std::vector<float>& ys) {
-  xs.clear(); ys.clear();
-  uint32_t s = 12345u;
-  for (int i = 0; i < 20000; ++i) {
-    s = s * 1664525u + 1013904223u;
-    const float u = static_cast<float>(s >> 8) * (1.0f / 16777216.0f);  // [0, 1)
-    s = s * 1664525u + 1013904223u;
-    const float v = static_cast<float>(s >> 8) * (1.0f / 16777216.0f);
-    xs.push_back((u - 0.5f) * 400.0f);
-    ys.push_back((v - 0.5f) * 400.0f);
-  }
-  const float specials[] = {0.0f, -0.0f, 1.0f, -1.0f, 1e-45f, 1e-40f, 1.1754942e-38f, 1e-30f,
-                            1e30f, -1e30f, 3.4e38f, 127.5f, -126.5f, 128.0f, k_inf, -k_inf, k_nan};
-  for (float a : specials)
-    for (float b2 : specials) { xs.push_back(a); ys.push_back(b2); }
-}
-
-void run_sweeps(uint32_t out[SW_COUNT]) {
-  FpEnvGuard fp;
-  std::vector<float> xs, ys, r;
-  sweep_inputs(xs, ys);
-  const size_t n = xs.size();
-  r.resize(n);
-  for (size_t i = 0; i < n; ++i) r[i] = m_sin(xs[i]);
-  out[SW_SIN] = crc_floats(r);
-  for (size_t i = 0; i < n; ++i) r[i] = m_cos(xs[i]);
-  out[SW_COS] = crc_floats(r);
-  for (size_t i = 0; i < n; ++i) r[i] = m_exp2(xs[i] * 0.33f);
-  out[SW_EXP2] = crc_floats(r);
-  for (size_t i = 0; i < n; ++i) r[i] = m_log2(m_abs(xs[i]) * ys[i] * ys[i] * 1e-3f + xs[i]);
-  out[SW_LOG2] = crc_floats(r);
-  for (size_t i = 0; i < n; ++i) r[i] = m_atan2(ys[i], xs[i]);
-  out[SW_ATAN2] = crc_floats(r);
-  for (size_t i = 0; i < n; ++i) r[i] = m_hash2(xs[i] * 50.0f, ys[i] * 50.0f);
-  out[SW_HASH] = crc_floats(r);
-}
-
-// Program output checksums: every program on a 64x64 logical layer at 1x,
-// 1.5x and 2x, plus one at a fractional origin (sub-pixel remainder and edge
-// coverage) with dithering.
-const int k_check_cases = 4;
-const char* const k_case_names[k_check_cases] = {"@1x", "@1.5x", "@2x", "@1.5x+(10.5,7.25) dither"};
-
-Layer check_layer(int c) {
-  Layer ly;
-  ly.w = 64.0f; ly.h = 64.0f;
-  ly.s = c == 0 ? 1.0f : (c == 2 ? 2.0f : 1.5f);
-  if (c == 3) { ly.x = 10.5f; ly.y = 7.25f; ly.dither = true; }
-  return ly;
-}
-
-void run_programs(int lane, Exec exec, uint32_t out[k_program_count][k_check_cases]) {
-  std::vector<float> regs;
-  std::vector<uint8_t> px;
-  for (int p = 0; p < k_program_count; ++p) {
-    for (int c = 0; c < k_check_cases; ++c) {
-      const Layer ly = check_layer(c);
-      const Program pg = k_programs[p](ly.w, ly.h, ly.s);
-      px.assign(static_cast<size_t>(ly.w_px()) * static_cast<size_t>(ly.h_px()) * 4u, 0);
-      render_lane(lane, exec, pg, ly, px.data(), regs);
-      out[p][c] = crc32(px.data(), px.size());
-    }
-  }
-}
-
-// Expected checksums, recorded on macOS / AppleClang arm64. Every other
-// compiler and CPU must reproduce them bit for bit.
-const uint32_t k_expected_sweeps[SW_COUNT] = {
-  0xa7b0f0d9u, 0x29044e7au, 0x874e33a3u, 0xee75588du, 0x1604235bu, 0x63c4a42du};
-const uint32_t k_expected_programs[k_program_count][k_check_cases] = {
-  {0x2a9a8213u, 0x54e1557bu, 0xee728ee9u, 0x5df3967cu},   // ring_glow
-  {0x7c0c8a88u, 0x4b5d1775u, 0xc3a5be00u, 0x31e6247au},   // plasma
-  {0xb5c47a56u, 0x0aa70a77u, 0xece030ddu, 0x2a990a46u},   // fbm5
-  {0x2f875d31u, 0x4368de7bu, 0x6d3adc5au, 0x5ef500b2u}};  // synthetic150
-
-// Returns the number of mismatches; prints every checksum.
-int check(bool verbose) {
-  int bad = 0;
-  uint32_t sw[SW_COUNT];
-  run_sweeps(sw);
-  for (int i = 0; i < SW_COUNT; ++i) {
-    const bool ok = sw[i] == k_expected_sweeps[i];
-    bad += ok ? 0 : 1;
-    std::printf("  sweep %-6s 0x%08x %s\n", k_sweep_names[i], static_cast<unsigned>(sw[i]), ok ? "ok" : "MISMATCH");
-  }
-  uint32_t pr[k_program_count][k_check_cases];
-  run_programs(64, EXEC_SIMD, pr);
-  for (int p = 0; p < k_program_count; ++p) {
-    const Program pg = k_programs[p](64.0f, 64.0f, 1.0f);
-    for (int c = 0; c < k_check_cases; ++c) {
-      const bool ok = pr[p][c] == k_expected_programs[p][c];
-      bad += ok ? 0 : 1;
-      std::printf("  prog  %-12s %-26s 0x%08x %s\n", pg.name, k_case_names[c],
-                  static_cast<unsigned>(pr[p][c]), ok ? "ok" : "MISMATCH");
-    }
-  }
-
-  // Neither the lane width nor the kernel flavour may change a single bit:
-  // scalar one pixel at a time, auto-vectorised and explicit SIMD.
-  uint32_t pr1[k_program_count][k_check_cases], pr2[k_program_count][k_check_cases];
-  run_programs(1, EXEC_AUTO, pr1);
-  run_programs(64, EXEC_AUTO, pr2);
-  const bool lanes_ok = std::memcmp(pr, pr1, sizeof(pr)) == 0 && std::memcmp(pr, pr2, sizeof(pr)) == 0;
-  bad += lanes_ok ? 0 : 1;
-  std::printf("  scalar L=1 vs auto L=64 vs SIMD L=64: %s\n", lanes_ok ? "identical" : "DIFFERENT");
-
-  // A host that flushes denormals must not change a single bit either.
-  {
-    HostFlushToZero host;
-    uint32_t sw2[SW_COUNT];
-    run_sweeps(sw2);
-    uint32_t pr3[k_program_count][k_check_cases];
-    run_programs(64, EXEC_SIMD, pr3);
-    const bool env_ok = std::memcmp(sw, sw2, sizeof(sw)) == 0 && std::memcmp(pr, pr3, sizeof(pr)) == 0;
-    bad += env_ok ? 0 : 1;
-    std::printf("  host flush-to-zero, guarded: %s\n", env_ok ? "identical" : "DIFFERENT");
-  }
-  if (verbose) {
-    // Without the guard a flushing host changes results (log2 of a denormal).
-    std::vector<float> xs, ys, r1, r2;
-    sweep_inputs(xs, ys);
-    for (float x : xs) r1.push_back(m_log2(m_abs(x) * 1e-40f));
-    {
-      HostFlushToZero host;
-      for (float x : xs) r2.push_back(m_log2(m_abs(x) * 1e-40f));
-    }
-    std::printf("  host flush-to-zero, unguarded log2 sweep: %s\n",
-                crc_floats(r1) == crc_floats(r2) ? "identical" : "different (the guard is needed)");
-  }
-  return bad;
-}
-
-// ---------------------------------------------------------------------------
-// Report.
-// ---------------------------------------------------------------------------
 
 double now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-double ns_per_px(int lane, Exec exec, const Program& pg, const Layer& ly, int reps) {
-  std::vector<float> regs;
-  std::vector<uint8_t> px(static_cast<size_t>(ly.w_px()) * static_cast<size_t>(ly.h_px()) * 4u);
-  render_lane(lane, exec, pg, ly, px.data(), regs);  // warm up
+// Best of `reps` runs, in ns per pixel.
+double time_ns_per_px(const nsl::Program& p, const nsl::Draw& d, bool simd, int reps) {
+  const nsl::Placement pl = nsl::placement(d);
+  std::vector<uint8_t> px(static_cast<size_t>(pl.w) * static_cast<size_t>(pl.h) * 4u);
+  const size_t stride = static_cast<size_t>(pl.w) * 4u;
   double best = 1e30;
-  for (int r = 0; r < reps; ++r) {
+  for (int r = 0; r <= reps; ++r) {  // the first run warms up
     const double t0 = now_s();
-    render_lane(lane, exec, pg, ly, px.data(), regs);
-    best = std::min(best, now_s() - t0);
+    if (simd) nsl::execute(p, d, px.data(), stride);
+    else nsl::execute_scalar(p, d, px.data(), stride);
+    if (r > 0) best = std::min(best, now_s() - t0);
   }
-  return best * 1e9 / (static_cast<double>(ly.w_px()) * static_cast<double>(ly.h_px()));
-}
-
-Layer timing_layer(float w, float h, float s) {
-  Layer ly;
-  ly.w = w; ly.h = h; ly.s = s;
-  return ly;
-}
-
-void accuracy() {
-  struct Acc { const char* name; double max_err; } acc[5] = {
-    {"sin  |x|<=64 (abs)", 0}, {"cos  |x|<=64 (abs)", 0}, {"exp2 [-126,128) (rel)", 0},
-    {"log2 (0,1e30] (abs, rel>1)", 0}, {"atan2 (abs)", 0}};
-  for (int i = 0; i <= 200000; ++i) {
-    const float x = -64.0f + 128.0f * static_cast<float>(i) / 200000.0f;
-    acc[0].max_err = std::max(acc[0].max_err, std::fabs(static_cast<double>(m_sin(x)) - std::sin(static_cast<double>(x))));
-    acc[1].max_err = std::max(acc[1].max_err, std::fabs(static_cast<double>(m_cos(x)) - std::cos(static_cast<double>(x))));
-    const float e = -126.0f + 253.99f * static_cast<float>(i) / 200000.0f;
-    const double re = std::exp2(static_cast<double>(e));
-    acc[2].max_err = std::max(acc[2].max_err, std::fabs(static_cast<double>(m_exp2(e)) - re) / re);
-    const float l = std::pow(10.0f, -44.0f + 74.0f * static_cast<float>(i) / 200000.0f);
-    if (l > 0.0f)
-      acc[3].max_err = std::max(acc[3].max_err, std::fabs(static_cast<double>(m_log2(l)) - std::log2(static_cast<double>(l))) /
-                                                    std::max(1.0, std::fabs(std::log2(static_cast<double>(l)))));
-    const float ang = -3.14159f + 6.28318f * static_cast<float>(i) / 200000.0f;
-    const float yy = std::sin(ang) * 3.0f, xx = std::cos(ang) * 3.0f;
-    acc[4].max_err = std::max(acc[4].max_err, std::fabs(static_cast<double>(m_atan2(yy, xx)) -
-                                                        std::atan2(static_cast<double>(yy), static_cast<double>(xx))));
-  }
-  std::printf("\nBuilt-in accuracy vs double libm:\n");
-  for (const Acc& a : acc) std::printf("  %-24s max error %.3g\n", a.name, a.max_err);
-}
-
-void report() {
-#if defined(_MSC_VER) && !defined(__clang__)
-  std::printf("compiler: MSVC %d", _MSC_VER);
-#elif defined(__clang__)
-  std::printf("compiler: clang %s", __clang_version__);
-#elif defined(__GNUC__)
-  std::printf("compiler: GCC %s", __VERSION__);
-#endif
-#if defined(__x86_64__) || defined(_M_X64)
-  std::printf(" (x64, SSE2)\n");
-#elif NSB_X86
-  std::printf(" (x86, SSE2)\n");
-#elif NSB_A64
-  std::printf(" (arm64, NEON)\n");
-#else
-  std::printf(" (other)\n");
-#endif
-#if defined(NSB_FORCE_PORTABLE)
-  std::printf("SIMD kernels: portable fallback (forced)\n");
-#endif
-
-  std::printf("\nns per pixel (120x120 logical knob @2x = 240x240 px, best of 7)\n");
-  std::printf("scalar = one pixel at a time; auto = scalar kernels left to the auto-vectoriser;\n");
-  std::printf("SIMD = explicit 4-wide kernels; L = pixels per lane\n");
-  const int lanes[] = {8, 32, 64, 128, 256};
-  std::printf("  %-13s %4s %5s %4s %9s %9s", "program", "ops", "trans", "regs", "scalar", "auto L64");
-  for (int l : lanes) std::printf(" %6s%-3d", "SIMD L", l);
-  std::printf("\n");
-  for (int p = 0; p < k_program_count; ++p) {
-    const Program pg = k_programs[p](120.0f, 120.0f, 2.0f);
-    const Layer knob_ly = timing_layer(120.0f, 120.0f, 2.0f);
-    std::printf("  %-13s %4d %5d %4d", pg.name, static_cast<int>(pg.code.size()), pg.transcendentals, pg.nregs);
-    std::printf(" %9.2f", ns_per_px(1, EXEC_AUTO, pg, knob_ly, 7));
-    std::printf(" %9.2f", ns_per_px(64, EXEC_AUTO, pg, knob_ly, 7));
-    for (int l : lanes) std::printf(" %9.2f", ns_per_px(l, EXEC_SIMD, pg, knob_ly, 7));
-    std::printf("\n");
-  }
-
-  std::printf("\nms per re-shade, SIMD L=64:\n");
-  std::printf("  %-13s %14s %20s %18s\n", "program", "knob 120@2x", "background 800x600@2x", "same @ resolution 0.5");
-  for (int p = 0; p < k_program_count; ++p) {
-    const Program knob = k_programs[p](120.0f, 120.0f, 2.0f);
-    const Program bg   = k_programs[p](800.0f, 600.0f, 2.0f);
-    const Program bg_half = k_programs[p](800.0f, 600.0f, 1.0f);
-    const double knob_ms = ns_per_px(64, EXEC_SIMD, knob, timing_layer(120.0f, 120.0f, 2.0f), 7) * 240.0 * 240.0 * 1e-6;
-    const double bg_ms   = ns_per_px(64, EXEC_SIMD, bg, timing_layer(800.0f, 600.0f, 2.0f), 2) * 1600.0 * 1200.0 * 1e-6;
-    const double half_ms = ns_per_px(64, EXEC_SIMD, bg_half, timing_layer(800.0f, 600.0f, 1.0f), 3) * 800.0 * 600.0 * 1e-6;
-    std::printf("  %-13s %11.2f ms %17.1f ms %15.1f ms\n", knob.name, knob_ms, bg_ms, half_ms);
-  }
-
-  accuracy();
-
-  std::printf("\nChecksums:\n");
-  const int bad = check(true);
-  std::printf("%s\n", bad == 0 ? "all checksums match" : "CHECKSUM MISMATCH (see above)");
+  return best * 1e9 / (static_cast<double>(pl.w) * static_cast<double>(pl.h));
 }
 
 }  // namespace
 
-int main(int argc, char** argv) {
-  if (argc > 1 && std::strcmp(argv[1], "--check") == 0) {
-    const int bad = check(false);
-    std::printf("%s (%d mismatches)\n", bad == 0 ? "shader bench: checksums match" : "shader bench: CHECKSUM MISMATCH", bad);
-    return bad == 0 ? 0 : 1;
+int main() {
+#if defined(_MSC_VER) && !defined(__clang__)
+  std::printf("compiler: MSVC %d\n", _MSC_VER);
+#elif defined(__clang__)
+  std::printf("compiler: clang %s\n", __clang_version__);
+#elif defined(__GNUC__)
+  std::printf("compiler: GCC %s\n", __VERSION__);
+#endif
+  std::printf("\n%-11s %5s %5s %5s %5s %8s %8s %12s %14s %13s\n", "shader", "pixel", "draw", "trans", "regs",
+              "scalar", "SIMD", "knob 120@2x", "bg 800x600@2x", "bg @ res 0.5");
+  std::printf("%-11s %5s %5s %5s %5s %8s %8s %12s %14s %13s\n", "", "ops", "ops", "", "", "ns/px", "ns/px", "ms", "ms",
+              "ms");
+  for (const Shader& s : k_shaders) {
+    const nsl::CompileResult r = nsl::compile(s.src, std::strlen(s.src), s.name);
+    if (!r.program) {
+      std::printf("%s\n", r.error.c_str());
+      return 1;
+    }
+    const nsl::Program& p = *r.program;
+    const nsl::Stats st = nsl::stats(p);
+    nsl::Draw knob;
+    knob.w = knob.h = 120.0f;
+    knob.scale = 2.0f;
+    knob.time = 1.7f;
+    nsl::Draw bg = knob;
+    bg.w = 800.0f;
+    bg.h = 600.0f;
+    nsl::Draw bg_half = bg;
+    bg_half.scale = 1.0f;
+    const double scalar = time_ns_per_px(p, knob, false, 3);
+    const double simd = time_ns_per_px(p, knob, true, 7);
+    const double bg_ns = time_ns_per_px(p, bg, true, 2);
+    const double half_ns = time_ns_per_px(p, bg_half, true, 3);
+    std::printf("%-11s %5d %5d %5d %5d %8.2f %8.2f %12.2f %14.1f %13.1f\n", s.name, st.pixel_ops, st.draw_ops,
+                st.transcendentals, st.pixel_regs, scalar, simd, simd * 240.0 * 240.0 * 1e-6,
+                bg_ns * 1600.0 * 1200.0 * 1e-6, half_ns * 800.0 * 600.0 * 1e-6);
   }
-  report();
   return 0;
 }

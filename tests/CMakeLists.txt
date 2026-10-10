@@ -30,6 +30,8 @@ add_executable(neui_tests
   test_component_loader.cpp
   test_metrics.cpp
   test_ios_api.cpp
+  test_shader_lang.cpp
+  test_shader_exec.cpp
   # mujson lives in the core lib, but the suite links no library, so its TU is
   # compiled directly into the test executable (same pattern as the *.cpp above).
   ${PROJECT_SOURCE_DIR}/src/mujson.cpp)
@@ -40,6 +42,10 @@ target_include_directories(neui_tests PRIVATE
   ${PROJECT_SOURCE_DIR}/src)
 
 target_compile_features(neui_tests PRIVATE cxx_std_17)
+
+# The .nsl shader compiler + executor is a library of its own (its compile
+# flags must not leak into or come from the test TUs), so the suite links it.
+target_link_libraries(neui_tests PRIVATE neui-shader)
 
 # iOS: the suite is a console-style program, but iOS only installs/launches app
 # bundles - give it a deterministic bundle id so CI can install it on a booted
@@ -66,9 +72,8 @@ endif()
 
 add_test(NAME neui_tests COMMAND neui_tests)
 
-# Shader phase 0: CPU executor prototype + benchmark. Its ctest entry checks
-# that every compiler / CPU produces the same shader bits. Not on iOS (a plain
-# console program; iOS only launches app bundles).
+# Shader executor benchmark (report only). Not on iOS (a plain console
+# program; iOS only launches app bundles).
 if(NOT NEUI_IOS)
   add_subdirectory(shader_bench)
 endif()

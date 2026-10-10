@@ -1,17 +1,16 @@
-<!-- neui reference. The .nsl language specification (shader phase 0). -->
+<!-- neui reference. The .nsl language specification. -->
 
 # The neui shading language (`.nsl`), version 1
 
-**Status: specification, nothing implemented yet.** This is the phase-0
-deliverable of `plans/shader-effects.md`. Phase 1 implements it in
-`hosts/shared/shader_lang.h` (front end) and `src/shader_exec.cpp` (CPU
-executor). The prototype in `tests/shader_bench/` already implements the
-built-in math, the pixel grid and the output rule below, and its checksums pin
-them.
+**Status: implemented by the compiler and CPU executor in `src/shader/`**
+(the `neui-shader` library, API `src/shader/nsl.h`; phase 1 of
+`plans/shader-effects.md`). No host exposes it yet: `NEUI_API_SHADER` and the
+compound layer come in phases 2 and 3. Tests: `tests/test_shader_lang.cpp` and
+`tests/test_shader_exec.cpp`.
 
 **What is normative:** this document for syntax, types and semantics. The
 exact polynomial behind each approximated built-in (§9.2) is defined by the
-reference implementation and pinned by checksums. Its accuracy bounds are
+reference implementation (`src/shader/nsl_math.h`) and pinned by checksums. Its accuracy bounds are
 given here.
 
 ## 1. Overview
@@ -279,7 +278,7 @@ same polynomials (§12).
 | `exp(x)` | `exp2(x * 1.4426950)` | from exp2 |
 | `log(x)` | `log2(x) * 0.6931472` | from log2 |
 | `pow(x, y)` | `x > 0`: `exp2(y * log2(x))`; `x == 0`: `y > 0` → 0, `y == 0` → 1, `y < 0` → +inf; `x < 0` → NaN | from exp2 / log2 |
-| `atan(y, x)` | reduction to [0, 1] and [-tan(π/8), tan(π/8)], Cephes polynomial; `atan(0, 0)` = 0 | abs ≤ 3e-7 |
+| `atan(y, x)` | reduction to [0, 1] and [-tan(π/8), tan(π/8)], Cephes polynomial; `atan(0, 0)` = 0; a NaN argument, or both arguments infinite, gives NaN | abs ≤ 3e-7 |
 | `atan(t)` | `atan(t, 1.0)` | |
 | `asin(x)` | `atan(x, sqrt(1 - x*x))`; \|x\| > 1 → NaN | |
 | `acos(x)` | `atan(sqrt(1 - x*x), x)`; \|x\| > 1 → NaN | |
@@ -394,12 +393,14 @@ moves.
 - **CPU executor:** bit-identical on every platform, for every program.
   Phase 0 confirmed this for AppleClang arm64, MSVC x64, GCC 13 x64 and
   Clang 18 x64, over the built-in sweeps (including denormals and specials)
-  and four test programs at 1×, 1.5×, 2× and a fractional, dithered origin. CI pins it (`neui_shader_bench_check`, later `neui_tests`).
+  and four test programs at 1×, 1.5×, 2× and a fractional, dithered origin.
+  CI pins it on every platform (`neui_tests`, `test_shader_exec.cpp`).
   Implementation rules:
-  - shader arithmetic is compiled with `-ffp-contract=off` (MSVC:
-    `/fp:precise`) in **one** TU, including the front end's constant folding;
+  - shader arithmetic, including the compiler's constant folding, is
+    compiled in **one** library (`src/shader/`, `neui-shader`) with
+    `-ffp-contract=off` (MSVC: `/fp:precise`), optimised in every build type;
   - no libm;
-  - the FP environment is pinned per draw.
+  - the FP environment is pinned per draw and per compile.
 - **GPU executor (D2D):** emits neui's own polynomials and the same pixel
   grid, but GPUs may fuse multiply-adds, flush denormals and round division
   differently. Contract: within 2/255 per channel on ≥ 99.9% of pixels, and

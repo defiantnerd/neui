@@ -2,15 +2,21 @@
 
 ## Status
 
-**Phase 0 done (2026-10-10); phase 1 next.** The prerequisite track,
+**Phases 0 and 1 done (2026-10-10); phase 2 next.** The prerequisite track,
 `plans/xpl-partial-repaint.md`, is implemented (P1-P4).
+
+Phase 1 produced the compiler and the CPU executor: the `neui-shader` static
+library in `src/shader/` (API `src/shader/nsl.h`, linked by `neui`), with
+`tests/test_shader_lang.cpp` and `tests/test_shader_exec.cpp`. No host exposes
+it yet. See "Phase 1 results" at the end of this document.
 
 Phase 0 produced:
 - **the language specification**, `docs/shader-language.md` (types,
   semantics, every built-in and edge case, pixel grid, output rule, limits,
   grammar);
-- **a CPU executor prototype + benchmark**, `tests/shader_bench/`, whose
-  ctest `neui_shader_bench_check` pins the bits;
+- **a CPU executor prototype + benchmark**, `tests/shader_bench/` (since
+  phase 1 a timing tool over the real library; the goldens moved into
+  `neui_tests`);
 - **a D2D custom-effect spike**, branch `spike/d2d-shader-effect` (f1774d2),
   run on the Windows machine.
 
@@ -265,7 +271,7 @@ asks for it. Importing `.sc` stays out.
 ## 3. Architecture
 
 ```
- .nsl source ──► front end (hosts/shared/shader_lang.h, header-only)
+ .nsl source ──► front end (src/shader/nsl_compile.cpp)
                  lex → parse → type-check → line:col diagnostics
                  → scalarised IR (const-fold, DCE, CSE, hoist uniform-only
                    work, unroll, register alloc)
@@ -273,7 +279,8 @@ asks for it. Importing `.sc` stays out.
        ┌───────────────┼──────────────────────────┐
        ▼               ▼                          ▼
   CPU executor     HLSL emitter               MSL emitter (later, if needed)
-  src/shader_exec  hosts/shared/              hosts/shared/
+  src/shader/      hosts/shared/              hosts/shared/
+  nsl_exec.cpp
   (reference,      shader_emit_hlsl.h         shader_emit_msl.h
    every host)     → D2D custom effect        → Metal → CGImage
        │
@@ -284,8 +291,11 @@ asks for it. Importing `.sc` stays out.
 
 ### Front end
 
-- Header-only `hosts/shared/shader_lang.h`, with built-in metadata in
-  `hosts/shared/shader_builtins.h`.
+- `src/shader/nsl_compile.cpp` in the `neui-shader` library, next to the
+  executor. (The original design had a header-only front end in
+  `hosts/shared/`. But constant folding is shader arithmetic, and a header is
+  compiled with whatever flags its includer uses, so it lives in the library
+  with the executor's flags.)
 - Hand-written lexer and recursive-descent parser in the mujson style, with
   exact `line:col` diagnostics.
 - Vector ops are **scalarised** at compile time (a `vec3` add becomes three
@@ -295,14 +305,13 @@ asks for it. Importing `.sc` stays out.
 
 ### CPU executor (the reference)
 
-- **Where:** `src/shader_exec.{h,cpp}`. It is a `.cpp` rather than
-  header-only so it can be compiled at `-O2` / `/O2` even in Debug builds
-  (Debug builds are 10-50× slower). This follows the `src/mujson.cpp`
-  precedent, which Tier-1 also compiles directly. On MSVC, Debug's `/Od`,
-  `/RTC1` **and `/Ob0`** must be stripped for that TU. `/Ob0` disables all
-  inlining, `__forceinline` included, and phase 0 measured the SIMD kernels
-  6-11× slower with it. `tests/shader_bench/CMakeLists.txt` shows the
-  directory-scoped way.
+- **Where:** `src/shader/nsl_exec.cpp`, with the math in
+  `src/shader/nsl_math.h` and the IR in `src/shader/nsl_ir.h`. The
+  `neui-shader` library is compiled at `-O2` / `/O2` even in Debug builds
+  (Debug builds are 10-50× slower). On MSVC, Debug's `/Od`, `/RTC1` **and
+  `/Ob0`** are stripped for its directory. `/Ob0` disables all inlining,
+  `__forceinline` included, and phase 0 measured the SIMD kernels 6-11×
+  slower with it.
 - **How it runs:** a batched structure-of-arrays interpreter. Each IR op
   processes a lane of 64 pixels held in float arrays, so dispatch is
   amortised over the lane.
@@ -758,13 +767,13 @@ What this means:
 | # | Scope | Main files |
 |---|---|---|
 | 0 | **Done.** Language spec + edge-case table; executor micro-benchmark (MSVC, AppleClang arm64, GCC, Clang); D2D zero-input effect spike (`SCENE_POSITION` at 100/120/150/200% vs CPU) | `docs/shader-language.md`, `tests/shader_bench/`, branch `spike/d2d-shader-effect` |
-| 1 | Front end + IR + optimiser; deterministic built-ins; SoA CPU executor; output packer (premultiply, optional dither) | `hosts/shared/{shader_lang.h,shader_builtins.h}`, `src/shader_exec.{h,cpp}`, `CMakeLists.txt`, `tests/CMakeLists.txt` |
+| 1 | **Done.** Front end + IR + optimiser; deterministic built-ins; SoA CPU executor; output packer (premultiply, optional dither) | `src/shader/{nsl.h,nsl_ir.h,nsl_math.h,nsl_compile.cpp,nsl_exec.cpp,CMakeLists.txt}`, `tests/test_shader_{lang,exec}.cpp` |
 | 2 | `NEUI_API_SHADER` (`create`, `create_from_file`, introspection, **`bake_bitmap` / `bake_filmstrip`**); asset kind + resource kind; shader cache on `AssetEntry`; QR leak fix. **First visible win:** baked shader filmstrips via the existing ASSET layer + `frame` binding, on every supporting host, zero per-frame cost | `include/neui/d/{shader.h,assets.h,resource.h}`, `hosts/shared/{asset_store.h,resource_provider.h}`, the 4 hosts' `host.*` (`get_interface`) + `widgets.*` (thunk tables) |
 | 3 | Live SHADER compound layer (`u.*`, `resolution`, `fallback`); `shader_api->draw`; painter `resolve_shader` seam; component JSON + serialize | `include/neui/d/compound.h`, `hosts/shared/{compound.h,shader_layer.h,widget_paint_compound.h,painter.h,component_loader.h}`, 6 painter construction sites |
 | 4 | D2D GPU path: HLSL emitter, runtime `D3DCompile`, custom effect, tolerance tests | `hosts/shared/shader_emit_hlsl.h`, `include/neui/d/renderer.h`, `backends/d2d/{d2d_backend.cpp,d2d_shader_effect.cpp}` |
 | 5 | **Partial repaint** - separate track, scheduled **first** (`plans/xpl-partial-repaint.md`) | see that plan |
 | 6 | Time + animation: clock, registry, generalised heartbeat, fps cap, pause / reduce-motion (**requires 5**) | `hosts/shared/anim_clock.h`, `hosts/crossplatform/{platform.h,platform_*}`, native hosts' timers |
-| 7 | Only if measured necessary: Metal executor on Apple; opt-in CPU fork-join pool | `hosts/shared/shader_emit_msl.h`, `backends/cg/cg_backend.mm`, `src/shader_exec.cpp` |
+| 7 | Only if measured necessary: Metal executor on Apple; opt-in CPU fork-join pool | `hosts/shared/shader_emit_msl.h`, `backends/cg/cg_backend.mm`, `src/shader/nsl_exec.cpp` |
 | 8 | Research: post-processing of existing UI. Bake-time `NEUI_FE_SHADER` with `sample(in, uv)` over a SURFACE fits the CPU filter graph directly. Live scene post-processing needs the rendered region as input: cheap on Cairo (the window surface is CPU memory) and feasible on D2D (copy the target region into an effect input), but CG's `drawRect:` context is not readable, so Apple would need an offscreen-then-blit frame | `hosts/shared/filter_graph.h`, `include/neui/d/filter.h` |
 
 ## 10. Tier-1 test strategy
@@ -783,8 +792,10 @@ null platform:
   - **CRC32 goldens** of the built-in library at 64×64 @1× and @2×, checked
     on Windows, macOS, Linux and the iOS simulator. This is how "same look"
     is enforced;
-  - a differential test against a tiny tree-walking reference interpreter
-    that exists only in the tests.
+  - control-flow programs against hand-written C++ equivalents (with a
+    tolerance, since the C++ side uses libm). This replaced the planned
+    tree-walking reference interpreter: it catches the same lowering bugs
+    for much less code.
 - **`tests/test_shader_cache.cpp`:** uses a fake backend counting
   create/destroy (in the style of `test_asset_font.cpp`). Covers:
   - content sharing across AttrBags;
@@ -889,3 +900,61 @@ points. The example shows:
   sequences).
 - The throwaway branch `spike/shader-bench-ci` (benchmark report on the CI
   compilers) can be deleted.
+
+## 14. Phase 1 results (2026-10-10)
+
+**What exists:** the `neui-shader` static library in `src/shader/`, linked
+PUBLIC by `neui`, and its internal API `src/shader/nsl.h`:
+- `compile()` gives a program or a `<name>:<line>:<col>: error: <message>`
+  diagnostic (first error only);
+- uniform introspection and defaults, flags (`READS_TIME`, `DITHER`,
+  `CPU_ONLY`) and stats;
+- `placement()` and `execute()`, which give premultiplied BGRA8 at the
+  spec's pixel grid;
+- test hooks `execute_scalar()` and `evaluate()`.
+
+**How it compiles** (`nsl_compile.cpp`): lexer, one-pass parser + type
+checker, then lowering:
+- every call is inlined and every loop unrolled;
+- control flow is predicated: `if` merges changed variables with selects,
+  while `return` / `break` / `continue` clear alive masks;
+- constants fold through the executor's own math; CSE and exact
+  simplifications apply;
+- dead code is removed, the program is split into a draw part (uniform-only
+  work, scalar, once per draw) and a pixel part, and registers are allocated
+  by linear scan.
+
+Constants and draw values reach the pixel program through a pool and an
+`OP_LOAD` right before their first use, so an unrolled loop full of distinct
+constants does not exhaust the 256-register limit.
+
+**Checks:** 26 test cases.
+- The four phase-0 programs compiled from `.nsl` reproduce the phase-0
+  checksums bit for bit.
+- So do the built-in sweeps, with one deliberate change: `atan` now gives NaN
+  for a NaN argument (the spec says so), where phase 0 returned 0.
+- SIMD equals scalar to the bit, and a host's flush-to-zero changes nothing.
+- The tests also cover:
+  - the edge-case table;
+  - the pixel grid, coverage and stride;
+  - uniforms, `neui_time` and stats;
+  - control flow against C++;
+  - diagnostics with exact positions, every limit, literal rounding under a
+    decimal-comma locale;
+  - mutation fuzzing (about 3000 mutants).
+
+**Speed** (`neui_shader_bench`, M1 Ultra, AppleClang):
+
+| Shader | ns/px | knob 120×120 @2× |
+|---|---|---|
+| ring_glow (29 ops) | 6.2 | 0.36 ms |
+| plasma (35 ops, 6 sin) | 14.3 | 0.83 ms |
+| fbm5 (191 ops) | 44 | 2.5 ms |
+| metal_knob (128 ops) | 24 | 1.4 ms |
+
+That is the same as the phase-0 prototype.
+
+**Next (phase 2):** `NEUI_API_SHADER` (`create`, `create_from_file`,
+introspection, `bake_bitmap` / `bake_filmstrip`), the SHADER asset kind and
+resource kind, the shader cache on `AssetEntry`, and the QR-leak fix.
+

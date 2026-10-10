@@ -118,6 +118,12 @@ endif()
 # the C registry; CMake compiles each TU in its own language.
 add_library(neui src/neui.c src/mujson.cpp)
 
+# The .nsl shader compiler + CPU executor (src/shader/nsl.h). Its own static
+# library because it needs its own compile flags (optimised, no FMA
+# contraction, in every build type); the hosts reach it through neui.
+add_subdirectory("src/shader")
+target_link_libraries(neui PUBLIC neui-shader)
+
 # Vendored QR Code generator (Project Nayuki, MIT). Compiled into a small
 # static lib the host libs link; backs the QR compound layer kind. Added
 # before the host subdirectories so the neui-qrcodegen target exists when
