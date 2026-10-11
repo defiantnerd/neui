@@ -9,7 +9,7 @@ only if measured necessary; phase 8 is research. The prerequisite track,
 Phase 9, texture sampling (2026-10-11), is in progress: a `sampler2D`
 uniform bound to a BITMAP or SURFACE asset, a bit-exact sample built-in on
 the CPU, and D2D resource textures on the GPU. Both spikes are done and
-carried most of steps 9a and 9c, on branch `spike/texture-sampling`: the
+carried most of steps 9a and 9c, merged to `next`: the
 language, the CPU executor and the D2D draw path work on every platform,
 within 1/255 of the CPU on the GPU. Next is the host side (9b), then docs
 (9d). It is also what phase 8 needs. See "Phase 9 design" and "Phase 9.0
@@ -873,7 +873,7 @@ What this means:
 | 6 | **Done.** Time + animation: session clock + animating-widget registry, per-frame / per-session timers, fps cap, pause, OS reduced motion, clock images dropped per frame | `hosts/shared/{anim_clock.h,shader_asset.h,shader_layer.h,shader_api.h}`, `include/neui/d/shader.h`, `hosts/crossplatform/{platform.h,platform_*,host.cpp}`, the native hosts' CUSTOMDRAW paint + timers, `tests/test_anim_clock.cpp` |
 | 7 | Only if measured necessary: Metal executor on Apple; opt-in CPU fork-join pool | `hosts/shared/shader_emit_msl.h`, `backends/cg/cg_backend.mm`, `src/shader/nsl_exec.cpp` |
 | 8 | Research: post-processing of existing UI. Bake-time `NEUI_FE_SHADER` with `sample(in, uv)` over a SURFACE fits the CPU filter graph directly. Live scene post-processing needs the rendered region as input: cheap on Cairo (the window surface is CPU memory) and feasible on D2D (copy the target region into an effect input), but CG's `drawRect:` context is not readable, so Apple would need an offscreen-then-blit frame. Needs phase 9's sampling first | `hosts/shared/filter_graph.h`, `include/neui/d/filter.h` |
-| 9 | **In progress (§19, §20):** spikes done, 9a and most of 9c on branch `spike/texture-sampling`; 9b (host side) next. Texture sampling: `uniform sampler2D` + `texture2D` bound to BITMAP / SURFACE assets; bit-exact fixed-point bilinear on the CPU; asset content ids in the image cache key; `u.<sampler>` layer props + JSON `"textures"`; D2D resource textures | `src/shader/{nsl.h,nsl_ir.h,nsl_compile.cpp,nsl_exec.cpp,nsl_gpu.cpp}`, `include/neui/d/{shader.h,renderer.h}`, `hosts/shared/{asset_store.h,shader_asset.h,shader_layer.h,shader_api.h,compound.h,component_loader.h}`, `backends/d2d/d2d_shader.cpp`, `tests/test_shader_*.cpp` |
+| 9 | **In progress (§19, §20):** spikes done, 9a and most of 9c merged; 9b (host side) next. Texture sampling: `uniform sampler2D` + `texture2D` bound to BITMAP / SURFACE assets; bit-exact fixed-point bilinear on the CPU; asset content ids in the image cache key; `u.<sampler>` layer props + JSON `"textures"`; D2D resource textures | `src/shader/{nsl.h,nsl_ir.h,nsl_compile.cpp,nsl_exec.cpp,nsl_gpu.cpp}`, `include/neui/d/{shader.h,renderer.h}`, `hosts/shared/{asset_store.h,shader_asset.h,shader_layer.h,shader_api.h,compound.h,component_loader.h}`, `backends/d2d/d2d_shader.cpp`, `tests/test_shader_*.cpp` |
 
 ## 10. Tier-1 test strategy
 
@@ -1510,7 +1510,7 @@ above):
 
 ## 19. Phase 9 design: texture sampling (2026-10-11)
 
-**Status:** both spikes done (§20), on branch `spike/texture-sampling`:
+**Status:** both spikes done (§20) and merged to `next`:
 the language, the CPU executor and the D2D draw path work and are tested on
 every platform (step 9a without the spec section, and most of 9c). Hosts do
 not bind bitmaps yet (9b), so a shader that samples runs on the CPU with
@@ -1766,7 +1766,7 @@ channel, which made a bilinear sample cost as much as `fbm5`.
 
 ## 20. Phase 9.0 results: texture sampling spikes (2026-10-11)
 
-Branch `spike/texture-sampling` (64fdcbe CPU, d72ce1e D2D, fixes after).
+Built on branch `spike/texture-sampling` (64fdcbe CPU, d72ce1e D2D), merged to `next`.
 
 **What exists:**
 - **Language:** `uniform sampler2D`, `texture2D` / `texture`,
