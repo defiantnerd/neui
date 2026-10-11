@@ -36,6 +36,9 @@ backend separately as `wd.dpi = 96 * screen.scale`.
   confined to the left, right or bottom inset moves no bounds and raises no `RESIZE`, so this
   is the only notice a client laying out inside the safe area gets.
 - **Dark mode** via `NEUI_ATTR_FOLLOW_SYSTEM_THEME`; `@2x`/`@3x` asset selection.
+- **Shaders and their animation** — both hosts expose `NEUI_API_SHADER`; a `neui_time`
+  animation runs on the session clock (an `NSTimer` per session on the native host, per frame
+  on xpl) and holds while Reduce Motion is on.
 
 ### Not available here
 
@@ -43,6 +46,8 @@ backend separately as `wd.dpi = 96 * screen.scale`.
 - `notify->message_box` returns `NEUI_MB_IOS_PENDING` — `UIAlertController` is async.
 - `UIApplicationMain` owns the run loop: `run()` returns immediately, never call `pump_once()`.
   Build the UI from `scene:willConnectToSession:`.
+- A modal DIALOG does not block `show`: it is presented as a form sheet and `show` returns
+  at once; dismiss it with `widgets->destroy` as on the desktop.
 - `dnd->begin_drag` is a no-op; attach a `DRAG_SOURCE` behavior asset.
 - Nothing moves content out from under the keyboard — ask `NEUI_API_IOS::keyboard_inset`.
 
@@ -63,8 +68,9 @@ return value. Changes arrive as one `NEUI_EVENT_IOS_ENVIRONMENT_CHANGED` carryin
 `NEUI_IOS_ENV_*` mask; Dynamic Type stays on `METRICS_CHANGED`, where clients already handle it.
 
 Implementation is shared in `hosts/shared/ios/ios_api.h` — UIKit's globals are the same on both
-hosts. Only two things are per-host, and they are seams: resolving a frame to its
-`UIViewController`, and walking the host's own registry to deliver the event. Frame chrome
+hosts. Only three things are per-host, and they are seams: resolving a frame to its
+`UIViewController`, walking the host's own registry to deliver the event, and repainting after
+an appearance override. Frame chrome
 (status bar, home indicator, deferred edges, orientations) lives in a shared table keyed by
 widget id; each host's view controller reads it back in its `preferredStatusBarStyle` and
 friends, falling through to `super` when the client set nothing.

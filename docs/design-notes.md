@@ -2,8 +2,8 @@
 
 Distilled design rationale for **shipped** neui features - the "why we chose X
 over Y" calls, trade-offs, and rejected alternatives. Implementation detail lives
-in `CLAUDE.md`; open/deferred work lives in `TODO.md`; accepted quirks live in
-`known_issues.md`.
+in `CLAUDE.md`; open/deferred work lives in `TODO.md` and `docs/deferred-issues.md`;
+accepted quirks live in `known_issues.md`.
 
 These notes were condensed from the per-feature plan documents that used to live
 in `plans/`. Those plans were removed once the work shipped - their **full
@@ -157,3 +157,28 @@ verbatim text remains in git history** if the complete narrative is ever needed.
 - **Core premise: one host that delivers the same look and behavior across platforms** - registers like the win32 host in the `neui_api_t` registry, with an identical control hierarchy on every platform.
 - **OS-specific rendering backends behind a common C interface, selected via CMake** - Direct2D on Windows first, other platforms deferred; backends placed alongside host implementations so other hosts can reuse them.
 - **Split native vs. shared: only APPWINDOW/PLUGWINDOW are native controls** (platform-specific files chosen by CMake); all other controls share one base class.
+
+## Filmstrip assets (frame-indexed bitmaps)
+
+- **A filmstrip is a BITMAP with frame-layout metadata, not a new asset kind.** It is the uniform-grid case of a texture atlas (`cols x rows` equal cells, row-major, an optional gutter). Kept as a plain bitmap, every existing consumer works unchanged: `draw_asset`, compound ASSET layers, `get_pixels_for_export`, the per-ctx GPU upload cache, device loss, `@Nx` resolution.
+- **One upload, sub-rect draws.** The backend `draw_bitmap` already takes a source rect, so a frame is the cell rect passed through the same per-`(asset, ctx)` upload. There are no per-frame textures, and animating the frame costs nothing.
+- **Recognition is layered and never silent.** Explicit `set_frame_layout` / `create_filmstrip_from_file` comes first. A `<image>.json` sidecar comes next and is authoritative. A filename keyword (`<N>frames` / `<N>frame` / `<N>f`) is last. Bare separators like `-128` and incidental matches like `airstrip5` are rejected as too common. An aspect-ratio guess was rejected because it false-positives on any tall image.
+- **Value -> frame is declarative:** a `frame` prop on compound ASSET layers (bindable to `neui.param.value`) plus `frame_layout` in component JSON, which round-trips through `serialize_component`.
+- **ABI:** all public additions are vtable-appended, and the frame-aware draw thunk is a sibling rather than a signature change. `AssetEntry` grew a pointer, so a full rebuild is required.
+- **Non-goals:** non-uniform atlases (TexturePacker-style named frames; a separate asset-kind conversation), PNG text-chunk frame counts (the sidecar covers it), time-driven playback, and a built-in filmstrip skin for the native KNOB (filmstrip knobs go through CUSTOMDRAW + compound, the skinning seam).
+
+## Client resource provider (`NEUI_API_RESOURCE_CLIENT`)
+
+- **Client first, then the host's own lookup.** For a client whose assets live in a container (plugin bundle, embedded resource, MCU flash), host-first would pay a guaranteed miss ladder, up to three failed `@Nx` decodes, before asking the one place the bytes are. An embedded target may have no filesystem at all. Client-first also lets a client override shipped files (skins).
+- **Borrow + `release`, not host-owns.** Every consumer copies or transforms the bytes at once (fonts copy, components parse, images decode), so the client can point straight at a resource or a vector member. `release` runs before the triggering call returns.
+- **One call per logical name, with `scale_hint`.** The host asks once for `knob.png` at scale 2 and the client declares what it returned in `out->scale`. The `@Nx` naming stays a filesystem convention and never leaks into the interface. The name is the client's original string; `base_dir` is passed separately.
+- **Bytes that fail to decode or parse count as a miss**, and resolution falls through to the filesystem. Otherwise a buggy provider could shadow a good file.
+- **`kinds_mask`** (0 = all) keeps an image-only client from being asked for every font and component. **The negative cache is sticky** (cleared on DPI change and session teardown); repeated misses must stay cheap, and `provide` must not call back into neui.
+- **`neui_component_env_t::resolve_asset` is kept and runs first**, then `provide`, then the filesystem. That order is the only strictly backward-compatible one. The two answer different questions: `resolve_asset` maps a name to an existing handle, which can be a runtime-built compound or painted SURFACE with no byte form; `provide` supplies bytes. Both see the same raw name from the component's `assets` map.
+- **Plain structs, no `struct_size`.** The request is host-allocated and passed by const pointer, so appended fields are safe; the `/0` suffix is the version gate. `KIND_SIDECAR` stays distinct from `KIND_COMPONENT` so a client can answer off `kind` alone.
+
+## Gradient strokes (`stroke_path_gradient`)
+
+- **Why:** paths could be filled with a gradient but only stroked with a solid colour. The SVG importer (asvglib) needs `stroke="url(#grad)"`, such as a dashed ring with a multi-stop gradient, and fell back to the first stop's colour.
+- **One entry point mirroring the existing two:** the gradient brush of `fill_path_gradient` with the stroke geometry and style of `stroke_path_styled` (`style == NULL` = plain stroke, `grad == NULL` or fewer than 2 stops = no-op). Gradient geometry is in the path's logical space and the alpha stack folds into the stops, exactly as for fills. `neui_gradient_t` needed no change. D2D, CG and Cairo all stroke with a gradient brush natively.
+- **ABI:** the vtables are positional initializers, so the slot sits right after `stroke_path_styled` in the struct and in every backend's initializer.

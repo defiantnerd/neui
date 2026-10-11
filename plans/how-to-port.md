@@ -12,9 +12,9 @@ neui has three composable layers. Decide which you're adding before opening any 
 
 | Layer | Purpose | Existing examples | When to add a new one |
 |---|---|---|---|
-| **Render backend** (`backends/<name>/`) | Implements `neui_render_backend_t` — primitives, text, bitmaps, paths, transform stack. Pure rendering; no windowing. | `d2d/` (Direct2D), `cg/` (CoreGraphics), `null/` (no-op). | Your platform has a 2D graphics API that the xpl host can drive (Cairo, Skia, GL with a custom rasteriser, framebuffer software renderer). |
-| **xpl platform layer** (`hosts/crossplatform/platform_<name>.cpp`) | Implements `xpl_host::platform_*` — window creation, message pump, mouse/keyboard/IME/clipboard input, menubar, image loading. | `platform_win32.cpp`, `platform_macos.mm`, `platform_null.cpp`. | Your platform has windowing (X11 / Wayland / UIKit / Android Views). Pair with one render backend. |
-| **Native host** (`hosts/<name>/`) | A complete alternative to the xpl host that uses native widgets directly (no painted widgets). Implements the full `neui_widget_api_t` / `neui_tree_api_t` / etc. against the platform's native control set. | `hosts/win32/` (HWND controls), `hosts/macos/` (AppKit controls). | You want **native** controls (look-and-feel parity with the OS, free accessibility, free IME). Otherwise prefer xpl + backend. |
+| **Render backend** (`backends/<name>/`) | Implements `neui_render_backend_t` — primitives, text, bitmaps, paths, transform stack. Pure rendering; no windowing. | `d2d/` (Direct2D), `cg/` (CoreGraphics), `cairo/` (Linux, software), `lvgl/` (experimental), `null/` (no-op). | Your platform has a 2D graphics API that the xpl host can drive (Cairo, Skia, GL with a custom rasteriser, framebuffer software renderer). |
+| **xpl platform layer** (`hosts/crossplatform/platform_<name>.cpp`) | Implements `xpl_host::platform_*` — window creation, message pump, mouse/keyboard/IME/clipboard input, menubar, image loading. | `platform_win32.cpp`, `platform_macos.mm`, `platform_ios.mm`, `platform_linux.cpp`, `platform_lvgl.cpp`, `platform_null.cpp`. | Your platform has windowing (X11 / Wayland / UIKit / Android Views). Pair with one render backend. |
+| **Native host** (`hosts/<name>/`) | A complete alternative to the xpl host that uses native widgets directly (no painted widgets). Implements the full `neui_widget_api_t` / `neui_tree_api_t` / etc. against the platform's native control set. | `hosts/win32/` (HWND controls), `hosts/macos/` (AppKit controls), `hosts/ios/` (UIKit controls). | You want **native** controls (look-and-feel parity with the OS, free accessibility, free IME). Otherwise prefer xpl + backend. |
 
 **Common port shapes:**
 
@@ -96,10 +96,15 @@ If you're only adding a **new backend** on an already-supported platform (e.g. a
 | Bitmap | `destroy_bitmap(ctx, handle)` | Free. |
 | Bitmap | `draw_bitmap(ctx, handle, sx, sy, sw, sh, dx, dy, dw, dh)` | Source + destination rect in logical px. `sw==0 && sh==0` means "use full bitmap". |
 | Path | `begin_path / move_to / line_to / arc / close_path` | Build a path. `arc` is centre + radius + start..end radians, sweep is clockwise (Y-down). |
-| Path | `fill_path(ctx, argb) / stroke_path(ctx, stroke_w, argb)` | Render. Path stays valid after either (can stroke + fill). |
+| Path | `fill_path(ctx, argb) / stroke_path(ctx, stroke_w, argb)` | Render. Path stays valid after either (can stroke + fill) and across other draws until the next `begin_path`: a `fill_rect`, `push_clip`, text or bitmap draw must neither include it nor consume it. On an API with one current path (Cairo), set the path aside around those draws (`PathAside` in `backends/cairo/cairo_backend.cpp`). |
 | Transform | `push_transform / pop_transform / translate / rotate / scale` | Post-multiplied (`t' = t * T`); applies to all subsequent draws until popped. Identity at every `begin_frame`. |
 | DPI | `get_scale_factor(ctx) → float` | Physical px per logical px. |
 | DPI | `update_dpi(ctx, dpi)` | Called before `begin_frame` when DPI changes (Win32 WM_DPICHANGED). |
+
+Optional slots (nullable; the host checks before use):
+- `set_frame_damage(ctx, rects, n) → bool`: partial repaint. Clip and clear only the damage and present only it. Return false while the surface holds no complete frame (after create / resize / DPI change), so the host paints in full.
+- `get_device_transform(ctx, m[6])`: the current user → device mapping; shader layers use it to land on whole device pixels.
+- `create_shader_program / destroy_shader_program / draw_shader_program(_textured)`: a GPU path for `.nsl` shaders (only D2D has one). Without them shaders run on the CPU.
 
 ### 3.2 Backend boilerplate
 
@@ -157,6 +162,9 @@ void platform_set_window_title (void*, const char* utf8);
 void platform_set_window_pos   (void*, int x, int y, int w, int h, uint32_t dpi);
 void platform_post_close       (void*);          // async close (WM_CLOSE / [window performClose:nil])
 void platform_invalidate       (void*);          // mark client area dirty
+void platform_invalidate_rect  (void*, int x, int y, int w, int h);  // partial; may forward to platform_invalidate
+void platform_set_animation_timer(void*, uint32_t interval_ms);     // drive Session::animation_tick; 0 stops
+bool platform_reduced_motion   ();               // the OS asks for reduced motion
 float platform_get_scale_factor(void*);
 void  platform_apply_size_constraints(void*, int minw, int minh, int maxw, int maxh);
 void  platform_set_window_icon(WidgetData&, const char* path);
@@ -167,8 +175,6 @@ void  platform_set_window_icon(WidgetData&, const char* path);
 bool platform_clipboard_set_text(const char* utf8, uint32_t length);
 int  platform_clipboard_get_text(char* buf, int buflen);   // NULL queries size; bytes inc. NUL
 bool platform_clipboard_has_text();
-uint32_t platform_register_clipboard_listener(ClipboardChangeCallback cb, void* token);
-void     platform_unregister_clipboard_listener(uint32_t handle);
 ```
 
 **Image loading** (BGRA8 premultiplied output)
@@ -208,7 +214,6 @@ Beyond the API surface, the platform layer must translate OS events into Session
 | IME start / update / commit / end | `WidgetData::on_composition(kind, utf8, len, caret_byte, attrs)` |
 | Close request | `APP_QUIT`; decrement appwindow count; quit pump on last close |
 | Menu pick / accelerator | `Session::dispatch_menu_event(cmd_id)` |
-| Clipboard external change | invoke registered listener callbacks on the UI thread |
 
 The Session pointer is reachable from the native handle via a per-window user-data slot (`GWLP_USERDATA` on Win32 / window delegate / associated object on macOS). Decide how you'll attach it; copy the existing pattern.
 
@@ -314,11 +319,7 @@ The xpl host calls `platform_clipboard_*` for both the public `NEUI_API_CLIPBOAR
 
 Implement `set_text` / `get_text` / `has_text` for any platform that has a system clipboard. For platforms without one, the null-host stubs are fine.
 
-The **listener** is what lets clients observe external clipboard changes. Two patterns:
-- **Push** (Win32): hidden `HWND_MESSAGE` window + `AddClipboardFormatListener` → `WM_CLIPBOARDUPDATE` → callback. See `hosts/shared/win32/clipboard_listener_win32.h`.
-- **Poll** (macOS): timer / runloop tick that compares `NSPasteboard.changeCount`. See `hosts/shared/macos/clipboard_macos.h`.
-
-If your platform has neither, `platform_register_clipboard_listener` may return 0 (handle 0 = not registered; clients tolerate this).
+There is **no clipboard-change listener** to port: the API has no onchange event, and clients poll `has_text` / `item_has_format` when they need to know (e.g. to enable Paste in a menu). See `docs/clipboard-and-dnd.md`.
 
 ---
 
@@ -400,7 +401,7 @@ Order matters — each step unlocks the next.
 9. **Wire focus + tab traversal**: Tab cycles, focused widget paints its focus ring.
 10. **Wire resize + DPI**: drag-resize updates the layout; moving to a different-DPI monitor (where applicable) re-flows.
 11. **Wire close**: last APPWINDOW close exits the pump.
-12. **Implement secondary features** in roughly this order: clipboard text → clipboard listener → image loading → menubar (if applicable) → IME → theme provider → modal dialogs / popup menus → window icon → size constraints.
+12. **Implement secondary features** in roughly this order: clipboard text → image loading → menubar (if applicable) → IME → theme provider → modal dialogs / popup menus → window icon → size constraints.
 13. **Sweep the gotchas in §13.**
 
 ---
@@ -479,7 +480,6 @@ If any step fails, the gotcha checklist in §13 is the first place to look.
 | Theme provider (Apple) | `hosts/shared/macos/theme_provider_macos.h` | NSAppearance + KVO. |
 | Keymap | `hosts/shared/macos/keys_macos.h` | kVK_* → NEUI_KEY_* translation table; modifier mapping including the Cmd-as-CTRL convention. |
 | Clipboard | `hosts/shared/win32/clipboard_win32.h`, `hosts/shared/macos/clipboard_macos.h` | Both shapes (CF_UNICODETEXT vs NSPasteboardTypeString). |
-| Clipboard listener | `hosts/shared/win32/clipboard_listener_win32.h` | `HWND_MESSAGE` pattern (push). macOS uses change-count polling — see the comments in `clipboard_macos.h`. |
 
 ---
 

@@ -283,11 +283,11 @@ extern "C" {
 
 // string: font family for text rendered by the widget (e.g. "Consolas",
 // "Segoe UI"). Empty / unset leaves the host's system default in place
-// (Segoe UI on the Win32 / D2D backend). Honoured by the Direct2D
-// backend and the two hosts that use it (native win32 + crossplatform
-// on Windows); cg / null backends ignore it (text continues to render
-// in the system default). Live - applies on the next paint for painted
-// widgets, and via WM_SETFONT on the native win32 host.
+// (Segoe UI on the Win32 / D2D backend). Honoured by the Direct2D, CG
+// and Cairo backends (painted text) and by the native hosts' controls
+// (win32 HFONT, macOS NSFont); unknown families fall back to the
+// default, and the null backend ignores it. Live - applies on the next
+// paint for painted widgets, and via WM_SETFONT on the native win32 host.
 #define NEUI_ATTR_FONT_FAMILY "neui.attr.font_family"
 
 // float (logical pixels at 96 DPI): font size for text rendered by the

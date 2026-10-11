@@ -54,12 +54,12 @@ is a real initiative, not trivial; together they form one programme.
   worth designing the slot system without them, not worth shipping
   them without it. Build the abstraction alongside the first one.
 - **Compound layer kinds beyond v1.** `text` / `asset` / `rect` /
-  `path` / `qr` / `group` shipped (`group` = a nested transform+clip
+  `path` / `qr` / `group` / `arc` / `shader` shipped (`group` = a nested transform+clip
   scope holding a tree of child layers added via `add_child_layer`; the
   group is one layer at the widget level, child `z` orders only within
   it, children read the same widget AttrBag). Remaining: template format
   specs (`{key:.2f}` reserved but parser not implemented -
-  `include/neui/d/compound.h:36`), SVG-mini string form for `set_path`.
+  `include/neui/d/compound.h:37`), SVG-mini string form for `set_path`.
 - **Behavior follow-ups.** Declarative interactivity v1 shipped as
   `NEUI_ASSET_KIND_BEHAVIOR` (drag V/H/rotational/biaxial, wheel,
   key step, click toggle/cycle, context reset, drag-source) - one
@@ -106,9 +106,10 @@ drag-source on all three hosts, with custom drag-preview image on
 macOS + Win32). Shipped — design rationale in `docs/design-notes.md`.
 Remaining:
 
-- **`image/tiff` (and other bitmap MIMEs).** `image/png` ships on all
-  three hosts (Win32 publishes as `CF_DIBV5` alongside the registered
-  MIME via WIC; macOS stamps `NSPasteboardTypePNG`); TIFF / JPEG /
+- **`image/tiff` (and other bitmap MIMEs).** `image/png` ships on every
+  host (Win32 publishes as `CF_DIBV5` alongside the registered MIME via
+  WIC; macOS stamps `NSPasteboardTypePNG`; iOS `public.png`; on X11 the
+  MIME is the target atom itself); TIFF / JPEG /
   WebP would follow the same shape but are deferred until a concrete
   need surfaces. Helpers live in
   `hosts/shared/win32/clipboard_format_png_win32.h`.
@@ -143,12 +144,11 @@ Remaining:
   Design.
 - **WASM host.** WebAssembly target via Canvas-2D backend - see
   `plans/wasm-host.md`. Deferred; phased path documented.
-- **Multi-level redo on win32 native.** `NEUI_CMD_REDO` maps to
-  `EM_UNDO` (single-level toggle). Clients that need multi-level
-  redo should select the xpl host's text widgets (full `EditHistory`).
 - **Other platform ports** (Linux/Wayland, Android, embedded). Playbook
   in `plans/how-to-port.md`. Linux/X11 and iOS/iPadOS are DONE - iOS ships
   two hosts plus the `NEUI_API_IOS` extension; see `docs/host-ios.md`.
+  Embedded has an experimental LVGL prototype, paused pending hardware
+  (`docs/host-lvgl.md`).
 
 ## Theme
 
@@ -177,5 +177,9 @@ for shipped features lives in `docs/design-notes.md`.
 | `plans/win32-pointer-and-directmanipulation.md` | Deferred. WM_POINTER pen/touch + DirectManipulation smooth-scroll; binding spec for when it lands. |
 | `plans/winui3-host.md` | Feasibility analysis; deferred indefinitely. |
 | `plans/wasm-host.md` | Feasibility analysis; deferred. |
-| `plans/lvgl-port.md` | Feasibility investigation (neui-on-LVGL); no implementation proposed. |
+| `plans/lvgl-port.md` | Feasibility investigation (neui-on-LVGL); superseded by the prototype below. |
+| `plans/lvgl-host-approach-c.md` | Experimental LVGL host: built + evaluated, paused pending target hardware. |
 | `plans/how-to-port.md` | Reference playbook for new platform ports. |
+| `plans/xpl-partial-repaint.md` | P1-P4 implemented on every xpl platform (verified on screen on macOS, Windows, Linux); only tuning (rect cap / merge gap) left. |
+| `plans/shader-effects.md` | `.nsl` shaders: phases 0-4, 6 and 9 done; phase 7 (Metal, CPU thread pool) only if measured necessary. |
+| `plans/svg-adaption.md` | Design note: SVG-designed knobs as compound layers vs. bitmaps; no implementation proposed. |

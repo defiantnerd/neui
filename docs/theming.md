@@ -8,7 +8,7 @@ Focus: clients see **logical** focus only. Tab traversal hand-rolled on xpl (`Se
 
 ## Theme palette
 
-Process-wide `neui_detail::Palette` (`theme_palette.h`) - flat array indexed by `ColorRole` (frame_bg, panel_bg, control_bg, accent, text_primary, border, scrollbar_*, ime_underline_*, …); Win32 + macOS providers populate from system sources and fire `Session::on_theme_changed` on flips.
+Process-wide `neui_detail::Palette` (`theme_palette.h`) - flat array indexed by `ColorRole` (frame_bg, panel_bg, control_bg, accent, text_primary, border, scrollbar_*, ime_underline_*, …); Win32 + macOS + iOS providers populate from system sources, Linux reads the XDG portal's dark/light over D-Bus (`theme_provider_linux.h`, `NEUI_HAS_DBUS`), and all fire `Session::on_theme_changed` on flips.
 
 **Per-session override** (`NEUI_ATTR_THEME_MODE`): Session computes `_effective_palette` per mode and points `active_palette_override_ptr()` at it; `current_palette()` consults it first. AUTO copies system; LIGHT/DARK = defaults + live system accent. **Per-frame opt-in** (`NEUI_ATTR_FOLLOW_SYSTEM_THEME = 1`): DWM dark title bar + dark HMENU + palette-driven brushes + invalidate on theme flip; without it OS-default chrome, no auto-invalidate.
 

@@ -11,6 +11,9 @@ This includes using fonts, colors and sizes that are defined from the target sys
 * C based interface
 * strict separation of client and host
 * extensible
+* skinnable, asset-driven controls (compound / behavior / component assets, filmstrips, SVG-style filters)
+* shaders in a small GLSL subset (`.nsl`, via `NEUI_API_SHADER`): on the CPU with identical pixels on every platform, on the GPU through Direct2D on windows
+* partial repaint: the crossplatform host redraws only what changed
 
 ## targets
 

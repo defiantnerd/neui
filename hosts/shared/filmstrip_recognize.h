@@ -15,7 +15,7 @@
 
 // Filmstrip recognition helpers. There is NO reliable in-band marker that a
 // PNG/JPG is a frame strip, so recognition is a layered, opt-in convention
-// (see plans/filmstrip-assets.md, Part C):
+// (see docs/design-notes.md, "Filmstrip assets"):
 //   1. explicit  - set_frame_layout / create_filmstrip_from_file(count>0).
 //   2. sidecar   - a "<image>.json" (or "<base>.json") next to the file:
 //                  { "frames": 100, "orientation": "vertical", "gutter": 0 }

@@ -3,7 +3,7 @@
 // Tier-1 coverage for the client resource provider (NEUI_API_RESOURCE_CLIENT,
 // <neui/d/resource.h>) as wired into AssetStore<Loader> (hosts/shared/) plus the
 // (name, scale-bucket) resolution cache it rides on
-// (plans/client-resource-provider.md).
+// (docs/design-notes.md, "Client resource provider").
 //
 // What matters here and is easy to regress:
 //   * order          - client is asked BEFORE the filesystem ladder

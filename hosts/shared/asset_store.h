@@ -1080,7 +1080,7 @@ namespace neui_detail
 
   protected:
     // One resolution attempt for a (name, scale bucket) pair. Client first
-    // (decision 1 in plans/client-resource-provider.md): for a client whose
+    // (docs/design-notes.md, "Client resource provider"): for a client whose
     // assets live in a container the filesystem ladder below is a guaranteed
     // miss - up to three failed decodes on paths that will never exist - and on
     // an embedded target there may be no filesystem at all.

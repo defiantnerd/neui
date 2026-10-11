@@ -416,7 +416,9 @@ extern "C" {
     // (int attrs are promoted; string / missing attrs yield 0.0), then
     //   effective = scale * x + offset
     // is computed and applied to the property. Int-typed properties
-    // (offset_x, width, color, align_*) are rounded to nearest.
+    // (offset_x, width, align_*) are rounded to nearest. Colour properties
+    // (color, tint, fill_color, stroke_color) bound to an int attribute read
+    // its ARGB exactly (the map runs in double; the result wraps to 32 bits).
     //
     // Set "<prop>.step" (see the prop list above) to quantise x before that
     // map, which steps the property without quantising the attribute itself.

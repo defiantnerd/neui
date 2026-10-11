@@ -36,7 +36,7 @@ A painted control is built from four things:
 ```
 
 1. **The AttrBag is the single source of truth.** Every CUSTOMDRAW widget owns
-   a string-keyed attribute bag (see the Attribute API in `CLAUDE.md`). The
+   a string-keyed attribute bag (see the Attribute API in `docs/attributes.md`). The
    control's *state* (a knob's value, a label's text, a toggle's on/off) lives
    here as named float / int / string attrs. Nothing else stores it.
 
@@ -46,7 +46,7 @@ A painted control is built from four things:
    AttrBag (its `target`, default `neui.param.value`).
 
 3. **A COMPOUND asset is the visual side.** It is a stack of layers (text,
-   asset/bitmap, rect, path, qr). Each layer *reads* from the AttrBag through
+   asset/bitmap, rect, path, qr, group, arc, shader). Each layer *reads* from the AttrBag through
    bindings and templates, and paints accordingly.
 
 4. **Bindings + templates are the wires.** A binding makes a numeric layer
@@ -178,7 +178,9 @@ attached, reading and writing one shared AttrBag.
 **Numeric binding** - `bind(layer, prop, attr_key, scale, offset)`. At paint
 time the attr is read as float (int attrs promoted; string / missing yield 0),
 then `effective = scale * x + offset` is applied. Int-typed targets
-(`offset_x`, `width`, `color`, `align_*`) round to nearest. A binding replaces
+(`offset_x`, `width`, `align_*`) round to nearest. Colour props (`color`,
+`tint`, `fill_color`, `stroke_color`) read an int attr's ARGB exactly instead
+(the map runs in double, the result wraps to 32 bits). A binding replaces
 any static value on that prop. Example: map a 0..1 value onto a -135deg..+135deg
 sweep with `scale = 3*pi/2 = 4.712389`, `offset = -3*pi/4 = -2.356194`.
 
@@ -201,7 +203,7 @@ value.
 These are the well-known attr keys most relevant to component widgets. The
 param keys are the conventional `target` / read keys for behaviors and bindings;
 the others tune painted-control behavior. Full table of all attrs is in
-`CLAUDE.md`. Macros are in `<neui/d/attrs.h>`.
+`docs/attributes.md`. Macros are in `<neui/d/attrs.h>`.
 
 | Macro | Key string | Type | Role |
 |---|---|---|---|
@@ -247,8 +249,11 @@ order). Macros / enums in `<neui/d/compound.h>`.
 | **TEXT** (`NEUI_COMPOUND_LAYER_TEXT`) | `text` (string template), `size` (float px), `color` (int ARGB, optional - defaults to theme `text_primary`, tracks light/dark), `align_x` (0 left / 1 center / 2 right), `align_y` (0 top / 1 center / 2 bottom). |
 | **ASSET** (`NEUI_COMPOUND_LAYER_ASSET`) | `asset` (bitmap / surface / filmstrip handle), `frame` (int filmstrip cell, default 0; commonly bound to a value), `rotation` (float radians, clockwise), `tint` (int ARGB multiplicative; default `0xFFFFFFFF` = passthrough, any other runs the tint primitive; `0` short-circuits). |
 | **RECT** (`NEUI_COMPOUND_LAYER_RECT`) | `fill_color` (int ARGB, 0 = no fill), `stroke_color` (int ARGB, 0 = no stroke), `stroke_width` (float px, 0 = none), `corner_radius` (float px, 0 = sharp; clamped to `min(w,h)/2`). A circle is a rect with `corner_radius = w/2`. |
-| **PATH** (`NEUI_COMPOUND_LAYER_PATH`) | `fill_color`, `stroke_color`, `stroke_width` (same as rect). Geometry assigned via `set_path(cmds, count)` - `MOVE_TO` / `LINE_TO` / `ARC` / `CLOSE`, coords layer-local (0,0 = layer top-left). No bezier in v1. |
+| **PATH** (`NEUI_COMPOUND_LAYER_PATH`) | `fill_color`, `stroke_color`, `stroke_width` (same as rect). Geometry assigned via `set_path(cmds, count)` - `MOVE_TO` / `LINE_TO` / `ARC` / `CUBIC_TO` / `QUAD_TO` / `CLOSE`, coords layer-local (0,0 = layer top-left). |
 | **QR** (`NEUI_COMPOUND_LAYER_QR`) | `text` (string template, default `"{value}"`; overridden by the `neui.attr.qrcode` attr), `fill_color` (int ARGB dark modules, 0 = theme `text_primary`), `background` (int ARGB, 0 = transparent), `ecc` (`neui_qr_ecc_t` 0=LOW..3=HIGH, default MEDIUM), `quiet_zone` (int modules, default 4, clamped [0,16]). |
+| **GROUP** (`NEUI_COMPOUND_LAYER_GROUP`) | Container: children are added with `add_child_layer(parent, kind, z)`, anchor / size against the group rect and clip to it; child `z` orders only within the group; `alpha` / `show_when` apply to the whole subtree. |
+| **ARC** (`NEUI_COMPOUND_LAYER_ARC`) | `value` (float [0..1] swept fraction, normally bound), `begin_angle` / `end_angle` (float degrees, 0 = 12 o'clock, clockwise; default -135 / 135), `direction` (0 cw / 1 ccw), `polarity` (0 min / 1 center / 2 max), `fill_color` (pie), `stroke_color` / `stroke_width` / `stroke_cap` (ring). Inscribed in the layer rect (an ellipse when width != height). |
+| **SHADER** (`NEUI_COMPOUND_LAYER_SHADER`) | `shader` (SHADER asset), `u.<name>` (a uniform: `set_*` or `bind`; a `sampler2D`'s bitmap via `set_asset` / `bind_asset`), `resolution` (float (0, 4], default 1), `time` (float s; neither set nor bound = the animation clock), `fallback` (int layer handle painted when the shader cannot). See `docs/shader-guide.md`. |
 
 ---
 

@@ -7,6 +7,27 @@ CPU thread pool) only if measured necessary; phase 8 is research, and now
 has the sampling it needs. The prerequisite track,
 `plans/xpl-partial-repaint.md`, is implemented (P1-P4).
 
+After phase 9 (2026-10-11):
+- **Linux checked on screen** (WSLg, the `neui-linux` session): the shader
+  example's rows, the animation clock (fps cap, pause), partial repaint
+  damage, input and resize. The check found two Linux bugs, both fixed in
+  c9d8452:
+  - The Linux host dropped invalidations raised during a paint, so the
+    example's paints/s readout never updated.
+  - Cairo primitives (`fill_rect`, `push_clip`, ...) drew and clipped with
+    the path API's retained path.
+- **`resolution` below 1 is scaled up by neui** (6a09baa). On the device
+  grid the shader runs on a coarse grid that starts at the floored device
+  origin. `nsl::upscale` (`src/shader/nsl_upscale.cpp`) scales it up with
+  texture2D's exact integer bilinear, and the backend draws the result 1:1.
+  Before, each backend scaled the image its own way, and the macOS xpl host
+  even changed look after the first frame: AppKit hands a partial update of
+  a large view to Core Animation's GPU path. Other scaled bitmaps keep that
+  macOS difference (`docs/deferred-issues.md`).
+- **The animation clock stops at the frame on screen** when it pauses
+  (d9df1fa).
+- **Compound colour bindings are exact** (0f26615, see §8).
+
 Phase 9, texture sampling (2026-10-11), is done: a `sampler2D`
 uniform bound to a BITMAP or SURFACE asset, a bit-exact sample built-in on
 the CPU, and D2D resource textures on the GPU. Both spikes are done and
@@ -1262,7 +1283,8 @@ findings fixed:**
 - **A per-layer `rev` cache** of the uniform resolution: not needed at the
   measured cost.
 - **Linux on-screen check** of the live layer: CI builds and tests it; the
-  Cairo `get_device_transform` has no on-screen verification yet.
+  Cairo `get_device_transform` has no on-screen verification yet. (Done
+  2026-10-11 on WSLg; see Status.)
 
 **Next:** phase 4 (D2D GPU path) or phase 6 (time and animation; partial
 repaint, its prerequisite, is done). Which one first depends on the client's

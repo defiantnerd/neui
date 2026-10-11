@@ -446,6 +446,16 @@ Under a rotation, skew, mirror or uneven scale there is no device grid to
 match: the layer is shaded in its own space at the transform's average scale
 (`sqrt(|det|)`) and the result is drawn through the transform.
 
+With a `resolution` below 1 on the device grid (quantised to 1/65536), the
+grid above at `s = neui_scale` is anchored at the floored device origin: with
+`D0` the layer's device origin at the display scale, shader pixel 0 starts at
+`floor(D0)` and `X0 = (D0 - floor(D0)) * resolution`, the remainder snapped
+as above. neui scales the result up to device pixels itself, with
+`texture2D`'s linear arithmetic (§9.4: weights in 1/256, edge texels
+clamped), and the backend draws it 1:1, so every backend shows the same
+pixels. Above 1, under a rotation or skew, or for a layer too large to scale
+up, the backend scales the image.
+
 **Output.** `main` returns **straight** (non-premultiplied) RGBA. Each device
 pixel becomes premultiplied 8-bit BGRA:
 

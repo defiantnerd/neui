@@ -2,7 +2,15 @@
 
 ## Status
 
-**P1 implemented (branch `shaders`); Linux runtime check pending.** The pieces:
+**P1-P4 implemented on every xpl platform and verified on screen** (macOS,
+Windows, and Linux on WSLg on 2026-10-11). Only the tuning below is left. On
+Linux, the damage of an animated frame covered exactly the animated widgets,
+and idle windows stayed at 0% CPU. The same check found one bug, fixed in
+c9d8452: `paint_window` cleared the pending damage after painting, so an
+invalidation raised during a paint was lost. It now takes the pending state
+first, as the other platforms do.
+
+**P1 implemented (branch `shaders`; Linux verified on screen 2026-10-11).** The pieces:
 - `hosts/shared/damage.h` with Tier-1 `tests/test_damage.cpp`;
 - `damage_rect_to_device` in `backends/shared/backend_util.h`;
 - the `set_frame_damage` backend slot;
@@ -22,7 +30,7 @@ Two deviations from the design below:
   `WidgetData::repaint()` (the internal hover / press / caret / focus sites)
   stays full-frame until P3.
 
-**P2 implemented (macOS verified on screen, iOS compile-only).**
+**P2 implemented (macOS verified on screen, iOS built and tested by CI).**
 - **Platform side:** `setNeedsDisplayInRect:` + `drawRect:` damage on both. The CG backend accepts damage for window ctxs; off-screen ctxs accept once they hold a frame.
 - **Finding:** a layer-backed view gets one dirty rect, the bounding box of everything invalidated since the last draw. Scattered changes therefore coalesce into a full frame, and only localized ones pay: 0.10 ms against 1.15 ms per paint, with one of 48 knobs per tick, on an M-series Mac.
 - **Added in P2:**
@@ -31,7 +39,7 @@ Two deviations from the design below:
   - `neui_partial_repaint_example`.
 - **Reference:** `docs/widget-internals.md`, "Partial repaint".
 
-**P3 implemented (macOS verified on screen; Linux pending the real machine).** The internal invalidation paths now repaint only the widget:
+**P3 implemented (macOS verified on screen; Linux on WSLg, 2026-10-11).** The internal invalidation paths now repaint only the widget:
 - `WidgetData::repaint()` (114 widget-internal call sites);
 - hover / press / focus transitions (old + new widget);
 - `InputBoxWidget::on_keychar`;

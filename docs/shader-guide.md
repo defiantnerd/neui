@@ -136,7 +136,7 @@ that matter are:
   total, and `break` / `continue` work. Loops are unrolled, so a loop costs
   its full trip count even when every pixel breaks out early.
 - **Not in v1:** `while`, `do`, `switch`, arrays, structs, matrices,
-  textures, `discard`, `%` (use `mod`), bitwise operators, and the
+  `discard`, `%` (use `mod`), bitwise operators, and the
   preprocessor (the only directive is `#pragma neui <name>`).
 - Uninitialised variables are zero, and every edge case is defined
   (`normalize(vec2(0))` is zero, `mod` floors, `x / 0.0` is ±inf).
@@ -966,7 +966,7 @@ and edge cases in spec §9):
 | loop trip count | 64 |
 | loop nesting depth | 4 |
 | product of nested loop trip counts | 1024 |
-| operations per pixel after inlining and unrolling | 8192 |
+| operations after inlining and unrolling (per pixel and per draw) | 8192 |
 
 **Keywords:** `uniform const float int bool vec2 vec3 vec4 sampler2D void
 true false if else for break continue return in out inout`, plus `precision
