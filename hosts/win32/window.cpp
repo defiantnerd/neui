@@ -950,6 +950,25 @@ namespace win32_host
 
     switch (msg)
     {
+    case WM_ACTIVATE:
+      // Remember the focused control when the frame loses activation and
+      // give it back when the frame returns, as the dialog manager does.
+      // DefWindowProc would focus the frame itself, so after a modal dialog
+      // closed the owner's input field no longer had focus.
+      if (wd) {
+        if (LOWORD(wParam) == WA_INACTIVE) {
+          HWND f = GetFocus();
+          wd->saved_focus = (f && IsChild(hwnd, f)) ? f : nullptr;
+        } else if (!HIWORD(wParam)) {  // activated, not minimised
+          HWND f = wd->saved_focus;
+          if (f && IsWindow(f) && IsChild(hwnd, f)) {
+            SetFocus(f);
+            return 0;
+          }
+        }
+      }
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+
     case WM_NCCREATE:
       {
         CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);

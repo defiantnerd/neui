@@ -85,6 +85,9 @@ namespace win32_host {
     bool* modal_pump = nullptr;
     // Win32-specific
     HWND hwnd = nullptr;
+    // Frames: the control that had focus when the frame was last deactivated,
+    // given back on reactivation (WM_ACTIVATE in AppWindowProc).
+    HWND saved_focus = nullptr;
     HFONT hfont = nullptr;   // DPI-scaled font; owned by frame windows (APPWINDOW/PLUGWINDOW)
     // Optional per-widget custom font, built from NEUI_ATTR_FONT_FAMILY /
     // NEUI_ATTR_FONT_SIZE / NEUI_ATTR_FONT_WEIGHT. When non-null the native
