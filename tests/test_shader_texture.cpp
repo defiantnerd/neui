@@ -146,9 +146,13 @@ vec4 main(vec2 p) { return texture2D(albedo, p) * level + texture(noise, p); }
   CHECK(nsl::samplers(*p)[1].wrap == nsl::Wrap::REPEAT);
   CHECK(nsl::samplers(*p)[1].filter == nsl::Filter::NEAREST);
   CHECK(nsl::stats(*p).fetches == 4 + 1);  // texel reads: bilinear 4, nearest 1
-  // No GPU form until the D2D path samples.
-  CHECK(nsl::emit_hlsl(*p).empty());
-  CHECK(nsl::gpu_constant_count(*p) == 0);
+  // The GPU form reads each sampler from its own texture register.
+  const std::string hlsl = nsl::emit_hlsl(*p);
+  CHECK(hlsl.find("Texture2D<float4> t0 : register(t0);") != std::string::npos);
+  CHECK(hlsl.find("Texture2D<float4> t1 : register(t1);") != std::string::npos);
+  CHECK(hlsl.find("= n_texel1(") != std::string::npos);
+  CHECK(hlsl.find(">> 24) & 255u)") != std::string::npos);
+  CHECK(nsl::gpu_constant_count(*p) > 0);
 }
 
 TEST_CASE("shader texture: diagnostics")

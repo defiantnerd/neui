@@ -57,6 +57,7 @@ struct TexView {
   int32_t w = 0, h = 0;
   size_t stride = 0;
   float scale = 1.0f;
+  double inv_w = 0.0, inv_h = 0.0;  // for repeat: a multiply, not an integer division
 };
 struct Textures {
   TexView t[k_max_samplers];
@@ -76,6 +77,8 @@ Textures bind_textures(const Program& pg, const Draw& d) {
     v.h = x.h;
     v.stride = x.stride;
     v.scale = x.scale > 0.0f && x.scale < 1e30f ? x.scale : 1.0f;
+    v.inv_w = 1.0 / x.w;
+    v.inv_h = 1.0 / x.h;
   }
   return r;
 }
@@ -102,16 +105,20 @@ inline int32_t tex_coord(float v) {
   return static_cast<int32_t>(v);
 }
 
-// Applies the edge mode to coordinate i of an axis of n texels; false when a
-// border sampler reads outside the bitmap.
-inline bool tex_wrap(int32_t& i, int32_t n, Wrap mode) {
+// Applies the edge mode to coordinate i of an axis of n texels (inv = 1 / n);
+// false when a border sampler reads outside the bitmap. Repeat is the floored
+// modulo: an estimated quotient, then exact integer correction.
+inline bool tex_wrap(int32_t& i, int32_t n, double inv, Wrap mode) {
   if (mode == Wrap::CLAMP) {
     i = i < 0 ? 0 : (i >= n ? n - 1 : i);
     return true;
   }
   if (mode == Wrap::REPEAT) {
-    i %= n;
-    if (i < 0) i += n;
+    if (i < 0 || i >= n) {
+      i -= static_cast<int32_t>(static_cast<double>(i) * inv) * n;  // |i| <= 2^30: no overflow
+      while (i < 0) i += n;
+      while (i >= n) i -= n;
+    }
     return true;
   }
   return i >= 0 && i < n;
@@ -122,7 +129,7 @@ inline bool tex_wrap(int32_t& i, int32_t n, Wrap mode) {
 template <Wrap M>
 NSL_FI uint32_t tex_texel_m(const TexView& t, float xf, float yf) {
   int32_t x = tex_coord(xf), y = tex_coord(yf);
-  if (!tex_wrap(x, t.w, M) || !tex_wrap(y, t.h, M)) return 0u;
+  if (!tex_wrap(x, t.w, t.inv_w, M) || !tex_wrap(y, t.h, t.inv_h, M)) return 0u;
   const uint8_t* q = t.px + static_cast<size_t>(y) * t.stride + static_cast<size_t>(x) * 4u;
   return static_cast<uint32_t>(q[0]) | static_cast<uint32_t>(q[1]) << 8 | static_cast<uint32_t>(q[2]) << 16 |
          static_cast<uint32_t>(q[3]) << 24;
@@ -447,7 +454,6 @@ float sweep_value(float from, float to, uint32_t i, uint32_t n) {
 
 size_t gpu_constant_count(const Program& p) {
   if (p.flag_bits & NSL_CPU_ONLY) return 0;
-  if (!p.sampler_list.empty()) return 0;  // no GPU sampling yet (plans/shader-effects.md, phase 9)
   const size_t n = detail::gpu_float_count(p);
   return n <= detail::k_gpu_max_floats ? n : 0;
 }

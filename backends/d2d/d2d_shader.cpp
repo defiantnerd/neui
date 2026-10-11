@@ -18,6 +18,13 @@
 //   still applies; SCENE_POSITION then starts at 0 at the image's top-left.
 // - A shader is identified by a GUID hashed from its text, so equal programs
 //   share one loaded shader per device and reload after device loss.
+// - A program that samples bitmaps gets them as D2D resource textures, not
+//   effect inputs: the effect stays a zero-input source, so the placement
+//   above is untouched, and the shader reads texel (x, y) with Load. A
+//   second blob property carries the bitmaps of a draw; a texture is made
+//   per content id and device context (D2D finds one another effect made)
+//   and kept while it is in use, unbound samplers read a 1 x 1 transparent
+//   one.
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -57,7 +64,13 @@ namespace neui_d2d_backend
   <Property name='Constants' type='blob'>
     <Property name='DisplayName' type='string' value='Constants'/>
   </Property>
+  <Property name='Textures' type='blob'>
+    <Property name='DisplayName' type='string' value='Textures'/>
+  </Property>
 </Effect>)";
+      enum : UINT32 { k_prop_constants = 0, k_prop_textures = 1 };
+      constexpr size_t k_max_textures = 4;   // samplers per program (nsl k_max_samplers)
+      constexpr size_t k_texture_cache = 16; // textures an effect keeps alive between draws
 
       enum : int { k_compiling, k_ready, k_failed };
 
@@ -80,6 +93,14 @@ namespace neui_d2d_backend
 
       // The blob property: output size, then the constant buffer.
       struct BlobHeader { uint32_t w, h, pad0, pad1; };
+
+      // A resource texture's id: the content id, under a fixed prefix.
+      GUID texture_guid(uint64_t content_id)
+      {
+        GUID g = { 0x6e657569, 0x7478, 0x4964, { 0 } };  // "neui" "tx" "Id"
+        for (int i = 0; i < 8; ++i) g.Data4[i] = static_cast<unsigned char>(content_id >> (8 * i));
+        return g;
+      }
 
       class ShaderEffect final : public ID2D1EffectImpl, public ID2D1DrawTransform
       {
@@ -114,6 +135,36 @@ namespace neui_d2d_backend
           return S_OK;
         }
 
+        // The bitmaps of the next draw: an array of neui_shader_texture_desc_t,
+        // read here (the pixels are copied into textures now).
+        static HRESULT CALLBACK set_textures(IUnknown* effect, const BYTE* data, UINT32 size)
+        {
+          auto* self = static_cast<ShaderEffect*>(static_cast<ID2D1EffectImpl*>(effect));
+          if (size % sizeof(neui_shader_texture_desc_t) != 0 || (size && !data)) return E_INVALIDARG;
+          const size_t n = size / sizeof(neui_shader_texture_desc_t);
+          if (n > k_max_textures) return E_INVALIDARG;
+          ID2D1ResourceTexture* next[k_max_textures] = {};
+          for (size_t i = 0; i < n; ++i) {
+            neui_shader_texture_desc_t d;
+            std::memcpy(&d, data + i * sizeof d, sizeof d);
+            next[i] = self->texture_for(d);
+            if (!next[i]) {
+              for (size_t k = 0; k < i; ++k) next[k]->Release();
+              return E_FAIL;
+            }
+          }
+          self->release_bound();
+          for (size_t i = 0; i < n; ++i) self->bound_[i] = next[i];
+          self->bound_count_ = n;
+          return S_OK;
+        }
+
+        static HRESULT CALLBACK get_textures(const IUnknown*, BYTE*, UINT32, UINT32* actual)
+        {
+          if (actual) *actual = 0;  // write-only: the descriptors point at the caller's pixels
+          return S_OK;
+        }
+
         // IUnknown
         IFACEMETHODIMP QueryInterface(REFIID riid, void** ppv) override
         {
@@ -143,6 +194,8 @@ namespace neui_d2d_backend
           Program* p = g_initializing;
           if (!p) return E_FAIL;
           shader_ = p->guid;
+          ctx_ = ctx;
+          ctx_->AddRef();
           if (!ctx->IsShaderLoaded(p->guid)) {
             const HRESULT hr = ctx->LoadPixelShader(p->guid, p->bytecode.data(),
                                                     static_cast<UINT32>(p->bytecode.size()));
@@ -155,8 +208,11 @@ namespace neui_d2d_backend
           if (!info_) return E_FAIL;
           HRESULT hr = info_->SetPixelShader(shader_);
           if (FAILED(hr) || blob_.size() <= sizeof(BlobHeader)) return hr;
-          return info_->SetPixelShaderConstantBuffer(blob_.data() + sizeof(BlobHeader),
-                                                     static_cast<UINT32>(blob_.size() - sizeof(BlobHeader)));
+          hr = info_->SetPixelShaderConstantBuffer(blob_.data() + sizeof(BlobHeader),
+                                                   static_cast<UINT32>(blob_.size() - sizeof(BlobHeader)));
+          for (size_t i = 0; SUCCEEDED(hr) && i < bound_count_; ++i)
+            hr = info_->SetResourceTexture(static_cast<UINT32>(i), bound_[i]);
+          return hr;
         }
         IFACEMETHODIMP SetGraph(ID2D1TransformGraph*) override { return E_NOTIMPL; }
 
@@ -186,13 +242,87 @@ namespace neui_d2d_backend
 
       private:
         ShaderEffect() = default;
-        ~ShaderEffect() = default;
+        ~ShaderEffect()
+        {
+          release_bound();
+          for (auto& kv : cache_) kv.second->Release();
+          if (empty_) empty_->Release();
+          if (ctx_) ctx_->Release();
+        }
 
-        LONG              ref_ = 1;
-        ID2D1DrawInfo*    info_ = nullptr;  // owned by D2D for the effect's lifetime
-        GUID              shader_{};
-        D2D1_RECT_L       rect_ = { 0, 0, 0, 0 };
-        std::vector<BYTE> blob_;
+        void release_bound()
+        {
+          for (size_t i = 0; i < bound_count_; ++i) bound_[i]->Release();
+          bound_count_ = 0;
+        }
+
+        // A new reference to the texture of `d`.
+        ID2D1ResourceTexture* texture_for(const neui_shader_texture_desc_t& d)
+        {
+          if (!ctx_) return nullptr;
+          const bool bound = d.bgra && d.width_px && d.height_px && d.stride >= size_t(d.width_px) * 4u;
+          if (!bound) {
+            if (!empty_) {
+              static const BYTE clear[4] = { 0, 0, 0, 0 };
+              empty_ = make_texture(nullptr, clear, 1, 1, 4);
+            }
+            if (empty_) empty_->AddRef();
+            return empty_;
+          }
+          if (d.content_id) {
+            auto it = cache_.find(d.content_id);
+            if (it != cache_.end()) {
+              it->second->AddRef();
+              return it->second;
+            }
+          }
+          ID2D1ResourceTexture* t = nullptr;
+          GUID guid{};
+          if (d.content_id) {
+            guid = texture_guid(d.content_id);
+            if (FAILED(ctx_->FindResourceTexture(&guid, &t))) t = nullptr;  // another effect's
+          }
+          if (!t) t = make_texture(d.content_id ? &guid : nullptr, d.bgra, d.width_px, d.height_px, d.stride);
+          if (!t) return nullptr;
+          if (d.content_id) {
+            if (cache_.size() >= k_texture_cache) {
+              for (auto& kv : cache_) kv.second->Release();
+              cache_.clear();
+            }
+            t->AddRef();
+            cache_.emplace(d.content_id, t);
+          }
+          return t;
+        }
+
+        ID2D1ResourceTexture* make_texture(const GUID* id, const BYTE* px, uint32_t w, uint32_t h, size_t stride)
+        {
+          const UINT32 extents[2] = { w, h };
+          const D2D1_EXTEND_MODE modes[2] = { D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP };
+          D2D1_RESOURCE_TEXTURE_PROPERTIES props = {};
+          props.extents = extents;
+          props.dimensions = 2;
+          props.bufferPrecision = D2D1_BUFFER_PRECISION_8BPC_UNORM;
+          props.channelDepth = D2D1_CHANNEL_DEPTH_4;
+          props.filter = D2D1_FILTER_MIN_MAG_MIP_POINT;
+          props.extendModes = modes;
+          const UINT32 strides[1] = { static_cast<UINT32>(stride) };
+          ID2D1ResourceTexture* t = nullptr;
+          if (FAILED(ctx_->CreateResourceTexture(id, &props, px, strides, static_cast<UINT32>(stride * h), &t)))
+            return nullptr;
+          return t;
+        }
+
+        LONG                   ref_ = 1;
+        ID2D1DrawInfo*         info_ = nullptr;  // owned by D2D for the effect's lifetime
+        ID2D1EffectContext*    ctx_ = nullptr;
+        GUID                   shader_{};
+        D2D1_RECT_L            rect_ = { 0, 0, 0, 0 };
+        std::vector<BYTE>      blob_;
+        ID2D1ResourceTexture*  bound_[k_max_textures] = {};  // the next draw's, owned
+        size_t                 bound_count_ = 0;
+        std::unordered_map<uint64_t, ID2D1ResourceTexture*> cache_;  // by content id, owned
+        ID2D1ResourceTexture*  empty_ = nullptr;  // 1 x 1 transparent, for unbound samplers
       };
 
       bool load_compiler()
@@ -212,9 +342,10 @@ namespace neui_d2d_backend
         if (g_register_failed || !factory) return false;
         const D2D1_PROPERTY_BINDING bindings[] = {
           { L"Constants", &ShaderEffect::set_constants, &ShaderEffect::get_constants },
+          { L"Textures", &ShaderEffect::set_textures, &ShaderEffect::get_textures },
         };
         g_registered = SUCCEEDED(factory->RegisterEffectFromString(
-          k_clsid, k_effect_xml, bindings, 1, &ShaderEffect::create));
+          k_clsid, k_effect_xml, bindings, 2, &ShaderEffect::create));
         g_register_failed = !g_registered;
         return g_registered;
       }
@@ -309,8 +440,10 @@ namespace neui_d2d_backend
 
     bool draw(ID2D1DeviceContext* dc, float opacity, void* program,
               int32_t x, int32_t y, uint32_t w, uint32_t h,
-              const float* constants, uint32_t count)
+              const float* constants, uint32_t count,
+              const neui_shader_texture_desc_t* tex, uint32_t tex_count)
     {
+      if (tex_count > k_max_textures || (tex_count && !tex)) return false;
       auto* p = static_cast<Program*>(program);
       if (!dc || !p || !constants || count == 0 || count % 4 != 0 || !w || !h ||
           count <= NEUI_SHADER_OPACITY_INDEX)
@@ -336,8 +469,14 @@ namespace neui_d2d_backend
       float* c = reinterpret_cast<float*>(blob.data() + sizeof hdr);
       std::memcpy(c, constants, sizeof(float) * count);
       c[NEUI_SHADER_OPACITY_INDEX] *= opacity;
-      if (FAILED(fx->SetValue(0, D2D1_PROPERTY_TYPE_BLOB, blob.data(),
+      if (FAILED(fx->SetValue(k_prop_constants, D2D1_PROPERTY_TYPE_BLOB, blob.data(),
                               static_cast<UINT32>(blob.size()))))
+        return false;
+      // A program that samples gets all its samplers on every draw, so the
+      // property is only set for one; other programs never read t<i>.
+      if (tex_count && FAILED(fx->SetValue(k_prop_textures, D2D1_PROPERTY_TYPE_BLOB,
+                                           reinterpret_cast<const BYTE*>(tex),
+                                           static_cast<UINT32>(sizeof(neui_shader_texture_desc_t) * tex_count))))
         return false;
 
       FLOAT dpi_x = 96.0f, dpi_y = 96.0f;

@@ -12,6 +12,17 @@ extern "C" {
 // Created by the backend on window creation; owned and destroyed by the host.
 typedef void* neui_render_ctx_t;
 
+// A bitmap a textured shader program samples (draw_shader_program_textured):
+// premultiplied BGRA8 rows of `stride` bytes. Equal `content_id`s mean equal
+// pixels, so a backend may keep one upload per id; 0 = do not keep it. No
+// pixels or an empty size is an unbound sampler, which reads as transparent.
+typedef struct neui_shader_texture_desc_t {
+  const uint8_t* bgra;
+  uint32_t width_px, height_px;
+  size_t stride;
+  uint64_t content_id;
+} neui_shader_texture_desc_t;
+
 // Rendering backend interface.
 // Backends implement this struct and register with the crossplatform host at link time.
 // The native_handle passed to create_context is platform-specific:
@@ -397,12 +408,22 @@ typedef struct neui_render_backend {
                                         int32_t x, int32_t y, uint32_t w, uint32_t h,
                                         const float* constants, uint32_t count);
 
+  // draw_shader_program for a program that samples bitmaps: tex[i] is the
+  // program's sampler i (texture register t<i> in HLSL_D2D), `tex_count` of
+  // them. NULL = programs that sample run on the CPU.
+  bool  (NEUI_ABI *draw_shader_program_textured)(neui_render_ctx_t ctx, void* program,
+                                                 int32_t x, int32_t y, uint32_t w, uint32_t h,
+                                                 const float* constants, uint32_t count,
+                                                 const neui_shader_texture_desc_t* tex, uint32_t tex_count);
+
 } neui_render_backend_t;
 
 // Languages for create_shader_program. HLSL_D2D: an HLSL ps_4_0 pixel shader
 // for a zero-input Direct2D custom effect, entry `main(float4 pos :
 // SV_POSITION, float4 scene : SCENE_POSITION) : SV_Target`, constant buffer
-// b0; SCENE_POSITION is 0 at the drawn rect's top-left, in device pixels.
+// b0; SCENE_POSITION is 0 at the drawn rect's top-left, in device pixels. A
+// program that samples reads `Texture2D t<i> : register(t<i>)` with Load,
+// one per sampler, bound by draw_shader_program_textured.
 #define NEUI_SHADER_LANG_HLSL_D2D 1
 
 // The constant the backend multiplies its opacity into.

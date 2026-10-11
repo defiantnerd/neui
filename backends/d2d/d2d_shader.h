@@ -10,6 +10,8 @@
 #include <d2d1_1.h>
 #include <d3dcommon.h>
 
+#include <neui/d/renderer.h>
+
 #include <cstddef>
 #include <cstdint>
 
@@ -27,10 +29,12 @@ namespace neui_d2d_backend
     void  destroy_program(void* program);
 
     // Draws `program` at device pixel (x, y), w x h px, into `dc` (inside
-    // BeginDraw), with `opacity` multiplied into the constants' opacity slot.
+    // BeginDraw), with `opacity` multiplied into the constants' opacity slot,
+    // and `tex` bound to its samplers (renderer.h draw_shader_program_textured).
     bool  draw(ID2D1DeviceContext* dc, float opacity, void* program,
                int32_t x, int32_t y, uint32_t w, uint32_t h,
-               const float* constants, uint32_t count);
+               const float* constants, uint32_t count,
+               const neui_shader_texture_desc_t* tex, uint32_t tex_count);
 
     // A device context is going away (destroy or device loss): drop the
     // effects made on it.

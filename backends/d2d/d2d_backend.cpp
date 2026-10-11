@@ -1821,7 +1821,17 @@ namespace neui_d2d_backend
   {
     auto* ctx = static_cast<D2DContext*>(raw);
     if (!ctx || !ctx->target) return false;
-    return shader::draw(ctx->target, current_alpha(ctx), program, x, y, w, h, constants, count);
+    return shader::draw(ctx->target, current_alpha(ctx), program, x, y, w, h, constants, count, nullptr, 0);
+  }
+
+  static bool d2d_draw_shader_program_textured(neui_render_ctx_t raw, void* program,
+                                               int32_t x, int32_t y, uint32_t w, uint32_t h,
+                                               const float* constants, uint32_t count,
+                                               const neui_shader_texture_desc_t* tex, uint32_t tex_count)
+  {
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!ctx || !ctx->target) return false;
+    return shader::draw(ctx->target, current_alpha(ctx), program, x, y, w, h, constants, count, tex, tex_count);
   }
 
   // `current` is in DIPs; the target's DPI maps a DIP to dpi/96 pixels.
@@ -2138,6 +2148,7 @@ namespace neui_d2d_backend
     d2d_create_shader_program,
     d2d_destroy_shader_program,
     d2d_draw_shader_program,
+    d2d_draw_shader_program_textured,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

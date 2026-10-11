@@ -193,11 +193,12 @@ namespace neui_detail
     // compile it in the background and decline draws until it is ready). Null
     // when GPU use is off, the backend has no GPU programs, the shader is
     // #pragma neui cpu_only, or the backend could not make it; a failure is
-    // remembered, not retried.
+    // remembered, not retried. Shaders that sample bitmaps stay on the CPU
+    // until the hosts bind textures (plans/shader-effects.md, phase 9).
     void* gpu_program(const ShaderAsset& sa, neui_render_backend_t* backend)
     {
       if (!_gpu_enabled || !sa.program || !backend || !backend->create_shader_program ||
-          !backend->draw_shader_program)
+          !backend->draw_shader_program || !neui::nsl::samplers(*sa.program).empty())
         return nullptr;
       auto it = _gpu.find(sa.uid);
       if (it != _gpu.end()) return it->second;
