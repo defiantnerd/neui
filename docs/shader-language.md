@@ -6,9 +6,10 @@
 (the `neui-shader` library, API `src/shader/nsl.h`). Clients compile shaders
 through the optional `NEUI_API_SHADER` (`include/neui/d/shader.h`) and run
 them in a compound SHADER layer, with `draw` from a CUSTOMDRAW paint, or baked
-into bitmaps (phases 2 and 3 of `plans/shader-effects.md`). Tests:
-`tests/test_shader_lang.cpp`, `tests/test_shader_exec.cpp`,
-`tests/test_shader_asset.cpp` and `tests/test_shader_layer.cpp`.
+into bitmaps (phases 2 and 3 of `plans/shader-effects.md`); sampling bitmaps
+is phase 9. Tests: `tests/test_shader_lang.cpp`, `tests/test_shader_exec.cpp`,
+`tests/test_shader_texture.cpp`, `tests/test_shader_asset.cpp` and
+`tests/test_shader_layer.cpp`.
 
 **New to `.nsl`?** Start with the guide, `docs/shader-guide.md`: it teaches
 the language by example and shows how a client puts a shader on screen.
@@ -23,8 +24,9 @@ given here.
 A `.nsl` shader is an **image generator**: a pure function from a position
 inside a layer to a colour. neui runs it once per device pixel of the layer and
 draws the result like a bitmap, inside the normal paint order. A shader has no
-inputs except the position and its uniforms. It has no textures, no state that
-survives between pixels or frames, and no side effects.
+inputs except the position, its uniforms and the bitmaps bound to its samplers
+(§6.1). It has no state that survives between pixels or frames, and no side
+effects.
 
 ```glsl
 // ring_glow.nsl - a value-driven glow ring for a knob
@@ -64,7 +66,7 @@ terminates.
   (round-half-to-even) and is **independent of the C locale**. A literal that
   overflows to infinity is an error. One that underflows becomes 0 or a
   denormal, per IEEE.
-- **Directives:** the only directive is `#pragma neui <name>` on a line of its
+- **Directives:** the only directive is `#pragma neui ...` on a line of its
   own (§11). Any other line starting with `#` is an error ("the preprocessor
   is not supported"), and so are `#define`, `#include` and `#version`.
 
@@ -91,6 +93,7 @@ function. Mutable globals do not exist: a global is `uniform` or `const`.
 | `vec2`, `vec3`, `vec4` | 2-4 floats | component-wise arithmetic |
 | `bool` | `true`, `false` | from comparisons and logic |
 | `int` | signed 32-bit | **compile-time only**: literals, `const int`, loop counters |
+| `sampler2D` | a bitmap | uniforms and `in` parameters only; read with `texture2D` (§6.1, §9.4) |
 | `void` | none | function return type only |
 
 **Every `int` value is known at compile time,** because loops are unrolled.
@@ -165,6 +168,37 @@ for reduced motion) and is re-run every frame of the clock, at 30 fps by
 default. A program that does not read it is re-run only when its inputs
 change. The wrap jumps once an hour; a loop whose period divides 3600 does
 not show it.
+
+### 6.1 Samplers
+
+```glsl
+#pragma neui sampler noise repeat         // edge mode and filter, per sampler
+uniform sampler2D albedo;                 // clamp, linear: the defaults
+uniform sampler2D noise;
+```
+
+- **A `sampler2D` uniform** reads a bitmap: a BITMAP or SURFACE asset that
+  neui binds by the sampler's name (the compound layer's `u.<name>` asset,
+  `shader_api->draw` / the bake API's `textures`). At most **4** per
+  program; they count toward the 32 uniform declarations, not toward the 64
+  scalar components. A sampler has no default.
+- **Unbound** (nothing bound, a released or foreign handle, an asset that is
+  not a bitmap), a sampler reads as transparent: `texture2D` returns
+  `vec4(0.0)`, and `neui_texture_size` and `neui_texel` return `vec2(0.0)`.
+- **Where a sampler may appear:** as a uniform, and as an `in` parameter of
+  a user function (an alias, since calls are inlined). It cannot be a local
+  variable, be assigned, be an `out` / `inout` parameter or a return type,
+  or be compared, selected with `?:`, or used in arithmetic.
+- **Modes**, fixed at compile time: `#pragma neui sampler <name>
+  [clamp|repeat|border] [linear|nearest]`, the words in either order, each at
+  most once, at most one line per sampler, before or after the declaration.
+  The default is `clamp linear`. The mode applies to both axes.
+  - `clamp`: outside the bitmap, the nearest edge texel continues.
+  - `repeat`: the bitmap tiles.
+  - `border`: outside the bitmap is transparent.
+  - `linear` filters between the 4 nearest texels, `nearest` reads one (§9.4).
+- **No mipmaps:** a bitmap drawn much smaller than its size aliases. Supply
+  bitmaps near the size they are drawn at, or bake a smaller one.
 
 ## 7. Expressions
 
@@ -321,6 +355,50 @@ c = neui_hash(i + vec2(0, 1)); d = neui_hash(i + vec2(1, 1));
 return mix(mix(a, b, u.x), mix(c, d, u.x), u.y)
 ```
 
+### 9.4 Sampling
+
+| Function | Result |
+|---|---|
+| `vec4 texture2D(sampler2D s, vec2 uv)` | the bitmap at `uv`, **straight** RGBA (like `main`'s result) |
+| `vec4 texture(sampler2D s, vec2 uv)` | the same (the Shadertoy spelling) |
+| `vec2 neui_texture_size(sampler2D s)` | the bitmap's logical size: its pixel size / its own HiDPI factor |
+| `vec2 neui_texel(sampler2D s)` | one texel in `uv` units: `1 / width_px`, `1 / height_px` |
+
+`uv` is normalised: `(0, 0)` is the bitmap's **top-left** corner and
+`(1, 1)` its bottom-right, y-down like `p`. A bitmap that fills the layer is
+`texture2D(s, p / neui_size)`.
+
+**Exact definition.** With `W`, `H` the bitmap's size in texels and texel
+`(i, j)` its premultiplied 8-bit `(r, g, b, a)`:
+
+```
+texel(x, y):  x, y floats holding whole numbers (from floor)
+              x = (x != x) ? 0 : clamp(x, -2^30, 2^30) as int, likewise y
+              clamp:  x = clamp(x, 0, W - 1)
+              repeat: x = x - W * floor(x / W)   (exact integer arithmetic)
+              border: outside [0, W) x [0, H) -> (0, 0, 0, 0)
+nearest:  C = texel(floor(u * W), floor(v * H)),  scale 255
+linear:   t = u * W - 0.5;  x0 = floor(t);  fx = floor((t - x0) * 256 + 0.5)
+          likewise y0, fy;  x1 = x0 + 1, y1 = y0 + 1
+          C = texel(x0, y0) * (256 - fx) * (256 - fy) + texel(x1, y0) * fx * (256 - fy)
+            + texel(x0, y1) * (256 - fx) * fy         + texel(x1, y1) * fx * fy
+          per channel, scale 255 * 256 * 256 = 16711680
+result:   rgb = C.a == 0 ? 0 : C.rgb / C.a;   a = C.a / scale
+```
+
+Every product and sum is an integer below 2^24, so it is exact in float in
+any order; the final division is the only rounding. Consequences:
+
+- filtering happens on premultiplied colour, so colour does not bleed out of
+  transparent texels;
+- the fraction between texels is quantised to 1/256, as GPU filtering
+  hardware does;
+- **a bitmap drawn 1:1** (layer size = the bitmap's logical size, at the
+  bitmap's own scale, `texture2D(s, p / neui_size)`) **comes back byte for
+  byte**: float noise beside a texel centre quantises to a weight of 0 or
+  256;
+- there is no sRGB linearisation, as in the rest of neui.
+
 ## 10. Arithmetic model
 
 - **IEEE-754 binary32**, round-to-nearest-even, **gradual underflow**
@@ -406,6 +484,7 @@ moves.
 |---|---|
 | `#pragma neui dither` | ordered dithering on output |
 | `#pragma neui cpu_only` | never use a GPU executor for this shader (exact pixels everywhere, at CPU speed) |
+| `#pragma neui sampler <name> [clamp\|repeat\|border] [linear\|nearest]` | a sampler's edge mode and filter (§6.1) |
 
 ## 12. Determinism and fidelity
 
@@ -436,6 +515,10 @@ moves.
   `#pragma neui cpu_only` and `shader_api->set_gpu(session, false)` force the
   CPU path when exact pixels matter more than speed. Bakes always run on the
   CPU.
+  Sampling on the GPU reads texels with `Load` and runs the same integer
+  filter as the CPU (not the hardware's filtering, whose sub-texel precision
+  varies): at most 1/255 from the CPU on a GTX 1080 and on WARP, and a 1:1
+  copy is exact there too.
 
 ## 13. Limits
 
@@ -451,7 +534,8 @@ GPU timeout (TDR on Windows).
 | nesting depth (statements, blocks and expressions) | 128 |
 | nesting depth after inlining | 512 |
 | user functions | 64 |
-| uniforms | 32 declarations, 64 scalar components |
+| uniforms | 32 declarations (samplers included), 64 scalar components |
+| `sampler2D` uniforms | 4 |
 | `for` trip count | 64 |
 | `for` nesting depth | 4 |
 | product of nested trip counts | 1024 |
@@ -467,17 +551,18 @@ limits nor the operation limit would catch it.
 
 ## 14. Keywords and differences from GLSL ES 1.00
 
-**Keywords:** `uniform const float int bool vec2 vec3 vec4 void true false
-if else for break continue return in out inout precision lowp mediump highp`.
+**Keywords:** `uniform const float int bool vec2 vec3 vec4 sampler2D void
+true false if else for break continue return in out inout precision lowp
+mediump highp`. `texture2D`, `texture`, `neui_texture_size` and `neui_texel`
+are built-ins.
 
 **Reserved, an error with a "not supported in .nsl v1" message:** `while do
 switch case default discard struct attribute varying layout centroid flat
 smooth invariant mat2 mat3 mat4 mat2x2 mat2x3 mat2x4 mat3x2 mat3x3 mat3x4
 mat4x2 mat4x3 mat4x4 ivec2 ivec3 ivec4 bvec2 bvec3 bvec4 uvec2 uvec3 uvec4
-uint double dvec2 dvec3 dvec4 half sampler2D sampler3D samplerCube texture
-texture2D textureCube asm class union enum typedef template this goto inline
-noinline volatile public static extern interface long short unsigned sizeof
-cast namespace using`.
+uint double dvec2 dvec3 dvec4 half sampler3D samplerCube textureCube asm class
+union enum typedef template this goto inline noinline volatile public static
+extern interface long short unsigned sizeof cast namespace using`.
 
 **Differences from GLSL ES 1.00, in one place:**
 - Entry point `vec4 main(vec2 p)` returns the colour; there is no
@@ -486,8 +571,10 @@ cast namespace using`.
 - `int` is compile-time only, and int `/` is an error. Implicit int → float.
 - Uninitialised values are zero. Every edge case is defined (§9, §10, §11).
 - No preprocessor except `#pragma neui`. No arrays, structs, matrices,
-  textures, derivatives, `while`, `discard`, mutable globals or user
-  overloading.
+  derivatives, `while`, `discard`, mutable globals or user overloading.
+- Samplers: `sampler2D` only, with neui's exact filtering (§9.4); no
+  mipmaps / LOD, no sampler state in source except the pragma, and `uv`
+  is y-down.
 - Assignment is a statement. Loops have a constant trip count.
 - Added: `saturate`.
 
@@ -514,7 +601,10 @@ knob.nsl:20:5: error: loop runs 128 times; the limit is 64
 | `fragCoord` (device px, **y-up**) | `p` (logical px, **y-down**); flip with `neui_size.y - p.y` |
 | `iResolution.xy` | `neui_size` (logical) or `neui_size * neui_scale` (device) |
 | `iTime` | `neui_time` (wrapped to an hour) |
-| `iChannel0`, `texture(...)` | not in v1 |
+| `iChannel0` | a `uniform sampler2D` the client binds a bitmap to |
+| `texture(iChannel0, uv)` (uv **y-up**) | `texture(img, vec2(uv.x, 1.0 - uv.y))`; `texture` works as is |
+| `iChannelResolution[0].xy` | `1.0 / neui_texel(img)` (texels) |
+| a channel's wrap / filter setting | `#pragma neui sampler img repeat nearest` |
 | `while (...)`, data-dependent loops | a `for` with a constant bound + `break` |
 | colour output | straight alpha; neui premultiplies |
 
@@ -531,12 +621,12 @@ bgfx shader bodies are GLSL, so porting is mechanical.
 ```ebnf
 program        = { global } ;
 global         = uniform_decl | const_decl | function | precision_stmt ;
-uniform_decl   = "uniform" [ precision ] value_type IDENT [ "=" expr ] ";" ;
+uniform_decl   = "uniform" [ precision ] ( value_type IDENT [ "=" expr ] | "sampler2D" IDENT ) ";" ;
 const_decl     = "const" [ precision ] type IDENT "=" expr { "," IDENT "=" expr } ";" ;
 precision_stmt = "precision" precision "float" ";" ;
 precision      = "lowp" | "mediump" | "highp" ;
 function       = ( type | "void" ) IDENT "(" [ param { "," param } ] ")" block ;
-param          = [ "in" | "out" | "inout" ] [ precision ] type IDENT ;
+param          = [ "in" | "out" | "inout" ] [ precision ] ( type | "sampler2D" ) IDENT ;
 type           = value_type | "bool" | "int" ;
 value_type     = "float" | "vec2" | "vec3" | "vec4" ;
 
@@ -570,4 +660,4 @@ call           = ( IDENT | type ) "(" [ expr { "," expr } ] ")" ;
 ```
 
 `relop` includes `!=` only in a `for` condition. In expressions, `!=` is
-parsed by `equality`.
+parsed by `equality`. A `sampler2D` parameter must be `in` (the default).

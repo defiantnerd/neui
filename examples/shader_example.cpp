@@ -24,6 +24,14 @@
 //   * The same shader drawn with shader_api->draw at half resolution, with
 //     animation_time() as its time; it counts its paints for an fps readout.
 //   * An fps cap (set_animation_fps) and a pause toggle (set_animation_paused).
+// Sampling bitmaps (sampler2D), all three textures baked by shaders at start:
+//   * Two knobs lit from a normal map: the SHADER layer's "u.normals" is the
+//     baked map, so one small bitmap replaces a filmstrip; the highlight stays
+//     put while the knob turns.
+//   * A meter that looks its colours up in a 256 x 1 ramp; its level follows
+//     the first lit knob.
+//   * Water from two layers of a baked seamless noise tile ("repeat"),
+//     drifting on the animation clock.
 // And a deliberately broken shader, whose compile error is shown in a label
 // (how a client reports a skin's shader error).
 // Without NEUI_API_SHADER (null platform, LVGL), plain KNOB widgets.
@@ -196,6 +204,111 @@ static const char* const k_ring_component = R"json({
   ]
 })json";
 
+// ---- Sampling bitmaps: textures baked by shaders, sampled by live ones ----
+
+static const char* const k_normal_bake = R"(
+// A machined knob's surface as a normal map (rgb = n * 0.5 + 0.5, y down):
+// a shallow dome, fine rings and a rounded edge.
+vec4 main(vec2 p) {
+  vec2  d = (p - neui_size * 0.5) / (neui_size * 0.5);   // -1..1 across
+  float r = length(d);
+  float slope = 0.35 * r                                  // the dome
+              + 0.05 * sin(r * 80.0)                      // machined rings
+              + 1.6 * smoothstep(0.84, 0.98, r);          // the rounded edge
+  vec3  n = normalize(vec3(normalize(d) * slope, 1.0));
+  return vec4(n * 0.5 + 0.5, 1.0);
+}
+)";
+
+static const char* const k_lit_knob = R"(
+uniform sampler2D normals;           // rgb = surface normal * 0.5 + 0.5, y down, z out
+uniform float value  = 0.5;          // 0..1
+uniform vec4  accent = vec4(0.25, 0.66, 0.96, 1.0);
+
+vec4 main(vec2 p) {
+  vec2  c = neui_size * 0.5;
+  float R = min(c.x, c.y);
+  vec2  d = p - c;
+  // The knob turns with the value; the light does not. Look up the normal
+  // map in the knob's own frame, then turn the normal back to the screen.
+  float a  = (value - 0.5) * 4.712389;                         // 270 degrees of travel
+  float ca = cos(a), sa = sin(a);
+  vec2  q  = vec2(ca * d.x + sa * d.y, ca * d.y - sa * d.x);
+  vec3  n  = texture2D(normals, q / (2.0 * R) + 0.5).xyz * 2.0 - 1.0;
+  n.xy = vec2(ca * n.x - sa * n.y, sa * n.x + ca * n.y);
+  vec3  l    = normalize(vec3(-0.5, -0.7, 1.0));               // light from the top left
+  float diff = saturate(dot(n, l));
+  float spec = pow(saturate(dot(reflect(-l, n), vec3(0.0, 0.0, 1.0))), 32.0);
+  vec3  col  = vec3(0.16, 0.17, 0.20) + vec3(0.55) * diff + vec3(0.6) * spec;
+  vec2  tip  = c + vec2(sa, -ca) * R * 0.7;                    // the pointer
+  col = mix(col, accent.rgb, 1.0 - smoothstep(-neui_px, neui_px, length(p - tip) - R * 0.08));
+  return vec4(col, 1.0 - smoothstep(R - neui_px, R, length(d)));
+}
+)";
+
+static const char* const k_noise_tile = R"(
+// Seamless fbm: the lattice wraps every `period` cells, so the edges of the
+// tile meet. Bake it once, at the size it is sampled at.
+float tile_noise(vec2 u, float period) {
+  vec2  i = floor(u), f = u - i, s = f * f * (3.0 - 2.0 * f);
+  float a = neui_hash(mod(i, period)),                   b = neui_hash(mod(i + vec2(1.0, 0.0), period));
+  float c = neui_hash(mod(i + vec2(0.0, 1.0), period)), d = neui_hash(mod(i + vec2(1.0, 1.0), period));
+  return mix(mix(a, b, s.x), mix(c, d, s.x), s.y);
+}
+
+vec4 main(vec2 p) {
+  vec2  u = p / neui_size * 8.0;                 // 8 lattice cells across the tile
+  float n = 0.0, amp = 0.5, period = 8.0;
+  for (int o = 0; o < 4; o++) {
+    n += amp * tile_noise(u, period);
+    u *= 2.0;
+    period *= 2.0;
+    amp *= 0.5;
+  }
+  return vec4(vec3(n), 1.0);
+}
+)";
+
+static const char* const k_water = R"(
+#pragma neui sampler noise repeat
+
+uniform sampler2D noise;             // the seamless tile above, 128 px
+uniform vec4 deep    = vec4(0.05, 0.08, 0.20, 1.0);
+uniform vec4 shallow = vec4(0.10, 0.55, 0.65, 1.0);
+
+vec4 main(vec2 p) {
+  vec2  drift = vec2(6.0, 2.5) * neui_time;                    // px per second
+  float a = texture2D(noise, (p + drift) / 128.0).r;           // one tile per 128 px
+  float b = texture2D(noise, (p * 0.5 - drift.yx) / 128.0).r;  // a larger, slower layer
+  float n = a * 0.6 + b * 0.4;
+  return vec4(mix(deep.rgb, shallow.rgb, smoothstep(0.3, 0.7, n)), 1.0);
+}
+)";
+
+static const char* const k_ramp = R"(
+// A meter ramp, baked to 256 x 1: green, then yellow, then red.
+vec4 main(vec2 p) {
+  float t = p.x / neui_size.x;
+  vec3  c = mix(vec3(0.20, 0.80, 0.30), vec3(0.95, 0.85, 0.20), smoothstep(0.45, 0.70, t));
+  return vec4(mix(c, vec3(0.95, 0.25, 0.20), smoothstep(0.80, 0.90, t)), 1.0);
+}
+)";
+
+static const char* const k_meter = R"(
+#pragma neui sampler palette nearest
+
+uniform sampler2D palette;           // a 256 x 1 colour ramp, bottom to top
+uniform float level = 0.7;           // 0..1, e.g. a meter value
+
+vec4 main(vec2 p) {
+  float t   = 1.0 - p.y / neui_size.y;                  // 0 at the bottom
+  vec3  col = texture2D(palette, vec2(t, 0.5)).rgb;     // the ramp's colour at t
+  float lit = step(t, level);                           // 1 below the level
+  float seg = step(0.25, fract(p.y / 6.0));             // 6 px segments with a gap
+  return vec4(col * mix(0.2, 1.0, lit), seg);
+}
+)";
+
 // An unknown identifier: the compile error goes into a label.
 static const char* const k_broken = "vec4 main(vec2 p) {\n  return vec4(glow, 1.0);\n}\n";
 
@@ -233,6 +346,12 @@ struct AppState
   uint32_t     pause_box_id = 0;
   uint32_t     fps_label_id = 0;
   int          anim_paints = 0;
+  int          compiled = 0;
+
+  // The sampling row: two lit knobs, the meter, the water.
+  uint32_t     lit_ids[2] = {};
+  uint32_t     meter_id = 0;
+  uint32_t     water_id = 0;
   std::chrono::steady_clock::time_point anim_t0 = std::chrono::steady_clock::now();
 };
 
@@ -243,6 +362,7 @@ static neui_asset_t compile(AppState* a, const char* src, const char* name)
   char err[256];
   neui_asset_t s = a->shaders->create(a->session, src, (uint32_t)strlen(src), name, err, sizeof err);
   if (s.id == asset_none.id) dbglog("[shader] %s\n", err);
+  else ++a->compiled;
   return s;
 }
 
@@ -258,6 +378,19 @@ static neui_asset_t bitmap_compound(AppState* a, neui_asset_t bitmap, float fram
   a->compound->set_asset(a->session, comp, L, "asset", bitmap);
   if (frame_scale > 0.0f)
     a->compound->bind(a->session, comp, L, "frame", NEUI_PARAM_VALUE, frame_scale, 0.0f);
+  return comp;
+}
+
+// A compound with one SHADER layer over the whole widget.
+static neui_asset_t shader_compound(AppState* a, neui_asset_t shader, neui_compound_layer_t* out)
+{
+  neui_asset_t comp = a->assets->create_compound(a->session);
+  neui_compound_layer_t L = a->compound->add_layer(a->session, comp, NEUI_COMPOUND_LAYER_SHADER, 0);
+  a->compound->set_anchor(a->session, comp, L, NEUI_ANCHOR_CENTER, NEUI_ANCHOR_CENTER);
+  a->compound->set_int(a->session, comp, L, "width", NEUI_COMPOUND_FILL);
+  a->compound->set_int(a->session, comp, L, "height", NEUI_COMPOUND_FILL);
+  a->compound->set_asset(a->session, comp, L, "shader", shader);
+  *out = L;
   return comp;
 }
 
@@ -312,11 +445,23 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
         }
         return false;
       }
+    for (int i = 0; i < 2; ++i)
+      if (a->lit_ids[i] && event->data.attr.widget.id == a->lit_ids[i]) {
+        set_readout(a, k_knobs + k_live + i, event->data.attr.value);
+        if (i == 0 && a->meter_id) {  // the meter shows the first lit knob
+          a->attrs->set_float(a->session, { a->meter_id }, "app.level", event->data.attr.value);
+          a->widgets->invalidate(a->session, { a->meter_id });
+        }
+        return false;
+      }
   }
   if (event->type == NEUI_EVENT_CHECKBOX_CHANGED && a->gpu_box_id &&
       event->data.checkbox.widget.id == a->gpu_box_id) {
     a->shaders->set_gpu(a->session, event->data.checkbox.state == NEUI_CHECK_CHECKED);
     for (uint32_t id : a->live_ids)
+      if (id) a->widgets->invalidate(a->session, { id });
+    const uint32_t sampling[] = { a->lit_ids[0], a->lit_ids[1], a->meter_id, a->water_id };
+    for (uint32_t id : sampling)
       if (id) a->widgets->invalidate(a->session, { id });
     a->widgets->invalidate(a->session, { a->panel_id });
     return false;
@@ -425,7 +570,8 @@ int main(int argc, char* argv[])
   const int banner_h = 64, knob_y = pad + banner_h + 16, readout_y = knob_y + knob + 10;
   const int tile_y = readout_y + 32, live_label_y = tile_y + tile_h + 16, live_y = live_label_y + 26;
   const int anim_label_y = live_y + knob + 16, anim_y = anim_label_y + 30;
-  const int error_y = anim_y + knob + 16, timing_y = error_y + 26;
+  const int tex_label_y = anim_y + knob + 16, tex_y = tex_label_y + 26;
+  const int error_y = tex_y + knob + 16, timing_y = error_y + 26;
   const int win_h = timing_y + 22 + pad;
 
   neui_widget_t win = app.widgets->create(app.session, widget_none, NEUI_W_APPWINDOW,
@@ -529,8 +675,24 @@ int main(int argc, char* argv[])
     app.widgets->set_asset(app.session, img, tiles[i]);
   }
 
+  // Textures for the sampling row, baked by shaders: a knob's normal map, a
+  // seamless noise tile and a 256 x 1 colour ramp.
+  neui_asset_t normal_bake = compile(&app, k_normal_bake, "knob_normals.nsl");
+  neui_asset_t tile_bake = compile(&app, k_noise_tile, "noise_tile.nsl");
+  neui_asset_t ramp_bake = compile(&app, k_ramp, "meter_ramp.nsl");
+  bake = neui_shader_bake_t{};
+  bake.width = bake.height = 128.0f;
+  bake.scale = 1.0f;
+  neui_asset_t normals_bmp = app.shaders->bake_bitmap(app.session, normal_bake, &bake);
+  neui_asset_t noise_bmp = app.shaders->bake_bitmap(app.session, tile_bake, &bake);
+  bake.width = 256.0f;
+  bake.height = 1.0f;
+  neui_asset_t ramp_bmp = app.shaders->bake_bitmap(app.session, ramp_bake, &bake);
+  bakes += 3;
+
   const double ms =
     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  const int compiled = app.compiled;
 
   // Live: three compound knobs on the glow shader, one component knob, and a
   // panel drawn with shader_api->draw.
@@ -612,6 +774,49 @@ int main(int argc, char* argv[])
                                                  win_w - pad - anim_w, anim_y, anim_w, knob, nullptr);
   app.anim_panel_id = anim_panel.id;
 
+  // Sampling bitmaps: knobs lit from the normal map, the meter on the ramp,
+  // water from the noise tile.
+  neui_widget_t tex_label = app.widgets->create(app.session, win, NEUI_W_LABEL,
+                                                pad, tex_label_y, win_w - 2 * pad, 22, nullptr);
+  app.widgets->set_text(app.session, tex_label,
+                        "Sampling baked bitmaps: a normal map, a colour ramp, a noise tile");
+  neui_asset_t lit = compile(&app, k_lit_knob, "lit_knob.nsl");
+  neui_asset_t meter = compile(&app, k_meter, "meter.nsl");
+  neui_asset_t water = compile(&app, k_water, "water.nsl");
+  neui_compound_layer_t L;
+  neui_asset_t lit_comp = shader_compound(&app, lit, &L);
+  app.compound->bind(app.session, lit_comp, L, "u.value", NEUI_PARAM_VALUE, 1.0f, 0.0f);
+  app.compound->set_float(app.session, lit_comp, L, "u.value.step", 1.0f / 256.0f);
+  app.compound->bind(app.session, lit_comp, L, "u.accent", "app.accent", 1.0f, 0.0f);
+  app.compound->set_asset(app.session, lit_comp, L, "u.normals", normals_bmp);
+  for (int i = 0; i < 2; ++i) {
+    neui_widget_t k = app.widgets->create(app.session, win, NEUI_W_CUSTOMDRAW,
+                                          pad + i * (knob + knob_gap), tex_y, knob, knob, nullptr);
+    app.lit_ids[i] = k.id;
+    app.widgets->set_asset(app.session, k, lit_comp);
+    app.widgets->set_asset(app.session, k, behav);
+    app.attrs->set_int(app.session, k, "app.accent", (int)accents[i * 2]);
+    const float v = i == 0 ? 0.3f : 0.75f;
+    app.attrs->set_float(app.session, k, NEUI_PARAM_DEFAULT, v);
+    app.attrs->set_float(app.session, k, NEUI_PARAM_VALUE, v);
+  }
+  neui_asset_t meter_comp = shader_compound(&app, meter, &L);
+  app.compound->set_asset(app.session, meter_comp, L, "u.palette", ramp_bmp);
+  app.compound->bind(app.session, meter_comp, L, "u.level", "app.level", 1.0f, 0.0f);
+  const int meter_x = pad + 2 * (knob + knob_gap);
+  neui_widget_t meter_w = app.widgets->create(app.session, win, NEUI_W_CUSTOMDRAW,
+                                              meter_x, tex_y, 24, knob, nullptr);
+  app.meter_id = meter_w.id;
+  app.widgets->set_asset(app.session, meter_w, meter_comp);
+  app.attrs->set_float(app.session, meter_w, "app.level", 0.3f);
+  neui_asset_t water_comp = shader_compound(&app, water, &L);  // no "time": the clock
+  app.compound->set_asset(app.session, water_comp, L, "u.noise", noise_bmp);
+  const int water_x = meter_x + 24 + knob_gap;
+  neui_widget_t water_w = app.widgets->create(app.session, win, NEUI_W_CUSTOMDRAW,
+                                              water_x, tex_y, win_w - pad - water_x, knob, nullptr);
+  app.water_id = water_w.id;
+  app.widgets->set_asset(app.session, water_w, water_comp);
+
   // The broken shader's diagnostic.
   char err[256];
   neui_asset_t broken = app.shaders->create(app.session, k_broken, (uint32_t)strlen(k_broken),
@@ -623,8 +828,8 @@ int main(int argc, char* argv[])
                                             pad, error_y, win_w - 2 * pad, 22, nullptr);
   app.widgets->set_text(app.session, error, line);
 
-  snprintf(line, sizeof line, "Compiled 4 shaders and baked %d images in %.0f ms (%.0fx scale).",
-           bakes, ms, (double)k_bake_scale);
+  snprintf(line, sizeof line, "Compiled %d shaders and baked %d images in %.0f ms (%.0fx scale).",
+           compiled, bakes, ms, (double)k_bake_scale);
   neui_widget_t timing = app.widgets->create(app.session, win, NEUI_W_LABEL,
                                              pad, timing_y, win_w - 2 * pad, 22, nullptr);
   app.widgets->set_text(app.session, timing, line);
@@ -638,6 +843,8 @@ int main(int argc, char* argv[])
   app.assets->destroy(app.session, behav);
   app.assets->destroy(app.session, live_comp);
   app.assets->destroy(app.session, anim_comp);
+  const neui_asset_t sampling[] = { lit_comp, meter_comp, water_comp, normals_bmp, noise_bmp, ramp_bmp };
+  for (neui_asset_t a : sampling) app.assets->destroy(app.session, a);
   if (ring.id != asset_none.id) app.assets->destroy(app.session, ring);
   app.assets->destroy(app.session, banner_comp);
   app.assets->destroy(app.session, banner_bmp);
@@ -646,7 +853,8 @@ int main(int argc, char* argv[])
     app.assets->destroy(app.session, strips[c]);
   }
   for (neui_asset_t t : tiles) app.assets->destroy(app.session, t);
-  const neui_asset_t programs[] = { metal, glow, plasma, marble, plasma_anim };
+  const neui_asset_t programs[] = { metal, glow, plasma, marble, plasma_anim, normal_bake, tile_bake,
+                                    ramp_bake, lit, meter, water };
   for (neui_asset_t s : programs) app.assets->destroy(app.session, s);
   host->destroy(app.session);
   return 0;

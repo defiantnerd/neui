@@ -19,8 +19,9 @@ colour.
 - neui runs it once per device pixel of a rectangle and draws the result like
   a bitmap, inside the normal paint order. Clip, transform, alpha and the
   z-order of compound layers all apply as for any other drawing.
-- The only inputs are the position and the uniforms. There are no textures,
-  no state kept between pixels or frames, and no side effects.
+- The only inputs are the position, the uniforms and the bitmaps bound to
+  its samplers (§5.5). There is no state kept between pixels or frames, and
+  there are no side effects.
 - On the CPU, the pixels are bit-identical on every platform and compiler.
 - On Windows (Direct2D), live shaders run on the GPU by default, within a
   small tolerance of the CPU result (§7.7).
@@ -350,6 +351,160 @@ vec4 main(vec2 p) {
   and that hash amplifies them. Prefer `neui_hash` for anything that has to
   match the CPU.
 
+### 5.5 Sampling bitmaps
+
+A `uniform sampler2D` reads a bitmap the client binds to it: a BITMAP asset
+(an image, or a bake), or a SURFACE. `texture2D(s, uv)` returns its colour
+at `uv`, which runs 0..1 across the bitmap, **y down** like `p`.
+
+```glsl
+uniform sampler2D art;
+uniform vec4  tint = vec4(1.0, 0.85, 0.6, 1.0);
+uniform float fade = 0.3;                        // 0 = as is, 1 = grey
+
+vec4 main(vec2 p) {
+  vec4  c    = texture2D(art, p / neui_size);    // straight RGBA, like main's result
+  float grey = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+  return vec4(mix(c.rgb, vec3(grey), fade) * tint.rgb, c.a * tint.a);
+}
+```
+
+- **`p / neui_size` stretches the bitmap over the layer.** At the bitmap's
+  own size and scale, the copy is exact, byte for byte.
+- **The result is straight RGBA,** like `main`'s, so it can be returned or
+  mixed as is. Filtering happens on premultiplied colour, so colour does not
+  bleed out of transparent texels.
+- **An unbound sampler reads as transparent.** That covers nothing bound, a
+  released handle, or an asset that is not a bitmap.
+- **Edges and filtering** are set per sampler with a pragma:
+  `#pragma neui sampler <name> [clamp|repeat|border] [linear|nearest]`.
+  The default is `clamp linear`.
+  - `repeat` tiles the bitmap.
+  - `border` makes everything outside it transparent.
+  - `nearest` reads one texel without blending: pixel art, and lookup
+    tables with hard steps.
+- **`neui_texture_size(s)`** is the bitmap's size in logical px (its pixel
+  size over its own HiDPI scale). **`neui_texel(s)`** is the size of one texel
+  in `uv` units, for neighbour taps. Fitting a bitmap without stretching it:
+
+```glsl
+#pragma neui sampler art border                  // transparent outside the bitmap
+
+uniform sampler2D art;
+
+vec4 main(vec2 p) {
+  vec2  img = neui_texture_size(art);                          // logical px
+  float k   = min(neui_size.x / img.x, neui_size.y / img.y);   // max() would cover
+  vec2  uv  = (p - (neui_size - img * k) * 0.5) / (img * k);
+  return texture2D(art, uv);
+}
+```
+
+- **There are no mipmaps.** A bitmap drawn far smaller than its size
+  shimmers. Supply bitmaps near the size they are drawn at, or bake a
+  smaller one.
+- **A sampler can be passed to a function** as an `in` parameter. It cannot
+  be a local variable, be assigned, or take part in arithmetic.
+
+**A knob lit from a normal map.** One small bitmap holds the surface shape
+(machined rings, a dome). The shader turns it with the value and lights it
+from a fixed direction, so the highlight stays put while the knob turns, as
+a real one does. A filmstrip would need a frame per position.
+
+```glsl
+uniform sampler2D normals;           // rgb = surface normal * 0.5 + 0.5, y down, z out
+uniform float value  = 0.5;          // 0..1
+uniform vec4  accent = vec4(0.25, 0.66, 0.96, 1.0);
+
+vec4 main(vec2 p) {
+  vec2  c = neui_size * 0.5;
+  float R = min(c.x, c.y);
+  vec2  d = p - c;
+  // The knob turns with the value; the light does not. Look up the normal
+  // map in the knob's own frame, then turn the normal back to the screen.
+  float a  = (value - 0.5) * 4.712389;                         // 270 degrees of travel
+  float ca = cos(a), sa = sin(a);
+  vec2  q  = vec2(ca * d.x + sa * d.y, ca * d.y - sa * d.x);
+  vec3  n  = texture2D(normals, q / (2.0 * R) + 0.5).xyz * 2.0 - 1.0;
+  n.xy = vec2(ca * n.x - sa * n.y, sa * n.x + ca * n.y);
+  vec3  l    = normalize(vec3(-0.5, -0.7, 1.0));               // light from the top left
+  float diff = saturate(dot(n, l));
+  float spec = pow(saturate(dot(reflect(-l, n), vec3(0.0, 0.0, 1.0))), 32.0);
+  vec3  col  = vec3(0.16, 0.17, 0.20) + vec3(0.55) * diff + vec3(0.6) * spec;
+  vec2  tip  = c + vec2(sa, -ca) * R * 0.7;                    // the pointer
+  col = mix(col, accent.rgb, 1.0 - smoothstep(-neui_px, neui_px, length(p - tip) - R * 0.08));
+  return vec4(col, 1.0 - smoothstep(R - neui_px, R, length(d)));
+}
+```
+
+**A seamless noise tile,** baked once and then sampled with `repeat`, costs
+a fraction of live noise: on the CPU, 2.7-3.8× less than five octaves of
+`neui_noise` per pixel (§8). For the tile to repeat without a seam, the noise
+lattice must wrap at the tile's edge:
+
+```glsl
+// Seamless fbm: the lattice wraps every `period` cells, so the edges of the
+// tile meet. Bake it once, at the size it is sampled at.
+float tile_noise(vec2 u, float period) {
+  vec2  i = floor(u), f = u - i, s = f * f * (3.0 - 2.0 * f);
+  float a = neui_hash(mod(i, period)),                   b = neui_hash(mod(i + vec2(1.0, 0.0), period));
+  float c = neui_hash(mod(i + vec2(0.0, 1.0), period)), d = neui_hash(mod(i + vec2(1.0, 1.0), period));
+  return mix(mix(a, b, s.x), mix(c, d, s.x), s.y);
+}
+
+vec4 main(vec2 p) {
+  vec2  u = p / neui_size * 8.0;                 // 8 lattice cells across the tile
+  float n = 0.0, amp = 0.5, period = 8.0;
+  for (int o = 0; o < 4; o++) {
+    n += amp * tile_noise(u, period);
+    u *= 2.0;
+    period *= 2.0;
+    amp *= 0.5;
+  }
+  return vec4(vec3(n), 1.0);
+}
+```
+
+Bake it at 128 × 128 (§7.9). Two layers of it, drifting at different speeds,
+make moving water:
+
+```glsl
+#pragma neui sampler noise repeat
+
+uniform sampler2D noise;             // the seamless tile above, 128 px
+uniform vec4 deep    = vec4(0.05, 0.08, 0.20, 1.0);
+uniform vec4 shallow = vec4(0.10, 0.55, 0.65, 1.0);
+
+vec4 main(vec2 p) {
+  vec2  drift = vec2(6.0, 2.5) * neui_time;                    // px per second
+  float a = texture2D(noise, (p + drift) / 128.0).r;           // one tile per 128 px
+  float b = texture2D(noise, (p * 0.5 - drift.yx) / 128.0).r;  // a larger, slower layer
+  float n = a * 0.6 + b * 0.4;
+  return vec4(mix(deep.rgb, shallow.rgb, smoothstep(0.3, 0.7, n)), 1.0);
+}
+```
+
+**A palette lookup.** A 256 × 1 bitmap maps a number to a colour: a meter
+from green to red, a heat map, a theme ramp. Sample its middle row at
+`(t, 0.5)`:
+
+```glsl
+#pragma neui sampler palette nearest
+
+uniform sampler2D palette;           // a 256 x 1 colour ramp, bottom to top
+uniform float level = 0.7;           // 0..1, e.g. a meter value
+
+vec4 main(vec2 p) {
+  float t   = 1.0 - p.y / neui_size.y;                  // 0 at the bottom
+  vec3  col = texture2D(palette, vec2(t, 0.5)).rgb;     // the ramp's colour at t
+  float lit = step(t, level);                           // 1 below the level
+  float seg = step(0.25, fract(p.y / 6.0));             // 6 px segments with a gap
+  return vec4(col * mix(0.2, 1.0, lit), seg);
+}
+```
+
+The ramp can come from an image, or from a gradient shader baked to 256 × 1.
+
 ## 6. Animation
 
 A shader that reads `neui_time` animates:
@@ -592,6 +747,61 @@ So the cheapest robust skin gives every shader layer a fallback layer.
 In C++ code, test the pointer and build the plain look instead (as
 `neui_shader_example` does with plain KNOB widgets).
 
+### 7.9 Binding bitmaps to samplers
+
+A sampler takes a BITMAP or SURFACE asset of the session, by the sampler's
+name. A filmstrip is sampled as its whole sheet.
+
+```cpp
+// Bake a texture with one shader...
+neui_shader_bake_t tb{};
+tb.width = tb.height = 128;
+tb.scale = 1;
+neui_asset_t tile = sh->bake_bitmap(sess, tile_shader, &tb);
+
+// ...and sample it in another. A SHADER layer: the "u.<name>" prop.
+compound->set_asset(sess, comp, L, "u.noise", tile);
+// Or per widget: bind it to an int attribute that holds the handle.
+compound->bind_asset(sess, comp, L, "u.normals", "app.normals");
+attrs->set_int(sess, knob, "app.normals", (int)normal_map.id);
+
+// draw() and the bakes: by name.
+const neui_shader_texture_t tex[] = { { "noise", tile } };
+neui_shader_draw_t d{};
+d.shader = water;
+d.width = 300; d.height = 160;
+d.time = sh->animation_time(sess);
+d.textures = tex;
+d.texture_count = 1;
+sh->draw(p, &d);
+```
+
+In component JSON, `"textures"` maps a sampler to an `"assets"` entry, and a
+binding takes `"asset": true`:
+
+```json
+"assets": { "knob_normals": "img/knob_normals.png" },
+"layers": [
+  { "kind": "shader", "size": "fill", "shader": "lit_knob",
+    "textures": { "normals": "knob_normals" },
+    "bind": { "u.value": { "attr": "neui.param.value", "step": 0.00390625 },
+              "u.art":   { "attr": "app.art", "asset": true } } }
+]
+```
+
+- **`sampler_count` / `sampler_at`** list a shader's samplers, with their
+  edge mode and filter. `uniform_count` does not include them.
+- **No refcount,** as for any asset a layer holds: unbind the bitmap (set
+  `u.<name>` to `asset_none`) before destroying it. A destroyed bitmap reads
+  as transparent.
+- **Images are cached by the bitmap's content.** Repainting a SURFACE
+  (`paint_surface`) makes new content. Widgets that sample it show it on
+  their next paint, so invalidate them.
+- **A bake copies.** Changing a sampled bitmap later does not change a
+  bitmap baked from it.
+- **On Windows,** a live shader that samples runs on the GPU like any
+  other. The bitmap is uploaded once per content and device context.
+
 ## 8. Performance
 
 A shader costs about **pixels × operations**, and the cost is paid on every
@@ -612,6 +822,11 @@ Measured on the CPU executor (single thread, ns per device pixel; a knob is
 | plasma (35 ops, 6 `sin`) | 14 | 35-36 | 0.8-2.1 ms |
 | realistic metal knob (128 ops) | 25 | 62-66 | 1.4-3.8 ms |
 | fbm, 5 octaves (191 ops) | 44-49 | 134 | 2.5-7.7 ms |
+| one bilinear `texture2D` (80 ops) | 20 | 40 | 1.1-2.3 ms |
+| one `nearest` sample (19 ops) | 6 | 12 | 0.3-0.7 ms |
+| normal-mapped knob (§5.5) | 30 | 58 | 1.7-3.3 ms |
+| baked noise tile instead of fbm | 19 | 36 | 1.1-2.1 ms |
+| 9-tap blur (9 samples) | 157 | 291-297 | 9-17 ms |
 
 An 800×600 background at 2× (1.9 Mpx) with a heavy shader (176 ops) costs
 70-170 ms. That is fine for a bake, but not for animation.
@@ -632,6 +847,9 @@ How to keep it cheap:
   per draw (§4.1).
 - **Size effects for the CPU.** macOS, iOS and Linux always run shaders on
   the CPU. The Windows GPU path buys headroom, not a different look.
+- **Sample instead of computing** what does not depend on the inputs: a
+  baked noise tile, a palette, a normal map. Each sample costs about 80
+  operations, so many-tap effects (blurs) belong in a bake.
 
 ## 9. Errors and troubleshooting
 
@@ -648,7 +866,11 @@ lines and byte columns. Only the first error is reported. Common ones:
 | `nested loops run 2048 times in total; the limit is 1024` | reduce the inner or outer count |
 | `shader needs 32894 operations after inlining and unrolling; the limit is 8192` | the shader is too heavy: fewer octaves or iterations, less work in loops |
 | `global variables must be 'const' or 'uniform'` | make it `const`, or compute it inside `main` |
-| `uniforms are float, vec2, vec3 or vec4` | no `int` / `bool` uniforms: use a float (`value > 0.5`) |
+| `uniforms are float, vec2, vec3, vec4 or sampler2D` | no `int` / `bool` uniforms: use a float (`value > 0.5`) |
+| `'texture2D' takes a sampler2D and a vec2` | the sampler first, then a `vec2` uv |
+| `a sampler2D is a uniform or an 'in' parameter, not a variable` | declare it as `uniform sampler2D name;` and pass it to functions |
+| `'#pragma neui sampler' names 'x', which is not a sampler2D uniform` | the pragma takes the sampler's name, spelled as declared |
+| `more than 4 sampler2D uniforms` | at most 4 bitmaps per shader |
 | `uniform 'v' cannot be assigned` | copy it to a local first |
 | `the condition is float, expected bool` | compare explicitly: `if (x > 0.0)` |
 | `'<' compares scalars only, not vec2 and vec2` | compare components, or use `step` |
@@ -668,6 +890,7 @@ lines and byte columns. Only the first error is reported. Common ones:
 4. Is the layer size zero?
 5. Is a uniform name misspelt? Unknown names are ignored.
 6. Is the bound attribute set on this widget?
+7. Does a sampler have its bitmap? An unbound sampler reads as transparent.
 
 ## 10. Porting
 
@@ -695,7 +918,10 @@ vec4 main(vec2 p) {
   logical px with **y down**. Flip with `neui_size.y - p.y` when it matters.
 - **Equivalents:** `iResolution.xy` is `neui_size`, and `iTime` is
   `neui_time` (wrapped to an hour, §6).
-- **Not available:** textures (`iChannel0`, `texture`) are not in v1.
+- **Textures:** `iChannel0` becomes a `uniform sampler2D` the client binds,
+  and `texture()` works as is. Shadertoy's uv is y-up, so sample at
+  `vec2(uv.x, 1.0 - uv.y)`. The channel's wrap and filter settings become
+  `#pragma neui sampler`.
 - **Loops:** data-dependent and `while` loops become a `for` to a constant
   maximum plus `break`.
 - **Integers:** int variables become `const` or `float`.
@@ -718,29 +944,32 @@ and edge cases in spec §9):
 | geometry | `dot` `length` `distance` `normalize` `cross` (vec3) `reflect` |
 | transcendental | `sin` `cos` `tan` `asin` `acos` `atan(y, x)` `atan(t)` `exp` `exp2` `log` `log2` `pow` |
 | noise | `neui_hash(vec2)` → [0, 1) per integer cell, `neui_noise(vec2)` → [0, 1) smooth |
+| sampling | `texture2D(s, uv)` / `texture(s, uv)` → straight `vec4`; `neui_texture_size(s)` (logical px), `neui_texel(s)` (one texel in uv) |
 
 **Reserved uniforms:** `neui_size`, `neui_scale`, `neui_px` and `neui_time`
 (§3).
 
 **Pragmas:**
 - `#pragma neui dither` (§5.3);
-- `#pragma neui cpu_only` (§7.7).
+- `#pragma neui cpu_only` (§7.7);
+- `#pragma neui sampler <name> [clamp|repeat|border] [linear|nearest]` (§5.5).
 
 **Limits** (spec §13):
 
 | Limit | Value |
 |---|---|
 | source size | 64 KiB |
-| uniforms | 32 declarations, 64 floats |
+| uniforms | 32 declarations (samplers included), 64 floats |
+| `sampler2D` uniforms | 4 |
 | user functions | 64 |
 | loop trip count | 64 |
 | loop nesting depth | 4 |
 | product of nested loop trip counts | 1024 |
 | operations per pixel after inlining and unrolling | 8192 |
 
-**Keywords:** `uniform const float int bool vec2 vec3 vec4 void true false if
-else for break continue return in out inout`, plus `precision lowp mediump
-highp`, which are accepted and ignored.
+**Keywords:** `uniform const float int bool vec2 vec3 vec4 sampler2D void
+true false if else for break continue return in out inout`, plus `precision
+lowp mediump highp`, which are accepted and ignored.
 
 **See also:**
 - `docs/shader-language.md`, the spec;
