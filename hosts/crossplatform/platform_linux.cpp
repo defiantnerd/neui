@@ -374,17 +374,20 @@ namespace
 
   void paint_window(LinuxWindow* lw)
   {
-    if (!lw || !lw->session) return;
-    auto* wd = lw->session->get_widget(lw->widget_index);
+    if (!lw) return;
     // Partial only when nothing asked for a full repaint since the last
     // paint; paint_frame itself falls back to full when the backend or the
     // coverage says so. The pending state is taken before painting, so an
     // invalidation raised DURING the paint (a paint handler that sets a
-    // label's text) is kept for the next frame instead of being dropped.
+    // label's text) is kept for the next frame instead of being dropped. It
+    // is taken even when nothing can paint, or platform_run would poll it
+    // forever.
     const bool full = lw->needs_paint;
     neui_detail::DamageRegion damage = std::move(lw->damage);
     lw->needs_paint = false;
     lw->damage.clear();
+    if (!lw->session) return;
+    auto* wd = lw->session->get_widget(lw->widget_index);
     if (wd && wd->render_ctx)
       lw->session->paint_frame(wd->render_ctx, lw->widget_index, full ? nullptr : &damage);
   }
@@ -2154,7 +2157,14 @@ namespace
       if (g_timerfd >= 0) { FD_SET(g_timerfd, &rfds); if (g_timerfd > maxfd) maxfd = g_timerfd; }
       int dfd = neui_detail::theme_dbus_fd();   // -1 without libdbus / no bus
       if (dfd >= 0) { FD_SET(dfd, &rfds); if (dfd > maxfd) maxfd = dfd; }
-      int r = select(maxfd + 1, &rfds, nullptr, nullptr, nullptr);
+      // A paint that invalidated again (a paint handler setting a label's
+      // text) left its window pending: poll instead of sleeping, so the next
+      // pass draws it now rather than at the next unrelated event.
+      bool pending = false;
+      for (auto& kv : g_windows)
+        if (paint_pending(kv.second)) { pending = true; break; }
+      timeval poll = { 0, 0 };
+      int r = select(maxfd + 1, &rfds, nullptr, nullptr, pending ? &poll : nullptr);
       if (r < 0) { if (errno == EINTR) continue; break; }
       if (g_timerfd >= 0 && FD_ISSET(g_timerfd, &rfds)) {
         uint64_t exp = 0; ssize_t rd = read(g_timerfd, &exp, sizeof(exp)); (void)rd;

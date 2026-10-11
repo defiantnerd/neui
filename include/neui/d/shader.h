@@ -110,7 +110,10 @@ extern "C" {
   } neui_shader_uniform_info_t;
 
   // What to bake: one image (or one filmstrip frame). Passed by pointer;
-  // fields may be appended in later versions, zero-initialise it.
+  // fields may be appended in later versions, zero-initialise it. An
+  // appended field changes the struct's size, so a client must be built
+  // against the header of the neui it runs with (pre-1.0, clients and hosts
+  // rebuild together; textures / texture_count were appended this way).
   typedef struct neui_shader_bake {
     float                        width, height;  // logical px; the shader's neui_size
     float                        scale;          // device px per logical px; <= 0 means 1
@@ -122,7 +125,8 @@ extern "C" {
   } neui_shader_bake_t;
 
   // What to draw: a shader over a rect of the painter's current space.
-  // Passed by pointer; fields may be appended, zero-initialise it.
+  // Passed by pointer; fields may be appended, zero-initialise it (and the
+  // client rebuilt, as for neui_shader_bake_t).
   typedef struct neui_shader_draw {
     neui_asset_t                 shader;
     float                        x, y, width, height;  // logical px, painter space

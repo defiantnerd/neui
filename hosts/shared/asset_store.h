@@ -157,6 +157,17 @@ namespace neui_detail
     std::vector<std::pair<uint32_t, std::string>>    comp_shader_handle_names;
   };
 
+  // AssetEntry::content_id's source. A plain inline function, so there is one
+  // counter in the process: two AssetStore<Loader> instantiations (the native
+  // win32 host's and the xpl host's, linked together) must never hand out the
+  // same id, because D2D shares resource textures by content id across every
+  // device context of the process.
+  inline uint64_t next_asset_content_id()
+  {
+    static uint64_t n = 0;
+    return ++n;
+  }
+
   template <typename Loader>
   class AssetStore
   {
@@ -1211,11 +1222,7 @@ namespace neui_detail
     std::vector<uint32_t>                    _free_slots;
     ShaderCache                              _shader_cache;
 
-    static uint64_t next_content_id()
-    {
-      static uint64_t n = 0;
-      return ++n;
-    }
+    static uint64_t next_content_id() { return next_asset_content_id(); }
 
     uint32_t alloc_slot(std::unique_ptr<AssetEntry> entry)
     {

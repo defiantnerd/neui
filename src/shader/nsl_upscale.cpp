@@ -3,6 +3,7 @@
 // type, since a layer below resolution 1 runs it on every render.
 
 #include <algorithm>
+#include <limits>
 
 #include "nsl.h"
 
@@ -31,6 +32,7 @@ bool axis(int a, int n, uint32_t r, Axis& ax) {
   };
   const int64_t d0 = first_at(int64_t(a) * one), d1 = first_at((int64_t(a) + n) * one);
   if (d1 - d0 > k_max_bitmap_side) return false;
+  if (d0 < std::numeric_limits<int>::min() || d1 > std::numeric_limits<int>::max()) return false;
   const size_t count = static_cast<size_t>(d1 - d0);
   ax.first = static_cast<int>(d0);
   ax.t0.resize(count);

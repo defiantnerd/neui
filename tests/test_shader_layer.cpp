@@ -477,6 +477,7 @@ TEST_CASE("nsl upscale: texture2D's bilinear on whole image px")
 
   CHECK_FALSE(nsl::upscale(src, 0, 1, 0, 0, 32768u, dst, dx, dy, dw, dh));
   CHECK_FALSE(nsl::upscale(src, 20000, 1, 0, 0, 32768u, dst, dx, dy, dw, dh));  // too wide
+  CHECK_FALSE(nsl::upscale(src, 2, 1, 2000000000, 0, 4096u, dst, dx, dy, dw, dh));  // origin past int
 }
 
 TEST_CASE("shader paint: below resolution 1 neui scales the image up, drawn 1:1")
@@ -1144,6 +1145,34 @@ TEST_CASE("shader cache: a repainted SURFACE is new content")
   CHECK_EQ(cache.size(), 0u);  // the old image can never be hit again
   paint_shader_layer(&p, L, 0, 0, 8, 8, nullptr);
   CHECK_EQ(cache.renders(), 2u);
+}
+
+namespace {
+// A second loader type: a second AssetStore instantiation, as the native win32
+// host and the xpl host are when linked together.
+struct OtherLoader : NullLoader {};
+}
+
+TEST_CASE("asset store: content ids are unique across store types")
+{
+  // D2D shares resource textures by content id across the whole process, so
+  // two store instantiations must never hand out the same id.
+  Fixture fx;
+  AssetStore<OtherLoader> other;
+  // One counter for the process: ids rise across both stores in turn (with a
+  // counter per instantiation, `other` would start again at 1).
+  const uint32_t a = fx.store.allocate_surface(4, 4, 1.0f, &fx.fb.table);
+  const uint32_t b = other.allocate_surface(4, 4, 1.0f, &fx.fb.table);
+  const uint32_t c = fx.store.allocate_surface(4, 4, 1.0f, &fx.fb.table);
+  REQUIRE(a != 0);
+  REQUIRE(b != 0);
+  REQUIRE(c != 0);
+  const uint64_t ia = fx.store.get_slot(a)->content_id;
+  const uint64_t ib = other.get_slot(b)->content_id;
+  const uint64_t ic = fx.store.get_slot(c)->content_id;
+  CHECK(ia < ib);
+  CHECK(ib < ic);
+  other.clear(&fx.fb.table);
 }
 
 TEST_CASE("shader api: draw and bake take textures by sampler name")

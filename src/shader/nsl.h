@@ -150,8 +150,8 @@ constexpr size_t k_gpu_opacity = 6;
 // sample there with texture2D's exact arithmetic (weights in 1/256, edge
 // texels clamped, integers on the premultiplied bytes, rounded once), so the
 // result is the same everywhere. Writes them to `dst`, dw x dh from px
-// (dx, dy) of the output grid; false when empty or a side would pass
-// k_max_bitmap_side.
+// (dx, dy) of the output grid; false when empty, a side would pass
+// k_max_bitmap_side, or the output origin would leave the int range.
 bool upscale(const uint8_t* src, int w, int h, int sx, int sy, uint32_t r,
              std::vector<uint8_t>& dst, int& dx, int& dy, int& dw, int& dh);
 
