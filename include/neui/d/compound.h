@@ -354,6 +354,13 @@ extern "C" {
     //                      attr on a vec3 / vec4 is unpacked as a colour.
     //                    Names the shader does not declare are ignored, so a
     //                    shader can be swapped under existing props.
+    //                    For a `uniform sampler2D <name>`: the bitmap it
+    //                    samples, a BITMAP or SURFACE asset (set_asset, or
+    //                    bind_asset to an int attr holding the handle);
+    //                    asset_none unbinds it (it reads as transparent).
+    //                    No refcount, as for "asset": clear it before
+    //                    destroying the bitmap. A SURFACE repainted later is
+    //                    sampled anew on the widget's next paint.
     //     "u.<name>.x"   one component (also .y .z .w and .r .g .b .a);
     //                    set_float / set_int / bind. Applied after "u.<name>".
     //     "resolution"   float shading density, (0, 4]; default 1 = one shader

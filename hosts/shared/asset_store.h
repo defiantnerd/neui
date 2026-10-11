@@ -88,6 +88,11 @@ namespace neui_detail
     uint32_t             height_px   = 0;
     float                scale       = 1.0f; // HiDPI factor loaded (1, 2, or 3)
     std::vector<uint8_t> pixels;             // BGRA8 premultiplied, width_px*height_px*4
+    // Names these pixels: process-unique, set when the slot is allocated and
+    // renewed whenever the pixels change (a SURFACE repaint or filter), never
+    // reused even when the slot is. Caches of what was made from the pixels
+    // (shader images that sample them) key on it.
+    uint64_t             content_id  = 0;
 
     // Backend bitmap cache: one GPU resource per render context. Tinted
     // draws of the same asset reuse the same upload - the backend's
@@ -764,6 +769,9 @@ namespace neui_detail
           if (cached.bmp) backend->destroy_bitmap(other_ctx, cached.bmp);
       }
       entry.bitmaps.clear();
+      // New pixels, new content: shader images made from the old ones go.
+      _shader_cache.release_texture(entry.content_id, backend);
+      entry.content_id = next_content_id();
     }
 
     // Evaluate a built FilterAsset in place over a SURFACE slot's pixels at the
@@ -839,6 +847,7 @@ namespace neui_detail
       if (entry->compound) compound_release_bitmaps(*entry->compound, backend);
       // A SHADER's rendered images (and their uploads) go with it.
       if (entry->shader) _shader_cache.release_uid(entry->shader->uid, backend);
+      _shader_cache.release_texture(entry->content_id, backend);
       if (entry->surface_ctx && backend && backend->destroy_context) {
         // Whatever was uploaded while painting into the surface (other
         // assets' bitmaps, QR symbols, shader images) goes with its ctx; a
@@ -1202,8 +1211,15 @@ namespace neui_detail
     std::vector<uint32_t>                    _free_slots;
     ShaderCache                              _shader_cache;
 
+    static uint64_t next_content_id()
+    {
+      static uint64_t n = 0;
+      return ++n;
+    }
+
     uint32_t alloc_slot(std::unique_ptr<AssetEntry> entry)
     {
+      entry->content_id = next_content_id();
       if (_handles.empty()) _handles.emplace_back(nullptr);
       uint32_t slot;
       if (!_free_slots.empty()) {

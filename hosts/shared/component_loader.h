@@ -816,6 +816,15 @@ namespace neui_detail
               }
             }
           }
+          // "textures": sampler name -> an "assets" name, the bitmap it samples.
+          if (const mj::object_t* ts = as_obj(obj_get(*lo, "textures"))) {
+            for (const auto& tkv : *ts)
+              if (auto* an = as_str(&tkv.second)) {
+                const neui_asset_t a = resolve_asset(*an);
+                if (a.id != asset_none.id)
+                  apis.compound->set_asset(session, cs, layer, ("u." + tkv.first).c_str(), a);
+              }
+          }
           if (auto* fb = as_str(obj_get(*lo, "fallback")))
             pending_fallbacks.emplace_back(layer, *fb);
         }
@@ -827,7 +836,9 @@ namespace neui_detail
             if (!bo) continue;
             const std::string* attr = as_str(obj_get(*bo, "attr"));
             if (!attr) continue;
-            if (bkv.first == "asset" || bkv.first == "shader") {
+            // "asset": true binds an asset handle (a sampler's bitmap).
+            const bool asset_bind = as_bool(obj_get(*bo, "asset"), false);
+            if (bkv.first == "asset" || bkv.first == "shader" || asset_bind) {
               apis.compound->bind_asset(session, cs, layer, bkv.first.c_str(), attr->c_str());
             } else {
               double scale = 1.0, offset = 0.0, step = 0.0;
@@ -1208,6 +1219,16 @@ namespace neui_detail
             }
             lo.emplace_back("uniforms", njson_obj(std::move(uo)));
           }
+          if (!L->shader_textures.empty()) {
+            std::vector<std::string> keys;
+            for (const auto& kv : L->shader_textures) keys.push_back(kv.first);
+            std::sort(keys.begin(), keys.end());  // deterministic output
+            mj::object_t to;
+            for (const auto& k : keys)
+              if (const std::string* nm = name_for_handle(L->shader_textures.at(k)))
+                to.emplace_back(k, njson_str(*nm));
+            if (!to.empty()) lo.emplace_back("textures", njson_obj(std::move(to)));
+          }
           // By the target's name; a fallback without one has no JSON form.
           if (const CompoundLayer* fb = compound_get_layer(*in.compound, L->fallback))
             if (!fb->name.empty()) lo.emplace_back("fallback", njson_str(fb->name));
@@ -1226,6 +1247,7 @@ namespace neui_detail
             const CompoundBinding& b = L->bindings.at(k);
             mj::object_t one;
             one.emplace_back("attr", njson_str(b.attr_key));
+            if (b.is_asset && k != "asset" && k != "shader") one.emplace_back("asset", njson_bool(true));
             if (!b.is_asset) {
               one.emplace_back("scale", njson_num(b.scale));
               one.emplace_back("offset", njson_num(b.offset));

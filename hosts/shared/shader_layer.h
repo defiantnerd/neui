@@ -68,9 +68,10 @@ namespace neui_detail
   }
 
   // Draws `sa` over (x, y, w, h) of the painter's current space with the
-  // given uniform values (uniform_components floats; null = the defaults)
-  // and neui_time `time` (already wrapped; `clock` when it is the animation
-  // clock's frame). False when nothing was drawn.
+  // given uniform values (uniform_components floats; null = the defaults),
+  // neui_time `time` (already wrapped; `clock` when it is the animation
+  // clock's frame) and the bitmap of each sampler (`tex`, one per sampler in
+  // declaration order; null or short = unbound). False when nothing was drawn.
   //
   // On the device grid, a backend with GPU programs runs the shader straight
   // on the target's pixels (no image); everywhere else the CPU renders an
@@ -78,7 +79,8 @@ namespace neui_detail
   inline bool shader_paint(neui_painter_t* p, const ShaderAsset& sa, ShaderCache& cache,
                            float x, float y, float w, float h,
                            float resolution, float time, const float* uniforms,
-                           bool clock = false)
+                           bool clock = false, const ShaderTexture* tex = nullptr,
+                           size_t tex_count = 0)
   {
     namespace nsl = neui::nsl;
     if (!p || !p->backend || !p->ctx || !sa.program || !p->backend->draw_bitmap) return false;
@@ -108,6 +110,14 @@ namespace neui_detail
       uniforms = defaults.data();
     }
 
+    // One bitmap per sampler, unbound past what was given.
+    const size_t samplers = nsl::samplers(prog).size();
+    std::vector<ShaderTexture> bound(samplers);
+    for (size_t i = 0; i < samplers && tex && i < tex_count; ++i) bound[i] = tex[i];
+    const std::vector<nsl::Texture> textures = shader_nsl_textures(bound.data(), samplers);
+    std::vector<uint64_t> content(samplers);
+    for (size_t i = 0; i < samplers; ++i) content[i] = bound[i].px ? bound[i].content_id : 0;
+
     nsl::Draw d;
     d.x = fx / g.k;
     d.y = fy / g.k;
@@ -116,19 +126,37 @@ namespace neui_detail
     d.scale = g.k;
     d.time = (nsl::flags(prog) & nsl::NSL_READS_TIME) ? time : 0.0f;
     d.uniforms = n ? uniforms : nullptr;
+    d.textures = samplers ? textures.data() : nullptr;
+    d.texture_count = static_cast<int>(samplers);
 
     if (g.device) {
       if (void* gp = cache.gpu_program(sa, p->backend)) {
         const nsl::Placement pl = nsl::placement(d);
         std::vector<float> cbuf(nsl::gpu_constant_count(prog));
-        if (pl.w > 0 && pl.h > 0 && nsl::gpu_constants(prog, d, cbuf.data()) &&
-            p->backend->draw_shader_program(p->ctx, gp,
-                                            static_cast<int32_t>(I) + pl.x,
-                                            static_cast<int32_t>(J) + pl.y,
-                                            static_cast<uint32_t>(pl.w),
-                                            static_cast<uint32_t>(pl.h), cbuf.data(),
-                                            static_cast<uint32_t>(cbuf.size())))
-          return true;
+        if (pl.w > 0 && pl.h > 0 && nsl::gpu_constants(prog, d, cbuf.data())) {
+          const int32_t gx = static_cast<int32_t>(I) + pl.x, gy = static_cast<int32_t>(J) + pl.y;
+          bool drew;
+          if (samplers) {
+            std::vector<neui_shader_texture_desc_t> desc(samplers);
+            for (size_t i = 0; i < samplers; ++i) {
+              desc[i] = neui_shader_texture_desc_t{};
+              if (!bound[i].px) continue;
+              desc[i].bgra = bound[i].px;
+              desc[i].width_px = bound[i].w;
+              desc[i].height_px = bound[i].h;
+              desc[i].stride = bound[i].stride;
+              desc[i].content_id = bound[i].content_id;
+            }
+            drew = p->backend->draw_shader_program_textured(
+                p->ctx, gp, gx, gy, static_cast<uint32_t>(pl.w), static_cast<uint32_t>(pl.h), cbuf.data(),
+                static_cast<uint32_t>(cbuf.size()), desc.data(), static_cast<uint32_t>(samplers));
+          } else {
+            drew = p->backend->draw_shader_program(p->ctx, gp, gx, gy, static_cast<uint32_t>(pl.w),
+                                                   static_cast<uint32_t>(pl.h), cbuf.data(),
+                                                   static_cast<uint32_t>(cbuf.size()));
+          }
+          if (drew) return true;
+        }
       }
     }
 
@@ -142,6 +170,8 @@ namespace neui_detail
     key.time = d.time;
     key.uniforms = d.uniforms;
     key.uniform_count = n;
+    key.textures = samplers ? content.data() : nullptr;
+    key.texture_count = samplers;
     key.clock = clock && (nsl::flags(prog) & nsl::NSL_READS_TIME);
     ShaderCacheEntry* e = cache.get(key, [&](ShaderCacheEntry& out) {
       const nsl::Placement pl = nsl::placement(d);
@@ -275,6 +305,22 @@ namespace neui_detail
     }
   }
 
+  // The bitmap of each sampler of a SHADER layer: its "u.<name>" asset, or
+  // the asset a binding on "u.<name>" names.
+  inline void shader_layer_textures(const CompoundLayer& L, const neui::nsl::Program& prog,
+                                    const AttrBag* bag, const ShaderCache& cache,
+                                    std::vector<ShaderTexture>& out)
+  {
+    const auto& decls = neui::nsl::samplers(prog);
+    out.assign(decls.size(), ShaderTexture());
+    for (size_t i = 0; i < decls.size(); ++i) {
+      auto it = L.shader_textures.find(decls[i].name);
+      const neui_asset_t stat = it == L.shader_textures.end() ? asset_none : it->second;
+      const std::string prop = "u." + decls[i].name;
+      out[i] = cache.texture(effective_asset(L, prop.c_str(), stat, bag));
+    }
+  }
+
   // Resolves a SHADER layer's program and cache. False when the layer cannot
   // render here: no shader support (no thunk), or no valid shader asset.
   inline bool shader_layer_resolve(neui_painter_t* p, const CompoundLayer& L, const AttrBag* bag,
@@ -296,6 +342,8 @@ namespace neui_detail
     if (!shader_layer_resolve(p, L, bag, &sa, &cache)) return;
     std::vector<float> values;
     shader_layer_uniforms(L, *sa->program, bag, values);
+    std::vector<ShaderTexture> tex;
+    shader_layer_textures(L, *sa->program, bag, *cache, tex);
     const float res = effective_float(L, "resolution", L.shader_resolution, bag);
     // Neither set nor bound, the time is the animation clock's, read only by
     // a program that uses it: reading it makes the widget animate.
@@ -304,7 +352,7 @@ namespace neui_detail
     const float t = neui::nsl::wrap_time(clock ? cache->clock().time()
                                                : effective_float(L, "time", L.shader_time, bag));
     shader_paint(p, *sa, *cache, x, y, w, h, res, t, values.empty() ? nullptr : values.data(),
-                 clock);
+                 clock, tex.data(), tex.size());
   }
 
   // True when the layer at `slot` is the fallback of a SHADER layer that can
@@ -332,12 +380,14 @@ namespace neui_detail
       return false;
     std::vector<float> values;
     shader_uniform_values(*sa->program, d->uniforms, d->uniform_count, values);
+    std::vector<ShaderTexture> tex;
+    shader_textures_by_name(*sa->program, d->textures, d->texture_count, *cache, tex);
     // A time read from animation_time is the clock's frame: its images are
     // dropped frame by frame like the layer's.
     const float t  = neui::nsl::wrap_time(d->time);
     const float ct = neui::nsl::wrap_time(cache->clock().frame());
     return shader_paint(p, *sa, *cache, d->x, d->y, d->width, d->height, d->resolution, t,
                         values.empty() ? nullptr : values.data(),
-                        std::memcmp(&t, &ct, sizeof t) == 0);
+                        std::memcmp(&t, &ct, sizeof t) == 0, tex.data(), tex.size());
   }
 }  // namespace neui_detail

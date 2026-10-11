@@ -275,6 +275,8 @@ namespace neui_detail
     // (no shader support, no shader asset). 0 = none.
     uint32_t                 fallback          = 0;
     std::unordered_map<std::string, ShaderUniformStatic> shader_uniforms;
+    // The bitmap of each sampler2D uniform, by its name ("tex" for "u.tex").
+    std::unordered_map<std::string, neui_asset_t> shader_textures;
 
     // Optional label (any kind). Component JSON refers to layers by it.
     std::string              name;
@@ -889,6 +891,14 @@ namespace neui_detail
     }
     if (L.kind == NEUI_COMPOUND_LAYER_SHADER && prop == "shader") {
       L.shader = v;
+      return true;
+    }
+    // "u.<name>": the bitmap of sampler <name>; asset_none unbinds it.
+    std::string key;
+    if (L.kind == NEUI_COMPOUND_LAYER_SHADER && shader_uniform_prop(prop, key) &&
+        key.find('.') == std::string::npos) {
+      if (v.id == asset_none.id) L.shader_textures.erase(key);
+      else L.shader_textures[key] = v;
       return true;
     }
     return false;

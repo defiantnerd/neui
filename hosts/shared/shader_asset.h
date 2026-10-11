@@ -42,6 +42,37 @@ namespace neui_detail
     return ++n;
   }
 
+  // A bitmap bound to a sampler for one draw: a BITMAP or SURFACE entry's
+  // pixels (premultiplied BGRA8) and its content id. No pixels = unbound,
+  // which reads as transparent.
+  struct ShaderTexture
+  {
+    const uint8_t* px = nullptr;
+    uint32_t       w = 0, h = 0;
+    size_t         stride = 0;
+    float          scale = 1.0f;
+    uint64_t       content_id = 0;
+  };
+
+  // Finds a session's bitmap by handle (installed by the host's resolve
+  // thunk, shader_api.h). False leaves `out` unbound.
+  using ShaderTextureLookup = bool (*)(void* store, uint32_t session_id, neui_asset_t a,
+                                       ShaderTexture& out);
+
+  inline std::vector<neui::nsl::Texture> shader_nsl_textures(const ShaderTexture* tex, size_t n)
+  {
+    std::vector<neui::nsl::Texture> out(n);
+    for (size_t i = 0; i < n; ++i) {
+      if (!tex[i].px) continue;
+      out[i].bgra = tex[i].px;
+      out[i].w = static_cast<int>(tex[i].w);
+      out[i].h = static_cast<int>(tex[i].h);
+      out[i].stride = tex[i].stride;
+      out[i].scale = tex[i].scale;
+    }
+    return out;
+  }
+
   // ---- Cache of rendered images ---------------------------------------------
   //
   // The live paths render a shader into a bitmap and draw that, re-running the
@@ -63,17 +94,20 @@ namespace neui_detail
   // per widget instead of filling the budget and pushing out the rest.
 
   // The inputs an image is rendered from. `time` is 0 for a program that
-  // does not read neui_time; `uniforms` holds uniform_components floats.
+  // does not read neui_time; `uniforms` holds uniform_components floats;
+  // `textures` the content id of each sampler's bitmap (0 = unbound).
   struct ShaderCacheKey
   {
-    uint64_t     uid = 0;
-    float        w = 0.0f, h = 0.0f;  // layer size, logical px
-    float        scale = 1.0f;        // shader px per logical px
-    float        fx = 0.0f, fy = 0.0f;  // origin minus its floor, shader px
-    float        time = 0.0f;
-    const float* uniforms = nullptr;
-    size_t       uniform_count = 0;
-    bool         clock = false;       // `time` is the animation clock's frame
+    uint64_t        uid = 0;
+    float           w = 0.0f, h = 0.0f;  // layer size, logical px
+    float           scale = 1.0f;        // shader px per logical px
+    float           fx = 0.0f, fy = 0.0f;  // origin minus its floor, shader px
+    float           time = 0.0f;
+    const float*    uniforms = nullptr;
+    size_t          uniform_count = 0;
+    const uint64_t* textures = nullptr;
+    size_t          texture_count = 0;
+    bool            clock = false;       // `time` is the animation clock's frame
   };
 
   struct ShaderCacheEntry
@@ -84,6 +118,7 @@ namespace neui_detail
     uint64_t           uid = 0;
     float              w = 0.0f, h = 0.0f, scale = 1.0f, fx = 0.0f, fy = 0.0f, time = 0.0f;
     std::vector<float> uniforms;
+    std::vector<uint64_t> textures;
     uint64_t           hash = 0;
     bool               clock = false;
 
@@ -112,6 +147,7 @@ namespace neui_detail
       const float f[6] = { k.w, k.h, k.scale, k.fx, k.fy, k.time };
       mix(f, sizeof f);
       if (k.uniform_count) mix(k.uniforms, sizeof(float) * k.uniform_count);
+      if (k.texture_count) mix(k.textures, sizeof(uint64_t) * k.texture_count);
       return h;
     }
 
@@ -134,6 +170,7 @@ namespace neui_detail
       e->w = key.w; e->h = key.h; e->scale = key.scale;
       e->fx = key.fx; e->fy = key.fy; e->time = key.time;
       e->uniforms.assign(key.uniforms, key.uniforms + key.uniform_count);
+      e->textures.assign(key.textures, key.textures + key.texture_count);
       e->hash = h;
       e->clock = key.clock;
       if (key.clock) drop_clock_images(key.time, backend);
@@ -189,16 +226,46 @@ namespace neui_detail
       }
     }
 
+    // Every image made from a bitmap's pixels, when they change or go.
+    void release_texture(uint64_t content_id, neui_render_backend_t* backend)
+    {
+      if (!content_id) return;
+      for (auto it = _map.begin(); it != _map.end();) {
+        const auto& t = it->second->textures;
+        if (std::find(t.begin(), t.end(), content_id) != t.end()) it = erase(it, backend);
+        else ++it;
+      }
+    }
+
+    // How texture() finds bitmaps: the host's resolve thunk installs the
+    // session's store before every paint that may sample.
+    void set_texture_lookup(ShaderTextureLookup fn, void* store, uint32_t session_id)
+    {
+      _tex_fn = fn;
+      _tex_store = store;
+      _tex_session = session_id;
+    }
+
+    // The bitmap `a` names in this session; unbound when it is no BITMAP or
+    // SURFACE with pixels.
+    ShaderTexture texture(neui_asset_t a) const
+    {
+      ShaderTexture t;
+      if (_tex_fn && a.id != asset_none.id && !_tex_fn(_tex_store, _tex_session, a, t)) t = ShaderTexture();
+      return t;
+    }
+
     // The backend's GPU program for `sa`, made on first use (the backend may
     // compile it in the background and decline draws until it is ready). Null
-    // when GPU use is off, the backend has no GPU programs, the shader is
-    // #pragma neui cpu_only, or the backend could not make it; a failure is
-    // remembered, not retried. Shaders that sample bitmaps stay on the CPU
-    // until the hosts bind textures (plans/shader-effects.md, phase 9).
+    // when GPU use is off, the backend has no GPU programs (for a shader that
+    // samples: no textured draw), the shader is #pragma neui cpu_only, or the
+    // backend could not make it; a failure is remembered, not retried.
     void* gpu_program(const ShaderAsset& sa, neui_render_backend_t* backend)
     {
       if (!_gpu_enabled || !sa.program || !backend || !backend->create_shader_program ||
-          !backend->draw_shader_program || !neui::nsl::samplers(*sa.program).empty())
+          !backend->draw_shader_program)
+        return nullptr;
+      if (!neui::nsl::samplers(*sa.program).empty() && !backend->draw_shader_program_textured)
         return nullptr;
       auto it = _gpu.find(sa.uid);
       if (it != _gpu.end()) return it->second;
@@ -262,7 +329,10 @@ namespace neui_detail
              same(e.fx, k.fx) && same(e.fy, k.fy) && same(e.time, k.time) &&
              e.uniforms.size() == k.uniform_count &&
              (k.uniform_count == 0 ||
-              std::memcmp(e.uniforms.data(), k.uniforms, sizeof(float) * k.uniform_count) == 0);
+              std::memcmp(e.uniforms.data(), k.uniforms, sizeof(float) * k.uniform_count) == 0) &&
+             e.textures.size() == k.texture_count &&
+             (k.texture_count == 0 ||
+              std::memcmp(e.textures.data(), k.textures, sizeof(uint64_t) * k.texture_count) == 0);
     }
 
     static void destroy_gpu(void* prog, neui_render_backend_t* backend)
@@ -317,6 +387,9 @@ namespace neui_detail
     uint64_t _renders = 0;
     uint64_t _hits    = 0;
     AnimClock _anim;
+    ShaderTextureLookup _tex_fn = nullptr;
+    void*               _tex_store = nullptr;
+    uint32_t            _tex_session = 0;
   };
 
   // The uniform value array execute() takes: every declared default, then
@@ -337,6 +410,22 @@ namespace neui_detail
                     sizeof(float) * static_cast<size_t>(u.components));
         break;
       }
+    }
+  }
+
+  // The bitmap of each sampler (declaration order) from textures named by
+  // sampler, resolved through the cache's lookup. Names the program does not
+  // declare are ignored; samplers not named stay unbound.
+  inline void shader_textures_by_name(const neui::nsl::Program& prog, const neui_shader_texture_t* named,
+                                      uint32_t count, const ShaderCache& cache,
+                                      std::vector<ShaderTexture>& out)
+  {
+    const auto& decls = neui::nsl::samplers(prog);
+    out.assign(decls.size(), ShaderTexture());
+    for (uint32_t i = 0; named && i < count; ++i) {
+      if (!named[i].name) continue;
+      for (size_t k = 0; k < decls.size(); ++k)
+        if (decls[k].name == named[i].name) out[k] = cache.texture(named[i].asset);
     }
   }
 
@@ -373,11 +462,14 @@ namespace neui_detail
 
   // Renders `frames` cells (1 for a plain bake). With `sweep` set, cell i
   // sets that uniform (or neui_time) to from + (to - from) * i / (frames - 1).
-  // False for a bad bake, a sweep that is not a float uniform or neui_time,
-  // a size over the limits, or an allocation failure.
+  // `tex` holds the bitmap of each sampler, in declaration order (`tex_count`
+  // of them; missing ones are unbound). False for a bad bake, a sweep that is
+  // not a float uniform or neui_time, a size over the limits, or an
+  // allocation failure.
   inline bool shader_bake(const ShaderAsset& sa, const neui_shader_bake_t& b,
                           const char* sweep, float from, float to, uint32_t frames,
-                          ShaderBakeResult& out)
+                          ShaderBakeResult& out, const ShaderTexture* tex = nullptr,
+                          size_t tex_count = 0)
   {
     namespace nsl = neui::nsl;
     if (!sa.program || frames == 0) return false;
@@ -399,6 +491,9 @@ namespace neui_detail
     std::vector<float> values;
     shader_uniform_values(prog, b.uniforms, b.uniform_count, values);
     d.uniforms = values.empty() ? nullptr : values.data();
+    const std::vector<nsl::Texture> textures = shader_nsl_textures(tex, tex ? tex_count : 0);
+    d.textures = textures.empty() ? nullptr : textures.data();
+    d.texture_count = static_cast<int>(textures.size());
 
     // What the sweep writes: a float uniform's slot, or the time.
     float* swept = nullptr;

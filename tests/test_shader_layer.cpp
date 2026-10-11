@@ -888,3 +888,251 @@ TEST_CASE("shader api: component shaders compile inline source or a file")
   CHECK_EQ(Api::component_shader(neui_session_t{ 9 }, "x", k_clock, 10, nullptr).id,
            asset_none.id);
 }
+
+// ---- Samplers (plans/shader-effects.md, phase 9) ------------------------------------
+
+namespace {
+const char* const k_copy_tex = R"(
+uniform sampler2D img;
+vec4 main(vec2 p) { return texture2D(img, p / neui_size); }
+)";
+
+std::vector<uint8_t> premul_pixels(uint32_t w, uint32_t h, uint32_t seed)
+{
+  std::vector<uint8_t> px(size_t(w) * h * 4);
+  uint32_t s = seed;
+  for (size_t i = 0; i < px.size(); i += 4) {
+    s = s * 1664525u + 1013904223u;
+    const uint32_t a = (s >> 24) % 4u == 0 ? 0u : (s >> 24);
+    for (int c = 0; c < 3; ++c) {
+      s = s * 1664525u + 1013904223u;
+      px[i + size_t(c)] = uint8_t((s >> 16) % (a + 1u));
+    }
+    px[i + 3] = uint8_t(a);
+  }
+  return px;
+}
+
+neui_asset_t add_bitmap(Fixture& fx, const std::vector<uint8_t>& px, uint32_t w, uint32_t h,
+                        float scale = 1.0f)
+{
+  const uint32_t slot = fx.store.allocate_bitmap(w, h, px.data(), scale);
+  return neui_asset_t{ (k_sid << 16) | slot };
+}
+
+CompoundLayer& texture_layer(CompoundAsset& ca, neui_asset_t sh, float w, float h)
+{
+  const uint32_t s = compound_add_layer(ca, NEUI_COMPOUND_LAYER_SHADER, 0);
+  CompoundLayer& L = *compound_get_layer(ca, s);
+  L.width = w; L.height = h;
+  apply_set_asset(L, "shader", sh);
+  return L;
+}
+
+// A textured GPU draw, recorded.
+std::vector<neui_shader_texture_desc_t> g_tex_descs;
+int g_gpu_draws = 0, g_gpu_tex_draws = 0;
+void* NEUI_ABI fb_create_program(int, const char*, size_t) { return reinterpret_cast<void*>(uintptr_t(0x9000)); }
+void NEUI_ABI fb_destroy_program(void*) {}
+bool NEUI_ABI fb_draw_program(neui_render_ctx_t, void*, int32_t, int32_t, uint32_t, uint32_t, const float*, uint32_t)
+{
+  ++g_gpu_draws;
+  return true;
+}
+bool NEUI_ABI fb_draw_program_tex(neui_render_ctx_t, void*, int32_t, int32_t, uint32_t, uint32_t, const float*,
+                                  uint32_t, const neui_shader_texture_desc_t* tex, uint32_t n)
+{
+  ++g_gpu_tex_draws;
+  g_tex_descs.assign(tex, tex + n);
+  return true;
+}
+}  // namespace
+
+TEST_CASE("shader api: sampler introspection")
+{
+  Fixture fx;
+  const neui_asset_t sh = fx.create(R"(
+#pragma neui sampler lut repeat nearest
+uniform float level = 1.0;
+uniform sampler2D albedo;
+uniform sampler2D lut;
+vec4 main(vec2 p) { return texture2D(albedo, p) + texture2D(lut, p) * level; }
+)");
+  REQUIRE(fx.api.sampler_count != nullptr);
+  CHECK_EQ(fx.api.sampler_count(k_sess, sh), 2u);
+  CHECK_EQ(fx.api.uniform_count(k_sess, sh), 1u);  // samplers are not uniforms
+  neui_shader_sampler_info_t si{};
+  REQUIRE(fx.api.sampler_at(k_sess, sh, 1, &si));
+  CHECK(std::string(si.name) == "lut");
+  CHECK_EQ(si.wrap, NEUI_SHADER_WRAP_REPEAT);
+  CHECK_EQ(si.filter, NEUI_SHADER_FILTER_NEAREST);
+  REQUIRE(fx.api.sampler_at(k_sess, sh, 0, &si));
+  CHECK(std::string(si.name) == "albedo");
+  CHECK_EQ(si.wrap, NEUI_SHADER_WRAP_CLAMP);
+  CHECK_EQ(si.filter, NEUI_SHADER_FILTER_LINEAR);
+  CHECK_FALSE(fx.api.sampler_at(k_sess, sh, 2, &si));
+  CHECK_FALSE(fx.api.sampler_at(k_sess, asset_none, 0, &si));
+  CHECK_EQ(fx.api.sampler_count(k_sess, asset_none), 0u);
+}
+
+TEST_CASE("shader layer: samples its bitmap, set or bound, byte for byte at 1:1")
+{
+  Fixture fx;
+  const neui_asset_t sh = fx.create(k_copy_tex);
+  const std::vector<uint8_t> px = premul_pixels(24, 16, 7u);
+  const neui_asset_t bm = add_bitmap(fx, px, 24, 16, 2.0f);
+  CompoundAsset ca;
+  CompoundLayer& L = texture_layer(ca, sh, 12, 8);
+  neui_painter p = fx.painter(ctx_a());
+  fx.fb.m[0] = fx.fb.m[3] = 2.0f;  // a 2x display: one texel per device px
+
+  // Unbound: transparent.
+  paint_shader_layer(&p, L, 0, 0, 12, 8, nullptr);
+  CHECK(fx.last_upload().pixels == std::vector<uint8_t>(px.size(), 0));
+
+  apply_set_asset(L, "u.img", bm);
+  paint_shader_layer(&p, L, 0, 0, 12, 8, nullptr);
+  CHECK(fx.last_upload().pixels == px);
+
+  // Bound to an int attr holding the handle, which wins over the set one.
+  const std::vector<uint8_t> px2 = premul_pixels(24, 16, 99u);
+  const neui_asset_t bm2 = add_bitmap(fx, px2, 24, 16, 2.0f);
+  apply_bind_asset(L, "u.img", "my.texture");
+  AttrBag bag;
+  bag.set_int("my.texture", static_cast<int32_t>(bm2.id));
+  paint_shader_layer(&p, L, 0, 0, 12, 8, &bag);
+  CHECK(fx.last_upload().pixels == px2);
+
+  // A handle of another session, or of a non-bitmap, is unbound.
+  bag.set_int("my.texture", static_cast<int32_t>(((k_sid + 1) << 16) | (bm2.id & 0xffff)));
+  paint_shader_layer(&p, L, 0, 0, 12, 8, &bag);
+  CHECK(fx.last_upload().pixels == std::vector<uint8_t>(px.size(), 0));
+  bag.set_int("my.texture", static_cast<int32_t>(sh.id));
+  paint_shader_layer(&p, L, 0, 0, 12, 8, &bag);
+  CHECK(fx.last_upload().pixels == std::vector<uint8_t>(px.size(), 0));
+}
+
+TEST_CASE("shader cache: keyed on the bitmap's content, released with it")
+{
+  Fixture fx;
+  const neui_asset_t sh = fx.create(k_copy_tex);
+  const std::vector<uint8_t> a = premul_pixels(8, 8, 1u), b = premul_pixels(8, 8, 2u);
+  const neui_asset_t bm = add_bitmap(fx, a, 8, 8);
+  CompoundAsset ca;
+  CompoundLayer& L = texture_layer(ca, sh, 8, 8);
+  apply_set_asset(L, "u.img", bm);
+  neui_painter p = fx.painter(ctx_a());
+  ShaderCache& cache = fx.store.shader_cache();
+
+  paint_shader_layer(&p, L, 0, 0, 8, 8, nullptr);
+  paint_shader_layer(&p, L, 0, 0, 8, 8, nullptr);
+  CHECK_EQ(cache.renders(), 1u);
+  CHECK_EQ(cache.size(), 1u);
+
+  // Released: the images made from it go. A new bitmap in the same slot (the
+  // same handle) is new content, never the old image.
+  fx.store.release_slot(bm.id & 0xffff, &fx.fb.table);
+  CHECK_EQ(cache.size(), 0u);
+  const neui_asset_t again = add_bitmap(fx, b, 8, 8);
+  REQUIRE(again.id == bm.id);
+  paint_shader_layer(&p, L, 0, 0, 8, 8, nullptr);
+  CHECK_EQ(cache.renders(), 2u);
+  CHECK(fx.last_upload().pixels == b);
+}
+
+namespace {
+void NEUI_ABI paint_nothing(neui_painter_t*, neui_painter_api_t*, float, float, void*) {}
+}
+
+TEST_CASE("shader cache: a repainted SURFACE is new content")
+{
+  Fixture fx;
+  const neui_asset_t sh = fx.create(k_copy_tex);
+  const uint32_t slot = fx.store.allocate_surface(8, 8, 1.0f, &fx.fb.table);
+  REQUIRE(slot != 0);
+  const neui_asset_t surf{ (k_sid << 16) | slot };
+  CompoundAsset ca;
+  CompoundLayer& L = texture_layer(ca, sh, 8, 8);
+  apply_set_asset(L, "u.img", surf);
+  neui_painter p = fx.painter(ctx_a());
+  ShaderCache& cache = fx.store.shader_cache();
+  paint_shader_layer(&p, L, 0, 0, 8, 8, nullptr);
+  CHECK_EQ(cache.renders(), 1u);
+  const uint64_t before = fx.store.get_slot(slot)->content_id;
+  fx.store.paint_surface(slot, 0, paint_nothing, nullptr, &fx.fb.table, &g_token, nullptr);
+  CHECK(fx.store.get_slot(slot)->content_id != before);
+  CHECK_EQ(cache.size(), 0u);  // the old image can never be hit again
+  paint_shader_layer(&p, L, 0, 0, 8, 8, nullptr);
+  CHECK_EQ(cache.renders(), 2u);
+}
+
+TEST_CASE("shader api: draw and bake take textures by sampler name")
+{
+  Fixture fx;
+  const neui_asset_t sh = fx.create(k_copy_tex);
+  const std::vector<uint8_t> px = premul_pixels(10, 6, 5u);
+  const neui_asset_t bm = add_bitmap(fx, px, 10, 6);
+  const neui_shader_texture_t tex[] = { { "nope", bm }, { "img", bm } };
+  neui_painter p = fx.painter(ctx_a());
+  neui_shader_draw_t d{};
+  d.shader = sh;
+  d.width = 10; d.height = 6;
+  d.textures = tex;
+  d.texture_count = 2;
+  CHECK(fx.api.draw(&p, &d));
+  CHECK(fx.last_upload().pixels == px);
+
+  neui_shader_bake_t b{};
+  b.width = 10; b.height = 6;
+  b.textures = tex;
+  b.texture_count = 2;
+  const neui_asset_t baked = fx.api.bake_bitmap(k_sess, sh, &b);
+  REQUIRE(baked.id != asset_none.id);
+  CHECK(fx.store.get_slot(baked.id & 0xffff)->pixels == px);
+  b.texture_count = 0;  // unbound: transparent
+  const neui_asset_t clear = fx.api.bake_bitmap(k_sess, sh, &b);
+  CHECK(fx.store.get_slot(clear.id & 0xffff)->pixels == std::vector<uint8_t>(px.size(), 0));
+}
+
+TEST_CASE("shader paint: a shader that samples uses the textured GPU draw")
+{
+  Fixture fx;
+  const neui_asset_t sh = fx.create(k_copy_tex);
+  const neui_asset_t flat = fx.create("vec4 main(vec2 p) { return vec4(1.0); }");
+  const std::vector<uint8_t> px = premul_pixels(8, 8, 3u);
+  const neui_asset_t bm = add_bitmap(fx, px, 8, 8);
+  auto& t = fx.fb.table;
+  t.create_shader_program = fb_create_program;
+  t.destroy_shader_program = fb_destroy_program;
+  t.draw_shader_program = fb_draw_program;
+  g_gpu_draws = g_gpu_tex_draws = 0;
+  CompoundAsset ca;
+  CompoundLayer& L = texture_layer(ca, sh, 8, 8);
+  apply_set_asset(L, "u.img", bm);
+  neui_painter p = fx.painter(ctx_a());
+
+  // No textured slot: the CPU draws it.
+  paint_shader_layer(&p, L, 0, 0, 8, 8, nullptr);
+  CHECK_EQ(g_gpu_tex_draws, 0);
+  CHECK_EQ(fx.store.shader_cache().renders(), 1u);
+
+  t.draw_shader_program_textured = fb_draw_program_tex;
+  fx.store.shader_cache().clear(&t);  // forget the remembered "no GPU program"
+  paint_shader_layer(&p, L, 0, 0, 8, 8, nullptr);
+  CHECK_EQ(g_gpu_tex_draws, 1);
+  REQUIRE(g_tex_descs.size() == 1);
+  CHECK(g_tex_descs[0].bgra == fx.store.get_slot(bm.id & 0xffff)->pixels.data());
+  CHECK_EQ(g_tex_descs[0].width_px, 8u);
+  CHECK_EQ(g_tex_descs[0].stride, size_t(32));
+  CHECK_EQ(g_tex_descs[0].content_id, fx.store.get_slot(bm.id & 0xffff)->content_id);
+  // An unbound sampler goes as an empty descriptor.
+  apply_set_asset(L, "u.img", asset_none);
+  paint_shader_layer(&p, L, 0, 0, 8, 8, nullptr);
+  REQUIRE(g_tex_descs.size() == 1);
+  CHECK(g_tex_descs[0].bgra == nullptr);
+  // A shader without samplers keeps the plain slot.
+  CompoundLayer& F = texture_layer(ca, flat, 8, 8);
+  paint_shader_layer(&p, F, 0, 0, 8, 8, nullptr);
+  CHECK_EQ(g_gpu_draws, 1);
+  fx.store.shader_cache().clear(&t);
+}

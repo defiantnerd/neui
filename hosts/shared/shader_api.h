@@ -53,6 +53,28 @@ namespace neui_detail
       return e->shader.get();
     }
 
+    // ShaderTextureLookup over the host's store: a BITMAP or SURFACE of the
+    // session with pixels.
+    static bool texture_lookup(void* store_ptr, uint32_t sid, neui_asset_t a, ShaderTexture& out)
+    {
+      uint32_t ignored = 0;
+      using StorePtr = decltype(Host::store(neui_session_t{}, ignored));
+      auto* store = static_cast<StorePtr>(store_ptr);
+      if (!store || ((a.id >> 16) & 0xffff) != (sid & 0xffff)) return false;
+      const AssetEntry* e = store->get_slot(a.id & 0xffff);
+      if (!e || (e->kind != NEUI_ASSET_KIND_BITMAP && e->kind != NEUI_ASSET_KIND_SURFACE)) return false;
+      if (!e->width_px || !e->height_px ||
+          e->pixels.size() < static_cast<size_t>(e->width_px) * e->height_px * 4u)
+        return false;
+      out.px = e->pixels.data();
+      out.w = e->width_px;
+      out.h = e->height_px;
+      out.stride = static_cast<size_t>(e->width_px) * 4u;
+      out.scale = e->scale > 0.0f ? e->scale : 1.0f;
+      out.content_id = e->content_id;
+      return true;
+    }
+
     static void put_error(char* err, uint32_t cap, const std::string& msg)
     {
       if (!err || cap == 0) return;
@@ -122,10 +144,14 @@ namespace neui_detail
     {
       const ShaderAsset* sa = resolve(session, shader);
       if (!sa || !b) return asset_none;
-      ShaderBakeResult r;
-      if (!shader_bake(*sa, *b, sweep, from, to, frames, r)) return asset_none;
       uint32_t sid = 0;
       auto* store = Host::store(session, sid);
+      ShaderCache& cache = store->shader_cache();
+      cache.set_texture_lookup(&texture_lookup, store, sid);
+      std::vector<ShaderTexture> tex;
+      shader_textures_by_name(*sa->program, b->textures, b->texture_count, cache, tex);
+      ShaderBakeResult r;
+      if (!shader_bake(*sa, *b, sweep, from, to, frames, r, tex.data(), tex.size())) return asset_none;
       const uint32_t slot = store->allocate_bitmap(std::move(r.pixels), r.w_px, r.h_px, r.scale);
       if (slot == 0) return asset_none;
       if (sweep && !store->set_frame_layout(slot, r.cols, r.rows, 0, r.frames)) {
@@ -147,6 +173,29 @@ namespace neui_detail
     {
       if (!sweep) return asset_none;
       return bake(session, shader, b, sweep, from, to, frames);
+    }
+
+    static uint32_t NEUI_ABI sampler_count(neui_session_t session, neui_asset_t shader)
+    {
+      const ShaderAsset* sa = resolve(session, shader);
+      return sa ? static_cast<uint32_t>(neui::nsl::samplers(*sa->program).size()) : 0u;
+    }
+
+    static bool NEUI_ABI sampler_at(neui_session_t session, neui_asset_t shader,
+                                    uint32_t index, neui_shader_sampler_info_t* out)
+    {
+      const ShaderAsset* sa = resolve(session, shader);
+      if (!sa || !out) return false;
+      const auto& decls = neui::nsl::samplers(*sa->program);
+      if (index >= decls.size()) return false;
+      const auto& s = decls[index];
+      out->name = s.name.c_str();
+      out->wrap = s.wrap == neui::nsl::Wrap::REPEAT   ? NEUI_SHADER_WRAP_REPEAT
+                : s.wrap == neui::nsl::Wrap::BORDER   ? NEUI_SHADER_WRAP_BORDER
+                                                      : NEUI_SHADER_WRAP_CLAMP;
+      out->filter = s.filter == neui::nsl::Filter::NEAREST ? NEUI_SHADER_FILTER_NEAREST
+                                                           : NEUI_SHADER_FILTER_LINEAR;
+      return true;
     }
 
     static void NEUI_ABI set_gpu(neui_session_t session, bool enabled)
@@ -184,7 +233,8 @@ namespace neui_detail
       for (uint32_t w : widgets) Host::invalidate_widget(session, w);
     }
 
-    // The painter's resolve_shader thunk (painter.h).
+    // The painter's resolve_shader thunk (painter.h). It also points the
+    // cache at this session's bitmaps, for the samplers of what it draws.
     static bool NEUI_ABI painter_resolve(void* host_token, neui_asset_t shader,
                                          const ShaderAsset** out_shader,
                                          ShaderCache** out_cache)
@@ -197,6 +247,7 @@ namespace neui_detail
       if (!e || e->kind != NEUI_ASSET_KIND_SHADER || !e->shader) return false;
       *out_shader = e->shader.get();
       *out_cache  = &store->shader_cache();
+      store->shader_cache().set_texture_lookup(&texture_lookup, store, sid);
       return true;
     }
 
@@ -247,6 +298,8 @@ namespace neui_detail
     t.animation_time       = A::animation_time;
     t.set_animation_fps    = A::set_animation_fps;
     t.set_animation_paused = A::set_animation_paused;
+    t.sampler_count        = A::sampler_count;
+    t.sampler_at           = A::sampler_at;
     return t;
   }
 }  // namespace neui_detail

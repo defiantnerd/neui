@@ -36,9 +36,17 @@
 //     machinery (painter draw_asset_frame, or a compound ASSET layer with its
 //     "frame" prop bound to a value attr) and costs nothing per frame.
 //
+// A shader can also read bitmaps: a `uniform sampler2D` takes a BITMAP or
+// SURFACE asset of the session (textures in bake / draw, or a SHADER layer's
+// "u.<name>" set with set_asset or bound with bind_asset), and texture2D(s,
+// uv) samples it (uv 0..1 across the bitmap, y down). A sampler without a
+// bitmap reads as transparent.
+//
 // The first two re-run the shader only when its inputs change: the result is
 // cached per session by content (shader, size, scale, sub-pixel position,
-// uniform values, time), so fifty knobs at one value share one bitmap.
+// uniform values, time, the bitmaps' contents), so fifty knobs at one value
+// share one bitmap. A SURFACE repainted with paint_surface is new content: a
+// widget that samples it repaints when the client invalidates it.
 //
 // On the CPU the pixels are the same on every platform and compiler, bit for
 // bit: neui runs shaders with its own deterministic math. Where the renderer
@@ -71,6 +79,29 @@ extern "C" {
     return u;
   }
 
+  // A bitmap for a `uniform sampler2D`, matched by name: a BITMAP or SURFACE
+  // asset of the session (a filmstrip is sampled as its whole sheet).
+  // asset_none or any other kind leaves the sampler unbound.
+  typedef struct neui_shader_texture {
+    const char*  name;
+    neui_asset_t asset;
+  } neui_shader_texture_t;
+
+  // How a sampler reads outside the bitmap and between texels, as its
+  // "#pragma neui sampler" line sets it (clamp and linear by default).
+#define NEUI_SHADER_WRAP_CLAMP    0u  // the edge texel continues
+#define NEUI_SHADER_WRAP_REPEAT   1u  // the bitmap tiles
+#define NEUI_SHADER_WRAP_BORDER   2u  // transparent outside
+#define NEUI_SHADER_FILTER_LINEAR  0u
+#define NEUI_SHADER_FILTER_NEAREST 1u
+
+  // A sampler2D as the shader declares it, from sampler_at.
+  typedef struct neui_shader_sampler_info {
+    const char* name;    // owned by the shader asset; valid until it is destroyed
+    uint32_t    wrap;    // NEUI_SHADER_WRAP_*
+    uint32_t    filter;  // NEUI_SHADER_FILTER_*
+  } neui_shader_sampler_info_t;
+
   // A uniform as the shader declares it, from uniform_at.
   typedef struct neui_shader_uniform_info {
     const char* name;        // owned by the shader asset; valid until it is destroyed
@@ -86,6 +117,8 @@ extern "C" {
     float                        time;           // neui_time in seconds; wrapped to [0, 3600)
     const neui_shader_uniform_t* uniforms;       // values by name; may be NULL
     uint32_t                     uniform_count;
+    const neui_shader_texture_t* textures;       // bitmaps by sampler name; may be NULL
+    uint32_t                     texture_count;
   } neui_shader_bake_t;
 
   // What to draw: a shader over a rect of the painter's current space.
@@ -98,6 +131,8 @@ extern "C" {
                                               // (animation_time() to animate)
     const neui_shader_uniform_t* uniforms;    // values by name; may be NULL
     uint32_t                     uniform_count;
+    const neui_shader_texture_t* textures;    // bitmaps by sampler name; may be NULL
+    uint32_t                     texture_count;
   } neui_shader_draw_t;
 
   typedef struct neui_shader_api {
@@ -125,7 +160,8 @@ extern "C" {
     // -------- Introspection --------------------------------------------------
 
     // The shader's declared uniforms, in declaration order (the reserved
-    // neui_* uniforms are not listed). 0 / false for an invalid handle.
+    // neui_* uniforms and the sampler2D uniforms are not listed). 0 / false
+    // for an invalid handle.
     uint32_t (NEUI_ABI *uniform_count)(neui_session_t session, neui_asset_t shader);
     bool     (NEUI_ABI *uniform_at)(neui_session_t session, neui_asset_t shader,
                                     uint32_t index, neui_shader_uniform_info_t* out);
@@ -135,7 +171,9 @@ extern "C" {
     // Render the shader into a new BITMAP asset of ceil(width * scale) x
     // ceil(height * scale) device px, tagged with `scale` so it draws at
     // width x height logical px. Uniforms not named in bake->uniforms keep
-    // their declared defaults; names the shader does not declare are ignored.
+    // their declared defaults, samplers not named in bake->textures read as
+    // transparent; names the shader does not declare are ignored. The new
+    // bitmap is a copy: changing a sampled bitmap later does not change it.
     // Returns asset_none for a bad handle, a non-positive or non-finite size,
     // or a bitmap side over 16384 px.
     neui_asset_t (NEUI_ABI *bake_bitmap)(neui_session_t session, neui_asset_t shader,
@@ -205,6 +243,15 @@ extern "C" {
     // for reduced motion ("Show animations in Windows" off, Reduce motion on
     // macOS and iOS).
     void  (NEUI_ABI *set_animation_paused)(neui_session_t session, bool paused);
+
+    // -------- Samplers (vtable-appended) --------------------------------------
+
+    // The shader's sampler2D uniforms, in declaration order (at most 4). Bind
+    // bitmaps to them by name: textures in bake / draw, or a SHADER layer's
+    // "u.<name>". 0 / false for an invalid handle.
+    uint32_t (NEUI_ABI *sampler_count)(neui_session_t session, neui_asset_t shader);
+    bool     (NEUI_ABI *sampler_at)(neui_session_t session, neui_asset_t shader,
+                                    uint32_t index, neui_shader_sampler_info_t* out);
   } neui_shader_api_t;
 
 #ifdef __cplusplus

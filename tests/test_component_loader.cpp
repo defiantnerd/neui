@@ -1283,3 +1283,73 @@ TEST_CASE("serialize_component: round-trips shaders and a shader layer")
   CHECK(s.ints.at("fallback") == 1);
   CHECK(g_layers[1].strs.at("name") == "disc");
 }
+
+TEST_CASE("component_loader: a shader layer's textures and asset bindings")
+{
+  const std::string json = R"json(
+{
+  "component": "lit_knob",
+  "size": [100, 100],
+  "assets": { "normals": "img/knob_normals.png", "lut": "img/heat.png" },
+  "shaders": { "lit": { "source": "vec4 main(vec2 p) { return vec4(1.0); }" } },
+  "layers": [
+    { "kind": "shader", "shader": "lit",
+      "textures": { "normals": "normals", "palette": "lut", "missing": 7 },
+      "bind": { "u.overlay": { "attr": "my.overlay", "asset": true },
+                "u.value": { "attr": "neui.param.value" } } }
+  ]
+}
+)json";
+  BuiltComponent bc = run_loader_with_shaders(json, "skins");
+  CHECK(bc.ok);
+  REQUIRE(g_layers.size() == 1);
+  const LayerRec& s = g_layers[0];
+  // Each texture names an "assets" entry, loaded like an ASSET layer's.
+  REQUIRE(g_loaded_files.size() == 2);
+  CHECK(g_loaded_files[0] == "skins/img/knob_normals.png");
+  CHECK(g_loaded_files[1] == "skins/img/heat.png");
+  CHECK(s.assets.at("u.normals") == 1001u);
+  CHECK(s.assets.at("u.palette") == 1002u);
+  CHECK(s.assets.count("u.missing") == 0);  // not a name
+  CHECK(s.bind_assets.at("u.overlay") == "my.overlay");
+  CHECK(s.binds.at("u.value").attr == "neui.param.value");
+  CHECK(s.bind_assets.count("u.value") == 0);
+}
+
+TEST_CASE("serialize_component: round-trips a shader layer's textures")
+{
+  HandBuilt hb;
+  hb.name = "lit";
+  const uint32_t ss = compound_add_layer(hb.ca, NEUI_COMPOUND_LAYER_SHADER, 0);
+  CompoundLayer* L = compound_get_layer(hb.ca, ss);
+  apply_set_asset (*L, "shader", neui_asset_t{ 4242u });
+  apply_set_asset (*L, "u.normals", neui_asset_t{ 77u });
+  apply_set_asset (*L, "u.gone", neui_asset_t{ 78u });
+  apply_set_asset (*L, "u.gone", asset_none);  // unbound again
+  apply_bind_asset(*L, "u.overlay", "my.overlay");
+  CHECK(L->shader_textures.size() == 1);
+  std::vector<ComponentShaderSource> sources(1);
+  sources[0].name = "lit"; sources[0].source = "vec4 main(vec2 p) { return vec4(1.0); }";
+  sources[0].is_inline = true;
+  std::vector<std::pair<uint32_t, std::string>> shader_names = { { 4242u, "lit" } };
+  std::vector<std::pair<std::string, std::string>> an = { { "normals", "img/n.png" } };
+  std::vector<std::pair<uint32_t, std::string>> hn = { { 77u, "normals" } };
+
+  ComponentSerializeInput in;
+  in.name = &hb.name; in.width = 100.0f; in.height = 100.0f;
+  in.shader_sources = &sources;
+  in.shader_handle_names = &shader_names;
+  in.asset_names = &an; in.asset_handle_names = &hn;
+  in.compound = &hb.ca; in.behavior = &hb.ba;
+  const std::string json = serialize_component(in, 0);
+  CHECK(json.find("\"textures\"") != std::string::npos);
+
+  BuiltComponent rebuilt = run_loader_with_shaders(json, nullptr);
+  CHECK(rebuilt.ok);
+  REQUIRE(g_layers.size() == 1);
+  const LayerRec& s = g_layers[0];
+  CHECK(s.assets.at("u.normals") == 1001u);  // "normals" reloaded from its path
+  REQUIRE(g_loaded_files.size() == 1);
+  CHECK(g_loaded_files[0] == "img/n.png");
+  CHECK(s.bind_assets.at("u.overlay") == "my.overlay");
+}
