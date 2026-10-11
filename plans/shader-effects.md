@@ -9,10 +9,11 @@ only if measured necessary; phase 8 is research. The prerequisite track,
 Phase 9, texture sampling (2026-10-11), is in progress: a `sampler2D`
 uniform bound to a BITMAP or SURFACE asset, a bit-exact sample built-in on
 the CPU, and D2D resource textures on the GPU. Both spikes are done and
-carried most of steps 9a and 9c, merged to `next`: the
-language, the CPU executor and the D2D draw path work on every platform,
-within 1/255 of the CPU on the GPU. Next is the host side (9b), then docs
-(9d). It is also what phase 8 needs. See "Phase 9 design" and "Phase 9.0
+carried most of steps 9a and 9c: the language, the CPU executor and the
+D2D draw path work on every platform, within 1/255 of the CPU on the GPU.
+Step 9b binds bitmaps in every host (draw / bake `textures`, a SHADER
+layer's `u.<name>`, component JSON `"textures"`, content-id cache keys).
+Next are the docs and the example (9d), then the 9c leftovers. It is also what phase 8 needs. See "Phase 9 design" and "Phase 9.0
 results".
 
 Phase 6 produced animation: a session clock (`hosts/shared/anim_clock.h`)
@@ -873,7 +874,7 @@ What this means:
 | 6 | **Done.** Time + animation: session clock + animating-widget registry, per-frame / per-session timers, fps cap, pause, OS reduced motion, clock images dropped per frame | `hosts/shared/{anim_clock.h,shader_asset.h,shader_layer.h,shader_api.h}`, `include/neui/d/shader.h`, `hosts/crossplatform/{platform.h,platform_*,host.cpp}`, the native hosts' CUSTOMDRAW paint + timers, `tests/test_anim_clock.cpp` |
 | 7 | Only if measured necessary: Metal executor on Apple; opt-in CPU fork-join pool | `hosts/shared/shader_emit_msl.h`, `backends/cg/cg_backend.mm`, `src/shader/nsl_exec.cpp` |
 | 8 | Research: post-processing of existing UI. Bake-time `NEUI_FE_SHADER` with `sample(in, uv)` over a SURFACE fits the CPU filter graph directly. Live scene post-processing needs the rendered region as input: cheap on Cairo (the window surface is CPU memory) and feasible on D2D (copy the target region into an effect input), but CG's `drawRect:` context is not readable, so Apple would need an offscreen-then-blit frame. Needs phase 9's sampling first | `hosts/shared/filter_graph.h`, `include/neui/d/filter.h` |
-| 9 | **In progress (§19, §20):** spikes done, 9a and most of 9c merged; 9b (host side) next. Texture sampling: `uniform sampler2D` + `texture2D` bound to BITMAP / SURFACE assets; bit-exact fixed-point bilinear on the CPU; asset content ids in the image cache key; `u.<sampler>` layer props + JSON `"textures"`; D2D resource textures | `src/shader/{nsl.h,nsl_ir.h,nsl_compile.cpp,nsl_exec.cpp,nsl_gpu.cpp}`, `include/neui/d/{shader.h,renderer.h}`, `hosts/shared/{asset_store.h,shader_asset.h,shader_layer.h,shader_api.h,compound.h,component_loader.h}`, `backends/d2d/d2d_shader.cpp`, `tests/test_shader_*.cpp` |
+| 9 | **In progress (§19, §20):** spikes done, 9a, 9b and most of 9c done; 9d (docs, example) next. Texture sampling: `uniform sampler2D` + `texture2D` bound to BITMAP / SURFACE assets; bit-exact fixed-point bilinear on the CPU; asset content ids in the image cache key; `u.<sampler>` layer props + JSON `"textures"`; D2D resource textures | `src/shader/{nsl.h,nsl_ir.h,nsl_compile.cpp,nsl_exec.cpp,nsl_gpu.cpp}`, `include/neui/d/{shader.h,renderer.h}`, `hosts/shared/{asset_store.h,shader_asset.h,shader_layer.h,shader_api.h,compound.h,component_loader.h}`, `backends/d2d/d2d_shader.cpp`, `tests/test_shader_*.cpp` |
 
 ## 10. Tier-1 test strategy
 
@@ -1728,7 +1729,7 @@ channel, which made a bilinear sample cost as much as `fbm5`.
 | Step | Scope | Main files |
 |---|---|---|
 | 9a | **Done in the spike** except the spec section (moved to 9d). Language + CPU: compiler (type, pragma, built-ins, diagnostics), `OP_TEXEL` / `OP_CHANNEL`, the executor's texture table | `src/shader/{nsl.h,nsl_ir.h,nsl_compile.cpp,nsl_exec.cpp}`, `tests/test_shader_texture.cpp`, `tests/shader_bench/` |
-| 9b | Host side: content ids, cache key, API, layer props, JSON, bakes; the GPU path calls the textured slot (until then `ShaderCache::gpu_program` keeps shaders that sample on the CPU) | `include/neui/d/shader.h`, `hosts/shared/{asset_store.h,shader_asset.h,shader_layer.h,shader_api.h,compound.h,component_loader.h}`, `tests/test_shader_{asset,layer}.cpp`, `tests/test_component_loader.cpp` |
+| 9b | **Done (§20).** Host side: content ids, cache key, API, layer props, JSON, bakes; the GPU path calls the textured slot | `include/neui/d/shader.h`, `hosts/shared/{asset_store.h,shader_asset.h,shader_layer.h,shader_api.h,compound.h,component_loader.h}`, `tests/test_shader_{asset,layer}.cpp`, `tests/test_component_loader.cpp` |
 | 9c | **Mostly done in the spike:** the HLSL texel read, resource textures, the textured slot, the smoke cases. Left: the texture LRU with a byte cap, an HLSL golden in `test_shader_gpu.cpp` | `src/shader/nsl_gpu.cpp`, `include/neui/d/renderer.h`, `backends/d2d/{d2d_shader.cpp,d2d_backend.cpp}`, `tests/{test_shader_gpu.cpp,shader_gpu_smoke.cpp}` |
 | 9d | Docs + example: the spec section (`sampler2D`, `texture2D`, the pragma, the filter arithmetic, keywords, limits, §1's "no textures"), guide recipes (all compiling), a normal-mapped knob, a baked noise tile, a LUT gauge | `docs/{shader-guide.md,rendering-and-assets.md,compound-behavior-component.md}`, `CLAUDE.md`, `examples/shader_example.cpp` |
 
@@ -1859,3 +1860,42 @@ i7-6800K MSVC 19.42):
   a live CPU layer.
 
 **Next:** 9b, the host side.
+
+**Step 9b (same day):**
+- **What exists:**
+  - `neui_shader_texture_t { name, asset }` and `textures` /
+    `texture_count` on the bake and draw structs.
+  - `sampler_count` / `sampler_at` with `NEUI_SHADER_WRAP_*` /
+    `NEUI_SHADER_FILTER_*`.
+  - A SHADER layer's `u.<sampler>` through `set_asset` and `bind_asset`
+    (`CompoundLayer::shader_textures`).
+  - Component JSON `"textures": { "<sampler>": "<assets name>" }`, plus
+    `"asset": true` on a `"bind"` entry for an asset binding, with the
+    serialize round trip.
+  - `AssetEntry::content_id`, and the image cache keyed on it.
+  - Shaders that sample use `draw_shader_program_textured` on the device
+    grid, and the CPU elsewhere or without the slot.
+- **Decisions:**
+  - **Bitmaps resolve through the image cache,** not through a new painter
+    thunk. `painter_resolve` (and a bake) point the session's `ShaderCache`
+    at its store (`set_texture_lookup`), and `ShaderCache::texture(handle)`
+    checks the session bits and the kind. No host code and no painter
+    construction site changed.
+  - **Content ids** are set in `alloc_slot`, so every kind gets one, and
+    renewed in `drop_surface_gpu_cache`, the one place pixels change after
+    allocation (`paint_surface` and the filters). That place and
+    `release_slot` drop the images made from the old id at once, instead
+    of leaving them to the LRU.
+  - **Unbound samplers** (none set, a foreign session, a SHADER or other
+    kind, a released handle) read as transparent.
+- **Tests:**
+  - introspection;
+  - a layer sampling a set and a bound bitmap byte for byte at 2x;
+  - foreign and wrong-kind handles;
+  - release, then a new bitmap in the same slot (no stale image);
+  - a repainted SURFACE (new id, images dropped);
+  - draw and bake textures by name;
+  - the GPU slot choice and descriptors;
+  - JSON load and round trip.
+- **Not done:** memoizing `resolve_asset` per component load. Each texture
+  or ASSET layer naming one image still loads its own copy.
