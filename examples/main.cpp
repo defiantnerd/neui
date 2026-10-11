@@ -94,6 +94,9 @@ struct AppState {
   // Modal "About" dialog (created on demand by Help > About).
   uint32_t           about_dlg_id = 0;
   uint32_t           about_ok_id  = 0;
+  // A dialog closed with its window's close button: the window is gone, the
+  // widgets stay until destroyed (done when About is opened again).
+  uint32_t           about_closed_id = 0;
   // SECTION demo: a non-interactive coloured backdrop with an optional
   // header label; children paint on top via normal tree traversal.
   uint32_t           section_id    = 0;
@@ -154,6 +157,10 @@ static void open_about_dialog(AppState* app)
 {
   if (!app || app->about_dlg_id != 0) return;  // already open
   neui_session_t sess  = app->session;
+  if (app->about_closed_id != 0) {  // left over from a close-button close
+    app->widgets->destroy(sess, { app->about_closed_id });
+    app->about_closed_id = 0;
+  }
   neui_widget_t  owner = { app->win_id };
 
   auto dlg = app->widgets->create(sess, widget_none, NEUI_W_DIALOG,
@@ -532,7 +539,16 @@ static neui_widget_client_t widget_client = {
     }
 
     case NEUI_EVENT_APP_QUIT:
-      // Allow close. ondestroy clears the modal dialog's cached IDs.
+      // Allow close. Closing a frame's window does not destroy its widgets
+      // (no ondestroy), so a closed About dialog is forgotten here and
+      // destroyed when About opens again; OK destroys it right away.
+      if (event->data.mouse.widget.id != 0 &&
+          event->data.mouse.widget.id == app->about_dlg_id) {
+        app->about_closed_id = app->about_dlg_id;
+        app->about_dlg_id = 0;
+        app->about_ok_id  = 0;
+        return true;
+      }
       dbglog("app quit requested - allowing\n");
       return true;
 
