@@ -6,6 +6,12 @@
 only if measured necessary; phase 8 is research. The prerequisite track,
 `plans/xpl-partial-repaint.md`, is implemented (P1-P4).
 
+Phase 9, texture sampling, is designed and not started (2026-10-11): a
+`sampler2D` uniform bound to a BITMAP or SURFACE asset, a bit-exact sample
+built-in on the CPU, and D2D resource textures on the GPU. Two spikes come
+first (CPU fetch cost, D2D resource textures). It is also what phase 8
+needs. See "Phase 9 design".
+
 Phase 6 produced animation: a session clock (`hosts/shared/anim_clock.h`)
 that a SHADER layer reading `neui_time` runs on by itself, and that
 `shader_api->animation_time` exposes to `draw` and any CUSTOMDRAW; an fps
@@ -191,7 +197,7 @@ counter.
 - `return`, including early return.
 
 **Not in v1:** `while`, recursion, arrays and dynamic indexing, matrices
-(possibly `mat2` later), textures and sampling (see the filter phase), and
+(possibly `mat2` later), textures and sampling (designed as phase 9, §19), and
 derivatives (`fwidth` / `dFdx`, which need 2×2 quad lanes; deferred).
 
 **Built-ins:**
@@ -863,7 +869,8 @@ What this means:
 | 5 | **Partial repaint** - separate track, scheduled **first** (`plans/xpl-partial-repaint.md`) | see that plan |
 | 6 | **Done.** Time + animation: session clock + animating-widget registry, per-frame / per-session timers, fps cap, pause, OS reduced motion, clock images dropped per frame | `hosts/shared/{anim_clock.h,shader_asset.h,shader_layer.h,shader_api.h}`, `include/neui/d/shader.h`, `hosts/crossplatform/{platform.h,platform_*,host.cpp}`, the native hosts' CUSTOMDRAW paint + timers, `tests/test_anim_clock.cpp` |
 | 7 | Only if measured necessary: Metal executor on Apple; opt-in CPU fork-join pool | `hosts/shared/shader_emit_msl.h`, `backends/cg/cg_backend.mm`, `src/shader/nsl_exec.cpp` |
-| 8 | Research: post-processing of existing UI. Bake-time `NEUI_FE_SHADER` with `sample(in, uv)` over a SURFACE fits the CPU filter graph directly. Live scene post-processing needs the rendered region as input: cheap on Cairo (the window surface is CPU memory) and feasible on D2D (copy the target region into an effect input), but CG's `drawRect:` context is not readable, so Apple would need an offscreen-then-blit frame | `hosts/shared/filter_graph.h`, `include/neui/d/filter.h` |
+| 8 | Research: post-processing of existing UI. Bake-time `NEUI_FE_SHADER` with `sample(in, uv)` over a SURFACE fits the CPU filter graph directly. Live scene post-processing needs the rendered region as input: cheap on Cairo (the window surface is CPU memory) and feasible on D2D (copy the target region into an effect input), but CG's `drawRect:` context is not readable, so Apple would need an offscreen-then-blit frame. Needs phase 9's sampling first | `hosts/shared/filter_graph.h`, `include/neui/d/filter.h` |
+| 9 | **Designed (§19), spikes next.** Texture sampling: `uniform sampler2D` + `texture2D` bound to BITMAP / SURFACE assets; bit-exact fixed-point bilinear on the CPU; asset content ids in the image cache key; `u.<sampler>` layer props + JSON `"textures"`; D2D resource textures | `src/shader/{nsl.h,nsl_ir.h,nsl_compile.cpp,nsl_exec.cpp,nsl_gpu.cpp}`, `include/neui/d/{shader.h,renderer.h}`, `hosts/shared/{asset_store.h,shader_asset.h,shader_layer.h,shader_api.h,compound.h,component_loader.h}`, `backends/d2d/d2d_shader.cpp`, `tests/test_shader_*.cpp` |
 
 ## 10. Tier-1 test strategy
 
@@ -1497,3 +1504,241 @@ above):
   54.4 fps each; nothing stale after fast drags. The half-refresh guard is
   untested on a >60 Hz display.
 - Still deferred: skipping ticks for a fully occluded (not minimised) window.
+
+## 19. Phase 9 design: texture sampling (2026-10-11)
+
+**Status:** designed, not started. Two spikes come first (§19.6). Nothing
+here is implemented; the spec (`docs/shader-language.md`) changes only in
+step 9a.
+
+Phase 9 lets a shader read a BITMAP or SURFACE asset: a `sampler2D` uniform
+bound to an asset, and a sample built-in. Today a shader is a function of
+its position, its uniforms and time only (spec §1). `sampler2D`, `texture`
+and `texture2D` are already reserved words that report "not supported in
+.nsl v1" (`src/shader/nsl_compile.cpp` ~189), so adding them breaks no
+program that compiles today.
+
+### 19.1 What it enables
+
+- **Image-based looks:**
+  - a knob lit from a **normal map**, with the light or the rotation as a
+    uniform bound to the value: one small bitmap instead of a filmstrip;
+  - photographic **textures** (brushed metal, wood, paper) under procedural
+    light, rings or arcs;
+  - **palette LUTs**: a 256×1 bitmap indexed by a value (gauges, heat maps,
+    theme-coloured gradients);
+  - artist-drawn **masks** and shapes, combined with animated shader work.
+- **Cheaper effects:** a noise tile baked once with `bake_bitmap` and
+  sampled with `repeat` replaces live fbm (46 ns/px on the M1 Ultra, 131 on
+  the i7, §7). `bake_bitmap` returns a BITMAP, so one shader's output feeds
+  another without new API.
+- **Phase 8:** a filter-graph shader primitive (`NEUI_FE_SHADER`) samples
+  its input image. This phase provides the sampling; phase 8 then only binds
+  the primitive's input buffer as a sampler.
+
+### 19.2 Language
+
+- **Declaration:** `uniform sampler2D name;` at global scope, at most **4**
+  per program. A sampler counts toward the 32 uniform declarations, not
+  toward the 64 scalar components, and has no default value.
+- **Where a sampler may appear:** as a uniform, and as an `in` parameter of
+  a user function (inlining makes it an alias). Everything else is a
+  compile error with a `line:col`: a sampler local, an assignment, `out` /
+  `inout`, a return type, a comparison, a `?:` operand or an arithmetic
+  operand.
+- **Sampling:** `vec4 texture2D(sampler2D s, vec2 uv)`. `texture` is
+  accepted as an alias, for Shadertoy ports.
+  - `uv` is normalised: `(0, 0)` is the bitmap's **top-left** corner and
+    `(1, 1)` its bottom-right, y-down like `p`. A Shadertoy port flips
+    `uv.y` as it flips `p.y`.
+  - The result is **straight** RGBA, like the value `main` returns.
+- **Sizes**, both draw-time values (hoisted, so free per pixel):
+  - `vec2 neui_texture_size(sampler2D s)`: the bitmap's **logical** size,
+    `width_px / scale` with the bitmap's own HiDPI factor, to lay it out
+    in px;
+  - `vec2 neui_texel(sampler2D s)`: one texel in `uv` units,
+    `1 / width_px`, for neighbour taps (blur, normal from height).
+- **Modes are per sampler and fixed at compile time**, so the GPU form is
+  emitted once: `#pragma neui sampler <name> [clamp|repeat|border]
+  [linear|nearest]`. The default is `clamp linear`; `border` reads every
+  texel outside the image as transparent. A mode applies to both axes.
+- **Defined arithmetic.** The CPU result must stay bit-identical on every
+  platform (spec §12). With `W`, `H` the bitmap's size in texels:
+  - **Nearest:** texel `(floor(u * W), floor(v * H))`.
+  - **Bilinear:** `t = u * W - 0.5`, `x0 = floor(t)`, `x1 = x0 + 1`,
+    `fx = floor((t - x0) * 256 + 0.5)`, weights `256 - fx` and `fx`; the
+    same for y. The fraction is quantised to 1/256, like GPU filtering
+    hardware.
+  - **The filter runs on the premultiplied 8-bit texels as integers:**
+    `C = (c00*(256-fx) + c10*fx) * (256-fy) + (c01*(256-fx) + c11*fx) * fy`.
+    Its largest value is `255 * 256 * 256 = 16 711 680 < 2^24`, so every
+    product and sum is exact in float, on the CPU and on the GPU, in any
+    order.
+  - **Straight result:** colour `C / A` (0 when `A == 0`; never above 1,
+    since a premultiplied texel has `c <= a`), alpha `A / 16711680`.
+    Nearest is the same with weights 256 and 0. The final division is the
+    only rounding.
+  - Filtering premultiplied keeps colour from bleeding out of transparent
+    edges. There is no sRGB linearisation, as in the filter graph.
+- **Identity:** a layer the size of a bitmap, at the bitmap's own scale,
+  that returns `texture2D(s, p / neui_size)` reproduces the bitmap's bytes
+  exactly. Float noise puts the bilinear position a hair beside the texel
+  centre, and the 1/256 quantisation turns that into a weight of 0 or 256.
+  A golden pins it.
+- **An unbound sampler** (nothing bound, an asset that is not a bitmap, a
+  destroyed handle) samples as `vec4(0)` and its sizes are `vec2(0)`.
+  That is well-defined and never a crash; dividing by such a size follows
+  the spec's IEEE rule, and the output clamp maps the NaN to 0.
+- **Not in phase 9:** mipmaps and LOD (a texture drawn much smaller than
+  its size aliases; the guide will say to supply textures near their
+  display size), derivatives, cube and 3D textures, sampling the window
+  being painted (phase 8), writing to a texture, and Metal.
+
+### 19.3 Compiler and CPU executor
+
+- **One new IR op, `OP_FETCH`:** `a` = x and `b` = y (texel coordinates as
+  floats), and an immediate in `c` that packs the sampler, the channel and
+  the wrap mode. It returns one channel of one texel as an integer-valued
+  float, 0-255. It converts the coordinates to int32 with saturation and
+  wraps them in **integer** arithmetic (clamp, repeat as a floored modulo,
+  border as a range test that returns 0): a float `mod` is not exact for
+  large coordinates.
+- **Everything else lowers to existing ops** (`MUL`, `SUB`, `ADD`, `FLOOR`,
+  `DIV`, `LT`, `SEL`): the coordinate math, the weight quantisation, the
+  integer-exact lerp and the unpremultiply. That makes it deterministic by
+  construction, and the HLSL emitter gets it for free; only the fetch is
+  new on each side. Estimated size: about 70 scalar ops per bilinear sample
+  (16 of them fetches) and about 15 per nearest sample, so the 8192-op
+  limit allows roughly 100 bilinear samples, enough for a 9-tap blur with
+  room for lighting.
+- **Never folded:** a fetch reads draw data, so constant folding must not
+  evaluate it (`eval_op` excludes it); CSE may still merge identical
+  fetches. A fetch whose `uv` is uniform-only is hoisted into the draw
+  program like any uniform-only work (`nsl_compile.cpp` ~2374), so the
+  draw program, `execute_scalar` and `gpu_constants` all receive the
+  textures.
+- **Sizes** are per-sampler reserved leaves (`W`, `H`, their reciprocals,
+  the logical size), filled per draw like `neui_size` (`nsl_exec.cpp` ~62).
+- **`nsl::Draw` gains a texture table:** per sampler
+  `{ const uint8_t* bgra; uint32_t w, h, stride; float scale; }`, null for
+  unbound. The library never sees assets; the host resolves them.
+- **The fetch is per lane:** SSE2 and NEON have no gather, so the kernel
+  converts 4 lanes, computes 4 offsets and loads 4 bytes. That is the cost
+  spike 1 measures. If the fetch dominates, the fallback is one fused op
+  that loads a texel's 4 channels with one 32-bit load instead of four
+  byte loads, at the price of a 4-output instruction in an IR whose
+  instructions all have one output (`nsl_ir.h` ~78).
+
+### 19.4 Host integration
+
+- **Asset content ids.** An `AssetEntry` has no revision or uid today, and
+  slots are reused without a generation check (`include/neui/d/assets.h`
+  ~17), so a handle cannot key the image cache. Add
+  `AssetEntry::content_id`: a process-unique 64-bit counter (the
+  `ShaderAsset::uid` scheme, `shader_asset.h` ~39), set on allocate and
+  renewed whenever the pixels change (`paint_surface`, the in-place filter
+  ops). A reused slot gets a new id, so a stale image is never hit.
+- **Image cache:** `ShaderCacheKey` (`shader_asset.h` ~67) appends the
+  content id of every bound sampler (0 for unbound). `release_slot` drops
+  the images keyed on the released id, as it already does for a shader's
+  `uid`. An image keyed on an id that has since changed can never be hit
+  again and ages out through the LRU.
+- **Public API** (`include/neui/d/shader.h`, all appended, nothing moves):
+  - `neui_shader_texture_t { const char* name; neui_asset_t asset; }`;
+  - `textures` + `texture_count` at the end of `neui_shader_bake_t` and
+    `neui_shader_draw_t`, both documented as zero-initialised and
+    appendable;
+  - `sampler_count` and `sampler_at` (name, wrap, filter) at the end of the
+    vtable. Samplers stay out of `uniform_count` / `uniform_at`, so a
+    client written today never sees a uniform with 0 components.
+- **SHADER layer:** a sampler is a `u.<name>` prop like any uniform, set
+  with the **existing** `set_asset` and bound with the existing
+  `bind_asset` (an int attr that holds a handle). `apply_set_asset`
+  (`hosts/shared/compound.h` ~883) learns `u.*` on SHADER layers.
+  `apply_bind_asset` already stores `is_asset` for any prop, and
+  `shader_layer_uniforms` (`shader_layer.h` ~263), which skips such
+  bindings today, resolves them as textures. No new compound slots.
+- **Component JSON:** `"textures": { "<sampler>": "<asset name>" }` on a
+  shader layer, with names resolved through the top-level `"assets"` map
+  exactly like an ASSET layer's `"asset"`, plus the serialize round trip.
+  A small fix on the way: `resolve_asset` (`component_loader.h` ~418) is
+  not memoized, so N layers that name one image load it N times; memoize
+  it per load.
+- **Sources:** BITMAP (file, memory, baked) and SURFACE. A filmstrip binds
+  as its whole sheet; sampling one frame is deferred.
+- **SURFACE content changes:** a layer that samples a surface repaints when
+  the client invalidates it, as an ASSET layer showing a surface does
+  today. A surface whose paint samples itself reads its previous contents.
+- **Bakes** resolve the textures on the host and run on the CPU, as today.
+
+### 19.5 D2D GPU path
+
+- **Resource textures, not effect inputs.** D2D places an effect input
+  itself, possibly inside an intermediate surface at an offset the shader
+  would have to recover, and an input needs rect mapping in the draw
+  transform. A resource texture
+  (`ID2D1EffectContext::CreateResourceTexture` from the entry's BGRA bytes,
+  bound with `ID2D1DrawInfo::SetResourceTexture`) is a plain texture the
+  shader addresses directly. The effect stays a zero-input `'Source'`
+  effect (`backends/d2d/d2d_shader.cpp` ~54), so the phase-0 placement on
+  `SCENE_POSITION` and the rect mapping stay as they are.
+- **HLSL:** one `Texture2D` per sampler. `OP_FETCH` emits the integer wrap
+  and `round(t.Load(int3(ix, iy, 0)).<ch> * 255)`. The bilinear filter is
+  the same op sequence as on the CPU. Hardware filtering is not used: its
+  sub-texel precision and rounding are implementation-defined. The fidelity
+  contract (spec §12) therefore stays as it is.
+- **Renderer slot** (`include/neui/d/renderer.h`, appended):
+  `draw_shader_program_textured(ctx, program, x, y, w, h, constants,
+  count, const neui_shader_texture_desc_t* tex, uint32_t tex_count)`, with
+  `{ const uint8_t* bgra; uint32_t w_px, h_px; uint64_t content_id; }`.
+  The backend keeps resource textures per (DC, content id) in an LRU with
+  a byte cap and drops them in `release_dc` (device loss). A backend
+  without the slot, or a `false` return, falls back to the CPU as today.
+
+### 19.6 Spikes first (9.0)
+
+1. **CPU fetch cost** (this Mac, then the i7 via neui-win): `OP_FETCH` and
+   the lowering on a branch, plus `shader_bench` cases: a pass-through, one
+   bilinear sample, a 9-tap blur, a normal-mapped knob, and a baked noise
+   tile against `fbm5`. Confirms the identity property and SIMD == scalar,
+   and decides between the lowering and a fused op.
+2. **D2D resource textures** (neui-win): a resource texture in the existing
+   effect; the BGRA channel order and `Load` under ps_4_0; upload and update
+   cost (a SURFACE that changes every frame); GPU against CPU at 100, 125,
+   150 and 200% on the GTX 1080 and on WARP; re-creation after device loss.
+
+### 19.7 Steps after the spikes
+
+| Step | Scope | Main files |
+|---|---|---|
+| 9a | Language + CPU: spec section, compiler (type, pragma, built-ins, diagnostics), `OP_FETCH`, the executor's texture table | `docs/shader-language.md`, `src/shader/{nsl.h,nsl_ir.h,nsl_compile.cpp,nsl_exec.cpp,nsl_math.h}`, `tests/test_shader_{lang,exec}.cpp`, `tests/shader_bench/` |
+| 9b | Host side: content ids, cache key, API, layer props, JSON, bakes | `include/neui/d/shader.h`, `hosts/shared/{asset_store.h,shader_asset.h,shader_layer.h,shader_api.h,compound.h,component_loader.h}`, `tests/test_shader_{asset,layer}.cpp`, `tests/test_component_loader.cpp` |
+| 9c | D2D: the HLSL fetch, resource textures, the textured slot | `src/shader/nsl_gpu.cpp`, `include/neui/d/renderer.h`, `backends/d2d/{d2d_shader.cpp,d2d_backend.cpp}`, `tests/{test_shader_gpu.cpp,shader_gpu_smoke.cpp}` |
+| 9d | Docs + example: guide recipes (all compiling), a normal-mapped knob, a baked noise tile, a LUT gauge | `docs/{shader-guide.md,rendering-and-assets.md,compound-behavior-component.md}`, `CLAUDE.md`, `examples/shader_example.cpp` |
+
+### 19.8 Tests
+
+- **`test_shader_lang`:** sampler declarations, every misuse diagnostic,
+  the pragma, the 4-sampler limit, `texture` as an alias.
+- **`test_shader_exec`:** the identity property at @1× and @2×; CRC
+  goldens for nearest and bilinear under clamp, repeat and border; an
+  unbound sampler; huge and negative coordinates; a hoisted sample (uniform
+  `uv`); SIMD == scalar.
+- **`test_shader_asset` / `test_shader_layer`:** a pixel change misses the
+  cache; a reused slot gives no stale hit; release drops the entries;
+  `u.<sampler>` through `set_asset` and `bind_asset`; a bake with textures.
+- **`test_component_loader`:** `"textures"` load and round trip.
+- **`test_shader_gpu`:** HLSL golden text with a sampler.
+- **`neui_shader_gpu_smoke`** (Windows): a textured shader, GPU against CPU
+  within the contract.
+
+### 19.9 Risks and open questions
+
+- **CPU cost of the per-lane fetch.** Settled by spike 1; the fused op is
+  the fallback.
+- **D2D resource-texture behaviour** (channel order, `Load`, update cost).
+  Settled by spike 2; effect inputs are the fallback.
+- **Minification aliasing** without mipmaps. Guidance only in phase 9.
+- **Handle reuse after destroy** still resolves to the new occupant, the
+  existing documented caveat (`assets.h`). Content ids prevent stale
+  pixels, not a wrong binding.
