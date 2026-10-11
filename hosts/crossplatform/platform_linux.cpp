@@ -393,6 +393,13 @@ namespace
       lw->session->paint_frame(wd->render_ctx, lw->widget_index, full ? nullptr : &damage);
   }
 
+  bool any_paint_pending()
+  {
+    for (auto& kv : g_windows)
+      if (paint_pending(kv.second)) return true;
+    return false;
+  }
+
   void flush_pending_paints()
   {
     // Snapshot first: a paint callback can create / destroy windows.
@@ -2169,14 +2176,14 @@ namespace
       if (g_timerfd >= 0) { FD_SET(g_timerfd, &rfds); if (g_timerfd > maxfd) maxfd = g_timerfd; }
       int dfd = neui_detail::theme_dbus_fd();   // -1 without libdbus / no bus
       if (dfd >= 0) { FD_SET(dfd, &rfds); if (dfd > maxfd) maxfd = dfd; }
-      // A paint that invalidated again (a paint handler setting a label's
-      // text) left its window pending: poll instead of sleeping, so the next
-      // pass draws it now rather than at the next unrelated event.
-      bool pending = false;
-      for (auto& kv : g_windows)
-        if (paint_pending(kv.second)) { pending = true; break; }
+      // Poll instead of sleeping when there is work select() cannot see:
+      // a paint that invalidated again (a paint handler setting a label's
+      // text), or events Xlib already read into its queue after
+      // drain_events (during the paints or XFlush) - the socket is empty
+      // then, so a sleep would hold them until an unrelated wakeup.
+      const bool poll_now = XQLength(g_display) > 0 || any_paint_pending();
       timeval poll = { 0, 0 };
-      int r = select(maxfd + 1, &rfds, nullptr, nullptr, pending ? &poll : nullptr);
+      int r = select(maxfd + 1, &rfds, nullptr, nullptr, poll_now ? &poll : nullptr);
       if (r < 0) { if (errno == EINTR) continue; break; }
       if (g_timerfd >= 0 && FD_ISSET(g_timerfd, &rfds)) {
         uint64_t exp = 0; ssize_t rd = read(g_timerfd, &exp, sizeof(exp)); (void)rd;
@@ -2212,7 +2219,9 @@ namespace
       fd_set rfds; FD_ZERO(&rfds); FD_SET(xfd, &rfds);
       int maxfd = xfd;
       if (g_timerfd >= 0) { FD_SET(g_timerfd, &rfds); if (g_timerfd > maxfd) maxfd = g_timerfd; }
-      struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 16000;
+      // As in platform_run: queued events and pending paints don't wait.
+      const bool poll_now = XQLength(g_display) > 0 || any_paint_pending();
+      struct timeval tv; tv.tv_sec = 0; tv.tv_usec = poll_now ? 0 : 16000;
       int r = select(maxfd + 1, &rfds, nullptr, nullptr, &tv);
       if (r < 0) { if (errno == EINTR) continue; break; }
       if (r > 0 && g_timerfd >= 0 && FD_ISSET(g_timerfd, &rfds)) {
