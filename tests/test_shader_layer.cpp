@@ -920,7 +920,7 @@ neui_asset_t add_bitmap(Fixture& fx, const std::vector<uint8_t>& px, uint32_t w,
   return neui_asset_t{ (k_sid << 16) | slot };
 }
 
-CompoundLayer& texture_layer(CompoundAsset& ca, neui_asset_t sh, float w, float h)
+CompoundLayer& texture_layer(CompoundAsset& ca, neui_asset_t sh, int w, int h)
 {
   const uint32_t s = compound_add_layer(ca, NEUI_COMPOUND_LAYER_SHADER, 0);
   CompoundLayer& L = *compound_get_layer(ca, s);
