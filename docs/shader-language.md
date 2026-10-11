@@ -518,7 +518,7 @@ moves.
   pixels, and within 8/255 on all pixels except those on a discontinuity of
   the shader (`step`, a comparison, `floor` / `fract` / `mod` crossing an
   integer): there a last-bit difference can put a pixel on the other side of
-  the jump, and it takes the other side's colour. Measured on a GTX 1080 and
+  the jump, and it takes the other side's colour. Measured on a desktop GPU and
   on WARP: at most 1/255 for continuous shaders
   (`tests/shader_gpu_smoke.cpp`); a hard-edged ring knob showed 3 such pixels
   out of about 120 000.
@@ -527,7 +527,7 @@ moves.
   CPU.
   Sampling on the GPU reads texels with `Load` and runs the same integer
   filter as the CPU (not the hardware's filtering, whose sub-texel precision
-  varies): at most 1/255 from the CPU on a GTX 1080 and on WARP, and a 1:1
+  varies): at most 1/255 from the CPU on a desktop GPU and on WARP, and a 1:1
   copy is exact there too.
 
 ## 13. Limits

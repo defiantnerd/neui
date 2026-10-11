@@ -3,7 +3,7 @@
 ## Status
 
 **P1-P4 implemented on every xpl platform and verified on screen** (macOS,
-Windows, and Linux on WSLg on 2026-10-11). Only the tuning below is left. On
+Windows, and Linux on 2026-10-11). Only the tuning below is left. On
 Linux, the damage of an animated frame covered exactly the animated widgets,
 and idle windows stayed at 0% CPU. The same check found one bug, fixed in
 c9d8452: `paint_window` cleared the pending damage after painting, so an
@@ -32,14 +32,14 @@ Two deviations from the design below:
 
 **P2 implemented (macOS verified on screen, iOS built and tested by CI).**
 - **Platform side:** `setNeedsDisplayInRect:` + `drawRect:` damage on both. The CG backend accepts damage for window ctxs; off-screen ctxs accept once they hold a frame.
-- **Finding:** a layer-backed view gets one dirty rect, the bounding box of everything invalidated since the last draw. Scattered changes therefore coalesce into a full frame, and only localized ones pay: 0.10 ms against 1.15 ms per paint, with one of 48 knobs per tick, on an M-series Mac.
+- **Finding:** a layer-backed view gets one dirty rect, the bounding box of everything invalidated since the last draw. Scattered changes therefore coalesce into a full frame, and only localized ones pay: 0.10 ms against 1.15 ms per paint, with one of 48 knobs per tick, on an Apple-silicon Mac.
 - **Added in P2:**
   - `WidgetData::paint_bounds()`, which a rotated IMAGE overrides. Its unclipped overflow was outside its damage. Windows found it and a negative test on macOS confirmed it.
   - `NEUI_DEBUG_PAINT_STATS`.
   - `neui_partial_repaint_example`.
 - **Reference:** `docs/widget-internals.md`, "Partial repaint".
 
-**P3 implemented (macOS verified on screen; Linux on WSLg, 2026-10-11).** The internal invalidation paths now repaint only the widget:
+**P3 implemented (macOS verified on screen; Linux, 2026-10-11).** The internal invalidation paths now repaint only the widget:
 - `WidgetData::repaint()` (114 widget-internal call sites);
 - hover / press / focus transitions (old + new widget);
 - `InputBoxWidget::on_keychar`;
@@ -55,9 +55,9 @@ Measured in `neui_example` on the xpl host, macOS:
 - **Interaction frames** (hover, typing, checkbox, slider drag): all partial, 0.15-0.42 ms, against 7.5-15 ms for this example's full frames.
 - **SECTION / GRID scroll:** correct, but full by coverage, since each container fills most of its example's window.
 
-P4 baseline from Windows: a D2D full frame of the 48-knob example costs 4.1-4.7 ms (Debug, 150%, GTX 1080) regardless of how many knobs change.
+P4 baseline from Windows: a D2D full frame of the 48-knob example costs 4.1-4.7 ms (Debug, 150%, desktop GPU) regardless of how many knobs change.
 
-**P4 implemented and verified on Windows** (GTX 1080, 150%, Debug, by the Windows session). It compiled clean under `NEUI_WERROR`, and the visual checks (damage tint, resize, partly off-screen and back, `neui_example` interaction) showed no stale or garbage pixels.
+**P4 implemented and verified on Windows** (desktop GPU, 150%, Debug). It compiled clean under `NEUI_WERROR`, and the visual checks (damage tint, resize, partly off-screen and back, `neui_example` interaction) showed no stale or garbage pixels.
 
 How it differs from the original design: it keeps a persistent canvas as planned, but copies the WHOLE canvas into the back buffer each frame instead of tracking damage(N) and damage(N-1). It's a GPU copy, cheap, and correct without bookkeeping. Multi-rect frames clip with a geometry-group layer; the mask is built in `set_frame_damage`, so a failure refuses cleanly.
 

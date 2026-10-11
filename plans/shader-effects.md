@@ -8,7 +8,7 @@ has the sampling it needs. The prerequisite track,
 `plans/xpl-partial-repaint.md`, is implemented (P1-P4).
 
 After phase 9 (2026-10-11):
-- **Linux checked on screen** (WSLg, the `neui-linux` session): the shader
+- **Linux checked on screen:** the shader
   example's rows, the animation clock (fps cap, pause), partial repaint
   damage, input and resize. The check found two Linux bugs, both fixed in
   c9d8452:
@@ -50,7 +50,7 @@ Phase 4 produced the D2D GPU path: the library emits each program's pixel
 part as HLSL (`src/shader/nsl_gpu.cpp`), the D2D backend compiles it in the
 background and draws it as a custom effect (`backends/d2d/d2d_shader.cpp`),
 and live layers and `draw` use it on the device grid; within 1/255 of the CPU
-on a GTX 1080 and on WARP. See "Phase 4 results".
+on a desktop GPU and on WARP. See "Phase 4 results".
 
 Phase 3 produced the live paths: the compound SHADER layer
 (`NEUI_COMPOUND_LAYER_SHADER`, `u.*` uniform props, `resolution`, `time`,
@@ -79,7 +79,7 @@ Phase 0 produced:
   phase 1 a timing tool over the real library; the goldens moved into
   `neui_tests`);
 - **a D2D custom-effect spike**, branch `spike/d2d-shader-effect` (f1774d2),
-  run on the Windows machine.
+  run on Windows.
 
 Results and the decisions they forced are in "Phase 0 results" at the end of
 this document. The sections above it are updated to match.
@@ -498,7 +498,7 @@ layer and `draw`.
   `D3DCOMPILE_IEEE_STRICTNESS`. (With a null level array, D3D11 stops at
   11_0; ps_4_0 does not need more.)
 - **Lazy compile:** `D3DCompile` measured 2.5 ms for a small shader and
-  14.5 ms for a 6-octave plasma (GTX 1080 machine). Compile lazily, draw with
+  14.5 ms for a 6-octave plasma (desktop GPU). Compile lazily, draw with
   the CPU path until the program is ready, and never block a paint on the
   compiler.
 - **No SDK headers at runtime:** do not use `d2d1effecthelpers.hlsli`; it ships
@@ -828,11 +828,11 @@ ns per pixel with the explicit SIMD kernels, 64-pixel lanes, from
 
 | CPU (compiler) | ring_glow, 27 ops | plasma, 35 ops / 6 sin | fbm5, 200 ops / 20 hash | synthetic, 176 ops / 15 transc. |
 |---|---|---|---|---|
-| Apple M1 Ultra (AppleClang) | 7 | 15 | 46 | 40 |
+| Apple silicon desktop (AppleClang) | 7 | 15 | 46 | 40 |
 | Apple M1, CI VM (AppleClang) | 8 | 17 | 53 | 43 |
 | AMD EPYC 9V45, CI VM (Clang 18 / GCC 13) | 5 / 7 | 17 / 20 | 67 / 72 | 41 / 49 |
 | AMD EPYC 7763, CI VM (Clang 18 / MSVC / GCC 13) | 10 / 14 / 13 | 25 / 33 / 31 | 98 / 119 / 124 | 70 / 79 / 92 |
-| Intel i7-6800K, 2016 (MSVC 19.42) | 16 | 36 | 131 | 90 |
+| x86 desktop, 2016 (MSVC 19.42) | 16 | 36 | 131 | 90 |
 
 What a re-shade costs (synthetic shader):
 
@@ -1094,7 +1094,7 @@ Constants and draw values reach the pixel program through a pool and
 **Speed** (`neui_shader_bench`, SIMD ns/px; `flat` has no per-pixel work and
 measures the fixed cost of the block loop and output packing):
 
-| Shader | M1 Ultra, AppleClang | i7-6800K (2016), MSVC | knob 120×120 @2× |
+| Shader | Apple silicon, AppleClang | x86 desktop (2016), MSVC | knob 120×120 @2× |
 |---|---|---|---|
 | flat | 0.9 | 4.0 | 0.05-0.23 ms |
 | ring_glow (29 ops) | 6.2 | 13.3 | 0.36-0.77 ms |
@@ -1107,7 +1107,7 @@ These are at or better than the phase-0 prototype.
 **An MSVC pitfall found on the way:**
 - **Symptom:** the first version of the output packer cost MSVC a fixed
   16 ns per pixel, making small shaders nearly 2× slower than the prototype.
-  The Windows machine found it with `/FAs`.
+  It was found on Windows with `/FAs`.
 - **Cause:** when the `F4` / `I4` wrapper structs are nested several levels
   deep, MSVC keeps every temporary on the stack. That came to 83 instructions
   per pixel, mostly stack stores.
@@ -1146,7 +1146,7 @@ These are at or better than the phase-0 prototype.
   - Verified on macOS on both the native and xpl hosts, which give identical
     screenshots, with a synthesized drag. The `NEUI_NO_SHADERS` fallback was
     checked too.
-  - It bakes 388 images (12.3 Mpx at 2×) in about 0.5 s on the M1 Ultra.
+  - It bakes 388 images (12.3 Mpx at 2×) in about 0.5 s on Apple silicon.
     The knob shader costs about 40 ns/px: it is heavier than ring_glow.
 - **The QR upload leak (§8) is fixed.**
 - **New library helpers:** `nsl::wrap_time` (the spec's time wrap) and
@@ -1252,7 +1252,7 @@ findings fixed:**
   on whole device pixels. Real-mouse drags on both hosts re-shade only the
   dragged knob (screenshot diffs: the other knobs' pixels unchanged), and the
   `draw` panel follows the first knob only.
-- **Bench on Windows** (i7-6800K, MSVC 19.42, unchanged executor since phase
+- **Bench on Windows** (2016 x86 desktop, MSVC 19.42, unchanged executor since phase
   2): flat 2.8, ring_glow 13.2-14.3, plasma 34.5-34.7, metal_knob 64.8-65.1
   ns/px; fbm5 145, up from 134 in phase 1 and 140-143 in phase 2. The rise
   arrived with phase 2's sign-preserving `floor` (the noise built-ins floor
@@ -1284,7 +1284,7 @@ findings fixed:**
   measured cost.
 - **Linux on-screen check** of the live layer: CI builds and tests it; the
   Cairo `get_device_transform` has no on-screen verification yet. (Done
-  2026-10-11 on WSLg; see Status.)
+  2026-10-11; see Status.)
 
 **Next:** phase 4 (D2D GPU path) or phase 6 (time and animation; partial
 repaint, its prerequisite, is done). Which one first depends on the client's
@@ -1324,7 +1324,7 @@ use case.
   target `neui_shader_gpu_smoke` (ctest, WARP in CI).
 - **Example:** a "GPU where available" checkbox over the live row.
 
-**Measured** (neui-win, GTX 1080, i7-6800K, MSVC; and WARP in CI):
+**Measured** (Windows: desktop GPU, 2016 x86 desktop CPU, MSVC; and WARP in CI):
 - GPU vs CPU over 6 programs at 1×, 1.25×, 1.5× and 2× with fractional
   origins: **at most 1/255**, no pixel over 2/255, nothing outside the rect.
   Two draws of one program in one frame, a pushed clip and alpha 0.5 are
@@ -1439,7 +1439,7 @@ only if measured necessary.
 - 10-13% of one core for the two panels (302 x 88 logical px each, the left
   at full resolution on the CPU).
 
-**Measured** (neui-win: GTX 1080, i7-6800K, 4K 60 Hz at 150%, MSVC Debug
+**Measured** (Windows: desktop GPU, 2016 x86 desktop CPU, 60 Hz at 150%, MSVC Debug
 `/W4` warning-free; 441 tests, `neui_shader_gpu_smoke` PASS; CPU from
 `QueryProcessCycleTime`, as `GetProcessTimes` under-counts short bursts):
 - **Rate:** native 9.8 / 29.6-30.7 / 60.0 paints/s for 10 / 30 / 60 fps;
@@ -1515,7 +1515,7 @@ above):
   15.6 ms tick, so 60 fps animations ran at ~32. Times are now taken when a
   paint starts, and a wait under 4 ms is not held unless that would put two
   presents within half a refresh.
-- **Measured** (neui-win, GTX 1080, 60 Hz, Debug, CPU path, 1000 Hz raw-input
+- **Measured** (Windows, desktop GPU, 60 Hz, Debug, CPU path, 1000 Hz raw-input
   drag; presents/s and CPU % of one core, sync 1 -> paced): xpl paused drag
   59 / 11.0% -> 65 / 17.7%; xpl 60 fps idle 60 / 30.4% -> 58 / 30.3%; xpl
   60 fps + drag 60 / 14.0% -> 68 / 44.0%, with the animated panels at 55-60
@@ -1561,8 +1561,8 @@ program that compiles today.
     theme-coloured gradients);
   - artist-drawn **masks** and shapes, combined with animated shader work.
 - **Cheaper effects:** a noise tile baked once with `bake_bitmap` and
-  sampled with `repeat` replaces live fbm (46 ns/px on the M1 Ultra, 131 on
-  the i7, §7). `bake_bitmap` returns a BITMAP, so one shader's output feeds
+  sampled with `repeat` replaces live fbm (46 ns/px on Apple silicon, 131 on
+  the 2016 x86 desktop, §7). `bake_bitmap` returns a BITMAP, so one shader's output feeds
   another without new API.
 - **Phase 8:** a filter-graph shader primitive (`NEUI_FE_SHADER`) samples
   its input image. This phase provides the sampling; phase 8 then only binds
@@ -1740,7 +1740,7 @@ channel, which made a bilinear sample cost as much as `fbm5`.
 
 ### 19.6 Spikes first (9.0) - done, results in §20
 
-1. **CPU fetch cost** (this Mac, then the i7 via neui-win): `OP_FETCH` and
+1. **CPU fetch cost** (macOS, then a 2016 x86 desktop on Windows): `OP_FETCH` and
    the lowering on a branch, plus `shader_bench` cases: a pass-through, one
    bilinear sample, a 9-tap blur, a normal-mapped knob, and a baked noise
    tile against `fbm5`. Confirms the identity property and SIMD == scalar,
@@ -1748,7 +1748,7 @@ channel, which made a bilinear sample cost as much as `fbm5`.
 2. **D2D resource textures** (neui-win): a resource texture in the existing
    effect; the BGRA channel order and `Load` under ps_4_0; upload and update
    cost (a SURFACE that changes every frame); GPU against CPU at 100, 125,
-   150 and 200% on the GTX 1080 and on WARP; re-creation after device loss.
+   150 and 200% on the desktop GPU and on WARP; re-creation after device loss.
 
 ### 19.7 Steps after the spikes
 
@@ -1812,10 +1812,10 @@ Built on branch `spike/texture-sampling` (64fdcbe CPU, d72ce1e D2D), merged to `
   `neui_shader_gpu_smoke` cases, and five bench programs.
 
 **Verified:**
-- The CRC goldens recorded on AppleClang arm64 match MSVC x64 (on the
-  Windows machine) and every CI job: macOS, the iOS simulator, Linux GCC
+- The CRC goldens recorded on AppleClang arm64 match MSVC x64 (on a
+  Windows desktop) and every CI job: macOS, the iOS simulator, Linux GCC
   and Windows MSVC.
-- **D2D, GTX 1080:** every textured case at 1.0, 1.25, 1.5 and 2.0× is at
+- **D2D, desktop GPU:** every textured case at 1.0, 1.25, 1.5 and 2.0× is at
   most 1/255 off the CPU, with no pixel over 2/255 and nothing drawn
   outside the placement. The 1:1 copy is exact (max 0). Two bitmaps in one
   frame, a new content id and an unbound sampler are right. The channel
@@ -1826,10 +1826,10 @@ Built on branch `spike/texture-sampling` (64fdcbe CPU, d72ce1e D2D), merged to `
 - `neui_shader_example` draws every panel unchanged on the Windows native
   and xpl hosts, GPU on.
 
-**Measured** (SIMD ns/px; `tests/shader_bench/`; M1 Ultra AppleClang 21,
-i7-6800K MSVC 19.42):
+**Measured** (SIMD ns/px; `tests/shader_bench/`; Apple silicon AppleClang 21,
+2016 x86 desktop MSVC 19.42):
 
-| Program | Ops (texel reads) | M1 Ultra | i7-6800K |
+| Program | Ops (texel reads) | Apple silicon | x86 (2016) |
 |---|---|---|---|
 | `tex_copy`, one bilinear sample | 80 (4) | 19.7 | 40 |
 | `tex_nearest`, one nearest sample | 19 (1) | 5.7 | 12-13 |
@@ -1845,8 +1845,7 @@ i7-6800K MSVC 19.42):
 - **The baked noise tile** costs 2.7× less than live `fbm5` on the M1 and
   3.8× less on the i7.
 - **A normal-mapped knob** costs the same as the procedural `metal_knob`.
-- **D2D:** a 240 × 240 px bilinear copy takes 0.094 ms per frame on the GTX
-  1080 (CPU 2.31 ms) and 0.554 ms on WARP. Compiling a textured program
+- **D2D:** a 240 × 240 px bilinear copy takes 0.094 ms per frame on the desktop GPU (CPU 2.31 ms) and 0.554 ms on WARP. Compiling a textured program
   takes 30-78 ms on the worker thread.
 
 **Decisions taken while building it:**

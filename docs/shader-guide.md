@@ -816,7 +816,7 @@ re-shade.
 Measured on the CPU executor (single thread, ns per device pixel; a knob is
 120×120 logical px at 2×, 57,600 px):
 
-| Shader | Apple M1 Ultra | Intel i7-6800K (2016) | one knob re-shade |
+| Shader | Apple silicon desktop | x86 desktop (2016) | one knob re-shade |
 |---|---|---|---|
 | flat colour | 0.9 | 4 | 0.05-0.23 ms |
 | ring glow (29 ops) | 6 | 13 | 0.4-0.8 ms |
