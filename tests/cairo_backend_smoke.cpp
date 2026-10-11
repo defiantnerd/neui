@@ -196,6 +196,41 @@ int main()
     if (fresh) be->destroy_context(fresh);
   }
 
+  // --- The path survives other draws (renderer.h: valid until begin_path). --
+  // fill_rect, push_clip and the like make their own geometry; they must not
+  // fill or clip to the path, nor drop it.
+  be->begin_frame(ctx, 0xFF000000u);
+  be->begin_path(ctx);
+  be->move_to(ctx, 8, 8);
+  be->line_to(ctx, 40, 8);
+  be->line_to(ctx, 8, 40);                             // an open triangle
+  be->stroke_path(ctx, 2.0f, 0xFF0000FFu);             // blue, stroked only
+  be->fill_rect(ctx, 48, 48, 8, 8, 0xFF00FF00u);       // green, elsewhere
+  be->end_frame(ctx);
+  be->read_pixels_bgra(ctx, out.data());
+  check(px(out, W, 16, 16)[1] == 0, "path: a later fill_rect does not fill the path");
+  check(px(out, W, 52, 52)[1] > 200, "path: the fill_rect itself draws");
+
+  be->begin_frame(ctx, 0xFF000000u);
+  be->begin_path(ctx);
+  be->move_to(ctx, 8, 8);
+  be->line_to(ctx, 40, 8);
+  be->line_to(ctx, 8, 40);
+  be->stroke_path(ctx, 2.0f, 0xFF0000FFu);
+  be->push_clip(ctx, 48, 48, 8, 8);
+  be->fill_rect(ctx, 0, 0, 64, 64, 0xFF00FF00u);       // green, clipped
+  be->pop_clip(ctx);
+  be->fill_path(ctx, 0xFFFF0000u);                     // red: the path is still there
+  be->end_frame(ctx);
+  be->read_pixels_bgra(ctx, out.data());
+  {
+    const uint8_t* in_path = px(out, W, 16, 16);
+    check(in_path[2] > 200 && in_path[1] == 0, "path: kept across push_clip, then filled");
+    check(px(out, W, 52, 52)[1] > 200, "path: the clip is the rect");
+    check(px(out, W, 30, 30)[1] == 0 && px(out, W, 30, 30)[2] == 0,
+          "path: the clip does not take in the path");
+  }
+
   be->destroy_context(ctx);
 
   std::printf(g_failures ? "\nSMOKE FAILED (%d)\n" : "\nSMOKE OK\n", g_failures);

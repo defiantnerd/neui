@@ -562,11 +562,40 @@ namespace neui_cairo_backend
   // --------------------------------------------------------------------------
   // Primitive draws
 
+  // The path API builds on the cr's current path and keeps it after a fill or
+  // stroke (renderer.h: valid until the next begin_path), but cairo_fill and
+  // cairo_clip take the whole current path. A primitive that makes its own
+  // geometry (a rect to fill, stroke or clip to, a text position) would draw
+  // or clip that path as well and then lose it; CG and D2D keep the path apart
+  // from the context. This sets the path aside for the primitive and puts it
+  // back, at the same CTM.
+  struct PathAside
+  {
+    explicit PathAside(cairo_t* c) : cr(c)
+    {
+      if (cairo_has_current_point(cr)) saved = cairo_copy_path(cr);
+      cairo_new_path(cr);
+    }
+    ~PathAside()
+    {
+      cairo_new_path(cr);
+      if (!saved) return;
+      if (saved->status == CAIRO_STATUS_SUCCESS) cairo_append_path(cr, saved);
+      cairo_path_destroy(saved);
+    }
+    PathAside(const PathAside&) = delete;
+    PathAside& operator=(const PathAside&) = delete;
+
+    cairo_t*      cr;
+    cairo_path_t* saved = nullptr;
+  };
+
   static void cairo_fill_rect(neui_render_ctx_t raw,
                               float x, float y, float w, float h, uint32_t argb)
   {
     auto* st = static_cast<CairoCtx*>(raw);
     if (!st || !st->cr) return;
+    PathAside aside(st->cr);
     double rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     cairo_set_source_rgba(st->cr, rgba[0], rgba[1], rgba[2], rgba[3]);
     cairo_rectangle(st->cr, x, y, w, h);
@@ -579,6 +608,7 @@ namespace neui_cairo_backend
   {
     auto* st = static_cast<CairoCtx*>(raw);
     if (!st || !st->cr) return;
+    PathAside aside(st->cr);
     double rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     cairo_set_source_rgba(st->cr, rgba[0], rgba[1], rgba[2], rgba[3]);
     cairo_set_line_width(st->cr, stroke_width);
@@ -613,6 +643,7 @@ namespace neui_cairo_backend
     auto* st = static_cast<CairoCtx*>(raw);
     if (!st || !st->cr || !text || !*text || font_size <= 0.0f) return;
 
+    PathAside aside(st->cr);
     cairo_save(st->cr);
     cairo_rectangle(st->cr, x, y, w, h);
     cairo_clip(st->cr);
@@ -681,6 +712,7 @@ namespace neui_cairo_backend
   {
     auto* st = static_cast<CairoCtx*>(raw);
     if (!st || !st->cr) return;
+    PathAside aside(st->cr);
     cairo_save(st->cr);
     cairo_rectangle(st->cr, x, y, w, h);
     cairo_clip(st->cr);
@@ -763,6 +795,7 @@ namespace neui_cairo_backend
     double shp = (src_h > 0.0f) ? src_h * h->scale : static_cast<double>(h->height_px);
     if (swp <= 0.0 || shp <= 0.0) return;
 
+    PathAside aside(st->cr);
     cairo_save(st->cr);
     // Map the source physical-px region onto the dst logical rect.
     cairo_translate(st->cr, dst_x, dst_y);
@@ -965,6 +998,7 @@ namespace neui_cairo_backend
     if (!st || !st->cr) return;
     cairo_pattern_t* pat = cairo_make_gradient(st, g);
     if (!pat) return;
+    PathAside aside(st->cr);
     cairo_set_source(st->cr, pat);
     cairo_rectangle(st->cr, x, y, w, h);
     cairo_fill(st->cr);

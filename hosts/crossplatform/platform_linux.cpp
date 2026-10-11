@@ -378,13 +378,15 @@ namespace
     auto* wd = lw->session->get_widget(lw->widget_index);
     // Partial only when nothing asked for a full repaint since the last
     // paint; paint_frame itself falls back to full when the backend or the
-    // coverage says so. Invalidations raised DURING the paint are dropped
-    // with the reset below, exactly as needs_paint always was.
-    if (wd && wd->render_ctx)
-      lw->session->paint_frame(wd->render_ctx, lw->widget_index,
-                               lw->needs_paint ? nullptr : &lw->damage);
+    // coverage says so. The pending state is taken before painting, so an
+    // invalidation raised DURING the paint (a paint handler that sets a
+    // label's text) is kept for the next frame instead of being dropped.
+    const bool full = lw->needs_paint;
+    neui_detail::DamageRegion damage = std::move(lw->damage);
     lw->needs_paint = false;
     lw->damage.clear();
+    if (wd && wd->render_ctx)
+      lw->session->paint_frame(wd->render_ctx, lw->widget_index, full ? nullptr : &damage);
   }
 
   void flush_pending_paints()
