@@ -140,13 +140,41 @@ TEST_CASE("anim clock: pause holds the time, stops the timer and keeps the widge
   g_now = 5000 * k_ms;
   CHECK(tick(c).empty());
   CHECK_EQ(c.size(), 1u);
-  CHECK_APPROX(paint(c, 1, 0), 1.0);
+  CHECK_APPROX(paint(c, 1, 0), 0.0);  // the frame on screen (no frame ran before the pause)
   c.set_paused(false);
   g_now = 5500 * k_ms;
-  CHECK_APPROX(paint(c, 1, 0), 1.0);  // the frame time until the next frame
+  CHECK_APPROX(paint(c, 1, 0), 0.0);  // the frame time until the next frame
   Calls r = tick(c);  // resuming makes the next timer event a frame
   CHECK_EQ(r.size(), 1u);
-  CHECK_APPROX(paint(c, 1, 0), 1.5);  // no jump: the paused 4 s do not count
+  CHECK_APPROX(paint(c, 1, 0), 0.5);  // no jump: the paused 4 s do not count
+}
+
+TEST_CASE("anim clock: a stopped clock stands at the frame on screen")
+{
+  g_now = 0;
+  AnimClock c(&fake_now);
+  paint(c, 1, 0);
+  g_now = 40 * k_ms;
+  CHECK_EQ(tick(c).size(), 1u);
+  CHECK_APPROX(paint(c, 1, 0), 0.04);
+  g_now = 70 * k_ms;  // between frames: the screen shows 0.04
+  c.set_paused(true);
+  g_now = 900 * k_ms;
+  CHECK_APPROX(paint(c, 1, 0), 0.04);  // a repaint while paused draws the same frame
+  c.set_paused(false);
+  CHECK_EQ(tick(c).size(), 1u);
+  CHECK_APPROX(paint(c, 1, 0), 0.04);  // and resuming goes on from it
+  g_now = 940 * k_ms;
+  CHECK_EQ(tick(c).size(), 1u);
+  CHECK_APPROX(paint(c, 1, 0), 0.08);
+
+  // Nothing animating: the clock's own reading, as before.
+  g_now = 1200 * k_ms;
+  AnimClock idle(&fake_now);
+  g_now = 1500 * k_ms;
+  idle.set_paused(true);
+  g_now = 1800 * k_ms;
+  CHECK_APPROX(idle.time(), 0.3);  // stopped at 0.3, not at a frame
 }
 
 TEST_CASE("anim clock: reduced motion holds the time and polls slowly")
@@ -165,7 +193,7 @@ TEST_CASE("anim clock: reduced motion holds the time and polls slowly")
   c.set_reduced_motion(false);
   CHECK_EQ(c.heartbeat_ms(3), 16u);
   CHECK_EQ(tick(c).size(), 1u);
-  CHECK_APPROX(paint(c, 1, 3), 0.1);
+  CHECK_APPROX(paint(c, 1, 3), 0.0);  // goes on from the frame shown when it was held
 }
 
 TEST_CASE("anim clock: a late paint resets the misses")

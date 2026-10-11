@@ -28,7 +28,10 @@
 // a slow timer keeps polling the setting so animation comes back on its own.
 //
 // The time is seconds of running time since the session began: a pause does
-// not make the animation jump. Header-only and platform-free (the host passes
+// not make the animation jump. A clock that stops while widgets animate stands
+// at the frame they show, not at the moment it stopped (up to a frame later),
+// so a repaint while it stands draws what is on screen, and resuming goes on
+// from there. Header-only and platform-free (the host passes
 // the timer events and the OS setting in), so it is Tier-1 tested.
 
 namespace neui_detail
@@ -200,6 +203,7 @@ namespace neui_detail
       if (was) _base = seconds_at(now);
       _paused  = paused;
       _reduced = reduced;
+      if (was && !running() && !_entries.empty()) _base = _frame;  // the frame on screen
       if (running()) {
         _start = now;
         if (!was) _next_due = now;  // the next timer event draws a frame
