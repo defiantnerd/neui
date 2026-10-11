@@ -143,6 +143,18 @@ bool gpu_constants(const Program& p, const Draw& d, float* out);
 // gpu_constants writes it.
 constexpr size_t k_gpu_opacity = 6;
 
+// Scales a coarse image up (a layer below resolution 1): the w x h
+// premultiplied BGRA8 texels `src` (rows of w * 4 bytes) cover px
+// [sx, sx + w) x [sy, sy + h) of a grid r / 65536 (below 1) times as dense as
+// the output's. Each output px whose centre lies on them takes the bilinear
+// sample there with texture2D's exact arithmetic (weights in 1/256, edge
+// texels clamped, integers on the premultiplied bytes, rounded once), so the
+// result is the same everywhere. Writes them to `dst`, dw x dh from px
+// (dx, dy) of the output grid; false when empty or a side would pass
+// k_max_bitmap_side.
+bool upscale(const uint8_t* src, int w, int h, int sx, int sy, uint32_t r,
+             std::vector<uint8_t>& dst, int& dx, int& dy, int& dw, int& dh);
+
 // Test hook: the same draw through scalar kernels, one pixel at a time. Must
 // produce exactly the bytes execute() does.
 bool execute_scalar(const Program& p, const Draw& d, uint8_t* bgra, size_t stride);

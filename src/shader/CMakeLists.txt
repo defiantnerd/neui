@@ -11,7 +11,7 @@ if(MSVC)
   string(REPLACE "/Ob0" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
 endif()
 
-add_library(neui-shader STATIC nsl_compile.cpp nsl_exec.cpp nsl_gpu.cpp)
+add_library(neui-shader STATIC nsl_compile.cpp nsl_exec.cpp nsl_gpu.cpp nsl_upscale.cpp)
 target_compile_features(neui-shader PUBLIC cxx_std_17)
 if(MSVC)
   target_compile_options(neui-shader PRIVATE /O2 /fp:precise)

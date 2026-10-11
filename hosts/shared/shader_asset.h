@@ -100,8 +100,9 @@ namespace neui_detail
   {
     uint64_t        uid = 0;
     float           w = 0.0f, h = 0.0f;  // layer size, logical px
-    float           scale = 1.0f;        // shader px per logical px
-    float           fx = 0.0f, fy = 0.0f;  // origin minus its floor, shader px
+    float           scale = 1.0f;        // image px per logical px
+    float           res = 1.0f;          // below 1: shaded this much coarser, scaled up
+    float           fx = 0.0f, fy = 0.0f;  // origin minus its floor, image px
     float           time = 0.0f;
     const float*    uniforms = nullptr;
     size_t          uniform_count = 0;
@@ -116,14 +117,15 @@ namespace neui_detail
 
     // The key, owned.
     uint64_t           uid = 0;
-    float              w = 0.0f, h = 0.0f, scale = 1.0f, fx = 0.0f, fy = 0.0f, time = 0.0f;
+    float              w = 0.0f, h = 0.0f, scale = 1.0f, res = 1.0f, fx = 0.0f, fy = 0.0f,
+                       time = 0.0f;
     std::vector<float> uniforms;
     std::vector<uint64_t> textures;
     uint64_t           hash = 0;
     bool               clock = false;
 
-    // The image: BGRA8 premultiplied, w_px x h_px, belonging (px, py) shader
-    // px from the floored origin (always 0 in practice).
+    // The image: BGRA8 premultiplied, w_px x h_px, belonging (px, py) image
+    // px from the floored origin (0 unless scaled up).
     std::vector<uint8_t> pixels;
     uint32_t             w_px = 0, h_px = 0;
     int                  px = 0, py = 0;
@@ -144,7 +146,7 @@ namespace neui_detail
         for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
       };
       mix(&k.uid, sizeof k.uid);
-      const float f[6] = { k.w, k.h, k.scale, k.fx, k.fy, k.time };
+      const float f[7] = { k.w, k.h, k.scale, k.res, k.fx, k.fy, k.time };
       mix(f, sizeof f);
       if (k.uniform_count) mix(k.uniforms, sizeof(float) * k.uniform_count);
       if (k.texture_count) mix(k.textures, sizeof(uint64_t) * k.texture_count);
@@ -167,7 +169,7 @@ namespace neui_detail
       }
       auto e = std::make_unique<ShaderCacheEntry>();
       e->uid = key.uid;
-      e->w = key.w; e->h = key.h; e->scale = key.scale;
+      e->w = key.w; e->h = key.h; e->scale = key.scale; e->res = key.res;
       e->fx = key.fx; e->fy = key.fy; e->time = key.time;
       e->uniforms.assign(key.uniforms, key.uniforms + key.uniform_count);
       e->textures.assign(key.textures, key.textures + key.texture_count);
@@ -326,7 +328,7 @@ namespace neui_detail
     {
       auto same = [](float a, float b) { return std::memcmp(&a, &b, sizeof a) == 0; };
       return e.uid == k.uid && same(e.w, k.w) && same(e.h, k.h) && same(e.scale, k.scale) &&
-             same(e.fx, k.fx) && same(e.fy, k.fy) && same(e.time, k.time) &&
+             same(e.res, k.res) && same(e.fx, k.fx) && same(e.fy, k.fy) && same(e.time, k.time) &&
              e.uniforms.size() == k.uniform_count &&
              (k.uniform_count == 0 ||
               std::memcmp(e.uniforms.data(), k.uniforms, sizeof(float) * k.uniform_count) == 0) &&

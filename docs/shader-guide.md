@@ -659,6 +659,7 @@ attrs->set_int(sess, knob, "app.accent", (int)0xFF3FA9F5);
 - **Other props:**
   - `"resolution"` (0, 4], default 1, is the shading density. 0.5 shades a
     quarter of the pixels and scales the result up, for soft backgrounds.
+    neui does the scaling itself, so it looks the same on every platform.
   - `"time"` (§6).
   - `"fallback"` names a layer that paints instead when this one cannot: no
     `NEUI_API_SHADER` on the host, or no valid shader.

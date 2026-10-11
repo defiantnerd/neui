@@ -203,7 +203,8 @@ extern "C" {
     // (neui_size) and is evaluated once per device pixel, so the result is
     // drawn 1:1 and stays sharp at any display scale; under a rotation or
     // skew it is drawn transformed. `resolution` below 1 shades fewer pixels
-    // and scales the result up (cheap, soft backgrounds). Clip, transform and
+    // and scales the result up with neui's own filter, the same on every
+    // backend (cheap, soft backgrounds). Clip, transform and
     // the alpha stack apply as for any painter call. Returns false and draws
     // nothing for a bad handle, an empty or oversized rect (a side over 16384
     // device px), or a painter of another session.

@@ -4,8 +4,9 @@
 // and NEUI_API_SHADER's draw. Both resolve the shader through the painter's
 // resolve_shader thunk, render it on the CPU into the session's image cache
 // (ShaderCache, shader_asset.h) and draw the image onto whole device pixels,
-// so it is never resampled. Host-free, so the Tier-1 suite covers it with a
-// fake backend.
+// so the backend never resamples it (below resolution 1, neui scales it up
+// itself first). Host-free, so the Tier-1 suite covers it with a fake
+// backend.
 
 #include <cmath>
 #include <cstdint>
@@ -31,16 +32,21 @@ namespace neui_detail
     return r < 4.0f ? r : 4.0f;
   }
 
-  // Where the shader's pixels lie: shader px U = k * x + ox for a logical x
-  // of the painter's current space, and likewise y. When the current
-  // transform is a translation plus a uniform positive scale, this is the
-  // device grid times the resolution, so an image placed on whole shader px
-  // lands on whole device px. Otherwise (rotation, skew, mirror, uneven
-  // scale) the image is shaded in the painter's space at the transform's
-  // average scale and drawn through the transform.
+  // Where the image's pixels lie: image px U = k * x + ox for a logical x of
+  // the painter's current space, and likewise y. When the current transform
+  // is a translation plus a uniform positive scale, this is the device grid
+  // times the resolution, so an image placed on whole image px lands on whole
+  // device px. A resolution below 1 is the exception: its image px are device
+  // px too, shaded `res` times as densely and scaled up by nsl::upscale, so
+  // the backend draws it 1:1. Backends scale bitmaps their own way, and CG
+  // even two ways (AppKit hands a partial update of a large view to Core
+  // Animation). Otherwise (rotation, skew, mirror, uneven scale) the image is
+  // shaded in the painter's space at the transform's average scale and drawn
+  // through the transform.
   struct ShaderGrid
   {
     float k = 1.0f, ox = 0.0f, oy = 0.0f;
+    float res = 1.0f;      // below 1: shaded res times as densely, scaled up
     bool  device = false;  // shader px are device px (aligned, resolution 1)
   };
 
@@ -57,10 +63,19 @@ namespace neui_detail
     const float tol = 1e-5f * std::fabs(m[0]);
     if (m[0] > 0.0f && std::fabs(m[1]) <= tol && std::fabs(m[2]) <= tol &&
         std::fabs(m[3] - m[0]) <= tol) {
-      g.k  = m[0] * resolution;
-      g.ox = m[4] * resolution;
-      g.oy = m[5] * resolution;
-      g.device = resolution == 1.0f;
+      // In 1/65536 steps, so nsl::upscale's integer positions are exact.
+      const float r = std::floor(resolution * 65536.0f + 0.5f) / 65536.0f;
+      if (r < 1.0f) {
+        g.k = m[0];
+        g.ox = m[4];
+        g.oy = m[5];
+        g.res = r;
+      } else {
+        g.k  = m[0] * resolution;
+        g.ox = m[4] * resolution;
+        g.oy = m[5] * resolution;
+        g.device = resolution == 1.0f;
+      }
     } else {
       g.k = std::sqrt(std::fabs(m[0] * m[3] - m[1] * m[2])) * resolution;
     }
@@ -75,7 +90,7 @@ namespace neui_detail
   //
   // On the device grid, a backend with GPU programs runs the shader straight
   // on the target's pixels (no image); everywhere else the CPU renders an
-  // image into the cache.
+  // image into the cache (below resolution 1: a coarser one, scaled up).
   inline bool shader_paint(neui_painter_t* p, const ShaderAsset& sa, ShaderCache& cache,
                            float x, float y, float w, float h,
                            float resolution, float time, const float* uniforms,
@@ -87,12 +102,21 @@ namespace neui_detail
     if (!(w > 0.0f) || !(h > 0.0f)) return false;
     const nsl::Program& prog = *sa.program;
 
-    const ShaderGrid g = shader_grid(p, shader_resolution_clamp(resolution));
+    ShaderGrid g = shader_grid(p, shader_resolution_clamp(resolution));
     if (!(g.k > 0.0f) || !std::isfinite(g.k)) return false;
+    // Too large to scale up: the backend scales the coarse image.
+    const float most = static_cast<float>(nsl::k_max_bitmap_side) - 2.0f - 1.0f / g.res;
+    if (g.res < 1.0f && !(w * g.k <= most && h * g.k <= most)) {
+      g.k *= g.res;
+      g.ox *= g.res;
+      g.oy *= g.res;
+      g.res = 1.0f;
+    }
 
-    // The layer origin on the shader grid, as whole px plus a remainder. The
+    // The layer origin on the image grid, as whole px plus a remainder. The
     // remainder is snapped to 1/256 px, so float noise in a transform does
     // not split the cache (whole logical px at 150% give exactly 0 or 0.5).
+    // A coarser shading grid starts at the whole px.
     const float X0 = g.k * x + g.ox;
     const float Y0 = g.k * y + g.oy;
     if (!(std::fabs(X0) < 8388608.0f) || !(std::fabs(Y0) < 8388608.0f)) return false;
@@ -123,7 +147,7 @@ namespace neui_detail
     d.y = fy / g.k;
     d.w = w;
     d.h = h;
-    d.scale = g.k;
+    d.scale = g.k * g.res;
     d.time = (nsl::flags(prog) & nsl::NSL_READS_TIME) ? time : 0.0f;
     d.uniforms = n ? uniforms : nullptr;
     d.textures = samplers ? textures.data() : nullptr;
@@ -165,6 +189,7 @@ namespace neui_detail
     key.w = w;
     key.h = h;
     key.scale = g.k;
+    key.res = g.res;
     key.fx = fx;
     key.fy = fy;
     key.time = d.time;
@@ -176,6 +201,18 @@ namespace neui_detail
     ShaderCacheEntry* e = cache.get(key, [&](ShaderCacheEntry& out) {
       const nsl::Placement pl = nsl::placement(d);
       if (pl.w <= 0 || pl.h <= 0) return false;
+      if (g.res < 1.0f) {
+        std::vector<uint8_t> coarse(static_cast<size_t>(pl.w) * 4u * static_cast<size_t>(pl.h));
+        if (!nsl::execute(prog, d, coarse.data(), static_cast<size_t>(pl.w) * 4u)) return false;
+        int dw = 0, dh = 0;
+        if (!nsl::upscale(coarse.data(), pl.w, pl.h, pl.x, pl.y,
+                          static_cast<uint32_t>(g.res * 65536.0f), out.pixels, out.px, out.py,
+                          dw, dh))
+          return false;
+        out.w_px = static_cast<uint32_t>(dw);
+        out.h_px = static_cast<uint32_t>(dh);
+        return true;
+      }
       out.w_px = static_cast<uint32_t>(pl.w);
       out.h_px = static_cast<uint32_t>(pl.h);
       out.px = pl.x;
@@ -188,7 +225,7 @@ namespace neui_detail
     void* bmp = ShaderCache::upload(*e, p->backend, p->ctx);
     if (!bmp) return false;
 
-    // Back from shader px to the painter's space.
+    // Back from image px to the painter's space.
     const float inv = 1.0f / g.k;
     p->backend->draw_bitmap(p->ctx, bmp, 0.0f, 0.0f, 0.0f, 0.0f,
                             (I + static_cast<float>(e->px) - g.ox) * inv,

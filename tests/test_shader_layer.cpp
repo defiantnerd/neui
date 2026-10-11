@@ -430,12 +430,92 @@ TEST_CASE("shader paint: resolution scales the shading density")
   fx.fb.m[0] = fx.fb.m[3] = 2.0f;
   neui_painter p = fx.painter(ctx_a());
   CHECK(shader_paint(&p, fx.shader(sh), fx.store.shader_cache(), 0, 0, 40, 20, 0.5f, 0, nullptr));
-  CHECK_EQ(fx.last_upload().w, 40u);  // 2x display at half density
+  CHECK_EQ(fx.last_upload().w, 80u);  // 2x display at half density, scaled up
   CHECK_EQ(fx.fb.last_dst[2], 40.0f);  // still covers the layer
   CHECK(shader_paint(&p, fx.shader(sh), fx.store.shader_cache(), 0, 0, 40, 20, 0.0f, 0, nullptr));
   CHECK_EQ(fx.last_upload().w, 80u);  // <= 0 means 1
   CHECK(shader_paint(&p, fx.shader(sh), fx.store.shader_cache(), 0, 0, 40, 20, 100.f, 0, nullptr));
   CHECK_EQ(fx.last_upload().w, 320u);  // clamped to 4
+}
+
+TEST_CASE("nsl upscale: texture2D's bilinear on whole image px")
+{
+  // Two texels, grey 0 and 255 (opaque), twice as large: the image px centres
+  // fall a quarter texel from the texel centres, the outer ones on the edge.
+  const uint8_t src[8] = { 0, 0, 0, 255, 255, 255, 255, 255 };
+  std::vector<uint8_t> dst;
+  int dx = -1, dy = -1, dw = 0, dh = 0;
+  REQUIRE(nsl::upscale(src, 2, 1, 0, 0, 32768u, dst, dx, dy, dw, dh));
+  CHECK_EQ(dx, 0);
+  CHECK_EQ(dy, 0);
+  CHECK_EQ(dw, 4);
+  CHECK_EQ(dh, 2);
+  const uint8_t want[4] = { 0, 64, 191, 255 };  // 63.75 and 191.25, rounded
+  for (int y = 0; y < 2; ++y)
+    for (int x = 0; x < 4; ++x) {
+      const uint8_t* q = &dst[size_t(y * 4 + x) * 4];
+      CHECK_EQ(q[0], want[x]);
+      CHECK_EQ(q[2], want[x]);
+      CHECK_EQ(q[3], 255);
+    }
+
+  // Texels from px (1, 3) of the coarse grid start at image px (2, 6).
+  REQUIRE(nsl::upscale(src, 2, 1, 1, 3, 32768u, dst, dx, dy, dw, dh));
+  CHECK_EQ(dx, 2);
+  CHECK_EQ(dy, 6);
+  CHECK_EQ(dw, 4);
+
+  // A third: image px whose centres lie on 3 texels, 9 of them. A flat
+  // premultiplied colour stays exactly that colour.
+  const uint8_t flat[12] = { 10, 20, 30, 128, 10, 20, 30, 128, 10, 20, 30, 128 };
+  REQUIRE(nsl::upscale(flat, 3, 1, 0, 0, 21845u, dst, dx, dy, dw, dh));
+  CHECK_EQ(dw, 9);
+  CHECK_EQ(dh, 3);
+  bool same = true;
+  for (size_t i = 0; i < dst.size(); ++i) same = same && dst[i] == flat[i % 4];
+  CHECK(same);
+
+  CHECK_FALSE(nsl::upscale(src, 0, 1, 0, 0, 32768u, dst, dx, dy, dw, dh));
+  CHECK_FALSE(nsl::upscale(src, 20000, 1, 0, 0, 32768u, dst, dx, dy, dw, dh));  // too wide
+}
+
+TEST_CASE("shader paint: below resolution 1 neui scales the image up, drawn 1:1")
+{
+  Fixture fx;
+  const neui_asset_t sh = fx.create(k_disc);
+  const ShaderAsset& sa = fx.shader(sh);
+  ShaderCache& cache = fx.store.shader_cache();
+  // 150% with the widget at (7, 3): the layer at (1, 1) starts at device
+  // (12, 6) and is shaded at half density from there.
+  fx.fb.m[0] = fx.fb.m[3] = 1.5f;
+  fx.fb.m[4] = 10.5f; fx.fb.m[5] = 4.5f;
+  neui_painter p = fx.painter(ctx_a());
+  CHECK(shader_paint(&p, sa, cache, 1.0f, 1.0f, 20.0f, 10.0f, 0.5f, 0.0f, nullptr));
+  nsl::Draw d;
+  d.w = 20.0f; d.h = 10.0f; d.scale = 0.75f;
+  nsl::Placement pl;
+  const std::vector<uint8_t> coarse = reference(*sa.program, d, &pl);
+  CHECK_EQ(pl.w, 15);
+  std::vector<uint8_t> want;
+  int dx = 0, dy = 0, dw = 0, dh = 0;
+  REQUIRE(nsl::upscale(coarse.data(), pl.w, pl.h, pl.x, pl.y, 32768u, want, dx, dy, dw, dh));
+  const Upload& u = fx.last_upload();
+  CHECK_EQ(u.w, 30u);
+  CHECK_EQ(u.h, 16u);  // 8 coarse rows, the last half covered
+  CHECK_EQ(u.scale, 1.5f);
+  CHECK(u.pixels == want);
+  // On whole device px, at the size of the image.
+  CHECK_APPROX(fx.fb.last_dst[0] * 1.5f + 10.5f, 12.0f);
+  CHECK_APPROX(fx.fb.last_dst[1] * 1.5f + 4.5f, 6.0f);
+  CHECK_APPROX(fx.fb.last_dst[2] * 1.5f, 30.0f);
+  CHECK_APPROX(fx.fb.last_dst[3] * 1.5f, 16.0f);
+
+  // Moved by whole device px it is the same image; resolution 1 is another.
+  CHECK(shader_paint(&p, sa, cache, 3.0f, 1.0f, 20.0f, 10.0f, 0.5f, 0.0f, nullptr));
+  CHECK_EQ(cache.size(), 1u);
+  CHECK_APPROX(fx.fb.last_dst[0] * 1.5f + 10.5f, 15.0f);
+  CHECK(shader_paint(&p, sa, cache, 1.0f, 1.0f, 20.0f, 10.0f, 1.0f, 0.0f, nullptr));
+  CHECK_EQ(cache.size(), 2u);
 }
 
 TEST_CASE("shader paint: a rotated painter shades in layer space")
