@@ -98,6 +98,7 @@ namespace
     bool         owns_display = false;     // true => embedded (dedicated XOpenDisplay)
     uint64_t     last_tick_ms = 0;         // 16 ms gate for host-driven embedded ticks
     Window       win          = 0;
+    bool         x_gone       = false;     // another client destroyed `win` (DestroyNotify)
     Visual*      visual       = nullptr;
     int          depth        = 0;
     XIC          ic           = nullptr;   // per-window input context (UTF-8)
@@ -434,7 +435,7 @@ namespace
     if (lw->ic) { XDestroyIC(lw->ic); lw->ic = nullptr; }
     if (lw->win) {
       g_windows.erase(lw->win);
-      XDestroyWindow(lw->dpy, lw->win);
+      if (!lw->x_gone) XDestroyWindow(lw->dpy, lw->win);
       lw->win = 0;
     }
     // Embedded windows own a dedicated Display connection; close it last.
@@ -448,28 +449,58 @@ namespace
     delete lw;
   }
 
-  // Mirror of macOS windowWillClose: client gets APP_QUIT (and may veto), then
-  // the render ctx + window are torn down and the appwindow count drops.
-  void handle_close(LinuxWindow* lw)
+  // The teardown every close path shares: a WM close, a window another client
+  // destroyed, and widget destroy. Releases the render ctx, ends a dialog's
+  // modal pump (a modal dialog also gives its owner input and focus back, as
+  // on win32), destroys the native window (not the X window itself once
+  // x_gone) and drops the appwindow count.
+  void teardown_window(LinuxWindow* lw, WidgetData* wd)
   {
     Session* s = lw->session;
+    if (s && wd && wd->is_dialog() && wd->owner_index != 0 &&
+        s->_widgets.exists(wd->owner_index)) {
+      if (auto* fw = dynamic_cast<FrameWidget*>(wd))
+        fw->modal_pump_active = false;   // widget_show's pump unwinds
+      const bool modal = !wd->attrs || wd->attrs->get_int(NEUI_ATTR_MODAL, 1) != 0;
+      auto& owner = s->_widgets[wd->owner_index];
+      if (modal && owner.native_handle) {
+        platform_set_window_enabled(owner.native_handle, true);
+        auto* ow = static_cast<LinuxWindow*>(owner.native_handle);
+        XRaiseWindow(ow->dpy, ow->win);
+        XSetInputFocus(ow->dpy, ow->win, RevertToParent, CurrentTime);
+      }
+    }
+    auto* backend = platform_get_backend();
+    if (wd && wd->render_ctx && backend) {
+      if (s) s->_asset_manager.release_context(wd->render_ctx, backend);
+      backend->destroy_context(wd->render_ctx);
+      wd->render_ctx = nullptr;
+    }
+    const bool was_app = lw->is_appwindow && lw->counted;
+    if (wd) wd->native_handle = nullptr;
+    destroy_native(lw);
+    if (was_app && g_appwindow_count > 0 && --g_appwindow_count <= 0)
+      g_quit = true;
+  }
+
+  // Mirror of macOS windowWillClose: client gets APP_QUIT (and may veto), then
+  // the window is torn down. `gone`: another client destroyed the X window
+  // (DestroyNotify), so the client still hears APP_QUIT but cannot keep it.
+  void handle_close(LinuxWindow* lw, bool gone = false)
+  {
+    Session* s = lw->session;
+    const Window win = lw->win;
+    if (gone) lw->x_gone = true;
     neui_event_t ev = {};
     ev.type = NEUI_EVENT_APP_QUIT;
     if (auto* fw = s ? s->get_widget(lw->widget_index) : nullptr)
       ev.data.mouse.widget.id = fw->widget_id;  // the frame closing
-    if (s && !s->dispatch_event(&ev)) return;   // client vetoed
-
-    auto* backend = platform_get_backend();
-    auto* wd = s ? s->get_widget(lw->widget_index) : nullptr;
-    if (wd && wd->render_ctx && backend) {
-      s->_asset_manager.release_context(wd->render_ctx, backend);
-      backend->destroy_context(wd->render_ctx);
-      wd->render_ctx = nullptr;
-    }
-    bool was_app = lw->is_appwindow && lw->counted;
-    if (wd) wd->native_handle = nullptr;
-    destroy_native(lw);
-    if (was_app && --g_appwindow_count <= 0) g_quit = true;
+    const bool allow = !s || s->dispatch_event(&ev);
+    // The handler may have destroyed the frame itself (widgets->destroy), in
+    // which case the window is torn down and lw freed already.
+    lw = find_window(win);
+    if (!lw || (!allow && !gone)) return;   // gone, or the client vetoed
+    teardown_window(lw, s ? s->get_widget(lw->widget_index) : nullptr);
   }
 
   // ---- Input dispatch -------------------------------------------------------
@@ -1466,6 +1497,16 @@ namespace
           handle_close(lw);
         break;
 
+      case DestroyNotify:
+        // Another client destroyed the window (xdotool windowclose, a killed
+        // WM frame). Our own destroys leave g_windows first, so they never
+        // get here. Close it as on WM_DELETE, without the veto. An embedded
+        // window is left to the plugin's own close: tearing it down here
+        // would close the Display the DAW's pump is reading.
+        if (ev.xdestroywindow.window == lw->win && !lw->owns_display)
+          handle_close(lw, /*gone=*/true);
+        break;
+
       default: break;
     }
   }
@@ -2017,38 +2058,9 @@ namespace
   void platform_destroy_window(WidgetData& wd)
   {
     if (!wd.native_handle) return;
-    auto* lw = static_cast<LinuxWindow*>(wd.native_handle);
-    Session* s = lw->session;
-
-    // Modal dialog teardown (mirror platform_win32's WM_DESTROY path): clear
-    // the pump flag so platform_run_modal_until in widget_show unwinds, and
-    // re-enable + raise the owner so input returns there. Must run BEFORE the
-    // widget is freed (destroy_recursive removes it right after this), while
-    // owner_index + the FrameWidget are still valid.
-    if (s && wd.is_dialog() && wd.owner_index != 0 &&
-        s->_widgets.exists(wd.owner_index)) {
-      if (auto* fw = dynamic_cast<FrameWidget*>(&wd))
-        fw->modal_pump_active = false;
-      auto& owner = s->_widgets[wd.owner_index];
-      if (owner.native_handle) {
-        platform_set_window_enabled(owner.native_handle, true);
-        auto* ow = static_cast<LinuxWindow*>(owner.native_handle);
-        XRaiseWindow(ow->dpy, ow->win);
-        XSetInputFocus(ow->dpy, ow->win, RevertToParent, CurrentTime);
-      }
-    }
-
-    auto* backend = platform_get_backend();
-    if (wd.render_ctx && backend) {
-      if (s) s->_asset_manager.release_context(wd.render_ctx, backend);
-      backend->destroy_context(wd.render_ctx);
-      wd.render_ctx = nullptr;
-    }
-    bool was_app = lw->is_appwindow && lw->counted;
-    destroy_native(lw);
-    wd.native_handle = nullptr;
-    if (was_app && g_appwindow_count > 0 && --g_appwindow_count <= 0)
-      g_quit = true;
+    // Runs BEFORE the widget is freed (destroy_recursive removes it right
+    // after this), while owner_index + the FrameWidget are still valid.
+    teardown_window(static_cast<LinuxWindow*>(wd.native_handle), &wd);
   }
 
   void platform_show_window(void* native_handle)
