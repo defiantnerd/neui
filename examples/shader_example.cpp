@@ -346,6 +346,7 @@ struct AppState
   uint32_t     pause_box_id = 0;
   uint32_t     fps_label_id = 0;
   int          anim_paints = 0;
+  bool         anim_paused = false;  // the readout says "paused" until resumed
   int          compiled = 0;
 
   // The sampling row: two lit knobs, the meter, the water.
@@ -470,6 +471,7 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
       event->data.checkbox.widget.id == a->pause_box_id) {
     const bool paused = event->data.checkbox.state == NEUI_CHECK_CHECKED;
     a->shaders->set_animation_paused(a->session, paused);
+    a->anim_paused = paused;
     if (paused) a->widgets->set_text(a->session, { a->fps_label_id }, "paused");
     a->anim_paints = 0;
     a->anim_t0 = std::chrono::steady_clock::now();
@@ -493,7 +495,7 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
     ++a->anim_paints;
     const auto now = std::chrono::steady_clock::now();
     const double s = std::chrono::duration<double>(now - a->anim_t0).count();
-    if (s >= 1.0) {
+    if (s >= 1.0 && !a->anim_paused) {  // a repaint while paused keeps "paused"
       char buf[48];
       snprintf(buf, sizeof buf, "%.1f paints/s", a->anim_paints / s);
       a->widgets->set_text(a->session, { a->fps_label_id }, buf);
