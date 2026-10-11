@@ -129,6 +129,30 @@ TEST_CASE("shader gpu: the emitted text is pinned")
   CHECK_EQ(crc32(nsl::emit_hlsl(*b)), 0x39d023edu);
 }
 
+TEST_CASE("shader gpu: a program that samples reads its textures with Load")
+{
+  // Two samplers, each edge mode and both filters; the text is pinned like
+  // the others (the D2D smoke test runs programs of this shape).
+  auto p = build(R"(
+#pragma neui sampler a repeat
+#pragma neui sampler b border nearest
+uniform sampler2D a;
+uniform sampler2D b;
+uniform sampler2D c;
+vec4 main(vec2 p) {
+  vec2 uv = p / neui_size;
+  return texture2D(a, uv * 3.0) * 0.5 + texture2D(b, uv - 0.25) * 0.25 + texture2D(c, uv) * 0.25;
+})");
+  REQUIRE(p != nullptr);
+  const std::string h = nsl::emit_hlsl(*p);
+  for (const char* f : { "Texture2D<float4> t0 : register(t0);", "Texture2D<float4> t1 : register(t1);",
+                         "Texture2D<float4> t2 : register(t2);", "x = x % iw;", "return 0u;",
+                         "x = clamp(x, 0, iw - 1);", ".Load(int3(x, y, 0))", "= n_texel2(" })
+    CHECK(has(h, f));
+  CHECK_FALSE(has(h, "Sample("));  // never the hardware's filtering
+  CHECK_EQ(crc32(h), 0x769149d7u);
+}
+
 // ---- The constants -------------------------------------------------------------
 
 TEST_CASE("shader gpu: constants carry the pixel grid and the draw values")

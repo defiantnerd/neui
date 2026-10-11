@@ -589,6 +589,33 @@ int main()
     g_be->destroy_context(ctx);
   }
 
+  // More bitmaps than an effect keeps (32 MiB of textures): the least
+  // recently used go, and every draw still samples its own pixels.
+  {
+    neui_render_ctx_t ctx = g_be->create_offscreen_context(64, 64, 1.0f);
+    std::vector<uint8_t> target(64 * 64 * 4);
+    Stats st;
+    for (uint32_t k = 0; k < 12; ++k) {  // 12 x 4 MiB
+      const Bitmap bm = make_bitmap(1024, 1024, 1000u + k);
+      Case c = textured[0];
+      c.tex = { desc_of(bm, 100 + k) };
+      const nsl::Texture t = texture_of(c.tex[0]);
+      nsl::Draw d;
+      d.w = d.h = 64.0f;
+      d.textures = &t;
+      d.texture_count = 1;
+      nsl::Placement pl;
+      const std::vector<uint8_t> cpu = cpu_image(*c.prog, d, pl);
+      g_be->begin_frame(ctx, 0x00000000u);
+      gpu_draw(ctx, c, d);
+      g_be->end_frame(ctx);
+      g_be->read_pixels_bgra(ctx, target.data());
+      st.add(compare(target, 64, 64, cpu, pl));
+    }
+    report("12 bitmaps of 4 MiB through one effect", st);
+    g_be->destroy_context(ctx);
+  }
+
   // Timing, report only: a 240 x 240 px bilinear copy per frame, GPU vs CPU.
   {
     neui_render_ctx_t ctx = g_be->create_offscreen_context(240, 240, 1.0f);

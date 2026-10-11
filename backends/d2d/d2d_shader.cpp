@@ -22,9 +22,9 @@
 //   effect inputs: the effect stays a zero-input source, so the placement
 //   above is untouched, and the shader reads texel (x, y) with Load. A
 //   second blob property carries the bitmaps of a draw; a texture is made
-//   per content id and device context (D2D finds one another effect made)
-//   and kept while it is in use, unbound samplers read a 1 x 1 transparent
-//   one.
+//   per content id and device context (D2D finds one another effect made),
+//   and each effect keeps the ones it used most recently within a byte
+//   budget; unbound samplers read a 1 x 1 transparent one.
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -70,7 +70,7 @@ namespace neui_d2d_backend
 </Effect>)";
       enum : UINT32 { k_prop_constants = 0, k_prop_textures = 1 };
       constexpr size_t k_max_textures = 4;   // samplers per program (nsl k_max_samplers)
-      constexpr size_t k_texture_cache = 16; // textures an effect keeps alive between draws
+      constexpr size_t k_texture_budget = size_t(32) << 20;  // bytes of textures an effect keeps between draws
 
       enum : int { k_compiling, k_ready, k_failed };
 
@@ -245,7 +245,7 @@ namespace neui_d2d_backend
         ~ShaderEffect()
         {
           release_bound();
-          for (auto& kv : cache_) kv.second->Release();
+          for (auto& kv : cache_) kv.second.tex->Release();
           if (empty_) empty_->Release();
           if (ctx_) ctx_->Release();
         }
@@ -272,8 +272,9 @@ namespace neui_d2d_backend
           if (d.content_id) {
             auto it = cache_.find(d.content_id);
             if (it != cache_.end()) {
-              it->second->AddRef();
-              return it->second;
+              it->second.stamp = ++stamp_;
+              it->second.tex->AddRef();
+              return it->second.tex;
             }
           }
           ID2D1ResourceTexture* t = nullptr;
@@ -285,14 +286,29 @@ namespace neui_d2d_backend
           if (!t) t = make_texture(d.content_id ? &guid : nullptr, d.bgra, d.width_px, d.height_px, d.stride);
           if (!t) return nullptr;
           if (d.content_id) {
-            if (cache_.size() >= k_texture_cache) {
-              for (auto& kv : cache_) kv.second->Release();
-              cache_.clear();
-            }
+            const size_t bytes = size_t(d.width_px) * d.height_px * 4u;
             t->AddRef();
-            cache_.emplace(d.content_id, t);
+            cache_.emplace(d.content_id, Cached{ t, bytes, ++stamp_ });
+            cached_bytes_ += bytes;
+            evict(d.content_id);
           }
           return t;
+        }
+
+        // Least recently used textures go past the budget, never `keep`. A
+        // texture bound to the next draw holds its own reference.
+        void evict(uint64_t keep)
+        {
+          while (cached_bytes_ > k_texture_budget) {
+            auto victim = cache_.end();
+            for (auto it = cache_.begin(); it != cache_.end(); ++it)
+              if (it->first != keep && (victim == cache_.end() || it->second.stamp < victim->second.stamp))
+                victim = it;
+            if (victim == cache_.end()) return;
+            cached_bytes_ -= victim->second.bytes;
+            victim->second.tex->Release();
+            cache_.erase(victim);
+          }
         }
 
         ID2D1ResourceTexture* make_texture(const GUID* id, const BYTE* px, uint32_t w, uint32_t h, size_t stride)
@@ -321,7 +337,10 @@ namespace neui_d2d_backend
         std::vector<BYTE>      blob_;
         ID2D1ResourceTexture*  bound_[k_max_textures] = {};  // the next draw's, owned
         size_t                 bound_count_ = 0;
-        std::unordered_map<uint64_t, ID2D1ResourceTexture*> cache_;  // by content id, owned
+        struct Cached { ID2D1ResourceTexture* tex; size_t bytes; uint64_t stamp; };
+        std::unordered_map<uint64_t, Cached> cache_;  // by content id, owned
+        size_t                 cached_bytes_ = 0;
+        uint64_t               stamp_ = 0;
         ID2D1ResourceTexture*  empty_ = nullptr;  // 1 x 1 transparent, for unbound samplers
       };
 
