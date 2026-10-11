@@ -1229,7 +1229,7 @@ namespace xpl_host
       }
     }
     if (auto* fw = dynamic_cast<FrameWidget*>(wd))
-      fw->modal_pump_active = false;
+      fw->end_modal_pump();
   }
 
   static void handle_close_request(WindowData* w)

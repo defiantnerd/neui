@@ -3016,11 +3016,14 @@ namespace win32_host
           EnableWindow(owner_hwnd, FALSE);
         // Native blocking modal: spin a nested OS pump until the dialog
         // HWND is destroyed. AppWindowProc's WM_DESTROY for the dialog
-        // clears modal_pump_active, breaking the pump so widget_show
-        // returns to the caller.
+        // clears the pump flag, breaking the pump so widget_show returns to
+        // the caller. The flag lives here: `w` may be freed meanwhile.
         if (is_dialog && is_modal) {
-          w.modal_pump_active = true;
-          run_modal_until(&w.modal_pump_active);
+          bool pump = true;
+          w.modal_pump = &pump;
+          run_modal_until(&pump);
+          if (WidgetData* still = get_widget(index))
+            if (still->modal_pump == &pump) still->modal_pump = nullptr;
         }
       }
     } else if (w.hwnd != nullptr) {

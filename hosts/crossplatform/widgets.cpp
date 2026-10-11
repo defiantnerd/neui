@@ -143,6 +143,16 @@ namespace xpl_host
     if (client_api && client_api->ondestroy)
       client_api->ondestroy(token, IndexToWidget(s->_session_id, idx), wd->userdata);
 
+    // Forget it as focus, so a later widget in the same slot is not focused
+    // by accident.
+    if (s->_focused_widget == idx) s->_focused_widget = 0;
+    if (s->_active_frame == idx) s->_active_frame = 0;
+    s->_frame_focus.erase(idx);
+    for (auto it = s->_frame_focus.begin(); it != s->_frame_focus.end();) {
+      if (it->second == idx) it = s->_frame_focus.erase(it);
+      else ++it;
+    }
+
     s->_widgets.remove(idx);
   }
 
@@ -423,14 +433,26 @@ namespace xpl_host
             platform_set_window_enabled(owner_native, false);
         }
         // Native blocking modal: spin a nested OS pump until the dialog
-        // is destroyed. The destroy path (platform_win32.cpp WM_NCDESTROY /
-        // platform_macos.mm windowWillClose) clears modal_pump_active so
-        // the pump exits and widget_show returns to the caller.
+        // is destroyed. The destroy path (platform_win32.cpp WM_DESTROY /
+        // platform_macos.mm windowWillClose / platform_linux.cpp
+        // teardown_window) ends it through FrameWidget::end_modal_pump, so the
+        // pump exits and widget_show returns to the caller.
         if (is_modal_dialog) {
           auto* fw = dynamic_cast<FrameWidget*>(&wd);
           if (fw) {
-            fw->modal_pump_active = true;
-            platform_run_modal_until(&fw->modal_pump_active);
+            // Logical focus moves into the dialog now, not when (or whether)
+            // the OS reports its window focused, and back to the owner after;
+            // otherwise keys typed into the dialog reach the owner's focused
+            // widget.
+            const uint32_t owner_idx = wd.owner_index;
+            s->frame_activated(idx);
+            bool pump = true;  // here, not on the dialog: it may be freed meanwhile
+            fw->modal_pump = &pump;
+            platform_run_modal_until(&pump);
+            if (s->_widgets.exists(idx))
+              if (auto* still = dynamic_cast<FrameWidget*>(&s->_widgets[idx]))
+                if (still->modal_pump == &pump) still->modal_pump = nullptr;
+            if (s->_widgets.exists(owner_idx)) s->frame_activated(owner_idx);
           }
         }
       }

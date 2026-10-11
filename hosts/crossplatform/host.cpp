@@ -2632,14 +2632,50 @@ namespace xpl_host
     }
   }
 
+  uint32_t Session::frame_of(uint32_t widget_index)
+  {
+    uint32_t idx = widget_index;
+    while (idx != 0 && _widgets.exists(idx)) {
+      if (_widgets[idx].is_frame()) return idx;
+      idx = _widgets.get_parent(idx);
+    }
+    return 0;
+  }
+
+  bool Session::frame_activated(uint32_t frame_index)
+  {
+    if (frame_index == 0 || !_widgets.exists(frame_index)) return false;
+    _active_frame = frame_index;
+    if (_focused_widget != 0 && _widgets.exists(_focused_widget)) {
+      const uint32_t from = frame_of(_focused_widget);
+      if (from == frame_index) return false;  // focus is already in it
+      _frame_focus[from] = _focused_widget;
+    }
+    uint32_t want = 0;
+    auto it = _frame_focus.find(frame_index);
+    if (it != _frame_focus.end() && _widgets.exists(it->second) &&
+        frame_of(it->second) == frame_index && _widgets[it->second].enabled)
+      want = it->second;
+    if (want == _focused_widget) return false;
+    set_focus(want);
+    return true;
+  }
+
   void Session::focus_next(bool forward)
   {
+    // Within one frame: Tab never leaves the window that has focus.
+    uint32_t frame = _focused_widget != 0 ? frame_of(_focused_widget) : 0;
+    if (frame == 0) frame = _active_frame;
     std::vector<uint32_t> stops;
-    uint32_t root_child = _widgets.child(0);
-    while (root_child != 0) {
-      if (_widgets.exists(root_child))
-        collect_tab_stops(_widgets, root_child, stops);
-      root_child = _widgets.next(root_child);
+    if (frame != 0 && _widgets.exists(frame)) {
+      collect_tab_stops(_widgets, frame, stops);
+    } else {
+      uint32_t root_child = _widgets.child(0);
+      while (root_child != 0) {
+        if (_widgets.exists(root_child))
+          collect_tab_stops(_widgets, root_child, stops);
+        root_child = _widgets.next(root_child);
+      }
     }
 
     if (stops.empty()) return;
@@ -5096,7 +5132,7 @@ namespace xpl_host
     return true;  // capture all keys while a menu is open
   }
 
-  bool Session::try_menubar_accel(uint32_t keycode, uint32_t modifiers)
+  bool Session::try_menubar_accel(uint32_t keycode, uint32_t modifiers, uint32_t frame_index)
   {
     if (keycode == 0 || keycode == NEUI_KEY_NONE) return false;
     const uint32_t mask = NEUI_KMOD_CTRL | NEUI_KMOD_SHIFT |
@@ -5104,6 +5140,7 @@ namespace xpl_host
     uint32_t mods = modifiers & mask;
     for (uint32_t mb_idx : _menubars) {
       if (!_widgets.exists(mb_idx)) continue;
+      if (frame_index != 0 && frame_of(mb_idx) != frame_index) continue;
       auto* mbp = dynamic_cast<MenubarWidget*>(&_widgets[mb_idx]);
       if (!mbp) continue;
       for (uint32_t id : mbp->menu_item_ids_ordered) {

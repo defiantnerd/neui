@@ -519,7 +519,7 @@ namespace xpl_host
             }
             // Drop the modal pump so widget_show unwinds and returns.
             if (auto* fw = dynamic_cast<FrameWidget*>(wd))
-              fw->modal_pump_active = false;
+              fw->end_modal_pump();
           }
           wd->native_handle = nullptr;
         }
@@ -718,7 +718,10 @@ namespace xpl_host
       if (wud && wud->session) {
         auto* s = wud->session;
         s->_os_focused = true;
-        if (s->_focused_widget != 0 && s->_widgets.exists(s->_focused_widget)) {
+        // Focus moves into this frame; if it changed, set_focus already
+        // told the client.
+        const bool moved = s->frame_activated(wud->widget_index);
+        if (!moved && s->_focused_widget != 0 && s->_widgets.exists(s->_focused_widget)) {
           auto& wd = s->_widgets[s->_focused_widget];
           if (wd.emit_events) {
             neui_event_t ev = {};

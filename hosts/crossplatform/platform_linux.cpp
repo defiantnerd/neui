@@ -467,7 +467,7 @@ namespace
     if (s && wd && wd->is_dialog() && wd->owner_index != 0 &&
         s->_widgets.exists(wd->owner_index)) {
       if (auto* fw = dynamic_cast<FrameWidget*>(wd))
-        fw->modal_pump_active = false;   // widget_show's pump unwinds
+        fw->end_modal_pump();   // widget_show's pump unwinds
       const bool modal = !wd->attrs || wd->attrs->get_int(NEUI_ATTR_MODAL, 1) != 0;
       auto& owner = s->_widgets[wd->owner_index];
       if (modal && owner.native_handle) {
@@ -744,7 +744,7 @@ namespace
     // Menubar accelerators (Ctrl+S etc.) - matched here on Linux since the
     // Win32 HACCEL path is MSG-based. On a hit the key is consumed (routed
     // through dispatch_menu_event, which tries the focused widget first).
-    if (keycode != 0 && s->try_menubar_accel(keycode, mods)) return;
+    if (keycode != 0 && s->try_menubar_accel(keycode, mods, lw->widget_index)) return;
 
     // KEYDOWN: client first (focused widget), then the widget's on_keydown.
     if (keycode != 0) {
@@ -1489,7 +1489,11 @@ namespace
       case KeyPress:      dispatch_key_press(lw, ev.xkey);          break;
       case KeyRelease:    dispatch_key_release(lw, ev.xkey);        break;
 
-      case FocusIn:  s->_os_focused = true;  lw->needs_paint = true; break;
+      case FocusIn:
+        s->_os_focused = true;
+        s->frame_activated(lw->widget_index);
+        lw->needs_paint = true;
+        break;
       case FocusOut: s->_os_focused = false; s->close_menubar_menu(); lw->needs_paint = true; break;
 
       case LeaveNotify:

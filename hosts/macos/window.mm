@@ -2581,7 +2581,8 @@ static float neui_snap_to_steps(float v, int steps)
   // unwinds and returns to the caller. No-op for non-modal frames.
   if (session && session->_widgets.exists(widget_index)) {
     auto& wd = session->_widgets[widget_index];
-    if (wd.modal_pump_active) wd.modal_pump_active = false;
+    wd.modal_pump_active = false;
+    if (wd.modal_pump) { *wd.modal_pump = false; wd.modal_pump = nullptr; }
   }
   if (is_appwindow) {
     if (--g_appwindow_count <= 0) {
@@ -4652,8 +4653,13 @@ namespace macos_host
       // (create_dialog armed the flag + presented the sheet). Do not touch
       // `w` after this returns: the dialog is typically destroyed (slot
       // freed) by the OK / close handler that unwound the pump.
-      if (w.modal_pump_active)
-        neui_detail::run_modal_pump_macos(&w.modal_pump_active);
+      if (w.modal_pump_active) {
+        bool pump = true;  // here, not on `w`: the dialog may be freed meanwhile
+        w.modal_pump = &pump;
+        neui_detail::run_modal_pump_macos(&pump);
+        if (_widgets.exists(index) && _widgets[index].modal_pump == &pump)
+          _widgets[index].modal_pump = nullptr;
+      }
       return;
     }
 

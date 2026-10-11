@@ -1154,7 +1154,7 @@ namespace win32_host
             SetForegroundWindow(owner->hwnd);
           }
           // Drop the modal pump so widget_show unwinds and returns.
-          if (wd) wd->modal_pump_active = false;
+          if (wd && wd->modal_pump) { *wd->modal_pump = false; wd->modal_pump = nullptr; }
         }
         return 0;
       }

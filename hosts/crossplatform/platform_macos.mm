@@ -874,7 +874,10 @@ void wake_app_event_pump()
 {
   if (session) {
     session->_os_focused = true;
-    if (session->_focused_widget != 0
+    // Focus moves into this frame; if it changed, set_focus already told
+    // the client.
+    const bool moved = session->frame_activated(widget_index);
+    if (!moved && session->_focused_widget != 0
      && session->_widgets.exists(session->_focused_widget)) {
       auto& wd = session->_widgets[session->_focused_widget];
       if (wd.emit_events) {
@@ -1254,7 +1257,7 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
       }
       // Drop the modal pump flag so widget_show unwinds and returns.
       if (auto* fw = dynamic_cast<xpl_host::FrameWidget*>(wd))
-        fw->modal_pump_active = false;
+        fw->end_modal_pump();
     }
   }
 

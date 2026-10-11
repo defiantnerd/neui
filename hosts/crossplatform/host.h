@@ -276,9 +276,16 @@ namespace xpl_host
   class FrameWidget : public WidgetData {
   public:
     bool is_frame() const override { return true; }
-    // True while a modal DIALOG is blocking inside platform_run_modal_until.
-    // Set in widget_show; cleared by the destroy path so the pump exits.
-    bool modal_pump_active = false;
+    // While a modal DIALOG blocks in widget_show: the flag its pump runs on.
+    // It lives on widget_show's stack, because the dialog may be destroyed
+    // (and this widget freed) while the pump runs; the close / destroy path
+    // ends the pump through end_modal_pump.
+    bool* modal_pump = nullptr;
+    void end_modal_pump()
+    {
+      if (modal_pump) *modal_pump = false;
+      modal_pump = nullptr;
+    }
     // Active toast overlay (at most one per frame; replace-on-second-call).
     ToastState toast;
   };
@@ -844,8 +851,19 @@ namespace xpl_host
     int frame_client_height(uint32_t widget_index);
 
     // Move keyboard focus to the next (forward=true) or previous (false) widget
-    // that has both tab_stop=true and visible=true. Wraps around.
+    // that has both tab_stop=true and visible=true, within the frame that has
+    // focus (the active frame when nothing is focused). Wraps around.
     void focus_next(bool forward);
+
+    // The frame (APPWINDOW / PLUGWINDOW / DIALOG) a widget lives in; 0 = none.
+    uint32_t frame_of(uint32_t widget_index);
+
+    // A frame's window became the OS focus window, or a modal dialog opened:
+    // logical focus moves into that frame, so keys, Tab and IME reach its
+    // widgets and not another window's. Each frame remembers its focused
+    // widget and gets it back. True when the focused widget changed
+    // (set_focus has then fired the focus events).
+    bool frame_activated(uint32_t frame_index);
 
     // Handle an editing key for the currently focused widget.
     // Returns true if the key was consumed and should not be forwarded.
@@ -1071,7 +1089,9 @@ namespace xpl_host
     // then client TREE_ITEM_ACTIVATED). Returns true if a shortcut matched
     // (the key is then consumed). Mirrors the Win32 HACCEL path, which is
     // MSG-based and so does not run on Linux.
-    bool try_menubar_accel(uint32_t keycode, uint32_t modifiers);
+    // A non-zero frame_index limits the search to that frame's menubar, so a
+    // dialog's keys do not fire its owner's shortcuts.
+    bool try_menubar_accel(uint32_t keycode, uint32_t modifiers, uint32_t frame_index = 0);
 
   public:
     neui_detail::Tree<WidgetData>  _widgets;
@@ -1086,6 +1106,8 @@ namespace xpl_host
     uint32_t _pressed_widget = 0;
     uint32_t _focused_widget = 0;
     bool     _os_focused     = true;  // frame currently has OS keyboard focus
+    uint32_t _active_frame   = 0;     // frame last activated (frame_activated)
+    std::unordered_map<uint32_t, uint32_t> _frame_focus;  // frame -> its focused widget
     uint32_t _open_combo     = 0;   // tree index of the currently open ComboBoxWidget, or 0
 
     // Popup-menu overlay state. _popup_active gates the nested message
