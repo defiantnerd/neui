@@ -189,7 +189,7 @@ TEST_CASE("shader lang: names and declarations")
   CHECK(fails_at(with_main("  const float k = p.x;\n  return vec4(k);"), 2, 19, "'k' needs a constant value"));
   CHECK(fails_at("uniform float a = 1.0;\nuniform float b = a;\n" + with_main("return vec4(b);"), 2, 19,
                  "uniform 'a' is not a constant"));
-  CHECK(fails_at("uniform int n;\n" + with_main("return vec4(0.0);"), 1, 9, "uniforms are float, vec2, vec3 or vec4"));
+  CHECK(fails_at("uniform int n;\n" + with_main("return vec4(0.0);"), 1, 9, "uniforms are float, vec2, vec3, vec4 or sampler2D"));
   CHECK(fails_at("uniform float u;\n" + with_main("  u = 1.0;\n  return vec4(u);"), 3, 3, "uniform 'u' cannot be assigned"));
   CHECK(fails_at(with_main("  neui_time = 1.0;"), 2, 3, "'neui_time' cannot be assigned"));
   CHECK(fails_at(with_main("  for (int i = 0; i < 4; i++) { i = 2; }"), 2, 33, "loop counter 'i' cannot be assigned"));

@@ -59,6 +59,8 @@ struct CompileError {
 
 std::string quote(const std::string& s) { return "'" + s + "'"; }
 
+const char* const k_sampler_where = "a sampler2D is a uniform or an 'in' parameter, not a variable";
+
 // ---------------------------------------------------------------------------
 // Decimal -> binary32 with correct rounding (ties to even), independent of
 // the C locale. A minimal unsigned big integer does the exact arithmetic.
@@ -174,7 +176,7 @@ enum Tok : uint8_t {
   T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_ANDAND, T_OROR, T_XORXOR,
   T_ASSIGN, T_PLUSEQ, T_MINUSEQ, T_STAREQ, T_SLASHEQ, T_PLUSPLUS, T_MINUSMINUS,
   T_UNIFORM, T_CONST, T_KW_FLOAT, T_KW_INT, T_KW_BOOL, T_KW_VEC2, T_KW_VEC3, T_KW_VEC4,
-  T_KW_VOID, T_TRUE, T_FALSE, T_IF, T_ELSE, T_FOR, T_BREAK, T_CONTINUE, T_RETURN,
+  T_KW_SAMPLER2D, T_KW_VOID, T_TRUE, T_FALSE, T_IF, T_ELSE, T_FOR, T_BREAK, T_CONTINUE, T_RETURN,
   T_IN, T_OUT, T_INOUT, T_PRECISION, T_LOWP, T_MEDIUMP, T_HIGHP,
 };
 
@@ -191,19 +193,27 @@ const char* const k_reserved_words[] = {
   "layout", "centroid", "flat", "smooth", "invariant", "mat2", "mat3", "mat4", "mat2x2",
   "mat2x3", "mat2x4", "mat3x2", "mat3x3", "mat3x4", "mat4x2", "mat4x3", "mat4x4", "ivec2",
   "ivec3", "ivec4", "bvec2", "bvec3", "bvec4", "uvec2", "uvec3", "uvec4", "uint", "double",
-  "dvec2", "dvec3", "dvec4", "half", "sampler2D", "sampler3D", "samplerCube", "texture",
-  "texture2D", "textureCube", "asm", "class", "union", "enum", "typedef", "template", "this",
-  "goto", "inline", "noinline", "volatile", "public", "static", "extern", "interface", "long",
-  "short", "unsigned", "sizeof", "cast", "namespace", "using"};
+  "dvec2", "dvec3", "dvec4", "half", "sampler3D", "samplerCube", "textureCube", "asm", "class",
+  "union", "enum", "typedef", "template", "this", "goto", "inline", "noinline", "volatile",
+  "public", "static", "extern", "interface", "long", "short", "unsigned", "sizeof", "cast",
+  "namespace", "using"};
+
+struct SamplerPragma {
+  std::string name;
+  int line = 0, col = 0;
+  bool has_wrap = false, has_filter = false;
+  Wrap wrap = Wrap::CLAMP;
+  Filter filter = Filter::LINEAR;
+};
 
 struct Keyword { const char* word; Tok t; };
 const Keyword k_keywords[] = {
   {"uniform", T_UNIFORM}, {"const", T_CONST}, {"float", T_KW_FLOAT}, {"int", T_KW_INT},
   {"bool", T_KW_BOOL}, {"vec2", T_KW_VEC2}, {"vec3", T_KW_VEC3}, {"vec4", T_KW_VEC4},
-  {"void", T_KW_VOID}, {"true", T_TRUE}, {"false", T_FALSE}, {"if", T_IF}, {"else", T_ELSE},
-  {"for", T_FOR}, {"break", T_BREAK}, {"continue", T_CONTINUE}, {"return", T_RETURN},
-  {"in", T_IN}, {"out", T_OUT}, {"inout", T_INOUT}, {"precision", T_PRECISION},
-  {"lowp", T_LOWP}, {"mediump", T_MEDIUMP}, {"highp", T_HIGHP}};
+  {"sampler2D", T_KW_SAMPLER2D}, {"void", T_KW_VOID}, {"true", T_TRUE}, {"false", T_FALSE},
+  {"if", T_IF}, {"else", T_ELSE}, {"for", T_FOR}, {"break", T_BREAK}, {"continue", T_CONTINUE},
+  {"return", T_RETURN}, {"in", T_IN}, {"out", T_OUT}, {"inout", T_INOUT},
+  {"precision", T_PRECISION}, {"lowp", T_LOWP}, {"mediump", T_MEDIUMP}, {"highp", T_HIGHP}};
 
 bool is_alpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
 bool is_digit(char c) { return c >= '0' && c <= '9'; }
@@ -282,11 +292,44 @@ class Lexer {
     }
     if (words.size() < 2 || words[0] != "pragma" || words[1] != "neui")
       fail(l, cl, "the preprocessor is not supported; the only directive is '#pragma neui <name>'");
+    if (words.size() >= 3 && words[2] == "sampler") { sampler_pragma(words, l, cl); return; }
     if (words.size() != 3) fail(l, cl, "'#pragma neui' takes one name");
     if (words[2] == "dither") flag_bits |= NSL_DITHER;
     else if (words[2] == "cpu_only") flag_bits |= NSL_CPU_ONLY;
     else fail(l, cl, "unknown pragma " + quote(words[2]));
   }
+
+  // "#pragma neui sampler <name> [clamp|repeat|border] [linear|nearest]". The
+  // parser checks the name once every uniform is declared.
+  void sampler_pragma(const std::vector<std::string>& words, int l, int cl) {
+    const char* const usage = "'#pragma neui sampler' takes a sampler name, then clamp, repeat or border, "
+                              "and linear or nearest";
+    if (words.size() < 4 || words.size() > 6) fail(l, cl, usage);
+    SamplerPragma sp;
+    sp.name = words[3];
+    sp.line = l;
+    sp.col = cl;
+    for (size_t k = 4; k < words.size(); ++k) {
+      const std::string& m = words[k];
+      if (m == "clamp" || m == "repeat" || m == "border") {
+        if (sp.has_wrap) fail(l, cl, "'#pragma neui sampler' sets the edge mode twice");
+        sp.has_wrap = true;
+        sp.wrap = m == "clamp" ? Wrap::CLAMP : m == "repeat" ? Wrap::REPEAT : Wrap::BORDER;
+      } else if (m == "linear" || m == "nearest") {
+        if (sp.has_filter) fail(l, cl, "'#pragma neui sampler' sets the filter twice");
+        sp.has_filter = true;
+        sp.filter = m == "linear" ? Filter::LINEAR : Filter::NEAREST;
+      } else {
+        fail(l, cl, "unknown sampler mode " + quote(m) + "; " + usage);
+      }
+    }
+    sampler_pragmas.push_back(sp);
+  }
+
+ public:
+  std::vector<SamplerPragma> sampler_pragmas;
+
+ private:
 
   void ident(Token& t) {
     while (i_ < n_ && is_alnum(s_[i_])) { t.text += s_[i_]; adv(); }
@@ -385,14 +428,15 @@ class Lexer {
 // Types and syntax tree
 // ---------------------------------------------------------------------------
 
-enum class Ty : uint8_t { Void, Bool, Int, Float, Vec2, Vec3, Vec4 };
+// Sampler: a sampler2D, a compile-time handle (RV::ival is the sampler index).
+enum class Ty : uint8_t { Void, Bool, Int, Float, Vec2, Vec3, Vec4, Sampler };
 
 int ty_comps(Ty t) {
   switch (t) {
     case Ty::Vec2: return 2;
     case Ty::Vec3: return 3;
     case Ty::Vec4: return 4;
-    case Ty::Void: return 0;
+    case Ty::Void: case Ty::Sampler: return 0;
     default: return 1;
   }
 }
@@ -407,6 +451,7 @@ const char* ty_name(Ty t) {
     case Ty::Float: return "float";
     case Ty::Vec2: return "vec2";
     case Ty::Vec3: return "vec3";
+    case Ty::Sampler: return "sampler2D";
     default: return "vec4";
   }
 }
@@ -425,7 +470,7 @@ struct VarDecl {
   int line = 0, col = 0;
   bool is_const = false;
   Qual qual = Q_IN;
-  int slot = 0;       // UNIFORM: first value index; RESERVED: which
+  int slot = 0;       // UNIFORM: first value index (a sampler: its index); RESERVED: which
   const Expr* init = nullptr;  // GLOBAL_CONST / UNIFORM default
 };
 
@@ -441,6 +486,8 @@ enum Builtin : uint8_t {
   B_CLAMP, B_MIX, B_SMOOTHSTEP,
   // geometric and noise
   B_LENGTH, B_DISTANCE, B_DOT, B_NORMALIZE, B_CROSS, B_REFLECT, B_HASH, B_NOISE,
+  // sampling: (sampler2D, vec2) -> vec4, sampler2D -> vec2
+  B_TEXTURE, B_TEXTURE_SIZE, B_TEXEL,
   B_NONE
 };
 
@@ -453,7 +500,9 @@ const BuiltinName k_builtins[] = {
   {"atan", B_ATAN}, {"mod", B_MOD}, {"min", B_MIN}, {"max", B_MAX}, {"step", B_STEP},
   {"pow", B_POW}, {"clamp", B_CLAMP}, {"mix", B_MIX}, {"smoothstep", B_SMOOTHSTEP},
   {"length", B_LENGTH}, {"distance", B_DISTANCE}, {"dot", B_DOT}, {"normalize", B_NORMALIZE},
-  {"cross", B_CROSS}, {"reflect", B_REFLECT}, {"neui_hash", B_HASH}, {"neui_noise", B_NOISE}};
+  {"cross", B_CROSS}, {"reflect", B_REFLECT}, {"neui_hash", B_HASH}, {"neui_noise", B_NOISE},
+  {"texture2D", B_TEXTURE}, {"texture", B_TEXTURE}, {"neui_texture_size", B_TEXTURE_SIZE},
+  {"neui_texel", B_TEXEL}};
 
 Builtin find_builtin(const std::string& name) {
   for (const BuiltinName& b : k_builtins)
@@ -505,7 +554,8 @@ struct Function {
 
 class Parser {
  public:
-  Parser(std::vector<Token> toks, uint32_t flag_bits) : toks_(std::move(toks)), flags_(flag_bits) {
+  Parser(std::vector<Token> toks, uint32_t flag_bits, std::vector<SamplerPragma> sampler_pragmas)
+      : toks_(std::move(toks)), flags_(flag_bits), sampler_pragmas_(std::move(sampler_pragmas)) {
     const char* names[RES_COUNT] = {nullptr, nullptr, "neui_scale", "neui_px", "neui_time"};
     // neui_size is one vec2 over RES_SIZE_X / RES_SIZE_Y.
     add_reserved("neui_size", Ty::Vec2, RES_SIZE_X);
@@ -516,11 +566,14 @@ class Parser {
     while (peek().t != T_END) parse_global();
     if (!main_)
       fail(peek().line, peek().col, "no 'vec4 main(vec2 p)' is defined");
+    resolve_sampler_pragmas();
   }
 
   const Function* main_fn() const { return main_; }
   const std::vector<const VarDecl*>& uniforms() const { return uniform_list_; }
   const std::vector<const VarDecl*>& global_consts() const { return const_list_; }
+  const std::vector<const VarDecl*>& sampler_vars() const { return sampler_list_; }
+  const std::vector<SamplerDesc>& samplers() const { return sampler_descs_; }
   int uniform_values() const { return uniform_values_; }
   uint32_t flag_bits() const { return flags_; }
 
@@ -619,6 +672,26 @@ class Parser {
   }
   void skip_precision() { while (peek().t == T_LOWP || peek().t == T_MEDIUMP || peek().t == T_HIGHP) next(); }
 
+  // Each "#pragma neui sampler" names a sampler2D uniform, at most once.
+  void resolve_sampler_pragmas() {
+    for (const VarDecl* v : sampler_list_) {
+      SamplerDesc d;
+      d.name = v->name;
+      sampler_descs_.push_back(d);
+    }
+    std::vector<char> seen(sampler_list_.size(), 0);
+    for (const SamplerPragma& sp : sampler_pragmas_) {
+      size_t i = 0;
+      while (i < sampler_list_.size() && sampler_list_[i]->name != sp.name) ++i;
+      if (i == sampler_list_.size())
+        fail(sp.line, sp.col, "'#pragma neui sampler' names " + quote(sp.name) + ", which is not a sampler2D uniform");
+      if (seen[i]) fail(sp.line, sp.col, "sampler " + quote(sp.name) + " has two '#pragma neui sampler' lines");
+      seen[i] = 1;
+      if (sp.has_wrap) sampler_descs_[i].wrap = sp.wrap;
+      if (sp.has_filter) sampler_descs_[i].filter = sp.filter;
+    }
+  }
+
   // --- globals ---
   void parse_global() {
     const Token& t = peek();
@@ -632,6 +705,7 @@ class Parser {
     if (t.t == T_UNIFORM) { parse_uniform(); return; }
     if (t.t == T_CONST) { parse_global_const(); return; }
     skip_precision();
+    if (peek().t == T_KW_SAMPLER2D) fail(peek().line, peek().col, k_sampler_where);
     if (!is_type_tok(peek().t) && peek().t != T_KW_VOID)
       fail(peek().line, peek().col, "expected a declaration, found " + quote(peek().text));
     const Token& type_tok = next();
@@ -645,8 +719,9 @@ class Parser {
     next();
     skip_precision();
     const Token& type_tok = next();
+    if (type_tok.t == T_KW_SAMPLER2D) { parse_sampler_uniform(); return; }
     if (!(type_tok.t == T_KW_FLOAT || type_tok.t == T_KW_VEC2 || type_tok.t == T_KW_VEC3 || type_tok.t == T_KW_VEC4))
-      fail(type_tok.line, type_tok.col, "uniforms are float, vec2, vec3 or vec4");
+      fail(type_tok.line, type_tok.col, "uniforms are float, vec2, vec3, vec4 or sampler2D");
     const Token& name = expect(T_IDENT, "a uniform name");
     VarDecl* v = new_var();
     v->kind = VarDecl::UNIFORM;
@@ -656,8 +731,7 @@ class Parser {
     v->col = name.col;
     v->slot = uniform_values_;
     declare_global(v, name);
-    if (static_cast<int>(uniform_list_.size()) >= k_max_uniforms)
-      fail(name.line, name.col, "more than " + std::to_string(k_max_uniforms) + " uniforms");
+    check_uniform_count(name);
     uniform_values_ += ty_comps(v->type);
     if (uniform_values_ > k_max_uniform_components)
       fail(name.line, name.col, "uniforms need more than " + std::to_string(k_max_uniform_components) + " floats");
@@ -671,6 +745,30 @@ class Parser {
     }
     expect(T_SEMI, "';'");
     uniform_list_.push_back(v);
+  }
+
+  void check_uniform_count(const Token& name) {
+    if (static_cast<int>(uniform_list_.size() + sampler_list_.size()) >= k_max_uniforms)
+      fail(name.line, name.col, "more than " + std::to_string(k_max_uniforms) + " uniforms");
+  }
+
+  // After "uniform sampler2D".
+  void parse_sampler_uniform() {
+    const Token& name = expect(T_IDENT, "a sampler name");
+    VarDecl* v = new_var();
+    v->kind = VarDecl::UNIFORM;
+    v->name = name.text;
+    v->type = Ty::Sampler;
+    v->line = name.line;
+    v->col = name.col;
+    v->slot = static_cast<int>(sampler_list_.size());
+    declare_global(v, name);
+    check_uniform_count(name);
+    if (static_cast<int>(sampler_list_.size()) >= k_max_samplers)
+      fail(name.line, name.col, "more than " + std::to_string(k_max_samplers) + " sampler2D uniforms");
+    if (peek().t == T_ASSIGN) fail(peek().line, peek().col, "a sampler2D has no default; the host binds a bitmap to it");
+    expect(T_SEMI, "';'");
+    sampler_list_.push_back(v);
   }
 
   void parse_global_const() {
@@ -722,12 +820,14 @@ class Parser {
         else if (accept(T_INOUT)) q = Q_INOUT;
         skip_precision();
         const Token& pt = next();
-        if (!is_type_tok(pt.t)) fail(pt.line, pt.col, "expected a parameter type, found " + quote(pt.text));
+        const bool sampler = pt.t == T_KW_SAMPLER2D;
+        if (!sampler && !is_type_tok(pt.t)) fail(pt.line, pt.col, "expected a parameter type, found " + quote(pt.text));
+        if (sampler && q != Q_IN) fail(pt.line, pt.col, "sampler2D parameters must be 'in'");
         const Token& pn = expect(T_IDENT, "a parameter name");
         VarDecl* v = new_var();
         v->kind = VarDecl::PARAM;
         v->name = pn.text;
-        v->type = tok_type(pt.t);
+        v->type = sampler ? Ty::Sampler : tok_type(pt.t);
         v->qual = q;
         v->line = pn.line;
         v->col = pn.col;
@@ -816,6 +916,7 @@ class Parser {
         return make_stmt(t.t == T_BREAK ? Stmt::BREAK : Stmt::CONTINUE, t);
       }
       case T_RETURN: return parse_return();
+      case T_KW_SAMPLER2D: fail(t.line, t.col, k_sampler_where);
       case T_CONST: case T_LOWP: case T_MEDIUMP: case T_HIGHP:
       case T_KW_FLOAT: case T_KW_INT: case T_KW_BOOL: case T_KW_VEC2: case T_KW_VEC3: case T_KW_VEC4:
         return parse_decl();
@@ -839,6 +940,7 @@ class Parser {
     const bool is_const = accept(T_CONST);
     skip_precision();
     const Token& type_tok = next();
+    if (type_tok.t == T_KW_SAMPLER2D) fail(type_tok.line, type_tok.col, k_sampler_where);
     if (!is_type_tok(type_tok.t)) fail(type_tok.line, type_tok.col, "expected a type, found " + quote(type_tok.text));
     const Ty ty = tok_type(type_tok.t);
     if (ty == Ty::Int && !is_const)
@@ -878,6 +980,7 @@ class Parser {
       case VarDecl::LOOP_COUNTER: fail(t.line, t.col, "loop counter " + quote(v->name) + " cannot be assigned");
       default: break;
     }
+    if (v->type == Ty::Sampler) fail(t.line, t.col, "sampler2D " + quote(v->name) + " cannot be assigned");
     if (v->is_const) fail(t.line, t.col, "const " + quote(v->name) + " cannot be assigned");
     if (v->type == Ty::Int) fail(t.line, t.col, "int " + quote(v->name) + " cannot be assigned");
     auto e = std::make_unique<Expr>();
@@ -1025,7 +1128,8 @@ class Parser {
 
   // Result type of an arithmetic operator, or a failure at `at`.
   Ty arith_type(Tok op, Ty a, Ty b, const Token& at) {
-    const bool numeric = a != Ty::Bool && b != Ty::Bool && a != Ty::Void && b != Ty::Void;
+    const bool numeric = a != Ty::Bool && b != Ty::Bool && a != Ty::Void && b != Ty::Void && a != Ty::Sampler &&
+                         b != Ty::Sampler;
     if (numeric && a == Ty::Int && b == Ty::Int) {
       if (op == T_SLASH) fail(at.line, at.col, "int division; write 1.0 / 2.0");
       return Ty::Int;
@@ -1060,6 +1164,7 @@ class Parser {
     else if (converts_to(b->type, a->type)) ty = a->type;
     else fail(q.line, q.col, "the two sides of '?:' are " + std::string(ty_name(a->type)) + " and " + ty_name(b->type));
     if (ty == Ty::Void) fail(q.line, q.col, "'?:' cannot select void");
+    if (ty == Ty::Sampler) fail(q.line, q.col, "'?:' cannot select a sampler2D");
     auto e = make_expr(Expr::TERNARY, q, ty);
     e->args.push_back(std::move(c));
     e->args.push_back(std::move(a));
@@ -1086,7 +1191,8 @@ class Parser {
     while (peek().t == T_EQEQ || peek().t == T_NE) {
       const Token& op = next();
       std::unique_ptr<Expr> r = parse_rel();
-      if (!(converts_to(l->type, r->type) || converts_to(r->type, l->type)) || l->type == Ty::Void)
+      if (!(converts_to(l->type, r->type) || converts_to(r->type, l->type)) || l->type == Ty::Void ||
+          l->type == Ty::Sampler)
         fail(op.line, op.col, "cannot compare " + std::string(ty_name(l->type)) + " with " + ty_name(r->type));
       l = binary(op.t, op, std::move(l), std::move(r), Ty::Bool);
     }
@@ -1282,6 +1388,17 @@ class Parser {
       e->builtin = b;
       e->args = parse_args();
       const int n = static_cast<int>(e->args.size());
+      if (b == B_TEXTURE) {
+        if (n != 2 || e->args[0]->type != Ty::Sampler || e->args[1]->type != Ty::Vec2)
+          fail(t.line, t.col, quote(t.text) + " takes a sampler2D and a vec2");
+        e->type = Ty::Vec4;
+        return e;
+      }
+      if (b == B_TEXTURE_SIZE || b == B_TEXEL) {
+        if (n != 1 || e->args[0]->type != Ty::Sampler) fail(t.line, t.col, quote(t.text) + " takes a sampler2D");
+        e->type = Ty::Vec2;
+        return e;
+      }
       auto want_n = [&](int k) {
         if (n != k) fail(t.line, t.col, quote(t.text) + " takes " + std::to_string(k) + " argument" + (k == 1 ? "" : "s"));
       };
@@ -1363,6 +1480,9 @@ class Parser {
   std::unordered_map<std::string, std::unique_ptr<Function>> functions_;
   std::vector<std::unordered_map<std::string, const VarDecl*>> scopes_;
   std::vector<const VarDecl*> uniform_list_;
+  std::vector<const VarDecl*> sampler_list_;
+  std::vector<SamplerPragma> sampler_pragmas_;
+  std::vector<SamplerDesc> sampler_descs_;
   std::vector<const VarDecl*> const_list_;
   int uniform_values_ = 0;
   const Function* current_fn_ = nullptr;
@@ -1383,6 +1503,7 @@ class IR {
     int a = -1, b = -1, c = -1;
     float value = 0.0f;
     int slot = 0;
+    uint16_t imm = 0;  // OP_TEXEL, OP_CHANNEL
     bool varying = false;
   };
 
@@ -1474,6 +1595,11 @@ class IR {
     return cse_[key] = push(val);
   }
 
+  // Texel (x, y), and one channel of it. Never folded: texels are only known
+  // per draw, so even constant coordinates are read then (in the draw program).
+  int texel(int x, int y, uint16_t imm) { return imm_op(OP_TEXEL, x, y, imm); }
+  int channel(int texel_id, int ch) { return imm_op(OP_CHANNEL, texel_id, -1, static_cast<uint16_t>(ch)); }
+
   // Booleans (0 / 1).
   int and_(int a, int b) {
     if (is_false(a) || is_false(b)) return f();
@@ -1488,6 +1614,21 @@ class IR {
   int not_(int a) { return op(OP_SUB, t(), a); }
 
  private:
+  int imm_op(Op o, int a, int b, uint16_t imm) {
+    const uint64_t key = (static_cast<uint64_t>(o) << 54) | (static_cast<uint64_t>(a + 1) << 36) |
+                         (static_cast<uint64_t>(b + 1) << 18) | imm;
+    auto it = cse_.find(key);
+    if (it != cse_.end()) return it->second;
+    Val val;
+    val.kind = K_INS;
+    val.op = o;
+    val.a = a;
+    val.b = b;
+    val.imm = imm;
+    val.varying = v[static_cast<size_t>(a)].varying || (b >= 0 && v[static_cast<size_t>(b)].varying);
+    return cse_[key] = push(val);
+  }
+
   int push(const Val& val) {
     if (v.size() >= k_max_ir_values) fail(0, 0, "");  // replaced by the caller's location
     v.push_back(val);
@@ -1522,6 +1663,12 @@ class Lowerer {
       r.n = ty_comps(u->type);
       for (int i = 0; i < r.n; ++i) r.id[i] = ir_.leaf(IR::K_UNIFORM, u->slot + i);
       globals_[u] = r;
+    }
+    for (const VarDecl* s : ps_.sampler_vars()) {
+      RV r;
+      r.t = Ty::Sampler;
+      r.ival = s->slot;
+      globals_[s] = r;
     }
     frames_.emplace_back();  // a frame for constant initialisers
     frames_.back().path = frames_.back().ret_alive = ir_.t();
@@ -1785,8 +1932,64 @@ class Lowerer {
   int step(int edge, int x) { return ir_.op(OP_SEL, ir_.op(OP_LT, x, edge), ir_.f(), ir_.t()); }
   int clamp(int x, int lo, int hi) { return ir_.op(OP_MIN, ir_.op(OP_MAX, x, lo), hi); }
 
+  // texture2D, neui_texture_size and neui_texel. Sampling is exact integer
+  // arithmetic on the premultiplied texels (every product and sum below 2^24)
+  // up to one division, so CPU and GPU agree whatever the operation order.
+  RV lower_texture(const Expr* e) {
+    const int si = static_cast<int>(lower_expr(e->args[0].get()).ival);
+    auto& I = ir_;
+    auto res = [&](TexValue tv) { return I.leaf(IR::K_RESERVED, tex_reserved(si, tv)); };
+    RV r;
+    r.t = e->type;
+    r.n = ty_comps(e->type);
+    if (e->builtin == B_TEXTURE_SIZE || e->builtin == B_TEXEL) {
+      const bool size = e->builtin == B_TEXTURE_SIZE;
+      r.id[0] = res(size ? TEX_LOGICAL_W : TEX_INV_W);
+      r.id[1] = res(size ? TEX_LOGICAL_H : TEX_INV_H);
+      return r;
+    }
+    const RV uv = lower_expr(e->args[1].get());
+    const SamplerDesc& sd = ps_.samplers()[static_cast<size_t>(si)];
+    const int W = res(TEX_W), H = res(TEX_H);
+    auto texel = [&](int x, int y) { return I.texel(x, y, texel_imm(si, sd.wrap)); };
+    int c[4];       // premultiplied r, g, b, a, scaled by `full`
+    int full = -1;  // the value of an opaque texel's alpha
+    if (sd.filter == Filter::NEAREST) {
+      const int x = I.op(OP_FLOOR, I.op(OP_MUL, uv.id[0], W));
+      const int y = I.op(OP_FLOOR, I.op(OP_MUL, uv.id[1], H));
+      const int t = texel(x, y);
+      for (int ch = 0; ch < 4; ++ch) c[ch] = I.channel(t, ch);
+      full = I.k(255.0f);
+    } else {
+      // Texel centres sit at integers; the fraction is quantised to 1/256.
+      const int tx = I.op(OP_SUB, I.op(OP_MUL, uv.id[0], W), I.k(0.5f));
+      const int ty = I.op(OP_SUB, I.op(OP_MUL, uv.id[1], H), I.k(0.5f));
+      const int x0 = I.op(OP_FLOOR, tx), y0 = I.op(OP_FLOOR, ty);
+      auto q8 = [&](int t, int t0) {
+        return I.op(OP_FLOOR, I.op(OP_ADD, I.op(OP_MUL, I.op(OP_SUB, t, t0), I.k(256.0f)), I.k(0.5f)));
+      };
+      const int fx = q8(tx, x0), fy = q8(ty, y0);
+      const int gx = I.op(OP_SUB, I.k(256.0f), fx), gy = I.op(OP_SUB, I.k(256.0f), fy);
+      const int x1 = I.op(OP_ADD, x0, I.t()), y1 = I.op(OP_ADD, y0, I.t());
+      const int w00 = I.op(OP_MUL, gx, gy), w10 = I.op(OP_MUL, fx, gy);
+      const int w01 = I.op(OP_MUL, gx, fy), w11 = I.op(OP_MUL, fx, fy);
+      const int t00 = texel(x0, y0), t10 = texel(x1, y0), t01 = texel(x0, y1), t11 = texel(x1, y1);
+      for (int ch = 0; ch < 4; ++ch) {
+        const int a = I.op(OP_ADD, I.op(OP_MUL, I.channel(t00, ch), w00), I.op(OP_MUL, I.channel(t10, ch), w10));
+        const int b = I.op(OP_ADD, I.op(OP_MUL, I.channel(t01, ch), w01), I.op(OP_MUL, I.channel(t11, ch), w11));
+        c[ch] = I.op(OP_ADD, a, b);
+      }
+      full = I.k(16711680.0f);  // 255 * 256 * 256
+    }
+    const int clear = I.op(OP_EQ, c[3], I.f());
+    for (int ch = 0; ch < 3; ++ch) r.id[ch] = I.op(OP_SEL, clear, I.f(), I.op(OP_DIV, c[ch], c[3]));
+    r.id[3] = I.op(OP_DIV, c[3], full);
+    return r;
+  }
+
   RV lower_builtin(const Expr* e) {
     const Builtin b = e->builtin;
+    if (b == B_TEXTURE || b == B_TEXTURE_SIZE || b == B_TEXEL) return lower_texture(e);
     std::vector<RV> args;
     for (const auto& a : e->args) args.push_back(lower_expr(a.get()));
     const int n = (b == B_LENGTH || b == B_DISTANCE || b == B_DOT || b == B_HASH || b == B_NOISE)
@@ -2196,7 +2399,7 @@ struct PixelAlloc {
   std::vector<Ins> code;
   std::vector<Program::PoolEntry> pool;
   int prologue = 0;  // leading OP_LOADs that run once per draw
-  int regs = 0, peak = 0, real_ops = 0, transcendentals = 0;
+  int regs = 0, peak = 0, real_ops = 0, transcendentals = 0, fetches = 0;
   uint16_t px = 0, py = 0, out[4] = {0, 0, 0, 0};
 };
 
@@ -2271,9 +2474,11 @@ PixelAlloc allocate_pixels(const IR& ir, const std::vector<char>& live, const st
     in.a = static_cast<uint16_t>(pix_reg[static_cast<size_t>(v.a)]);
     in.b = static_cast<uint16_t>(v.b >= 0 ? pix_reg[static_cast<size_t>(v.b)] : in.a);
     in.c = static_cast<uint16_t>(v.c >= 0 ? pix_reg[static_cast<size_t>(v.c)] : in.a);
+    if (op_has_imm(v.op)) in.c = v.imm;
     r.code.push_back(in);
     ++r.real_ops;
     if (op_is_transcendental(v.op)) ++r.transcendentals;
+    if (v.op == OP_TEXEL) ++r.fetches;
     for (int k = 0; k < 3; ++k) {
       const int s = operands[k];
       if (s < 0 || ir.v[static_cast<size_t>(s)].kind == IR::K_INPUT || pinned[static_cast<size_t>(s)]) continue;
@@ -2393,6 +2598,7 @@ void finalize(const IR& ir_in, const int out_in[4], int main_line, int main_col,
         in.a = static_cast<uint16_t>(draw_reg[static_cast<size_t>(v.a)]);
         in.b = static_cast<uint16_t>(v.b >= 0 ? draw_reg[static_cast<size_t>(v.b)] : in.a);
         in.c = static_cast<uint16_t>(v.c >= 0 ? draw_reg[static_cast<size_t>(v.c)] : in.a);
+        if (op_has_imm(v.op)) in.c = v.imm;
         pg.draw_code.push_back(in);
         break;
       }
@@ -2427,6 +2633,7 @@ void finalize(const IR& ir_in, const int out_in[4], int main_line, int main_col,
   pg.stat.draw_ops = static_cast<int>(pg.draw_code.size());
   pg.stat.pixel_regs = pg.pixel_regs;
   pg.stat.transcendentals = use.transcendentals;
+  pg.stat.fetches = use.fetches;
 }
 
 }  // namespace
@@ -2442,8 +2649,9 @@ CompileResult compile(const char* src, size_t len, const char* name) {
     if (len > k_max_source)
       fail(1, 1, "source is larger than " + std::to_string(k_max_source / 1024) + " KiB");
     uint32_t flag_bits = 0;
-    std::vector<Token> toks = Lexer(src, len).run(flag_bits);
-    Parser ps(std::move(toks), flag_bits);
+    Lexer lexer(src, len);
+    std::vector<Token> toks = lexer.run(flag_bits);
+    Parser ps(std::move(toks), flag_bits, std::move(lexer.sampler_pragmas));
     ps.parse_program();
 
     auto pg = std::make_shared<Program>();
@@ -2463,6 +2671,7 @@ CompileResult compile(const char* src, size_t len, const char* name) {
       pg->uniform_list.push_back(d);
     }
     pg->uniform_count = ps.uniform_values();
+    pg->sampler_list = ps.samplers();
     pg->flag_bits = ps.flag_bits();
     int out[4];
     try {
@@ -2491,6 +2700,7 @@ void default_uniforms(const Program& p, float* values) {
   for (const UniformDesc& u : p.uniform_list)
     for (int i = 0; i < u.components; ++i) values[u.offset + i] = u.defaults[i];
 }
+const std::vector<SamplerDesc>& samplers(const Program& p) { return p.sampler_list; }
 uint32_t flags(const Program& p) { return p.flag_bits; }
 Stats stats(const Program& p) { return p.stat; }
 

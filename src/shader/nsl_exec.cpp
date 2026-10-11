@@ -51,8 +51,117 @@ Geometry geometry(const Draw& d) {
   return g;
 }
 
+// The bitmaps of one draw, by sampler. A null `px` is an unbound sampler.
+struct TexView {
+  const uint8_t* px = nullptr;
+  int32_t w = 0, h = 0;
+  size_t stride = 0;
+  float scale = 1.0f;
+};
+struct Textures {
+  TexView t[k_max_samplers];
+};
+
+Textures bind_textures(const Program& pg, const Draw& d) {
+  Textures r;
+  const int n = std::min(static_cast<int>(pg.sampler_list.size()), d.texture_count);
+  for (int s = 0; s < n && d.textures; ++s) {
+    const Texture& x = d.textures[s];
+    if (!x.bgra || x.w <= 0 || x.h <= 0 || x.w > k_max_bitmap_side || x.h > k_max_bitmap_side ||
+        x.stride < static_cast<size_t>(x.w) * 4u)
+      continue;
+    TexView& v = r.t[s];
+    v.px = x.bgra;
+    v.w = x.w;
+    v.h = x.h;
+    v.stride = x.stride;
+    v.scale = x.scale > 0.0f && x.scale < 1e30f ? x.scale : 1.0f;
+  }
+  return r;
+}
+
+float tex_value(const Textures& tx, int slot) {
+  const TexView& t = tx.t[(slot - k_res_tex) / 8];
+  if (!t.px) return 0.0f;
+  const float w = static_cast<float>(t.w), h = static_cast<float>(t.h);
+  switch ((slot - k_res_tex) % 8) {
+    case TEX_W: return w;
+    case TEX_H: return h;
+    case TEX_INV_W: return 1.0f / w;
+    case TEX_INV_H: return 1.0f / h;
+    case TEX_LOGICAL_W: return w / t.scale;
+    default: return h / t.scale;
+  }
+}
+
+// A texel coordinate as an int: the lowering passes whole numbers (floor);
+// NaN reads texel 0 and anything beyond +-2^30 saturates.
+inline int32_t tex_coord(float v) {
+  if (!(v > -1073741824.0f)) return v == v ? -1073741824 : 0;
+  if (!(v < 1073741824.0f)) return 1073741824;
+  return static_cast<int32_t>(v);
+}
+
+// Applies the edge mode to coordinate i of an axis of n texels; false when a
+// border sampler reads outside the bitmap.
+inline bool tex_wrap(int32_t& i, int32_t n, Wrap mode) {
+  if (mode == Wrap::CLAMP) {
+    i = i < 0 ? 0 : (i >= n ? n - 1 : i);
+    return true;
+  }
+  if (mode == Wrap::REPEAT) {
+    i %= n;
+    if (i < 0) i += n;
+    return true;
+  }
+  return i >= 0 && i < n;
+}
+
+// Texel (x, y) of an edge mode as a little-endian BGRA word; 0 (transparent)
+// when unbound or outside a border sampler.
+template <Wrap M>
+NSL_FI uint32_t tex_texel_m(const TexView& t, float xf, float yf) {
+  int32_t x = tex_coord(xf), y = tex_coord(yf);
+  if (!tex_wrap(x, t.w, M) || !tex_wrap(y, t.h, M)) return 0u;
+  const uint8_t* q = t.px + static_cast<size_t>(y) * t.stride + static_cast<size_t>(x) * 4u;
+  return static_cast<uint32_t>(q[0]) | static_cast<uint32_t>(q[1]) << 8 | static_cast<uint32_t>(q[2]) << 16 |
+         static_cast<uint32_t>(q[3]) << 24;
+}
+
+inline uint32_t tex_texel(const TexView& t, Wrap mode, float xf, float yf) {
+  if (!t.px) return 0u;
+  switch (mode) {
+    case Wrap::CLAMP: return tex_texel_m<Wrap::CLAMP>(t, xf, yf);
+    case Wrap::REPEAT: return tex_texel_m<Wrap::REPEAT>(t, xf, yf);
+    default: return tex_texel_m<Wrap::BORDER>(t, xf, yf);
+  }
+}
+
+// OP_TEXEL over n lanes.
+template <Wrap M>
+void tex_texels(const TexView& t, const float* xs, const float* ys, float* out, int n) {
+  for (int i = 0; i < n; ++i) out[i] = from_bits(tex_texel_m<M>(t, xs[i], ys[i]));
+}
+
+inline float tex_texel_op(const Textures& tx, uint16_t imm, float x, float y) {
+  return from_bits(tex_texel(tx.t[texel_sampler(imm)], texel_wrap(imm), x, y));
+}
+
+inline float tex_channel(uint16_t ch, float texel) {
+  return static_cast<float>((bits(texel) >> channel_shift(ch)) & 0xffu);
+}
+
+// The scalar definition of every op, OP_TEXEL included.
+inline float eval_tex_op(const Ins& in, const Textures& tx, float a, float b, float c) {
+  switch (in.op) {
+    case OP_TEXEL: return tex_texel_op(tx, in.c, a, b);
+    case OP_CHANNEL: return tex_channel(in.c, a);
+    default: return eval_op(in.op, a, b, c);
+  }
+}
+
 // Evaluates the draw program; returns its registers.
-std::vector<float> run_draw(const Program& pg, const Draw& d) {
+std::vector<float> run_draw(const Program& pg, const Draw& d, const Textures& tx) {
   std::vector<float> uni(static_cast<size_t>(pg.uniform_count));
   if (d.uniforms) std::copy(d.uniforms, d.uniforms + pg.uniform_count, uni.begin());
   else default_uniforms(pg, uni.data());
@@ -66,11 +175,12 @@ std::vector<float> run_draw(const Program& pg, const Draw& d) {
       case RES_SIZE_Y: v = d.h; break;
       case RES_SCALE: v = d.scale; break;
       case RES_PX: v = 1.0f / d.scale; break;
-      default: v = d.time; break;
+      case RES_TIME: v = d.time; break;
+      default: v = tex_value(tx, r.second); break;
     }
     R[r.first] = v;
   }
-  for (const Ins& in : pg.draw_code) R[in.d] = eval_op(in.op, R[in.a], R[in.b], R[in.c]);
+  for (const Ins& in : pg.draw_code) R[in.d] = eval_tex_op(in, tx, R[in.a], R[in.b], R[in.c]);
   return R;
 }
 
@@ -85,14 +195,16 @@ std::vector<float> make_pool(const Program& pg, const std::vector<float>& DR) {
 }
 
 // Runs pixel_code[begin, end).
-void run_pixels_scalar(const Program& pg, size_t begin, size_t end, const float* pool, float* R) {
+void run_pixels_scalar(const Program& pg, size_t begin, size_t end, const float* pool, const Textures& tx,
+                       float* R) {
   for (size_t k = begin; k < end; ++k) {
     const Ins& in = pg.pixel_code[k];
-    R[in.d] = in.op == OP_LOAD ? pool[in.a] : eval_op(in.op, R[in.a], R[in.b], R[in.c]);
+    R[in.d] = in.op == OP_LOAD ? pool[in.a] : eval_tex_op(in, tx, R[in.a], R[in.b], R[in.c]);
   }
 }
 
-void run_pixels_simd(const Program& pg, size_t begin, size_t end, const float* pool, float* R) {
+void run_pixels_simd(const Program& pg, size_t begin, size_t end, const float* pool, const Textures& tx,
+                     float* R) {
   constexpr int L = k_lanes;
   for (size_t k = begin; k < end; ++k) {
     const Ins& in = pg.pixel_code[k];
@@ -132,6 +244,22 @@ void run_pixels_simd(const Program& pg, size_t begin, size_t end, const float* p
         for (int i = 0; i < L; i += 4) f4_store(d + i, v);
         break;
       }
+      case OP_TEXEL: {  // a gather: one lane at a time
+        const TexView& t = tx.t[texel_sampler(in.c)];
+        if (!t.px) std::fill(d, d + L, 0.0f);
+        else if (texel_wrap(in.c) == Wrap::CLAMP) tex_texels<Wrap::CLAMP>(t, a, b, d, L);
+        else if (texel_wrap(in.c) == Wrap::REPEAT) tex_texels<Wrap::REPEAT>(t, a, b, d, L);
+        else tex_texels<Wrap::BORDER>(t, a, b, d, L);
+        break;
+      }
+      case OP_CHANNEL:
+        switch (channel_shift(in.c)) {
+          case 0:  NSL_K1(i4_to_f4(f4_bits(x) & i4(0xff)))
+          case 8:  NSL_K1(i4_to_f4(i4_shr<8>(f4_bits(x)) & i4(0xff)))
+          case 16: NSL_K1(i4_to_f4(i4_shr<16>(f4_bits(x)) & i4(0xff)))
+          default: NSL_K1(i4_to_f4(i4_shr<24>(f4_bits(x))))
+        }
+        break;
       default: break;
     }
 #undef NSL_K1
@@ -212,13 +340,14 @@ bool run(const Program& pg, const Draw& d, uint8_t* out, size_t stride) {
   FpEnvGuard fp;
   const Geometry g = geometry(d);
   if (!g.ok || !out) return false;
-  const std::vector<float> pool = make_pool(pg, run_draw(pg, d));
+  const Textures tx = bind_textures(pg, d);
+  const std::vector<float> pool = make_pool(pg, run_draw(pg, d, tx));
   std::vector<float> regs(static_cast<size_t>(pg.pixel_regs) * L);
   float* R = regs.data();
   auto reg = [&](uint16_t r) { return R + static_cast<size_t>(r) * L; };
   const size_t pro = static_cast<size_t>(pg.pixel_prologue), all = pg.pixel_code.size();
-  if constexpr (Simd) run_pixels_simd(pg, 0, pro, pool.data(), R);  // pinned values, once
-  else run_pixels_scalar(pg, 0, pro, pool.data(), R);
+  if constexpr (Simd) run_pixels_simd(pg, 0, pro, pool.data(), tx, R);  // pinned values, once
+  else run_pixels_scalar(pg, 0, pro, pool.data(), tx, R);
 
   // p.x and the column coverage depend only on the column.
   const int w_pad = (g.w + L - 1) / L * L;
@@ -248,8 +377,8 @@ bool run(const Program& pg, const Draw& d, uint8_t* out, size_t stride) {
     for (int x0 = 0; x0 < g.w; x0 += L) {
       std::memcpy(px, px_col.data() + x0, sizeof(float) * L);
       std::fill(py, py + L, pyv);
-      if constexpr (Simd) run_pixels_simd(pg, pro, all, pool.data(), R);
-      else run_pixels_scalar(pg, pro, all, pool.data(), R);
+      if constexpr (Simd) run_pixels_simd(pg, pro, all, pool.data(), tx, R);
+      else run_pixels_scalar(pg, pro, all, pool.data(), tx, R);
       const int n = std::min(L, g.w - x0);
       uint8_t* dst = dst_row + static_cast<size_t>(x0) * 4u;
       const float* cx = cx_col.data() + x0;
@@ -270,13 +399,14 @@ template <bool Simd>
 void eval_points(const Program& pg, const Draw& d, const float* xs, const float* ys, int n, float* out) {
   constexpr int L = Simd ? k_lanes : 1;
   FpEnvGuard fp;
-  const std::vector<float> pool = make_pool(pg, run_draw(pg, d));
+  const Textures tx = bind_textures(pg, d);
+  const std::vector<float> pool = make_pool(pg, run_draw(pg, d, tx));
   std::vector<float> regs(static_cast<size_t>(pg.pixel_regs) * L);
   float* R = regs.data();
   auto reg = [&](uint16_t r) { return R + static_cast<size_t>(r) * L; };
   const size_t pro = static_cast<size_t>(pg.pixel_prologue), all = pg.pixel_code.size();
-  if constexpr (Simd) run_pixels_simd(pg, 0, pro, pool.data(), R);
-  else run_pixels_scalar(pg, 0, pro, pool.data(), R);
+  if constexpr (Simd) run_pixels_simd(pg, 0, pro, pool.data(), tx, R);
+  else run_pixels_scalar(pg, 0, pro, pool.data(), tx, R);
   for (int base = 0; base < n; base += L) {
     const int m = std::min(L, n - base);
     float* px = reg(pg.px);
@@ -285,8 +415,8 @@ void eval_points(const Program& pg, const Draw& d, const float* xs, const float*
       px[i] = i < m ? xs[base + i] : 0.0f;
       py[i] = i < m ? ys[base + i] : 0.0f;
     }
-    if constexpr (Simd) run_pixels_simd(pg, pro, all, pool.data(), R);
-    else run_pixels_scalar(pg, pro, all, pool.data(), R);
+    if constexpr (Simd) run_pixels_simd(pg, pro, all, pool.data(), tx, R);
+    else run_pixels_scalar(pg, pro, all, pool.data(), tx, R);
     for (int i = 0; i < m; ++i)
       for (int c = 0; c < 4; ++c) out[static_cast<size_t>(base + i) * 4u + static_cast<size_t>(c)] = reg(pg.out[c])[i];
   }
@@ -317,6 +447,7 @@ float sweep_value(float from, float to, uint32_t i, uint32_t n) {
 
 size_t gpu_constant_count(const Program& p) {
   if (p.flag_bits & NSL_CPU_ONLY) return 0;
+  if (!p.sampler_list.empty()) return 0;  // no GPU sampling yet (plans/shader-effects.md, phase 9)
   const size_t n = detail::gpu_float_count(p);
   return n <= detail::k_gpu_max_floats ? n : 0;
 }
@@ -335,7 +466,7 @@ bool gpu_constants(const Program& p, const Draw& d, float* out) {
   out[3] = g.Y1 - fj0;
   out[4] = d.scale;
   out[k_gpu_opacity] = 1.0f;
-  const std::vector<float> pool = detail::make_pool(p, detail::run_draw(p, d));
+  const std::vector<float> pool = detail::make_pool(p, detail::run_draw(p, d, detail::bind_textures(p, d)));
   const std::vector<int> slot = detail::gpu_pool_slots(p);
   for (size_t i = 0; i < slot.size(); ++i)
     if (slot[i] >= 0) out[slot[i]] = pool[i];

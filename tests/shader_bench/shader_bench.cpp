@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -17,9 +18,13 @@ namespace {
 
 namespace nsl = neui::nsl;
 
+// The bitmap bound to a shader's sampler(s), if any.
+enum Tex { TEX_NONE, TEX_PHOTO, TEX_NORMAL, TEX_NOISE };
+
 struct Shader {
   const char* name;
   const char* src;
+  Tex tex = TEX_NONE;
 };
 
 const Shader k_shaders[] = {
@@ -85,7 +90,122 @@ vec4 main(vec2 p) {
   float edge = 1.0 - smoothstep(R - neui_px, R, d);
   return vec4(col, edge);
 })"},
+  // Texture sampling (plans/shader-effects.md, phase 9).
+  {"tex_copy", R"(
+uniform sampler2D img;
+vec4 main(vec2 p) { return texture2D(img, p / neui_size); })", TEX_PHOTO},
+  {"tex_nearest", R"(
+#pragma neui sampler img nearest
+uniform sampler2D img;
+vec4 main(vec2 p) { return texture2D(img, p / neui_size); })", TEX_PHOTO},
+  {"tex_blur9", R"(
+uniform sampler2D img;
+vec4 main(vec2 p) {
+  vec2 uv = p / neui_size;
+  vec2 t = neui_texel(img);
+  vec4 sum = vec4(0.0);
+  for (int y = -1; y <= 1; y++)
+    for (int x = -1; x <= 1; x++)
+      sum += texture2D(img, uv + vec2(float(x), float(y)) * t);
+  return sum / 9.0;
+})", TEX_PHOTO},
+  {"tex_normal", R"(
+uniform float value = 0.4;
+uniform sampler2D normals;
+vec4 main(vec2 p) {
+  vec2 c = neui_size * 0.5;
+  float d = length(p - c);
+  float R = min(c.x, c.y) * 0.9;
+  vec3 n = texture2D(normals, p / neui_size).xyz * 2.0 - 1.0;
+  float a = (value - 0.5) * 4.71238898;
+  vec3 l = normalize(vec3(sin(a), -cos(a), 1.2));
+  float lit = saturate(dot(n, l));
+  float spec = pow(saturate(dot(reflect(-l, n), vec3(0.0, 0.0, 1.0))), 24.0);
+  vec3 col = vec3(0.18, 0.2, 0.24) + vec3(0.6) * lit + vec3(0.5) * spec;
+  return vec4(col, 1.0 - smoothstep(R - neui_px, R, d));
+})", TEX_NORMAL},
+  {"tex_noise", R"(
+#pragma neui sampler noise repeat
+uniform sampler2D noise;
+vec4 main(vec2 p) {
+  float sum = texture2D(noise, p / 256.0).r;
+  float t = smoothstep(0.3, 0.8, sum);
+  return vec4(mix(0.08, 0.95, t), mix(0.10, 0.80, t), mix(0.16, 0.55, t), 1.0);
+})", TEX_NOISE},
 };
+
+// Premultiplied BGRA test bitmaps.
+struct Bitmap {
+  int w = 0, h = 0;
+  std::vector<uint8_t> px;
+};
+
+Bitmap photo() {  // random, half transparent: the worst case for unpremultiply
+  Bitmap b;
+  b.w = b.h = 512;
+  b.px.resize(512u * 512u * 4u);
+  uint32_t s = 1u;
+  for (size_t i = 0; i < b.px.size(); i += 4) {
+    s = s * 1664525u + 1013904223u;
+    const uint32_t a = s >> 24;
+    for (int c = 0; c < 3; ++c) b.px[i + static_cast<size_t>(c)] = static_cast<uint8_t>(((s >> (8 * c)) & 0xffu) * a / 255u);
+    b.px[i + 3] = static_cast<uint8_t>(a);
+  }
+  return b;
+}
+
+Bitmap normal_map() {  // a domed knob with machined rings
+  Bitmap b;
+  b.w = b.h = 256;
+  b.px.resize(256u * 256u * 4u);
+  for (int y = 0; y < 256; ++y)
+    for (int x = 0; x < 256; ++x) {
+      const double u = (x + 0.5) / 128.0 - 1.0, v = (y + 0.5) / 128.0 - 1.0;
+      const double r = std::sqrt(u * u + v * v);
+      const double ring = 0.05 * std::sin(r * 60.0);
+      double nx = u * 0.6 + ring * u, ny = v * 0.6 + ring * v, nz = 1.0;
+      const double l = std::sqrt(nx * nx + ny * ny + nz * nz);
+      nx /= l; ny /= l; nz /= l;
+      uint8_t* q = &b.px[(static_cast<size_t>(y) * 256u + static_cast<size_t>(x)) * 4u];
+      q[2] = static_cast<uint8_t>(127.5 + 127.5 * nx);
+      q[1] = static_cast<uint8_t>(127.5 + 127.5 * ny);
+      q[0] = static_cast<uint8_t>(127.5 + 127.5 * nz);
+      q[3] = 255;
+    }
+  return b;
+}
+
+Bitmap noise_tile() {  // fbm5 baked once into a 256 x 256 tile
+  Bitmap b;
+  b.w = b.h = 256;
+  b.px.resize(256u * 256u * 4u);
+  const char* src = R"(
+vec4 main(vec2 p) {
+  vec2 q = p / 24.0;
+  float sum = 0.0;
+  float amp = 0.5;
+  for (int o = 0; o < 5; o++) {
+    sum += amp * neui_noise(q);
+    q = vec2(q.x * 2.03 + 1.7, q.y * 2.03 - 0.9);
+    amp *= 0.5;
+  }
+  return vec4(vec3(sum), 1.0);
+})";
+  const nsl::CompileResult r = nsl::compile(src, std::strlen(src), "noise_tile");
+  nsl::Draw d;
+  d.w = d.h = 256.0f;
+  if (r.program) nsl::execute(*r.program, d, b.px.data(), 256u * 4u);
+  return b;
+}
+
+nsl::Texture texture_of(const Bitmap& b) {
+  nsl::Texture t;
+  t.bgra = b.px.data();
+  t.w = b.w;
+  t.h = b.h;
+  t.stride = static_cast<size_t>(b.w) * 4u;
+  return t;
+}
 
 double now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -116,10 +236,11 @@ int main() {
 #elif defined(__GNUC__)
   std::printf("compiler: GCC %s\n", __VERSION__);
 #endif
-  std::printf("\n%-11s %5s %5s %5s %5s %8s %8s %12s %14s %13s\n", "shader", "pixel", "draw", "trans", "regs",
-              "scalar", "SIMD", "knob 120@2x", "bg 800x600@2x", "bg @ res 0.5");
-  std::printf("%-11s %5s %5s %5s %5s %8s %8s %12s %14s %13s\n", "", "ops", "ops", "", "", "ns/px", "ns/px", "ms", "ms",
-              "ms");
+  const Bitmap bitmaps[] = {Bitmap(), photo(), normal_map(), noise_tile()};
+  std::printf("\n%-11s %5s %5s %5s %5s %5s %8s %8s %12s %14s %13s\n", "shader", "pixel", "draw", "trans", "fetch",
+              "regs", "scalar", "SIMD", "knob 120@2x", "bg 800x600@2x", "bg @ res 0.5");
+  std::printf("%-11s %5s %5s %5s %5s %5s %8s %8s %12s %14s %13s\n", "", "ops", "ops", "", "", "", "ns/px", "ns/px",
+              "ms", "ms", "ms");
   for (const Shader& s : k_shaders) {
     const nsl::CompileResult r = nsl::compile(s.src, std::strlen(s.src), s.name);
     if (!r.program) {
@@ -128,7 +249,12 @@ int main() {
     }
     const nsl::Program& p = *r.program;
     const nsl::Stats st = nsl::stats(p);
+    const nsl::Texture tex = texture_of(bitmaps[s.tex]);
     nsl::Draw knob;
+    if (s.tex != TEX_NONE) {
+      knob.textures = &tex;
+      knob.texture_count = 1;
+    }
     knob.w = knob.h = 120.0f;
     knob.scale = 2.0f;
     knob.time = 1.7f;
@@ -141,8 +267,8 @@ int main() {
     const double simd = time_ns_per_px(p, knob, true, 7);
     const double bg_ns = time_ns_per_px(p, bg, true, 2);
     const double half_ns = time_ns_per_px(p, bg_half, true, 3);
-    std::printf("%-11s %5d %5d %5d %5d %8.2f %8.2f %12.2f %14.1f %13.1f\n", s.name, st.pixel_ops, st.draw_ops,
-                st.transcendentals, st.pixel_regs, scalar, simd, simd * 240.0 * 240.0 * 1e-6,
+    std::printf("%-11s %5d %5d %5d %5d %5d %8.2f %8.2f %12.2f %14.1f %13.1f\n", s.name, st.pixel_ops, st.draw_ops,
+                st.transcendentals, st.fetches, st.pixel_regs, scalar, simd, simd * 240.0 * 240.0 * 1e-6,
                 bg_ns * 1600.0 * 1200.0 * 1e-6, half_ns * 800.0 * 600.0 * 1e-6);
   }
   return 0;

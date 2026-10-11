@@ -26,13 +26,24 @@ enum Op : uint8_t {
   OP_LT, OP_LE, OP_EQ, OP_NE,  // 1 when the comparison holds, else 0
   OP_SEL,                      // a != 0 ? b : c
   OP_LOAD,                     // pixel program only: d = pixel_pool[a], broadcast
+  OP_TEXEL,                    // texel (a, b), its 4 premultiplied bytes as raw bits; c = texel_imm()
+  OP_CHANNEL,                  // one channel of texel a as 0..255; c = 0..3 for r, g, b, a
   OP_COUNT
 };
+
+// OP_TEXEL and OP_CHANNEL take an immediate in c, not a register. A texel
+// register holds the bits of a little-endian BGRA word, not a float: only
+// OP_CHANNEL reads it, and nothing does arithmetic on it.
+inline uint16_t texel_imm(int sampler, Wrap wrap) { return static_cast<uint16_t>(sampler | static_cast<int>(wrap) << 2); }
+inline int texel_sampler(uint16_t imm) { return imm & 3; }
+inline Wrap texel_wrap(uint16_t imm) { return static_cast<Wrap>(imm >> 2); }
+inline int channel_shift(uint16_t ch) { return ch == 3 ? 24 : 16 - 8 * ch; }  // r g b a in BGRA
+inline bool op_has_imm(Op op) { return op == OP_TEXEL || op == OP_CHANNEL; }
 
 inline int op_arity(Op op) {
   switch (op) {
     case OP_NEG: case OP_ABS: case OP_FLOOR: case OP_SQRT:
-    case OP_SIN: case OP_COS: case OP_EXP2: case OP_LOG2: case OP_LOAD:
+    case OP_SIN: case OP_COS: case OP_EXP2: case OP_LOG2: case OP_LOAD: case OP_CHANNEL:
       return 1;
     case OP_SEL:
       return 3;
@@ -83,6 +94,13 @@ struct Ins {
 // The reserved uniforms, as draw-program inputs.
 enum Reserved : uint8_t { RES_SIZE_X, RES_SIZE_Y, RES_SCALE, RES_PX, RES_TIME, RES_COUNT };
 
+// Per-sampler draw values, reserved slot k_res_tex + 8 * sampler + TexValue:
+// the bitmap's size in texels, one texel in uv units, its logical size. All 0
+// for an unbound sampler.
+constexpr int k_res_tex = 8;
+enum TexValue : uint8_t { TEX_W, TEX_H, TEX_INV_W, TEX_INV_H, TEX_LOGICAL_W, TEX_LOGICAL_H };
+inline int tex_reserved(int sampler, TexValue v) { return k_res_tex + 8 * sampler + v; }
+
 template <typename T>
 using RegInit = std::pair<uint16_t, T>;  // register <- value / source
 
@@ -113,6 +131,7 @@ struct Program {
 
   std::vector<UniformDesc> uniform_list;
   int uniform_count = 0;  // floats
+  std::vector<SamplerDesc> sampler_list;
   uint32_t flag_bits = 0;
   Stats stat;
 };

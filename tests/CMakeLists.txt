@@ -35,6 +35,7 @@ add_executable(neui_tests
   test_shader_asset.cpp
   test_shader_layer.cpp
   test_shader_gpu.cpp
+  test_shader_texture.cpp
   test_anim_clock.cpp
   test_paint_pacer.cpp
   # mujson lives in the core lib, but the suite links no library, so its TU is

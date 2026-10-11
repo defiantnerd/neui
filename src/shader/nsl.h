@@ -43,6 +43,19 @@ int uniform_components(const Program& p);  // total floats in the value array
 // Writes every uniform's default into `values` (uniform_components floats).
 void default_uniforms(const Program& p, float* values);
 
+// A sampler2D uniform as declared, with the modes its #pragma neui sampler
+// line sets. Samplers are not in uniforms(): they take a bitmap, not floats.
+enum class Wrap : uint8_t { CLAMP, REPEAT, BORDER };
+enum class Filter : uint8_t { LINEAR, NEAREST };
+struct SamplerDesc {
+  std::string name;
+  Wrap wrap = Wrap::CLAMP;
+  Filter filter = Filter::LINEAR;
+};
+constexpr int k_max_samplers = 4;
+
+const std::vector<SamplerDesc>& samplers(const Program& p);
+
 enum : uint32_t {
   NSL_READS_TIME = 1u << 0,  // reads neui_time: animates
   NSL_DITHER     = 1u << 1,  // #pragma neui dither
@@ -55,6 +68,7 @@ struct Stats {
   int draw_ops = 0;         // operations evaluated once per draw (uniform-only work)
   int pixel_regs = 0;       // live scalar registers per pixel
   int transcendentals = 0;  // per-pixel sin / cos / exp2 / log2 / atan2
+  int fetches = 0;          // per-pixel texel reads
 };
 Stats stats(const Program& p);
 
@@ -66,6 +80,17 @@ float wrap_time(double seconds);
 // filmstrip sweep). Here and not in the caller so no compiler contracts it.
 float sweep_value(float from, float to, uint32_t i, uint32_t n);
 
+// A bitmap bound to a sampler for one draw: premultiplied BGRA8 rows of
+// `stride` bytes, with `scale` device px per logical px (its HiDPI factor).
+// No pixels or an empty size is an unbound sampler, which reads as
+// transparent black.
+struct Texture {
+  const uint8_t* bgra = nullptr;
+  int w = 0, h = 0;
+  size_t stride = 0;
+  float scale = 1.0f;
+};
+
 // One draw of a shader layer.
 struct Draw {
   float x = 0.0f, y = 0.0f;   // layer origin, logical px, translation included
@@ -73,6 +98,8 @@ struct Draw {
   float scale = 1.0f;         // device px per logical px (display scale x resolution)
   float time = 0.0f;          // neui_time, already wrapped to [0, 3600)
   const float* uniforms = nullptr;  // uniform_components floats; null = defaults
+  const Texture* textures = nullptr;  // one per samplers() entry; missing = unbound
+  int texture_count = 0;
 };
 
 // The device pixels a draw covers: the bitmap is w x h and belongs at device
