@@ -230,4 +230,11 @@ namespace neui_detail
     return default_value;
   }
 
+  // True when `key` holds an int attribute: the strict getter answers only
+  // for its own kind, so two different defaults agree only on a real int.
+  inline bool attr_is_int(const AttrBag* bag, const std::string& key)
+  {
+    return bag && bag->get_int(key, 0) == bag->get_int(key, 1);
+  }
+
 } // namespace neui_detail

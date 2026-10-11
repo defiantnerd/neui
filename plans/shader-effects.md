@@ -850,12 +850,14 @@ What this means:
   - `compound_remove_layer`;
   - `compound_clear`;
   - `AssetStore::release_slot` (`asset_store.h` ~784).
-- **Colour bindings lose precision.** A bound `color` goes
-  `eval_binding_float` → float → `round_to_int` (`widget_paint_compound.h`
+- **Colour bindings lose precision. Fixed 2026-10-11.** A bound `color`
+  went `eval_binding_float` → float → `round_to_int` (`widget_paint_compound.h`
   ~461; `attr_as_float` in `hosts/shared/attrs.h`). A partly transparent ARGB
   value (alpha `0x01`-`0xFE`) has a magnitude above 2^24 as an int32, so its
-  low blue / green bits are rounded away. Opaque `0xFF…` values survive
-  because they wrap to a small negative int.
+  low blue / green bits were rounded away. Opaque `0xFF…` values survived
+  because they wrap to a small negative int. Colour props now go through
+  `effective_color` (`compound.h`): an int attr is read as it is and the
+  binding's map runs in double.
 - **Stale D2D documentation. Fixed in phase 4** for
   `docs/rendering-and-assets.md` and the comment in
   `backends/d2d/d2d_backend.h`. `plans/winui3-host.md` (~185-210) still

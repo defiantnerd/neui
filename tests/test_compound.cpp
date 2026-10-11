@@ -218,6 +218,37 @@ TEST_CASE("effective_int/float: static value unless a binding overrides")
   CHECK_EQ(effective_int(L, "offset_x", 17, &bag), 25);   // round(0.25*100)
 }
 
+TEST_CASE("effective_color: a bound int attr's ARGB arrives exactly")
+{
+  // Partly transparent: as an int32 its magnitude is above 2^24, so a trip
+  // through float rounded away the low blue bits.
+  AttrBag bag;
+  bag.set_int("c", (int)0x80123457);
+  bag.set_int("o", (int)0xFF000001);
+  bag.set_float("f", 0.5f);
+  CompoundLayer L;
+  L.fill_color = 0xFF112233u;
+  CHECK_EQ(effective_color(L, "fill_color", L.fill_color, &bag), 0xFF112233u);  // unbound
+
+  CompoundBinding b; b.attr_key = "c";
+  L.bindings["fill_color"] = b;
+  CHECK_EQ(effective_color(L, "fill_color", L.fill_color, &bag), 0x80123457u);
+  CHECK(static_cast<uint32_t>(effective_int(L, "fill_color", 0, &bag)) != 0x80123457u);  // the old path
+
+  b.attr_key = "o";
+  L.bindings["fill_color"] = b;
+  CHECK_EQ(effective_color(L, "fill_color", L.fill_color, &bag), 0xFF000001u);
+
+  // scale / offset still apply, and a float attr still works.
+  CompoundBinding s; s.attr_key = "f"; s.scale = 254.0f; s.offset = 1.0f;
+  L.bindings["stroke_color"] = s;
+  CHECK_EQ(effective_color(L, "stroke_color", 0u, &bag), 128u);
+  // Missing attr: the offset, as for every binding.
+  CompoundBinding m; m.attr_key = "missing"; m.offset = 7.0f;
+  L.bindings["tint"] = m;
+  CHECK_EQ(effective_color(L, "tint", 0xFFFFFFFFu, &bag), 7u);
+}
+
 // ---------------------------------------------------------------------------
 // Rect layer setters
 // ---------------------------------------------------------------------------

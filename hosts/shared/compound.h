@@ -642,6 +642,30 @@ namespace neui_detail
     return eval_binding_float(it->second, bag);
   }
 
+  // A colour binding: ARGB, exact for an int attribute. Through float, a
+  // partly transparent colour lost its low bits (as an int32 its magnitude
+  // passes 2^24), so the int is read as it is and step / scale / offset run
+  // in double, which holds every int32. The result wraps to 32 bits.
+  inline uint32_t eval_binding_color(const CompoundBinding& b, const AttrBag* bag)
+  {
+    if (b.is_asset) return 0u;
+    double x = attr_is_int(bag, b.attr_key)
+      ? static_cast<double>(bag->get_int(b.attr_key, 0))
+      : static_cast<double>(attr_as_float(bag, b.attr_key, 0.0f));
+    if (b.step > 0.0f) x = std::round(x / b.step) * b.step;
+    const double v = static_cast<double>(b.scale) * x + static_cast<double>(b.offset);
+    if (!(std::fabs(v) < 9.0e18)) return 0u;  // NaN, or past int64
+    return static_cast<uint32_t>(static_cast<int64_t>(std::llround(v)));
+  }
+
+  inline uint32_t effective_color(const CompoundLayer& L, const char* prop,
+                                  uint32_t static_value, const AttrBag* bag)
+  {
+    auto it = L.bindings.find(prop);
+    if (it == L.bindings.end()) return static_value;
+    return eval_binding_color(it->second, bag);
+  }
+
   inline neui_asset_t effective_asset(const CompoundLayer& L, const char* prop,
                                         neui_asset_t static_value,
                                         const AttrBag* bag)

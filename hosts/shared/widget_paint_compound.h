@@ -467,8 +467,7 @@ namespace neui_detail
           uint32_t color;
           auto bit = L.bindings.find("color");
           if (bit != L.bindings.end()) {
-            color = static_cast<uint32_t>(
-              round_to_int(eval_binding_float(bit->second, bag)));
+            color = eval_binding_color(bit->second, bag);
           } else if (L.text_color_set) {
             color = L.text_color;
           } else {
@@ -511,8 +510,7 @@ namespace neui_detail
         neui_asset_t asset = effective_asset(L, "asset", L.asset, bag);
         if (asset.id == asset_none.id) break;
         float rot = effective_float(L, "rotation", L.rotation, bag);
-        uint32_t tint = static_cast<uint32_t>(
-          effective_int(L, "tint", static_cast<int>(L.tint), bag));
+        uint32_t tint = effective_color(L, "tint", L.tint, bag);
         // Filmstrip cell. Default 0; commonly bound to a value attr. On an
         // ordinary (untagged) asset the frame is ignored and the whole bitmap
         // draws, so routing every asset layer through the frame-aware helper
@@ -543,10 +541,8 @@ namespace neui_detail
       }
       case NEUI_COMPOUND_LAYER_PATH: {
         if (L.path_cmds.empty()) break;
-        uint32_t fill   = static_cast<uint32_t>(
-          effective_int  (L, "fill_color",   static_cast<int>(L.fill_color),   bag));
-        uint32_t stroke = static_cast<uint32_t>(
-          effective_int  (L, "stroke_color", static_cast<int>(L.stroke_color), bag));
+        uint32_t fill   = effective_color(L, "fill_color",   L.fill_color,   bag);
+        uint32_t stroke = effective_color(L, "stroke_color", L.stroke_color, bag);
         float    sw     = effective_float(L, "stroke_width",  L.stroke_width,  bag);
         if (sw < 0.0f) sw = 0.0f;
 
@@ -657,10 +653,8 @@ namespace neui_detail
         break;
       }
       case NEUI_COMPOUND_LAYER_RECT: {
-        uint32_t fill   = static_cast<uint32_t>(
-          effective_int  (L, "fill_color",   static_cast<int>(L.fill_color),   bag));
-        uint32_t stroke = static_cast<uint32_t>(
-          effective_int  (L, "stroke_color", static_cast<int>(L.stroke_color), bag));
+        uint32_t fill   = effective_color(L, "fill_color",   L.fill_color,   bag);
+        uint32_t stroke = effective_color(L, "stroke_color", L.stroke_color, bag);
         float    sw     = effective_float(L, "stroke_width",  L.stroke_width,  bag);
         float    radius = effective_float(L, "corner_radius", L.corner_radius, bag);
         if (sw < 0.0f) sw = 0.0f;
@@ -727,10 +721,8 @@ namespace neui_detail
         break;
       }
       case NEUI_COMPOUND_LAYER_ARC: {
-        uint32_t fill   = static_cast<uint32_t>(
-          effective_int  (L, "fill_color",   static_cast<int>(L.fill_color),   bag));
-        uint32_t stroke = static_cast<uint32_t>(
-          effective_int  (L, "stroke_color", static_cast<int>(L.stroke_color), bag));
+        uint32_t fill   = effective_color(L, "fill_color",   L.fill_color,   bag);
+        uint32_t stroke = effective_color(L, "stroke_color", L.stroke_color, bag);
         float    sw     = effective_float(L, "stroke_width", L.stroke_width, bag);
         if (sw < 0.0f) sw = 0.0f;
         bool has_fill   = ((fill   >> 24) & 0xffu) != 0u;

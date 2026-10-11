@@ -237,13 +237,6 @@ namespace neui_detail
 
   // ---- The compound SHADER layer -------------------------------------------
 
-  // True when `key` holds an int attribute: the strict getter answers only
-  // for its own kind, so two different defaults agree only on a real int.
-  inline bool attr_is_int(const AttrBag* bag, const std::string& key)
-  {
-    return bag && bag->get_int(key, 0) == bag->get_int(key, 1);
-  }
-
   // Straight RGB(A) of byte / 255 from ARGB: the language's colour rule.
   inline void shader_unpack_argb(uint32_t argb, int comps, float* dst)
   {
