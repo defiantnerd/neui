@@ -129,6 +129,18 @@ if(WIN32 AND TARGET neui-backend-d2d)
   add_test(NAME neui_shader_gpu_smoke COMMAND neui_shader_gpu_smoke)
 endif()
 
+# Web-only: the Canvas 2D backend's smoke test (the twin of neui_cairo_smoke
+# below). Canvas 2D is a DOM API, so it is a page, not a ctest test: CI runs
+# it headless with `node tests/web/run_page.mjs <build-dir>/tests
+# neui_canvas2d_smoke.html` (Playwright + Chromium).
+if(EMSCRIPTEN)
+  add_executable(neui_canvas2d_smoke canvas2d_backend_smoke.cpp)
+  set_target_properties(neui_canvas2d_smoke PROPERTIES SUFFIX ".html")
+  target_include_directories(neui_canvas2d_smoke PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_canvas2d_smoke PRIVATE cxx_std_17)
+  target_link_libraries(neui_canvas2d_smoke PRIVATE neui-backend-canvas2d)
+endif()
+
 # Linux-only: Cairo software backend offscreen smoke test. Unlike neui_tests
 # this links a real backend (neui-backend-cairo), so it is gated to the
 # platforms where that backend is built (Emscripten sets UNIX too, but has

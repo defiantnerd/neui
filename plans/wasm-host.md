@@ -12,7 +12,7 @@ Confirmed decisions:
 3. **One `<canvas>` per frame.** APPWINDOW fills its mount element; DIALOGs float above it.
 4. **No new host.** The web target is xpl + Canvas2D backend + `platform_web.cpp`, registered as `"neui.host.crossplatform"`.
 
-This plan replaces that feasibility note. Status: Stages 0 and 1 done (2026-10-13, results below each stage); Stage 2 (Canvas 2D backend + minimal window) is next.
+This plan replaces that feasibility note. Status: Stages 0-2 done (2026-10-13, results below each stage); Stage 3 (input, focus, theme, container sizing) is next.
 
 ---
 
@@ -172,6 +172,15 @@ Reuse `backends/shared/backend_util.h` (`argb_unpack`, `quad_to_cubic`, the alph
 **Test:** `tests/canvas2d_smoke`, the web twin of `tests/cairo_backend_smoke.cpp`: an off-screen context, rect / arc / bitmap / text, `read_pixels_bgra` assertions with alpha tolerance, damage. Built as `.html`, run in headless Chromium by a small Playwright script in the web CI job (a CI-only dependency) that waits for a `PASS` / `FAIL` console line.
 
 Exit: smoke test green in CI; `path_example`, `arc_example` and `neui_example` paint statically and match desktop screenshots side by side.
+
+#### Stage 2 results (2026-10-13)
+
+- **Backend** (`backends/canvas2d/`, ~900 lines): every slot except the GPU shader programs, through `EM_JS`. The JS half lives on `Module.neuiC2D`. One gotcha: an `EM_JS` body is a C string literal, so it cannot contain regex backslashes. Text, paths, clips, transforms, alpha, fonts (CSS strings, plus a measure cache in C++), gradients (CLAMP only), bitmaps with tint, off-screen contexts with readback, partial damage and context generation all work. Client fonts read their family + weight from the font's own `name` / `OS/2` tables.
+- **Platform 2a** (`platform_web.cpp`): frames as `<canvas>` in a wrapper `<div>` (the APPWINDOW in `#neui-root`, else `<body>`). The loop is `drain → (paint on rAF | wait)` with `web_wait` as an `EM_ASYNC_JS`. It also covers ResizeObserver with `device-pixel-content-box`, the DPR change path, focus / blur, the 16 ms heartbeat, stb images over MEMFS, the in-frame menubar band (painted, not yet clickable) and the cursor.
+- **`canvas2d_smoke`**: 35 checks (the Cairo smoke checks plus round trip, tint, gradient and scale 2) pass in Edge 155, Firefox 157 and WebKit 27.2. Firefox's premultiplied round trip is off by one step, inside the tolerance. CI runs it in Playwright's Chromium (`tests/web/run_page.mjs`).
+- **On screen**: `neui_example` renders completely in Edge, Firefox and WebKit, at 1× and 2× (crisp), in both flavours and in Debug. That covers the menubar band, all widgets, JPEG / PNG images with the `@2x` ladder, compound knobs, QR, the section and the CPU-shader panel. `path_example` and `arc_example` are correct. `neui_shader_example` compiles 7 shaders and bakes 391 images in about 2 s; its animated row runs on the session clock at ~25 paints/s against a 30 fps cap.
+- **Examples** use a minimal shell (`examples/web/shell.html`) instead of Emscripten's default page.
+- **Release `neui_example` wasm** grew to 1.0 MB (JSPI) / 1.87 MB (Asyncify) now that the host actually draws.
 
 ### Stage 3: `platform_web` core: input, focus, timers, theme, resources (L)
 

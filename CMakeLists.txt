@@ -193,6 +193,9 @@ endif()
 if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
   add_subdirectory("backends/cairo")
 endif()
+if(EMSCRIPTEN)
+  add_subdirectory("backends/canvas2d")
+endif()
 # LVGL backend + platform prototype - gated; FetchContent of LVGL lives in the
 # subdirectory. Must fail hard on platforms that can't run the LVGL host.
 if(NEUI_WITH_LVGL)
@@ -271,6 +274,10 @@ function(neui_link_example name)
   endif()
   if(EMSCRIPTEN)
     set_target_properties(${name} PROPERTIES SUFFIX ".html")
+    target_link_options(${name} PRIVATE
+      "SHELL:--shell-file ${CMAKE_CURRENT_SOURCE_DIR}/examples/web/shell.html")
+    set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/examples/web/shell.html")
     foreach(pair IN LISTS EX_WEB_PRELOAD)
       string(FIND "${pair}" "|" bar)
       string(SUBSTRING "${pair}" 0 ${bar} src)

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>neui</title>
+<style>
+  /* Minimal page for the neui examples on the web (plans/wasm-host.md): the
+     APPWINDOW mounts into #neui-root; a DIALOG floats above the page. */
+  html, body { margin: 0; background: #1e1e1e; color: #ccc;
+               font: 13px system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #neui-root { display: inline-block; margin: 12px; }
+  #neui-status { margin: 12px; }
+  #neui-status:empty { display: none; }
+</style>
+</head>
+<body>
+<div id="neui-status">Loading…</div>
+<div id="neui-root"></div>
+<script>
+  var Module = {
+    setStatus: function(text) { document.getElementById('neui-status').textContent = text || ''; },
+    onAbort: function(what) { document.getElementById('neui-status').textContent = 'Failed: ' + what; },
+  };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

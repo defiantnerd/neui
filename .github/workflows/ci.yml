@@ -105,6 +105,17 @@ jobs:
       - name: Test
         run: ctest --test-dir build-web --output-on-failure
 
+      # The Canvas 2D backend needs a browser: its smoke test is a page, run
+      # headless in Playwright's Chromium. The backend is the same in both
+      # flavours, so once is enough.
+      - name: Canvas 2D smoke (headless Chromium)
+        if: matrix.flavor == 'jspi'
+        working-directory: tests/web
+        run: |
+          npm install --no-save --no-package-lock playwright
+          npx playwright install --with-deps chromium
+          node run_page.mjs ../../build-web/tests neui_canvas2d_smoke.html
+
   # iOS: build the UIKit host + the whole portable tree for the simulator
   # (arm64), then RUN the unit suite on a booted simulator. Running on the iOS
   # runtime/libc++ is not redundant with the macOS job - it validates the

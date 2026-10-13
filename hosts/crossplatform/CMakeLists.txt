@@ -62,14 +62,13 @@ elseif(APPLE)
   )
 elseif(EMSCRIPTEN)
   # Web (plans/wasm-host.md). MUST come before the UNIX branch: Emscripten's
-  # toolchain sets UNIX too. Stage 1 links the null backend; the Canvas 2D
-  # backend replaces it in Stage 2. Unlike the null platform below, shaders
-  # stay ON - the web host will hand NEUI_API_SHADER out once it can draw.
+  # toolchain sets UNIX too. Canvas 2D backend + the browser platform layer;
+  # shaders run on the CPU executor.
   target_sources(neui-xplhost PRIVATE platform_web.cpp)
   target_compile_definitions(neui-xplhost PRIVATE NEUI_PLATFORM_WEB=1)
   target_include_directories(neui-xplhost SYSTEM PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/stb)
-  target_link_libraries(neui-xplhost PRIVATE neui-backend-null)
+  target_link_libraries(neui-xplhost PRIVATE neui-backend-canvas2d)
   # The flavour's stack switching goes on every program that links the host
   # (and only those: neui_tests never suspends, so it runs on any node).
   if(NEUI_WEB_FLAVOR STREQUAL "jspi")

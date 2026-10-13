@@ -47,3 +47,6 @@ CMakeSettings.json
 
 # Claude Code project dir
 .claude/
+
+# Playwright install for the web test runner (tests/web/run_page.mjs)
+tests/web/node_modules
