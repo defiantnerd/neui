@@ -12,7 +12,7 @@ Confirmed decisions:
 3. **One `<canvas>` per frame.** APPWINDOW fills its mount element; DIALOGs float above it.
 4. **No new host.** The web target is xpl + Canvas2D backend + `platform_web.cpp`, registered as `"neui.host.crossplatform"`.
 
-This plan replaces that feasibility note. Status: Stages 0-4 done (2026-10-13, results below each stage); Stage 5 (text input, IME, clipboard) is next.
+This plan replaces that feasibility note. Status: Stages 0-5 done (2026-10-13, results below each stage); Stage 6 (drag and drop) is next.
 
 ---
 
@@ -297,6 +297,23 @@ Exit: `neui_example`'s About dialog (open / close / reopen), knob right-click re
   - PRIMARY is a no-op.
 
 Exit: Ctrl / Cmd + C / X / V round-trip inside neui and with other apps (Chrome, Firefox, Safari); a CJK IME composition commits as one undo unit; the Android / iOS virtual keyboard types into an INPUTBOX.
+
+#### Stage 5 results (2026-10-13)
+
+- **Text proxy**: a hidden `<textarea>` per frame (not on message boxes). While an INPUTBOX / MULTILINE of the frame has neui focus, DOM focus sits in it, placed at `caret_rect_local` after every drain and paint (`sync_text_proxy`). The page side keeps the wanted target (`W.applyFocus`), so a click that focuses the canvas is moved back at once, inside the gesture. Focus moving between canvas and proxy is not reported as focus / blur.
+- **Keys**: plain typing still comes from keydown (`KeyboardEvent.key`). Keys an IME is processing (`isComposing`, `Process`, 229) are left to it. The proxy is kept empty: `beforeinput` cancels every non-composition edit; edits whose keydown reached neui are just cancelled, the rest become neui input:
+  - `insertText` → one KEYCHAR per codepoint (virtual keyboards, emoji picker; `keyboard.insertText` checked);
+  - `deleteContentBackward` / `Forward` → Backspace / Delete; `insertLineBreak` / `Paragraph` → Enter.
+
+  Side effect: Space typed into a text widget no longer scrolls the page in Playwright's Firefox (the open item from Stage 3): the textarea takes the default action, not the page.
+- **IME**: `compositionstart` / composing `input` (the proxy's value and selection = text + caret) / `compositionend` → `on_composition` START / UPDATE / RESULT + END. The browser gives no clause attributes, so the composition draws with the plain underline. Checked in Edge through CDP `Input.imeSetComposition` + `insertText`: the composition shows inline, commits, and one Ctrl+Z removes the whole commit.
+- **Clipboard** (in-process copy `g_clip` + the browser):
+  - writes (`set_text`, `write_item` for text/plain, text/html, image/png) update the copy and go to `navigator.clipboard.writeText` / `write(ClipboardItem)` within the key's activation; outside a secure context the copy command over a temporary textarea stands in;
+  - Ctrl/Cmd+V is held (focus into the proxy first, so the paste event fires in every engine) until the paste event fills the copy, then dispatched as a "fresh" key record; a paste from the browser's own menu becomes a Ctrl/Cmd+V of its own; 300 ms without a paste event releases it unfilled;
+  - every other read (`get_text` / `read_item` while the copy is not fresh, e.g. a menu Paste) suspends on `navigator.clipboard.readText` / `read` (5 s cap; may prompt) and falls back to the copy when refused; a paste carrying no text, HTML or file also keeps the copy (only a failed write of neui's own leaves that);
+  - `has_text` answers from the copy; no PRIMARY.
+- **Checked**: Edge (both flavours): copy reaches the system clipboard, an external `writeText` pastes in, the async read path (an untrusted Ctrl+V, so no paste event) pastes through `readText` and the loop keeps running. Firefox and WebKit (no clipboard permission in Playwright): copy → paste round-trips through the copy. Stage 3 / 4 interaction and page-scroll checks still pass.
+- **Not checked here**: a real IME (Windows / macOS), Android / iOS virtual keyboards (no device), Safari's clipboard prompts. Not done: IME in GRID cell editing (no host does it: the GRID editor has no `on_composition`).
 
 ### Stage 6: drag and drop (M)
 

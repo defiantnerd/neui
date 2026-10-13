@@ -31,8 +31,23 @@
 // backdrop that takes its pointer input. A blocking call made during a paint
 // is refused (paint never suspends, plans rule 3).
 //
-// Not yet here: clipboard + IME (Stage 5), DnD (Stage 6), page embedding
-// (Stage 7).
+// Text input. Each frame has a hidden <textarea> (the text proxy): while a
+// text widget (INPUTBOX / MULTILINE) has neui focus, DOM focus sits in it,
+// placed at the widget's caret, so an IME's candidate window and a phone's
+// virtual keyboard appear there. Plain keys still arrive as keydown (the
+// KEYCHAR comes from KeyboardEvent.key, as before); composition events
+// become on_composition calls, and text that comes without a key (virtual
+// keyboards, the emoji picker) becomes KEYCHARs. The textarea is kept empty:
+// every non-composition edit of it is cancelled in beforeinput.
+//
+// Clipboard. Writes go to an in-process copy and to navigator.clipboard.
+// Reads cannot be synchronous in a browser: Ctrl/Cmd+V is held until the
+// browser's paste event delivers the clipboard (no permission prompt), then
+// dispatched; any other read (menu Paste, NEUI_API_CLIPBOARD) suspends on
+// navigator.clipboard.read / readText, which may ask the user, and falls
+// back to the in-process copy when refused. There is no PRIMARY selection.
+//
+// Not yet here: DnD (Stage 6), page embedding (Stage 7).
 
 #include "host.h"
 #include "platform.h"
@@ -71,9 +86,10 @@
 // Record types (neui_web_push): 1 resize, 2 focus, 3 blur, 4 close button,
 // 5 press on a blocked frame's backdrop, 10 pointer down, 11 pointer up,
 // 12 pointer move, 13 pointer leave, 14 context menu, 15 wheel, 20 key down,
-// 21 key up, 30 colour scheme (frame 0).
+// 21 key up, 30 colour scheme (frame 0), 40 composition start, 41
+// composition update, 42 composition end, 43 text without a key.
 
-EM_JS_DEPS(neui_web, "$UTF8ToString,$stringToUTF8");
+EM_JS_DEPS(neui_web, "$UTF8ToString,$stringToUTF8,$lengthBytesUTF8");
 
 EM_JS(void, web_setup, (), {
   if (Module.neuiWeb) return;
@@ -83,6 +99,37 @@ EM_JS(void, web_setup, (), {
   // Queue a record for the loop and wake it if it is waiting.
   W.push = function(type, frame, a, b, c, d, e, f) {
     Module._neui_web_push(type, frame, a || 0, b || 0, c || 0, d || 0, e || 0, f || 0);
+    W.wakeUp();
+  };
+  // A key record: code / key through the fixed C++ key buffer (64 bytes
+  // each; both are short names or one character). fresh = the clipboard copy
+  // was just filled by a paste event (a held Ctrl/Cmd+V).
+  W.sendKey = function(id, type, k, evId, fresh) {
+    var buf = Module._neui_web_key_buf();
+    stringToUTF8(k.code, buf, 64);
+    stringToUTF8(k.key, buf + 64, 64);
+    Module._neui_web_push_key(type, id, evId, k.mods, fresh);
+    W.wakeUp();
+  };
+  // DOM focus inside a frame follows neui: the text proxy while a text
+  // widget has neui focus (f.want), else the canvas. Only moves focus that
+  // is already inside the frame; f.hold pins it during a held paste.
+  W.applyFocus = function(f) {
+    if (!f.ta || f.hold) return;
+    var a = document.activeElement, to = null;
+    if (f.want && a === f.cv) to = f.ta;
+    else if (!f.want && a === f.ta) to = f.cv;
+    if (to) { try { to.focus({ preventScroll: true }); } catch (e) { to.focus(); } }
+  };
+  // A string into the C++ text buffer; returns its UTF-8 length.
+  W.str = function(t) {
+    var n = lengthBytesUTF8(t), p = Module._neui_web_text_buf(n + 1);
+    stringToUTF8(t, p, n + 1);
+    return n;
+  };
+  W.pushText = function(type, id, t, caret) {
+    var n = W.str(t);
+    Module._neui_web_push_text(type, id, n, caret);
     W.wakeUp();
   };
   // Hold an event until the drain decides about its default action.
@@ -269,11 +316,28 @@ EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h), {
   cv.style.cssText = 'display:block;outline:none;touch-action:none;' +
                      (fill ? 'width:100%;height:100%;' : 'width:' + w + 'px;height:' + h + 'px;');
   wrap.appendChild(cv);
+  // The text proxy (not on a message box): invisible, never hit by the
+  // pointer, moved to the caret by web_text_proxy.
+  var ta = null;
+  if (kind !== 3) {
+    ta = document.createElement('textarea');
+    ta.tabIndex = -1;
+    ta.setAttribute('autocomplete', 'off');
+    ta.setAttribute('autocorrect', 'off');
+    ta.setAttribute('autocapitalize', 'off');
+    ta.spellcheck = false;
+    ta.style.cssText = 'position:absolute;left:0;top:0;width:1px;height:16px;margin:0;padding:0;border:0;' +
+                       'opacity:0;resize:none;overflow:hidden;white-space:pre;font-size:16px;line-height:16px;' +
+                       'color:transparent;background:transparent;caret-color:transparent;outline:none;' +
+                       'pointer-events:none;';
+    wrap.appendChild(ta);
+  }
   host.appendChild(wrap);
   Module.neuiCanvases[id] = cv;
   var f = W.frames[id] = { wrap: wrap, cv: cv, ro: null, body: host === document.body, fill: fill,
                            floating: floating, title: title, x: x, y: y, owner: 0, ox: 0, oy: 0,
-                           center: false, shade: null };
+                           center: false, shade: null, ta: ta, typed: false, paste: null,
+                           want: false, hold: false };
 
   // Size + device pixel size (zoom, monitor changes) -> one RESIZE record.
   f.ro = new ResizeObserver(function(entries) {
@@ -285,8 +349,19 @@ EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h), {
     W.push(1, id, e.contentRect.width, e.contentRect.height, pw, ph);
   });
   try { f.ro.observe(cv, { box: 'device-pixel-content-box' }); } catch (err) { f.ro.observe(cv); }
-  cv.addEventListener('focus', function() { W.push(2, id); });
-  cv.addEventListener('blur',  function() { W.push(3, id); });
+  // Focus moving between the canvas and its text proxy stays inside the
+  // frame: only focus entering or leaving the frame is reported.
+  var inside = function(el) { return el === cv || (ta !== null && el === ta); };
+  var onFocus = function(e) {
+    if (!inside(e.relatedTarget)) W.push(2, id);
+    // A click focuses the canvas even while the proxy should have focus:
+    // move it back at once (still inside the gesture, which a phone needs
+    // to open its keyboard).
+    if (ta !== null) W.applyFocus(f);
+  };
+  var onBlur  = function(e) { if (!inside(e.relatedTarget)) W.push(3, id); };
+  cv.addEventListener('focus', onFocus);
+  cv.addEventListener('blur',  onBlur);
 
   // Pointer: canvas-relative CSS px (= frame-local logical px). A press
   // captures the pointer, so a drag keeps reporting outside the canvas and
@@ -295,7 +370,7 @@ EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h), {
   cv.addEventListener('pointerdown', function(e) {
     var p = at(e);
     try { cv.setPointerCapture(e.pointerId); } catch (err) {}
-    if (document.activeElement !== cv) { try { cv.focus({ preventScroll: true }); } catch (err) { cv.focus(); } }
+    if (!inside(document.activeElement)) { try { cv.focus({ preventScroll: true }); } catch (err) { cv.focus(); } }
     W.push(10, id, p[0], p[1], e.button, e.buttons, W.mods(e), e.timeStamp);
   });
   cv.addEventListener('pointerup', function(e) {
@@ -319,17 +394,91 @@ EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h), {
     var p = at(e);
     W.push(15, id, p[0], p[1], e.deltaX, e.deltaY, e.deltaMode, W.keep(e));
   }, { passive: false });
-  // Keys reach the focused canvas. The code / key strings go through a
-  // fixed C++ buffer (64 bytes each; both are short names or one character).
+  // Keys reach the focused canvas or text proxy. Keys an IME is processing
+  // ("Process" / 229) are left to it: the composition events follow.
   var key = function(type, e) {
-    var buf = Module._neui_web_key_buf();
-    stringToUTF8(e.code || "", buf, 64);
-    stringToUTF8(e.key || "", buf + 64, 64);
-    Module._neui_web_push_key(type, id, type === 20 ? W.keep(e) : 0, W.mods(e));
-    W.wakeUp();
+    if (e.isComposing || e.key === 'Process' || e.keyCode === 229) return;
+    var k = { code: e.code || "", key: e.key || "", mods: W.mods(e) };
+    if (type === 20) {
+      // The textarea's beforeinput for this key (same task) is then known
+      // to be handled already.
+      f.typed = true;
+      setTimeout(function() { f.typed = false; }, 0);
+      // Ctrl/Cmd+V: hold the key until the paste event has filled the
+      // clipboard copy. Its default action must run (it fires 'paste'), and
+      // reliably only from an editable element, so focus the proxy first.
+      if (ta && (W.apple ? e.metaKey : e.ctrlKey) && !e.altKey && (e.key === 'v' || e.key === 'V')) {
+        f.hold = true;
+        if (document.activeElement !== ta) { try { ta.focus({ preventScroll: true }); } catch (err) { ta.focus(); } }
+        f.paste = k;
+        setTimeout(function() {
+          if (f.paste !== k) return;
+          f.paste = null; f.hold = false; W.applyFocus(f);
+          W.sendKey(id, 20, k, 0, 0);
+        }, 300);
+        return;
+      }
+    }
+    W.sendKey(id, type, k, type === 20 ? W.keep(e) : 0, 0);
   };
-  cv.addEventListener('keydown', function(e) { if (!e.isComposing) key(20, e); });
-  cv.addEventListener('keyup',   function(e) { if (!e.isComposing) key(21, e); });
+  cv.addEventListener('keydown', function(e) { key(20, e); });
+  cv.addEventListener('keyup',   function(e) { key(21, e); });
+
+  if (ta) {
+    ta.addEventListener('focus', onFocus);
+    ta.addEventListener('blur',  onBlur);
+    ta.addEventListener('keydown', function(e) { key(20, e); });
+    ta.addEventListener('keyup',   function(e) { key(21, e); });
+    // Keep the proxy empty: cancel every edit except composition (which
+    // cannot be cancelled). Text arriving without a keydown (virtual
+    // keyboards, emoji picker, dictation) goes to neui as text or keys.
+    ta.addEventListener('beforeinput', function(e) {
+      var t = e.inputType || "";
+      if (e.isComposing || t.indexOf('Composition') >= 0) return;
+      e.preventDefault();
+      if (f.typed) return;   // its keydown already reached neui
+      var sk = function(name) { W.sendKey(id, 20, { code: name, key: name, mods: 0 }, 0, 0); };
+      if (t === 'insertText' || t === 'insertReplacementText') { if (e.data) W.pushText(43, id, e.data, 0); }
+      else if (t === 'deleteContentBackward') sk('Backspace');
+      else if (t === 'deleteContentForward') sk('Delete');
+      else if (t === 'insertLineBreak' || t === 'insertParagraph') sk('Enter');
+    });
+    ta.addEventListener('compositionstart', function() { W.push(40, id); });
+    ta.addEventListener('input', function(e) {
+      if (!e.isComposing) { ta.value = ""; return; }
+      // The proxy holds just the composition; its selection is the caret.
+      var v = ta.value, c = ta.selectionStart;
+      if (typeof c !== 'number' || c > v.length) c = v.length;
+      W.pushText(41, id, v, lengthBytesUTF8(v.slice(0, c)));
+    });
+    ta.addEventListener('compositionend', function(e) {
+      W.pushText(42, id, e.data || "", 0);
+      setTimeout(function() { ta.value = ""; }, 0);
+    });
+  }
+  // The paste event: fill the clipboard copy, then release the held key. A
+  // paste from the browser's own menu becomes a Ctrl/Cmd+V of its own.
+  var onPaste = function(e) {
+    var held = f.paste;
+    f.paste = null;
+    f.hold = false;
+    W.applyFocus(f);
+    // A clipboard with nothing neui can use (no text, no HTML, no files)
+    // keeps the copy: that is what a failed write of neui's own leaves.
+    var dt = e.clipboardData;
+    if (dt) {
+      var t = dt.getData('text/plain'), h = dt.getData('text/html');
+      if (t || h || (dt.files && dt.files.length > 0)) {
+        Module._neui_web_clip_begin();
+        if (t) Module._neui_web_clip_put(0, W.str(t));
+        if (h) Module._neui_web_clip_put(1, W.str(h));
+      }
+    }
+    e.preventDefault();
+    W.sendKey(id, 20, held || { code: 'KeyV', key: 'v', mods: W.apple ? 8 : 2 }, 0, 1);
+  };
+  cv.addEventListener('paste', onPaste);
+  if (ta) ta.addEventListener('paste', onPaste);
 });
 
 EM_JS(void, web_frame_destroy, (int id), {
@@ -420,6 +569,96 @@ EM_JS(void, web_set_cursor, (const char* css), {
   for (var id in W.frames) W.frames[id].cv.style.cursor = c;
 });
 
+// Text proxy: active = a text widget of this frame has neui focus; x / y / h
+// = its caret in frame-local px. DOM focus follows, if it is in the frame.
+EM_JS(void, web_text_proxy, (int id, int active, int x, int y, int h), {
+  var W = Module.neuiWeb, f = W.frames[id]; if (!f || !f.ta) return;
+  if (active) {
+    f.ta.style.left = (f.cv.offsetLeft + x) + 'px';
+    f.ta.style.top  = (f.cv.offsetTop + y) + 'px';
+    f.ta.style.height = Math.max(h, 1) + 'px';
+  }
+  f.want = !!active;
+  W.applyFocus(f);
+});
+
+// Clipboard write, fire and forget (inside the key's user activation). A
+// page that is not a secure context has no navigator.clipboard; the old
+// copy command over a temporary textarea stands in.
+EM_JS(void, web_clip_write_text, (const char* p, int n), {
+  var t = UTF8ToString(p, n), c = navigator.clipboard;
+  if (c && c.writeText && window.isSecureContext) { c.writeText(t).catch(function() {}); return; }
+  var a = document.activeElement, ta = document.createElement('textarea');
+  ta.value = t;
+  ta.style.cssText = 'position:fixed;left:0;top:0;opacity:0;';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } catch (e) {}
+  document.body.removeChild(ta);
+  if (a && a.focus) { try { a.focus({ preventScroll: true }); } catch (e) { a.focus(); } }
+});
+
+// Several formats at once (kind 0 text/plain, 1 text/html, 2 image/png),
+// collected by web_clip_item_add, written by web_clip_item_commit.
+EM_JS(void, web_clip_item_add, (int kind, const unsigned char* p, int n), {
+  var W = Module.neuiWeb;
+  W.clipItem = W.clipItem || [];
+  W.clipItem.push([kind, HEAPU8.slice(p, p + n)]);
+});
+EM_JS(void, web_clip_item_commit, (), {
+  var W = Module.neuiWeb, parts = W.clipItem || [], c = navigator.clipboard;
+  W.clipItem = [];
+  var types = ['text/plain', 'text/html', 'image/png'], text = null, obj = {}, any = false;
+  for (var i = 0; i < parts.length; i++) {
+    var k = parts[i][0], u8 = parts[i][1];
+    if (k === 0) text = new TextDecoder().decode(u8);
+    obj[types[k]] = new Blob([u8], { type: types[k] });
+    any = true;
+  }
+  if (!any || !c) return;
+  var plain = function() { if (text !== null && c.writeText) c.writeText(text).catch(function() {}); };
+  if (typeof ClipboardItem === 'function' && c.write) c.write([new ClipboardItem(obj)]).catch(plain);
+  else plain();
+});
+
+// Read the system clipboard into the C++ copy (neui_web_clip_begin / put):
+// every format (all) or just the text. Suspends; may show the browser's
+// permission prompt. 1 = read, 0 = refused / unsupported / timed out.
+EM_ASYNC_JS(int, web_clip_read, (int all, int timeout_ms), {
+  var c = navigator.clipboard;
+  if (!c) return 0;
+  var late = new Promise(function(r) { setTimeout(function() { r(null); }, timeout_ms); });
+  var put = function(kind, u8) {
+    var p = Module._neui_web_text_buf(u8.length + 1);
+    HEAPU8.set(u8, p);
+    Module._neui_web_clip_put(kind, u8.length);
+  };
+  try {
+    if (all && c.read) {
+      var items = await Promise.race([c.read(), late]);
+      if (!items) return 0;
+      var types = ['text/plain', 'text/html', 'image/png'], got = [];
+      for (var i = 0; i < items.length; i++)
+        for (var k = 0; k < 3; k++)
+          if (items[i].types.indexOf(types[k]) >= 0) {
+            var b = await items[i].getType(types[k]);
+            got.push([k, new Uint8Array(await b.arrayBuffer())]);
+          }
+      Module._neui_web_clip_begin();
+      for (var j = 0; j < got.length; j++) put(got[j][0], got[j][1]);
+      return 1;
+    }
+    if (!c.readText) return 0;
+    var t = await Promise.race([c.readText(), late]);
+    if (typeof t !== 'string') return 0;
+    Module._neui_web_clip_begin();
+    put(0, new TextEncoder().encode(t));
+    return 1;
+  } catch (e) {
+    return 0;
+  }
+});
+
 namespace xpl_host
 {
 namespace
@@ -451,6 +690,10 @@ namespace
     double    scroll_h_accum = 0.0;
     // A left press the in-frame menubar consumed: swallow its release.
     bool      swallow_release = false;
+    // Text proxy state last sent to the page (-1 = never).
+    int       ta_active = -1;
+    int       ta_x = 0, ta_y = 0, ta_h = 0;
+    bool      composing = false;
     // Double-click synthesis (the browser's dblclick comes after two clicks;
     // neui wants the second press itself).
     double    last_click_ms  = -1.0e9;
@@ -469,6 +712,7 @@ namespace
     EV_PDOWN = 10, EV_PUP = 11, EV_PMOVE = 12, EV_PLEAVE = 13, EV_CONTEXT = 14, EV_WHEEL = 15,
     EV_KEYDOWN = 20, EV_KEYUP = 21,
     EV_SCHEME = 30,
+    EV_COMP_START = 40, EV_COMP_UPDATE = 41, EV_COMP_END = 42, EV_TEXT = 43,
   };
   struct WebEvent
   {
@@ -481,6 +725,25 @@ namespace
   // The animation heartbeat: one 16 ms tick shared by every frame while any
   // of them animates (as the Linux timerfd), 0 = idle.
   double g_next_tick_ms = 0.0;
+
+  // The clipboard as neui last saw it: what neui wrote, or what a paste
+  // event / an async read delivered. g_clip_fresh = it matches the system
+  // clipboard for the record being dispatched (no new read needed).
+  neui_detail::DataItem g_clip;
+  bool g_clip_fresh = false;
+  std::vector<char> g_text_buf(256);
+
+  const char* clip_mime(int kind)
+  {
+    return kind == 1 ? NEUI_MIME_HTML : kind == 2 ? NEUI_MIME_PNG : NEUI_MIME_TEXT;
+  }
+  int clip_kind(const std::string& mime)
+  {
+    if (mime == NEUI_MIME_TEXT || mime == "text/plain") return 0;
+    if (mime == NEUI_MIME_HTML) return 1;
+    if (mime == NEUI_MIME_PNG)  return 2;
+    return -1;
+  }
 
   // A message box up: its own canvas + render context, not a WebFrame (no
   // widget, no session of its own). Boxes can stack (one opened from a
@@ -1024,6 +1287,104 @@ namespace
 
   // ---- Keyboard (mirrors platform_linux.cpp dispatch_key_press) -------------
 
+  // KEYCHAR to the focused widget: client first, then the widget. Returns
+  // whether a focused widget received it.
+  bool send_char(Session* s, uint32_t cp, uint32_t mods)
+  {
+    uint32_t fw = s->_focused_widget;
+    if (fw == 0 || !s->_widgets.exists(fw)) return false;
+    auto& wd = s->_widgets[fw];
+    bool char_consumed = false;
+    if (wd.emit_events) {
+      neui_event_t ev = {};
+      ev.type     = NEUI_EVENT_KEYCHAR;
+      ev.data.key = { { wd.widget_id }, cp, mods };
+      char_consumed = s->dispatch_event(&ev);
+    }
+    if (!char_consumed) s->handle_input_key(NEUI_EVENT_KEYCHAR, cp, mods);
+    return true;
+  }
+
+  // The focused widget when it is a text widget of this frame, else null.
+  WidgetData* focused_text_widget(WebFrame* f)
+  {
+    Session* s = f->session;
+    if (!s) return nullptr;
+    uint32_t fw = s->_focused_widget;
+    if (fw == 0 || !s->_widgets.exists(fw)) return nullptr;
+    auto& wd = s->_widgets[fw];
+    if (!wd.is_text_input() || s->find_parent_native_handle(fw) != f) return nullptr;
+    return &wd;
+  }
+
+  // Text arriving without a key (virtual keyboard, emoji picker): one
+  // KEYCHAR per codepoint.
+  void text_input(WebFrame* f, const std::string& utf8)
+  {
+    const auto* p = reinterpret_cast<const unsigned char*>(utf8.data());
+    size_t left = utf8.size();
+    while (left > 0) {
+      const uint32_t b = p[0];
+      size_t n = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2 : ((b & 0xF0) == 0xE0) ? 3
+               : ((b & 0xF8) == 0xF0) ? 4 : 0;
+      if (n == 0 || n > left) break;   // the browser hands over valid UTF-8
+      uint32_t cp = (n == 1) ? b : (b & (0x7Fu >> n));
+      for (size_t i = 1; i < n; ++i) cp = (cp << 6) | (p[i] & 0x3Fu);
+      p += n;
+      left -= n;
+      if (cp >= 0x20 && cp != 0x7F) send_char(f->session, cp, 0);
+    }
+  }
+
+  // Composition events (mirrors platform_win32.cpp's WM_IME_* translation;
+  // the browser reports no clause attributes).
+  void composition(WebFrame* f, int type, const std::string& utf8, int caret)
+  {
+    WidgetData* tw = focused_text_widget(f);
+    if (!tw) { f->composing = false; return; }
+    const int len = static_cast<int>(utf8.size());
+    if (type == EV_COMP_START) {
+      f->composing = tw->on_composition(WidgetData::COMP_START, nullptr, 0, 0, nullptr);
+      return;
+    }
+    if (!f->composing)   // an update without a start: start now
+      f->composing = tw->on_composition(WidgetData::COMP_START, nullptr, 0, 0, nullptr);
+    if (type == EV_COMP_UPDATE) {
+      tw->on_composition(WidgetData::COMP_UPDATE, utf8.c_str(), len, caret, nullptr);
+      return;
+    }
+    if (len > 0) tw->on_composition(WidgetData::COMP_RESULT, utf8.c_str(), len, 0, nullptr);
+    tw->on_composition(WidgetData::COMP_END, nullptr, 0, 0, nullptr);
+    f->composing = false;
+  }
+
+  // Keep each frame's text proxy on its focused text widget's caret.
+  void sync_text_proxy()
+  {
+    auto* backend = platform_get_backend();
+    for (auto& kv : g_frames) {
+      WebFrame* f = kv.second;
+      int active = 0, x = 0, y = 0, h = 0;
+      if (WidgetData* tw = focused_text_widget(f)) {
+        active = 1;
+        auto* frame_wd = f->session->get_widget(f->widget_index);
+        float lx = 0.0f, ly = 0.0f, lh = 0.0f;
+        if (backend && frame_wd && frame_wd->render_ctx &&
+            tw->caret_rect_local(backend, frame_wd->render_ctx, &lx, &ly, &lh)) {
+          x = tw->abs_x + static_cast<int>(lx);
+          y = tw->abs_y + static_cast<int>(ly);
+          h = static_cast<int>(lh);
+        } else {
+          x = tw->abs_x; y = tw->abs_y; h = tw->height;
+        }
+      }
+      if (active == f->ta_active && (!active || (x == f->ta_x && y == f->ta_y && h == f->ta_h)))
+        continue;
+      f->ta_active = active; f->ta_x = x; f->ta_y = y; f->ta_h = h;
+      web_text_proxy(f->id, active, x, y, h);
+    }
+  }
+
   // Returns whether neui consumed the press (its default action is then
   // prevented: no Tab focus move, no page scroll on Space / arrows, no
   // browser shortcut).
@@ -1064,18 +1425,7 @@ namespace
     // held: those are shortcuts, as on Linux / macOS).
     const uint32_t cp = neui_detail::web_key_char(key.c_str(), mods);
     if (cp == 0) return consumed;
-    uint32_t fw = s->_focused_widget;
-    if (fw == 0 || !s->_widgets.exists(fw)) return consumed;
-    auto& wd = s->_widgets[fw];
-    bool char_consumed = false;
-    if (wd.emit_events) {
-      neui_event_t ev = {};
-      ev.type     = NEUI_EVENT_KEYCHAR;
-      ev.data.key = { { wd.widget_id }, cp, mods };
-      char_consumed = s->dispatch_event(&ev);
-    }
-    if (!char_consumed) s->handle_input_key(NEUI_EVENT_KEYCHAR, cp, mods);
-    return true;   // a focused widget received the character
+    return send_char(s, cp, mods) || consumed;
   }
 
   void key_up(WebFrame* f, const std::string& code, const std::string& key, uint32_t web_mods)
@@ -1200,6 +1550,8 @@ namespace
     while (!g_queue.empty()) {
       WebEvent e = std::move(g_queue.front());
       g_queue.pop_front();
+      // A held Ctrl/Cmd+V comes with the clipboard its paste event read.
+      g_clip_fresh = (e.type == EV_KEYDOWN && e.c != 0.0);
 
       if (e.type == EV_SCHEME) {   // page-wide, no frame
         neui_detail::theme_apply_web_scheme(static_cast<int>(e.a));
@@ -1285,6 +1637,14 @@ namespace
             break;
           case EV_KEYUP:
             if (!blocked) key_up(f, e.code, e.key, static_cast<uint32_t>(e.b));
+            break;
+          case EV_COMP_START:
+          case EV_COMP_UPDATE:
+          case EV_COMP_END:
+            if (!blocked) composition(f, e.type, e.key, static_cast<int>(e.c));
+            break;
+          case EV_TEXT:
+            if (!blocked) text_input(f, e.key);
             break;
           default: break;
         }
@@ -1392,11 +1752,41 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push(int type, int frame, double a
 static char g_key_buf[128];
 extern "C" EMSCRIPTEN_KEEPALIVE char* neui_web_key_buf() { return g_key_buf; }
 
-extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push_key(int type, int frame, int ev_id, int mods)
+extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push_key(int type, int frame, int ev_id, int mods,
+                                                       int fresh)
 {
   g_key_buf[63] = g_key_buf[127] = '\0';
   g_queue.push_back({ type, frame, static_cast<double>(ev_id), static_cast<double>(mods),
-                      0, 0, 0, 0, std::string(g_key_buf), std::string(g_key_buf + 64) });
+                      static_cast<double>(fresh), 0, 0, 0,
+                      std::string(g_key_buf), std::string(g_key_buf + 64) });
+}
+
+// Strings of any length (composition text, clipboard bytes): the page
+// writes them into this buffer first.
+extern "C" EMSCRIPTEN_KEEPALIVE char* neui_web_text_buf(int size)
+{
+  if (size < 1) size = 1;
+  if (g_text_buf.size() < static_cast<size_t>(size)) g_text_buf.resize(static_cast<size_t>(size));
+  return g_text_buf.data();
+}
+
+// A composition / text record; the string (len bytes) is in the text buffer.
+extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push_text(int type, int frame, int len, int caret)
+{
+  if (len < 0 || static_cast<size_t>(len) > g_text_buf.size()) len = 0;
+  g_queue.push_back({ type, frame, 0, 0, static_cast<double>(caret), 0, 0, 0,
+                      std::string(), std::string(g_text_buf.data(), static_cast<size_t>(len)) });
+}
+
+// The clipboard copy, refilled from a paste event or an async read.
+extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_clip_begin()
+{
+  g_clip = neui_detail::DataItem();
+}
+extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_clip_put(int kind, int len)
+{
+  if (len < 0 || static_cast<size_t>(len) > g_text_buf.size()) return;
+  g_clip.set_format(clip_mime(kind), g_text_buf.data(), static_cast<uint32_t>(len));
 }
 
 // ===========================================================================
@@ -1536,10 +1926,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push_key(int type, int frame, int 
   {
     drain_queue();
     service_timers();
+    sync_text_proxy();
     if (any_paint_pending()) {
       if (web_wait(wait_timeout_ms(cap_ms), 1) == 1) {
         drain_queue();
         flush_pending_paints();
+        sync_text_proxy();   // the paint walk updated the widgets' positions
       }
     } else {
       web_wait(wait_timeout_ms(cap_ms), 0);
@@ -1561,6 +1953,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push_key(int type, int frame, int 
     drain_queue();
     service_timers();
     flush_pending_paints();
+    sync_text_proxy();
     return !g_quit;
   }
 
@@ -1632,14 +2025,81 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push_key(int type, int frame, int 
     neui_detail::free_image_bgra8_stb(pixels);
   }
 
-  // System clipboard - Stage 5.
-  bool platform_clipboard_set_text(const char* /*utf8*/, uint32_t /*length*/) { return false; }
-  int  platform_clipboard_get_text(char* /*buf*/, int /*buflen*/)             { return 0;     }
-  bool platform_clipboard_has_text()                                          { return false; }
+  // ---- Clipboard ---------------------------------------------------------------
+
+  // Bring the clipboard copy up to date before a read: nothing to do when a
+  // paste event just filled it; otherwise ask the browser (suspends; never
+  // during a paint). A refusal leaves the copy as it was. Either way it
+  // counts as current for the rest of this record, so the size query and
+  // the read that follows ask only once.
+  static void clip_refresh(bool all)
+  {
+    if (g_clip_fresh || g_in_paint) return;
+    web_clip_read(all ? 1 : 0, 5000);
+    g_clip_fresh = true;
+  }
+
+  bool platform_clipboard_set_text(const char* utf8, uint32_t length)
+  {
+    if (!utf8) return false;
+    g_clip = neui_detail::DataItem();
+    g_clip.set_format(NEUI_MIME_TEXT, utf8, length);
+    web_clip_write_text(utf8, static_cast<int>(length));
+    return true;
+  }
+
+  int platform_clipboard_get_text(char* buf, int buflen)
+  {
+    clip_refresh(false);
+    const int n = g_clip.get_format(NEUI_MIME_TEXT, nullptr, 0);
+    if (n <= 0) return 0;
+    if (buf && buflen > 0) {
+      std::vector<char> tmp(static_cast<size_t>(n));
+      g_clip.get_format(NEUI_MIME_TEXT, tmp.data(), n);
+      const int copy = std::min(n, buflen - 1);
+      std::memcpy(buf, tmp.data(), static_cast<size_t>(copy));
+      buf[copy] = '\0';
+    }
+    return n + 1;
+  }
+
+  // From the copy only (a read could prompt; clients poll this).
+  bool platform_clipboard_has_text()
+  {
+    return g_clip.get_format(NEUI_MIME_TEXT, nullptr, 0) > 0;
+  }
+
+  // No PRIMARY selection in a browser.
   void platform_clipboard_set_primary(const char* /*u*/, uint32_t /*l*/)      {}
   int  platform_clipboard_get_primary(char* /*b*/, int /*n*/)                 { return 0; }
-  bool platform_clipboard_write_item(const neui_detail::DataItem& /*item*/)   { return false; }
-  bool platform_clipboard_read_item(neui_detail::DataItem& /*item*/)          { return false; }
+
+  bool platform_clipboard_write_item(const neui_detail::DataItem& item)
+  {
+    neui_detail::DataItem copy;
+    bool any = false;
+    item.for_each_format([&](const std::string& mime, const std::vector<uint8_t>& bytes) {
+      const int kind = clip_kind(mime);
+      if (kind < 0) return;   // the browser clipboard takes these three only
+      copy.set_format(clip_mime(kind), bytes.data(), static_cast<uint32_t>(bytes.size()));
+      web_clip_item_add(kind, bytes.data(), static_cast<int>(bytes.size()));
+      any = true;
+    });
+    if (!any) return false;
+    g_clip = std::move(copy);
+    web_clip_item_commit();
+    return true;
+  }
+
+  bool platform_clipboard_read_item(neui_detail::DataItem& item)
+  {
+    clip_refresh(true);
+    bool any = false;
+    g_clip.for_each_format([&](const std::string& mime, const std::vector<uint8_t>& bytes) {
+      item.set_format(mime, bytes.data(), static_cast<uint32_t>(bytes.size()));
+      any = true;
+    });
+    return any;
+  }
 
   // Drag & drop - Stage 6.
   bool platform_dnd_register_window(void* /*native_handle*/, void* /*session_ptr*/,
