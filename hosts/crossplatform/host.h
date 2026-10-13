@@ -1009,7 +1009,7 @@ namespace xpl_host
                         const std::vector<std::string>& items);
     // Paint the popup menu overlay. Called from paint_frame after the
     // combo overlay so the popup sits on top of everything else.
-    void paint_popup_menu(neui_render_ctx_t ctx);
+    void paint_popup_menu(neui_render_ctx_t ctx, uint32_t frame_index);
     // Mouse + key hooks for the popup. Called before normal widget
     // dispatch when _popup_active. lx/ly are in frame-local logical px.
     bool handle_popup_click(float lx, float ly);
@@ -1119,7 +1119,9 @@ namespace xpl_host
     int                      _popup_hover      = -1;
     int                      _popup_x_abs      = 0;     // logical px, frame-local
     int                      _popup_y_abs      = 0;
+    uint32_t                 _popup_frame      = 0;     // frame the popup belongs to
     std::vector<std::string> _popup_items;
+    void invalidate_popup_frame();
 
     // In-frame menubar overlay state (see the handle_menubar_* methods).
     // _menu_open gates the band/dropdown interaction; _menu_bar is the open

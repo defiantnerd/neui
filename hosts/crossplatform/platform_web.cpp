@@ -25,8 +25,14 @@
 // tied to X types and LinuxWindow fields, so it is copied, with "mirrors
 // platform_linux.cpp" notes, rather than shared.
 //
-// Not yet here: clipboard + IME (Stage 5), DnD (Stage 6), message box + the
-// blocking-call guards (Stage 4), page embedding (Stage 7).
+// Blocking UI (modal DIALOG show, popup_menu, message_box) runs a nested loop
+// on the same stack. A DIALOG / message box floats in the page with a DOM
+// title bar over its canvas; while it is up its owner's frame sits under a
+// backdrop that takes its pointer input. A blocking call made during a paint
+// is refused (paint never suspends, plans rule 3).
+//
+// Not yet here: clipboard + IME (Stage 5), DnD (Stage 6), page embedding
+// (Stage 7).
 
 #include "host.h"
 #include "platform.h"
@@ -34,7 +40,9 @@
 
 #include <emscripten.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -45,6 +53,7 @@
 // Full DataItem definition for the item-based clipboard stubs below.
 #include "../shared/clipboard_item.h"
 #include "../shared/damage.h"
+#include "../shared/message_box_painted.h"
 #include "../shared/metrics.h"
 #include "../shared/web/keys_web.h"
 #include "../shared/web/theme_provider_web.h"
@@ -59,15 +68,16 @@
 // JavaScript half: Module.neuiWeb (frames, the wake hook, kept events) and
 // Module.neuiCanvases (canvas by frame id, read by the Canvas 2D backend).
 //
-// Record types (neui_web_push): 1 resize, 2 focus, 3 blur, 10 pointer down,
-// 11 pointer up, 12 pointer move, 13 pointer leave, 14 context menu,
-// 15 wheel, 20 key down, 21 key up, 30 colour scheme (frame 0).
+// Record types (neui_web_push): 1 resize, 2 focus, 3 blur, 4 close button,
+// 5 press on a blocked frame's backdrop, 10 pointer down, 11 pointer up,
+// 12 pointer move, 13 pointer leave, 14 context menu, 15 wheel, 20 key down,
+// 21 key up, 30 colour scheme (frame 0).
 
 EM_JS_DEPS(neui_web, "$UTF8ToString,$stringToUTF8");
 
 EM_JS(void, web_setup, (), {
   if (Module.neuiWeb) return;
-  var W = Module.neuiWeb = { frames: {}, wake: null, kept: new Map(), nextEv: 1 };
+  var W = Module.neuiWeb = { frames: {}, wake: null, kept: new Map(), nextEv: 1, z: 1000 };
   Module.neuiCanvases = Module.neuiCanvases || {};
   W.wakeUp = function() { if (W.wake) { var w = W.wake; W.wake = null; w(2); } };
   // Queue a record for the loop and wake it if it is waiting.
@@ -94,6 +104,32 @@ EM_JS(void, web_setup, (), {
     if (matchMedia('(prefers-color-scheme: dark)').matches) return 1;
     if (matchMedia('(prefers-color-scheme: light)').matches) return 2;
     return 0;
+  };
+  W.css = function(rgb) { return "#" + (0x1000000 + (rgb & 0xFFFFFF)).toString(16).slice(1); };
+  // Place a floating frame (dialog, message box) in document coordinates.
+  // With an owner, x / y keep their offset from the owner's create()
+  // position, so a dialog lands where it would over the desktop window;
+  // centred = over the owner's canvas. Then clamped into the visible part
+  // of the page.
+  W.place = function(f) {
+    var w = f.wrap.offsetWidth, h = f.wrap.offsetHeight;
+    var sx = window.scrollX || 0, sy = window.scrollY || 0;
+    var left = f.x + sx, top = f.y + sy;
+    var o = f.owner ? W.frames[f.owner] : null;
+    if (o) {
+      var r = o.cv.getBoundingClientRect();
+      if (f.center) {
+        left = r.left + sx + (r.width - w) / 2;
+        top  = r.top  + sy + (r.height - h) / 2;
+      } else {
+        left = r.left + sx + f.x - f.ox;
+        top  = r.top  + sy + f.y - f.oy;
+      }
+    }
+    left = Math.max(sx, Math.min(left, sx + document.documentElement.clientWidth  - w));
+    top  = Math.max(sy, Math.min(top,  sy + document.documentElement.clientHeight - h));
+    f.wrap.style.left = Math.round(left) + "px";
+    f.wrap.style.top  = Math.round(top) + "px";
   };
   // A device-pixel-ratio change (zoom, another monitor) does not always
   // resize a canvas' device-pixel box, so watch the ratio itself: the query
@@ -168,23 +204,64 @@ EM_JS(int, web_reduced_motion, (), {
   return (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches) ? 1 : 0;
 });
 
-// kind: 0 APPWINDOW, 1 PLUGWINDOW, 2 DIALOG. An APPWINDOW mounts into
-// #neui-root when the page has one, else into <body>. In a container with a
-// size of its own the APPWINDOW fills it (and follows it); otherwise the
-// canvas takes the frame's create() size. A dialog floats above the page
-// (viewport coordinates).
+// kind: 0 APPWINDOW, 1 PLUGWINDOW, 2 DIALOG, 3 message box. An APPWINDOW
+// mounts into #neui-root when the page has one, else into <body>. In a
+// container with a size of its own the APPWINDOW fills it (and follows it);
+// otherwise the canvas takes the frame's create() size. A dialog or message
+// box floats above the page with a DOM title bar (title, close button, drag
+// to move) over its canvas; the canvas stays the client area.
 EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h), {
   var W = Module.neuiWeb;
   var host = (kind === 0 && document.getElementById('neui-root')) || document.body;
   var fill = kind === 0 && host !== document.body && host.clientWidth > 0 && host.clientHeight > 0;
+  var floating = kind >= 2;
   var wrap = document.createElement('div');
-  wrap.className = 'neui-frame';
-  wrap.style.cssText = 'display:none;line-height:0;user-select:none;-webkit-user-select:none;' +
+  wrap.className = floating ? 'neui-frame neui-dialog' : 'neui-frame';
+  wrap.style.cssText = 'display:none;line-height:0;user-select:none;-webkit-user-select:none;position:relative;' +
                        (fill ? 'width:100%;height:100%;' : "");
-  if (kind === 2) {
-    wrap.style.position = 'fixed';
-    wrap.style.left = x + 'px'; wrap.style.top = y + 'px';
-    wrap.style.zIndex = '1000';
+  var title = null;
+  if (floating) {
+    wrap.style.position = 'absolute';
+    wrap.style.border = '1px solid var(--neui-border, #555)';
+    wrap.style.background = 'var(--neui-bar-bg, #2b2b2b)';
+    wrap.style.boxShadow = '0 10px 32px rgba(0,0,0,0.45)';
+    wrap.setAttribute('role', 'dialog');
+    var bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;align-items:center;height:28px;line-height:28px;padding-left:10px;' +
+                        'font:600 13px system-ui,sans-serif;color:var(--neui-bar-fg, #ddd);' +
+                        'cursor:default;touch-action:none;';
+    title = document.createElement('span');
+    title.style.cssText = 'flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;';
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.textContent = String.fromCharCode(215);
+    close.setAttribute('aria-label', 'Close');
+    close.style.cssText = 'width:36px;height:28px;border:0;padding:0;background:transparent;color:inherit;' +
+                          'font:16px system-ui,sans-serif;cursor:pointer;';
+    close.addEventListener('pointerenter', function() { close.style.background = 'var(--neui-close-hover, #c42b1c)'; });
+    close.addEventListener('pointerleave', function() { close.style.background = 'transparent'; });
+    close.addEventListener('pointerdown', function(e) { e.stopPropagation(); });
+    close.addEventListener('click', function() { W.push(4, id); });
+    bar.appendChild(title);
+    bar.appendChild(close);
+    wrap.appendChild(bar);
+    // Drag the title bar to move the frame (the page's business: neui keeps
+    // no window position on the web).
+    var drag = null;
+    bar.addEventListener('pointerdown', function(e) {
+      if (e.button !== 0) return;
+      drag = { px: e.clientX, py: e.clientY, l: wrap.offsetLeft, t: wrap.offsetTop };
+      try { bar.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+    });
+    bar.addEventListener('pointermove', function(e) {
+      if (!drag) return;
+      wrap.style.left = (drag.l + e.clientX - drag.px) + 'px';
+      wrap.style.top  = (drag.t + e.clientY - drag.py) + 'px';
+    });
+    var stop = function() { drag = null; };
+    bar.addEventListener('pointerup', stop);
+    bar.addEventListener('pointercancel', stop);
   }
   var cv = document.createElement('canvas');
   cv.tabIndex = 0;
@@ -194,7 +271,9 @@ EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h), {
   wrap.appendChild(cv);
   host.appendChild(wrap);
   Module.neuiCanvases[id] = cv;
-  var f = W.frames[id] = { wrap: wrap, cv: cv, ro: null, body: host === document.body, fill: fill };
+  var f = W.frames[id] = { wrap: wrap, cv: cv, ro: null, body: host === document.body, fill: fill,
+                           floating: floating, title: title, x: x, y: y, owner: 0, ox: 0, oy: 0,
+                           center: false, shade: null };
 
   // Size + device pixel size (zoom, monitor changes) -> one RESIZE record.
   f.ro = new ResizeObserver(function(entries) {
@@ -262,8 +341,47 @@ EM_JS(void, web_frame_destroy, (int id), {
 });
 
 EM_JS(void, web_frame_show, (int id, int show), {
-  var f = Module.neuiWeb.frames[id]; if (!f) return;
+  var W = Module.neuiWeb, f = W.frames[id]; if (!f) return;
   f.wrap.style.display = show ? 'block' : 'none';
+  if (show && f.floating) {   // on top of whatever floats already
+    f.wrap.style.zIndex = String(++W.z);
+    W.place(f);
+  }
+});
+
+// A floating frame's owner (another frame id, 0 = none) and the owner's
+// create() position; centred = over the owner's canvas (message box).
+EM_JS(void, web_frame_owner, (int id, int owner, int ox, int oy, int centred), {
+  var f = Module.neuiWeb.frames[id]; if (!f) return;
+  f.owner = owner; f.ox = ox; f.oy = oy; f.center = !!centred;
+});
+
+// Title bar colours from the session palette (0xRRGGBB).
+EM_JS(void, web_frame_chrome, (int id, int bar_bg, int bar_fg, int border, int close_hover), {
+  var W = Module.neuiWeb, f = W.frames[id]; if (!f || !f.floating) return;
+  var s = f.wrap.style;
+  s.setProperty('--neui-bar-bg', W.css(bar_bg));
+  s.setProperty('--neui-bar-fg', W.css(bar_fg));
+  s.setProperty('--neui-border', W.css(border));
+  s.setProperty('--neui-close-hover', W.css(close_hover));
+});
+
+// A frame blocked by a modal child sits under a backdrop: it dims the frame
+// and takes its pointer input (a press there is reported as record 5, so the
+// modal child can come forward). Wheel events pass through to the page.
+EM_JS(void, web_frame_block, (int id, int on), {
+  var W = Module.neuiWeb, f = W.frames[id]; if (!f) return;
+  if (on && !f.shade) {
+    var d = document.createElement('div');
+    d.style.cssText = 'position:absolute;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.28);';
+    d.addEventListener('pointerdown', function(e) { e.preventDefault(); W.push(5, id); });
+    d.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+    f.wrap.appendChild(d);
+    f.shade = d;
+  } else if (!on && f.shade) {
+    if (f.shade.parentNode) f.shade.parentNode.removeChild(f.shade);
+    f.shade = null;
+  }
 });
 
 EM_JS(void, web_frame_focus, (int id), {
@@ -271,12 +389,12 @@ EM_JS(void, web_frame_focus, (int id), {
   try { f.cv.focus({ preventScroll: true }); } catch (e) { f.cv.focus(); }
 });
 
-// Size in CSS px (not for a frame that fills its container); a dialog also
-// moves (x / y are viewport coordinates).
+// Size in CSS px (not for a frame that fills its container); a floating
+// frame also moves (placed as at show).
 EM_JS(void, web_frame_geometry, (int id, int x, int y, int w, int h, int move), {
-  var f = Module.neuiWeb.frames[id]; if (!f) return;
+  var W = Module.neuiWeb, f = W.frames[id]; if (!f) return;
   if (!f.fill) { f.cv.style.width = w + 'px'; f.cv.style.height = h + 'px'; }
-  if (move) { f.wrap.style.left = x + 'px'; f.wrap.style.top = y + 'px'; }
+  if (move && f.floating) { f.x = x; f.y = y; f.center = false; W.place(f); }
 });
 
 // Min / max size (CSS px, <= 0 = none) for a frame that sizes itself.
@@ -293,7 +411,8 @@ EM_JS(void, web_frame_title, (int id, const char* text), {
   var f = Module.neuiWeb.frames[id]; if (!f) return;
   var t = UTF8ToString(text);
   f.cv.setAttribute('aria-label', t);
-  if (f.body) document.title = t;
+  if (f.title) f.title.textContent = t;
+  else if (f.body) document.title = t;
 });
 
 EM_JS(void, web_set_cursor, (const char* css), {
@@ -313,6 +432,7 @@ namespace
     uint32_t  widget_index = 0;
     bool      is_appwindow = false;
     bool      is_dialog    = false;
+    int       owner_id     = 0;        // a dialog's owner frame (0 = none)
     bool      counted      = false;    // contributes to g_appwindow_count
     float     dpr          = 1.0f;     // device px per CSS px (= logical px)
     // needs_paint = a FULL repaint is pending; `damage` collects partial
@@ -345,7 +465,7 @@ namespace
   bool     g_apple          = false;
 
   enum : int {
-    EV_RESIZE = 1, EV_FOCUS = 2, EV_BLUR = 3,
+    EV_RESIZE = 1, EV_FOCUS = 2, EV_BLUR = 3, EV_CLOSE = 4, EV_BACKDROP = 5,
     EV_PDOWN = 10, EV_PUP = 11, EV_PMOVE = 12, EV_PLEAVE = 13, EV_CONTEXT = 14, EV_WHEEL = 15,
     EV_KEYDOWN = 20, EV_KEYUP = 21,
     EV_SCHEME = 30,
@@ -361,6 +481,30 @@ namespace
   // The animation heartbeat: one 16 ms tick shared by every frame while any
   // of them animates (as the Linux timerfd), 0 = idle.
   double g_next_tick_ms = 0.0;
+
+  // A message box up: its own canvas + render context, not a WebFrame (no
+  // widget, no session of its own). Boxes can stack (one opened from a
+  // timer while another is up).
+  struct WebMsgBox
+  {
+    int       id      = 0;
+    Session*  session = nullptr;   // the owner's, for its palette
+    neui_render_ctx_t ctx = nullptr;
+    float     dpr     = 1.0f;
+    neui_detail::MsgBoxPainted box;
+    bool      need_paint = true;
+    bool      running = true;
+    int       result  = 0;
+  };
+  std::vector<WebMsgBox*> g_boxes;
+
+  // Floating frames and boxes in the order they came up: a press on a
+  // blocked frame's backdrop brings the newest one still open forward.
+  std::vector<int> g_modal_order;
+
+  // Set while a frame paints: a blocking call from a paint callback is
+  // refused (the paint must finish before the stack may suspend).
+  bool g_in_paint = false;
 
   // One wheel notch scrolls this many lines (the Win32 default, as on Linux).
   constexpr int WEB_WHEEL_LINES = 3;
@@ -411,19 +555,35 @@ namespace
     f->damage.clear();
     if (!f->session) return;
     auto* wd = f->session->get_widget(f->widget_index);
-    if (wd && wd->render_ctx)
+    if (wd && wd->render_ctx) {
+      g_in_paint = true;
       f->session->paint_frame(wd->render_ctx, f->widget_index, full ? nullptr : &damage);
+      g_in_paint = false;
+    }
+  }
+
+  void paint_box(WebMsgBox* b)
+  {
+    b->need_paint = false;
+    auto* backend = platform_get_backend();
+    if (!b->ctx || !backend) return;
+    neui_detail::ScopedPaletteOverride scope(b->session ? b->session->effective_palette_ptr() : nullptr);
+    b->box.render(backend, b->ctx);
   }
 
   bool any_paint_pending()
   {
     for (auto& kv : g_frames)
       if (paint_pending(kv.second)) return true;
+    for (auto* b : g_boxes)
+      if (b->need_paint) return true;
     return false;
   }
 
   void flush_pending_paints()
   {
+    for (auto* b : g_boxes)
+      if (b->need_paint) paint_box(b);
     // Snapshot ids: a paint callback can create / destroy frames.
     std::vector<int> todo;
     for (auto& kv : g_frames)
@@ -507,8 +667,27 @@ namespace
 
   // ---- Window teardown (mirrors platform_linux.cpp) -------------------------
 
+  void forget_modal(int id)
+  {
+    g_modal_order.erase(std::remove(g_modal_order.begin(), g_modal_order.end(), id),
+                        g_modal_order.end());
+  }
+
+  // Title bar colours of a floating frame, from its session's palette.
+  void style_chrome(int id, Session* s)
+  {
+    using neui_detail::ColorRole;
+    neui_detail::ScopedPaletteOverride scope(s ? s->effective_palette_ptr() : nullptr);
+    auto rgb = [](ColorRole r) {
+      return static_cast<int>(neui_detail::current_palette().colors[static_cast<size_t>(r)] & 0xFFFFFFu);
+    };
+    web_frame_chrome(id, rgb(ColorRole::control_bg_alt), rgb(ColorRole::text_primary),
+                     rgb(ColorRole::border), 0xC42B1C);
+  }
+
   void destroy_native(WebFrame* f)
   {
+    forget_modal(f->id);
     g_frames.erase(f->id);
     web_frame_destroy(f->id);
     delete f;
@@ -955,6 +1134,67 @@ namespace
     if (auto* g = find_frame(f->id)) g->needs_paint = true;
   }
 
+  // Input on a message box (mirrors the platform_linux.cpp box loop).
+  // Returns whether the default action is prevented.
+  bool box_event(WebMsgBox* b, const WebEvent& e)
+  {
+    auto& box = b->box;
+    const int lx = static_cast<int>(e.a), ly = static_cast<int>(e.b);
+    switch (e.type) {
+      case EV_RESIZE: {
+        auto* backend = platform_get_backend();
+        const float dpr = static_cast<float>(web_dpr());
+        uint32_t pw = e.c > 0.0 ? static_cast<uint32_t>(e.c) : static_cast<uint32_t>(std::lround(e.a * dpr));
+        uint32_t ph = e.d > 0.0 ? static_cast<uint32_t>(e.d) : static_cast<uint32_t>(std::lround(e.b * dpr));
+        if (backend && b->ctx) {
+          if (dpr != b->dpr) {
+            b->dpr = dpr;
+            backend->update_dpi(b->ctx, dpi_for(dpr));
+            neui_canvas2d_backend::set_scale(b->ctx, dpr);
+          }
+          backend->resize(b->ctx, pw ? pw : 1, ph ? ph : 1);
+        }
+        b->need_paint = true;
+        return false;
+      }
+      case EV_PMOVE: {
+        int h = box.hit_button(lx, ly);
+        if (h != box.hover) { box.hover = h; b->need_paint = true; }
+        return false;
+      }
+      case EV_PLEAVE:
+        if (box.hover != -1) { box.hover = -1; b->need_paint = true; }
+        return false;
+      case EV_PDOWN:
+        if (static_cast<int>(e.c) == 0) { box.pressed = box.hit_button(lx, ly); b->need_paint = true; }
+        return false;
+      case EV_PUP:
+        if (static_cast<int>(e.c) == 0) {
+          int h = box.hit_button(lx, ly);
+          if (h >= 0 && h == box.pressed) { b->result = box.spec.btn[h].id; b->running = false; }
+          box.pressed = -1;
+          b->need_paint = true;
+        }
+        return false;
+      case EV_KEYDOWN: {
+        const uint32_t k = neui_detail::web_key_to_neui(e.code.c_str(), e.key.c_str());
+        if (k == NEUI_KEY_RETURN) { b->result = box.default_result(); b->running = false; }
+        else if (k == NEUI_KEY_ESCAPE && box.spec.cancel_index >= 0) {
+          b->result = box.cancel_result(); b->running = false;
+        }
+        return true;   // modal: no key reaches the page behind the box
+      }
+      case EV_CLOSE:
+        b->result = box.cancel_result();
+        b->running = false;
+        return false;
+      case EV_CONTEXT:
+        return true;
+      default:
+        return false;
+    }
+  }
+
   void drain_queue()
   {
     while (!g_queue.empty()) {
@@ -964,6 +1204,13 @@ namespace
       if (e.type == EV_SCHEME) {   // page-wide, no frame
         neui_detail::theme_apply_web_scheme(static_cast<int>(e.a));
         neui_detail::broadcast_theme_change();
+        for (auto& kv : g_frames)
+          if (kv.second->is_dialog) style_chrome(kv.first, kv.second->session);
+        for (auto* b : g_boxes) { style_chrome(b->id, b->session); b->need_paint = true; }
+        continue;
+      }
+      if (e.type == EV_BACKDROP) {   // bring the newest modal forward
+        if (!g_modal_order.empty()) web_frame_focus(g_modal_order.back());
         continue;
       }
 
@@ -974,6 +1221,14 @@ namespace
       else if (e.type == EV_WHEEL) verdict_id = static_cast<int>(e.f);
       else if (e.type == EV_KEYDOWN) verdict_id = static_cast<int>(e.a);
       bool consumed = false;
+
+      WebMsgBox* box = nullptr;
+      for (auto* b : g_boxes) if (b->id == e.frame) box = b;
+      if (box) {
+        consumed = box_event(box, e);
+        if (verdict_id) web_verdict(verdict_id, consumed ? 1 : 0);
+        continue;
+      }
 
       WebFrame* f = find_frame(e.frame);
       Session* s = f ? f->session : nullptr;
@@ -994,8 +1249,15 @@ namespace
             s->close_menubar_menu();
             f->needs_paint = true;
             break;
+          case EV_CLOSE:
+            if (!blocked) handle_close(f);
+            break;
           case EV_PDOWN:
-            if (!blocked)
+            // A press in a frame other than the one an open popup belongs
+            // to dismisses the popup (the coordinates are this frame's).
+            if (!blocked && s->_popup_active && s->_popup_frame != f->widget_index)
+              s->handle_popup_click(-1.0e6f, -1.0e6f);
+            else if (!blocked)
               pointer_down(f, x, y, static_cast<int>(e.c), static_cast<uint32_t>(e.d),
                            static_cast<uint32_t>(e.e), e.f);
             break;
@@ -1003,7 +1265,7 @@ namespace
             if (!blocked) pointer_up(f, x, y, static_cast<int>(e.c));
             break;
           case EV_PMOVE:
-            if (!blocked)
+            if (!blocked && !(s->_popup_active && s->_popup_frame != f->widget_index))
               pointer_move(f, x, y, static_cast<uint32_t>(e.d), static_cast<uint32_t>(e.e));
             break;
           case EV_PLEAVE:
@@ -1053,7 +1315,7 @@ namespace
   // ---- Frame creation ---------------------------------------------------------
 
   void create_frame(Session* session, uint32_t widget_index, WidgetData& wd,
-                    int kind, bool is_appwindow)
+                    int kind, bool is_appwindow, WebFrame* owner)
   {
     platform_init();
     auto* f = new WebFrame();
@@ -1069,6 +1331,14 @@ namespace
     const int h = wd.height > 0 ? wd.height : 1;
     web_frame_create(f->id, kind, wd.x, wd.y, w, h);
     if (!wd.text.empty()) web_frame_title(f->id, wd.text.c_str());
+    if (f->is_dialog) {
+      if (owner) {
+        f->owner_id = owner->id;
+        auto* ow = session->get_widget(owner->widget_index);
+        web_frame_owner(f->id, owner->id, ow ? ow->x : 0, ow ? ow->y : 0, 0);
+      }
+      style_chrome(f->id, session);
+    }
 
     wd.native_handle = f;
     wd.dpi = dpi_for(f->dpr);
@@ -1162,18 +1432,19 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push_key(int type, int frame, int 
 
   void platform_create_appwindow(Session* session, uint32_t widget_index, WidgetData& wd)
   {
-    create_frame(session, widget_index, wd, 0, /*is_appwindow*/true);
+    create_frame(session, widget_index, wd, 0, /*is_appwindow*/true, nullptr);
   }
 
   void platform_create_plugwindow(Session* session, uint32_t widget_index, WidgetData& wd)
   {
-    create_frame(session, widget_index, wd, 1, /*is_appwindow*/false);
+    create_frame(session, widget_index, wd, 1, /*is_appwindow*/false, nullptr);
   }
 
   void platform_create_dialog(Session* session, uint32_t widget_index, WidgetData& wd,
-                              void* /*owner_native*/)
+                              void* owner_native)
   {
-    create_frame(session, widget_index, wd, 2, /*is_appwindow*/false);
+    create_frame(session, widget_index, wd, 2, /*is_appwindow*/false,
+                 static_cast<WebFrame*>(owner_native));
   }
 
   void platform_destroy_window(WidgetData& wd)
@@ -1188,6 +1459,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push_key(int type, int frame, int 
     auto* f = static_cast<WebFrame*>(native_handle);
     web_frame_show(f->id, 1);
     f->needs_paint = true;
+    if (f->is_dialog) {   // a dialog comes up focused, as a desktop one does
+      forget_modal(f->id);
+      g_modal_order.push_back(f->id);
+      web_frame_focus(f->id);
+    }
   }
 
   void platform_hide_window(void* native_handle)
@@ -1199,7 +1475,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push_key(int type, int frame, int 
   void platform_set_window_enabled(void* native_handle, bool enabled)
   {
     if (!native_handle) return;
-    static_cast<WebFrame*>(native_handle)->input_disabled = !enabled;
+    auto* f = static_cast<WebFrame*>(native_handle);
+    f->input_disabled = !enabled;
+    web_frame_block(f->id, enabled ? 0 : 1);
   }
 
   void platform_activate_window(void* native_handle)
@@ -1288,6 +1566,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push_key(int type, int frame, int 
 
   bool platform_run_modal_until(bool* keep_running)
   {
+    if (g_in_paint) {   // plans rule 3: a paint never suspends
+      std::fprintf(stderr, "neui: blocking call during paint refused\n");
+      return !g_quit;
+    }
     while (keep_running && *keep_running && !g_quit) loop_turn(16);
     return !g_quit;
   }
@@ -1407,8 +1689,66 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push_key(int type, int frame, int 
     return static_cast<uint64_t>(emscripten_get_now());
   }
 
-  // Message boxes - Stage 4 (neui-drawn, as on Linux). 0 = failure.
-  int platform_message_box(void* /*native_handle*/, const char* /*text*/,
-                           const char* /*caption*/, uint32_t /*flags*/)       { return 0; }
+  // Message box: neui-drawn (hosts/shared/message_box_painted.h, as on
+  // Linux) on its own floating canvas, centred over the owner, which is
+  // blocked meanwhile. The box runs on platform_run_modal_until, so timers,
+  // toasts and other frames keep going. 0 = failure.
+  int platform_message_box(void* native_handle, const char* text,
+                           const char* caption, uint32_t flags)
+  {
+    if (!native_handle) return 0;
+    if (g_in_paint) {
+      std::fprintf(stderr, "neui: message box during paint refused\n");
+      return 0;
+    }
+    auto* backend = platform_get_backend();
+    if (!backend) return 0;
+    auto* owner = static_cast<WebFrame*>(native_handle);
+    const int owner_id = owner->id;
+
+    auto* b = new WebMsgBox();
+    b->id = g_next_frame_id++;
+    b->session = owner->session;
+    {
+      neui_detail::ScopedPaletteOverride scope(b->session ? b->session->effective_palette_ptr() : nullptr);
+      if (!b->box.layout(backend, text, caption, flags)) { delete b; return 0; }
+    }
+    const int w = b->box.win_w, h = b->box.win_h;
+    b->dpr = static_cast<float>(web_dpr());
+    web_frame_create(b->id, 3, 0, 0, w, h);
+    web_frame_title(b->id, caption ? caption : "");
+    web_frame_owner(b->id, owner_id, 0, 0, /*centred*/1);
+    style_chrome(b->id, b->session);
+    b->ctx = backend->create_context(reinterpret_cast<void*>(static_cast<uintptr_t>(b->id)),
+                                     static_cast<uint32_t>(std::lround(static_cast<float>(w) * b->dpr)),
+                                     static_cast<uint32_t>(std::lround(static_cast<float>(h) * b->dpr)));
+    if (!b->ctx) { web_frame_destroy(b->id); delete b; return 0; }
+    backend->update_dpi(b->ctx, dpi_for(b->dpr));
+    neui_canvas2d_backend::set_scale(b->ctx, b->dpr);
+    g_boxes.push_back(b);
+    g_modal_order.push_back(b->id);
+
+    // Block the owner (restored after: a box over an already-modal dialog
+    // leaves that dialog's owner blocked).
+    const bool prev_disabled = owner->input_disabled;
+    platform_set_window_enabled(owner, false);
+    web_frame_show(b->id, 1);
+    web_frame_focus(b->id);
+
+    platform_run_modal_until(&b->running);
+    const int result = b->running ? 0 : b->result;   // the loop quit: no answer
+
+    g_boxes.erase(std::remove(g_boxes.begin(), g_boxes.end(), b), g_boxes.end());
+    forget_modal(b->id);
+    backend->destroy_context(b->ctx);
+    web_frame_destroy(b->id);
+    delete b;
+    // The owner may have closed while the box was up.
+    if (WebFrame* o = find_frame(owner_id)) {
+      platform_set_window_enabled(o, !prev_disabled);
+      if (!prev_disabled) platform_activate_window(o);
+    }
+    return result;
+  }
 
 } // namespace xpl_host

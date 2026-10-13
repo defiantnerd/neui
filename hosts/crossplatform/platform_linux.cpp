@@ -25,7 +25,7 @@
 #include "../shared/linux/keys_linux.h"
 #include "../shared/linux/clipboard_linux.h"
 #include "../shared/linux/dnd_linux.h"
-#include "../shared/linux/message_box_linux.h"
+#include "../shared/message_box_painted.h"
 #include "../shared/theme_palette.h"
 #include "../shared/linux/theme_provider_linux.h"
 #include "../../backends/cairo/cairo_backend.h"
@@ -1681,8 +1681,6 @@ namespace
     auto* backend = platform_get_backend();
     if (!backend) return 0;
 
-    neui_detail::MsgBoxSpec spec = neui_detail::msgbox_parse(flags);
-
     int     scr   = DefaultScreen(d);
     Window  root  = RootWindow(d, scr);
     Visual* vis   = DefaultVisual(d, scr);
@@ -1693,77 +1691,11 @@ namespace
     // Scope the palette to the owner's session so dark/light + accent match.
     neui_detail::ScopedPaletteOverride scope(
       (owner && owner->session) ? owner->session->effective_palette_ptr() : nullptr);
-    auto C = [](neui_detail::ColorRole r) {
-      return neui_detail::current_palette().colors[(size_t)r];
-    };
-    using neui_detail::shade;   // shared ARGB channel shade (theme_palette.h)
 
-    // Offscreen ctx for text measurement during layout (logical px).
-    neui_render_ctx_t mctx = backend->create_offscreen_context(8, 8, 1.0f);
-    auto meas = [&](const char* s, float sz, int weight) -> int {
-      if (!mctx || !s || !*s) return 0;
-      if (weight) backend->push_font(mctx, "", weight);
-      int w = (int)backend->measure_text(mctx, s, -1, sz);
-      if (weight) backend->pop_font(mctx);
-      return w;
-    };
-
-    // Word-wrap UTF-8 `s` to maxw logical px (honours embedded '\n').
-    const float SZ_TXT = 13.0f, SZ_CAP = 14.0f;
-    const int   LH = 18, LH_CAP = 20, WRAP = 360;
-    auto wrap = [&](const char* s, float sz, int weight, int maxw,
-                    std::vector<std::string>& out) {
-      if (!s || !*s) return;
-      std::string cur, word;
-      auto flush_word = [&]() {
-        if (word.empty()) return;
-        std::string trial = cur.empty() ? word : cur + " " + word;
-        if (cur.empty() || meas(trial.c_str(), sz, weight) <= maxw) cur = trial;
-        else { out.push_back(cur); cur = word; }
-        word.clear();
-      };
-      for (const char* p = s;; ++p) {
-        char c = *p;
-        if (c == '\n' || c == 0) { flush_word(); out.push_back(cur); cur.clear();
-                                   if (c == 0) break; }
-        else if (c == ' ') flush_word();
-        else word += c;
-      }
-    };
-
-    std::vector<std::string> cap_lines, txt_lines;
-    wrap(caption, SZ_CAP, 700, WRAP, cap_lines);
-    wrap(text,    SZ_TXT, 0,   WRAP, txt_lines);
-
-    // Layout (logical px).
-    const int PAD = 18, GAP = 12, BTN_H = 28, BTN_GAP = 8, BTN_MINW = 84, ICON = 32;
-    int text_w = 0;
-    for (auto& l : cap_lines) text_w = std::max(text_w, meas(l.c_str(), SZ_CAP, 700));
-    for (auto& l : txt_lines) text_w = std::max(text_w, meas(l.c_str(), SZ_TXT, 0));
-    int content_h = (int)cap_lines.size() * LH_CAP + (int)txt_lines.size() * LH;
-    if (!cap_lines.empty() && !txt_lines.empty()) content_h += 6;
-
-    int bw[3] = {0,0,0}, total_b = 0;
-    for (int i = 0; i < spec.count; ++i) {
-      bw[i] = std::max(BTN_MINW, meas(spec.btn[i].label, SZ_TXT, 0) + 24);
-      total_b += bw[i] + (i ? BTN_GAP : 0);
-    }
-    int icon_w   = spec.icon ? ICON + GAP : 0;
-    int left_h   = std::max(content_h, spec.icon ? ICON : 0);
-    int win_w = PAD * 2 + std::max(icon_w + text_w, total_b);
-    int win_h = PAD * 2 + left_h + GAP + BTN_H;
-    backend->destroy_context(mctx); mctx = nullptr;
-
-    int btn_y  = win_h - PAD - BTN_H;
-    int btn_x0 = win_w - PAD - total_b;
-    int bx[3] = {0,0,0};
-    for (int i = 0, cx = btn_x0; i < spec.count; ++i) { bx[i] = cx; cx += bw[i] + BTN_GAP; }
-    auto hit_button = [&](int lx, int ly) -> int {
-      if (ly < btn_y || ly >= btn_y + BTN_H) return -1;
-      for (int i = 0; i < spec.count; ++i)
-        if (lx >= bx[i] && lx < bx[i] + bw[i]) return i;
-      return -1;
-    };
+    // Layout, paint and hit-test are shared with the web host.
+    neui_detail::MsgBoxPainted box;
+    if (!box.layout(backend, text, caption, flags)) return 0;
+    const int win_w = box.win_w, win_h = box.win_h;
 
     // Centre over the owner (or the screen).
     int ox = 0, oy = 0;
@@ -1809,63 +1741,12 @@ namespace
     if (!ctx) { XDestroyWindow(d, win); return 0; }
     backend->update_dpi(ctx, dpi);
 
-    int  hover = -1, pressed = -1, result = 0;
+    int  result = 0;
     bool done = false, need_paint = true, focused = false;
     // Swallow transient X errors (e.g. focusing a not-yet-viewable window).
     int (*old_err)(Display*, XErrorEvent*) = XSetErrorHandler(drag_xerror);
 
-    auto render = [&]() {
-      backend->begin_frame(ctx, C(neui_detail::ColorRole::frame_bg));
-      if (spec.icon) {
-        uint32_t icol; const char* glyph;
-        switch (spec.icon) {
-          case NEUI_MB_ICONERROR:       icol = 0xFFD13438; glyph = "\xC3\x97"; break; // ×
-          case NEUI_MB_ICONWARNING:     icol = 0xFFF7630C; glyph = "!";        break;
-          case NEUI_MB_ICONQUESTION:    icol = 0xFF0078D4; glyph = "?";        break;
-          default: /* INFORMATION */    icol = 0xFF0078D4; glyph = "i";        break;
-        }
-        int cx = PAD + ICON / 2, cy = PAD + ICON / 2, rr = ICON / 2;
-        backend->begin_path(ctx);
-        backend->arc(ctx, (float)cx, (float)cy, (float)rr, 0.0f, 6.2831853f);
-        backend->close_path(ctx);
-        backend->fill_path(ctx, icol);
-        backend->push_font(ctx, "", 700);
-        int gw = (int)backend->measure_text(ctx, glyph, -1, 18.0f);
-        backend->draw_text(ctx, (float)(cx - gw / 2), (float)PAD, (float)(gw + 4), (float)ICON, glyph, 18.0f, 0xFFFFFFFF);
-        backend->pop_font(ctx);
-      }
-      int tx = PAD + (spec.icon ? ICON + GAP : 0);
-      int ty = PAD;
-      backend->push_font(ctx, "", 700);
-      for (auto& l : cap_lines) {
-        backend->draw_text(ctx, (float)tx, (float)ty, (float)(win_w - tx - PAD), (float)LH_CAP, l.c_str(), SZ_CAP,
-                           C(neui_detail::ColorRole::text_primary));
-        ty += LH_CAP;
-      }
-      backend->pop_font(ctx);
-      if (!cap_lines.empty() && !txt_lines.empty()) ty += 6;
-      for (auto& l : txt_lines) {
-        backend->draw_text(ctx, (float)tx, (float)ty, (float)(win_w - tx - PAD), (float)LH, l.c_str(), SZ_TXT,
-                           C(neui_detail::ColorRole::text_primary));
-        ty += LH;
-      }
-      for (int i = 0; i < spec.count; ++i) {
-        uint32_t fill = C(neui_detail::ColorRole::control_bg);
-        if (pressed == i)     fill = shade(fill, -18);
-        else if (hover == i)  fill = shade(fill, +14);
-        backend->fill_rect(ctx, (float)bx[i], (float)btn_y, (float)bw[i], (float)BTN_H, fill);
-        bool def = (i == spec.def_index);
-        backend->draw_rect(ctx, (float)bx[i], (float)btn_y, (float)bw[i], (float)BTN_H,
-                           def ? 2.0f : 1.0f,
-                           def ? C(neui_detail::ColorRole::accent)
-                               : C(neui_detail::ColorRole::border));
-        int lw = (int)backend->measure_text(ctx, spec.btn[i].label, -1, SZ_TXT);
-        backend->draw_text(ctx, (float)(bx[i] + (bw[i] - lw) / 2), (float)btn_y, (float)(lw + 4), (float)BTN_H,
-                           spec.btn[i].label, SZ_TXT,
-                           C(neui_detail::ColorRole::text_primary));
-      }
-      backend->end_frame(ctx);
-    };
+    auto render = [&]() { box.render(backend, ctx); };
 
     XMapRaised(d, win);
 
@@ -1896,36 +1777,36 @@ namespace
           backend->resize(ctx, static_cast<uint32_t>(e.xconfigure.width), static_cast<uint32_t>(e.xconfigure.height));
           need_paint = true; break;
         case MotionNotify: {
-          int h = hit_button((int)(static_cast<float>(e.xmotion.x) / scale), (int)(static_cast<float>(e.xmotion.y) / scale));
-          if (h != hover) { hover = h; need_paint = true; }
+          int h = box.hit_button((int)(static_cast<float>(e.xmotion.x) / scale), (int)(static_cast<float>(e.xmotion.y) / scale));
+          if (h != box.hover) { box.hover = h; need_paint = true; }
           break;
         }
         case ButtonPress:
           if (e.xbutton.button == Button1) {
-            pressed = hit_button((int)(static_cast<float>(e.xbutton.x) / scale), (int)(static_cast<float>(e.xbutton.y) / scale));
+            box.pressed = box.hit_button((int)(static_cast<float>(e.xbutton.x) / scale), (int)(static_cast<float>(e.xbutton.y) / scale));
             need_paint = true;
           }
           break;
         case ButtonRelease:
           if (e.xbutton.button == Button1) {
-            int h = hit_button((int)(static_cast<float>(e.xbutton.x) / scale), (int)(static_cast<float>(e.xbutton.y) / scale));
-            if (h >= 0 && h == pressed) { result = spec.btn[h].id; done = true; }
-            pressed = -1; need_paint = true;
+            int h = box.hit_button((int)(static_cast<float>(e.xbutton.x) / scale), (int)(static_cast<float>(e.xbutton.y) / scale));
+            if (h >= 0 && h == box.pressed) { result = box.spec.btn[h].id; done = true; }
+            box.pressed = -1; need_paint = true;
           }
           break;
         case KeyPress: {
           KeySym ks = XLookupKeysym(&e.xkey, 0);
           if (ks == XK_Return || ks == XK_KP_Enter) {
-            result = spec.btn[spec.def_index].id; done = true;
-          } else if (ks == XK_Escape && spec.cancel_index >= 0) {
-            result = spec.btn[spec.cancel_index].id; done = true;
+            result = box.default_result(); done = true;
+          } else if (ks == XK_Escape && box.spec.cancel_index >= 0) {
+            result = box.cancel_result(); done = true;
           }
           break;
         }
         case ClientMessage:
           if (e.xclient.message_type == g_wm_protocols &&
               (Atom)e.xclient.data.l[0] == g_wm_delete) {
-            result = spec.cancel_index >= 0 ? spec.btn[spec.cancel_index].id : 0;
+            result = box.cancel_result();
             done = true;
           }
           break;

@@ -2487,7 +2487,7 @@ namespace xpl_host
     // top strip. No-op when the frame has no menubar / native-menu platforms.
     paint_menubar(ctx, parent_index);
     // Popup-menu overlay sits on top of the combo overlay.
-    paint_popup_menu(ctx);
+    paint_popup_menu(ctx, parent_index);
     // Toast overlay sits on top of every other overlay.
     paint_toast(ctx, parent_index);
     // The overlays above are not culled: the backend clips them to the
@@ -2608,7 +2608,7 @@ namespace xpl_host
         if (cb) cb->paint_overlay(_backend, ctx);
       }
     }
-    paint_popup_menu(ctx);
+    paint_popup_menu(ctx, frame_index);
     paint_toast(ctx, frame_index);
   }
 #endif // NEUI_PLATFORM_LVGL
@@ -4274,13 +4274,7 @@ namespace xpl_host
         ly < static_cast<float>(_popup_y_abs) || ly >= static_cast<float>(_popup_y_abs + height)) {
       if (_popup_hover != -1) {
         _popup_hover = -1;
-        void* frame = nullptr;
-        uint32_t f = _widgets.child(0);
-        while (f != 0 && _widgets.exists(f)) {
-          if (_widgets[f].native_handle) { frame = _widgets[f].native_handle; break; }
-          f = _widgets.next(f);
-        }
-        if (frame) platform_invalidate(frame);
+        invalidate_popup_frame();
       }
       return false;
     }
@@ -4299,14 +4293,7 @@ namespace xpl_host
     }
     if (new_hover != _popup_hover) {
       _popup_hover = new_hover;
-      uint32_t f = _widgets.child(0);
-      while (f != 0 && _widgets.exists(f)) {
-        if (_widgets[f].native_handle) {
-          platform_invalidate(_widgets[f].native_handle);
-          break;
-        }
-        f = _widgets.next(f);
-      }
+      invalidate_popup_frame();
     }
     return true;
   }
@@ -4342,22 +4329,24 @@ namespace xpl_host
         next += dir;
       }
       _popup_hover = next;
-      uint32_t f = _widgets.child(0);
-      while (f != 0 && _widgets.exists(f)) {
-        if (_widgets[f].native_handle) {
-          platform_invalidate(_widgets[f].native_handle);
-          break;
-        }
-        f = _widgets.next(f);
-      }
+      invalidate_popup_frame();
       return true;
     }
     return false;
   }
 
-  void Session::paint_popup_menu(neui_render_ctx_t ctx)
+  // The popup is painted (and repainted) on the frame it was opened in only;
+  // a session with several frames would otherwise draw it on each of them.
+  void Session::invalidate_popup_frame()
   {
-    if (!_popup_active || !_backend) return;
+    if (_popup_frame != 0 && _widgets.exists(_popup_frame) &&
+        _widgets[_popup_frame].native_handle)
+      platform_invalidate(_widgets[_popup_frame].native_handle);
+  }
+
+  void Session::paint_popup_menu(neui_render_ctx_t ctx, uint32_t frame_index)
+  {
+    if (!_popup_active || !_backend || frame_index != _popup_frame) return;
     using neui_detail::ColorRole;
     int w = popup_total_width(_backend, ctx, _popup_items);
     int h = popup_total_height(_popup_items);
@@ -4432,7 +4421,14 @@ namespace xpl_host
 
     // Find the owning frame and invalidate so the overlay paints on the
     // very next pump iteration (before the user moves the mouse).
-    void* frame = find_parent_native_handle(anchor_idx);
+    _popup_frame = 0;
+    if (anchor.native_handle) {
+      _popup_frame = anchor_idx;
+    } else {
+      for (uint32_t p : parents)
+        if (p != 0 && _widgets.exists(p) && _widgets[p].native_handle) { _popup_frame = p; break; }
+    }
+    void* frame = _popup_frame ? _widgets[_popup_frame].native_handle : nullptr;
     if (frame) platform_invalidate(frame);
 
     // Nested message loop until the user picks or dismisses.
@@ -4444,7 +4440,9 @@ namespace xpl_host
     _popup_hover  = -1;
     _popup_picked = 0;
 
-    if (frame) platform_invalidate(frame);
+    // The frame may have closed while the popup was up.
+    invalidate_popup_frame();
+    _popup_frame = 0;
     return picked;
   }
 

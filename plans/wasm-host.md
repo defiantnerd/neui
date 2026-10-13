@@ -12,7 +12,7 @@ Confirmed decisions:
 3. **One `<canvas>` per frame.** APPWINDOW fills its mount element; DIALOGs float above it.
 4. **No new host.** The web target is xpl + Canvas2D backend + `platform_web.cpp`, registered as `"neui.host.crossplatform"`.
 
-This plan replaces that feasibility note. Status: Stages 0-3 done (2026-10-13, results below each stage); Stage 4 (dialogs, popups, message box, menubar) is next.
+This plan replaces that feasibility note. Status: Stages 0-4 done (2026-10-13, results below each stage); Stage 5 (text input, IME, clipboard) is next.
 
 ---
 
@@ -253,7 +253,7 @@ Exit: `readme_example`, `path_example`, `overlay_example`, `neui_grid_example`, 
 
 - **Message box extraction (desktop change, done just before it is needed):**
   - Move the backend-only layout / render / hit-test from `platform_linux.cpp:1684-1766, 1817-1868` into `hosts/shared/message_box_painted.h`; the X11 window and loop stay in place.
-  - `message_box_linux.h` is gated on `__unix__`, which Emscripten defines, so it is reusable as is.
+  - `message_box_linux.h` is gated on `__unix__`, which Emscripten defines, so it is reusable as is (done differently: it moved into the new header, see the results).
   - Linux is verified by CI and by an on-screen pass by the user.
 - **Modal DIALOG** (`widgets.cpp:451`):
   - An absolutely positioned wrapper with a **DOM title bar** (title, close button, draggable, styled from the palette through CSS custom properties).
@@ -268,6 +268,19 @@ Exit: `readme_example`, `path_example`, `overlay_example`, `neui_grid_example`, 
   - Document the browser-reserved shortcuts: Ctrl / Cmd + W / T / N can't be caught; Ctrl + S / P / F can, through `preventDefault` when handled.
 
 Exit: `neui_example`'s About dialog (open / close / reopen), knob right-click reset, message box → toast, menus by mouse, keyboard and accelerators.
+
+#### Stage 4 results (2026-10-13)
+
+- **Message box extraction**: `hosts/shared/message_box_painted.h` holds the `NEUI_MB_*` decode (moved from `message_box_linux.h`, now deleted) and `MsgBoxPainted` (layout through an off-screen context, render, hit-test, Enter / Esc results). `platform_linux.cpp::run_message_box` keeps its X window and loop and calls it; the drawing is unchanged. **Linux still to verify**: CI build + an on-screen look at the box (no X11 build here).
+- **DIALOG**: a floating wrapper (`position:absolute` in document coordinates, so it scrolls with the page) with a DOM title bar: title, close button (→ `handle_close`, so `APP_QUIT` can veto), drag to move. Colours come from the session palette through CSS custom properties and follow theme changes. The canvas stays the client area.
+  - Placement: x / y keep their offset from the owner's create() position (the About dialog at 240,240 with its owner at 100,100 lands 140,140 into the owner's canvas), then clamped into the visible viewport. That replaces the planned "viewport coordinates": neui frames have no screen position on the web.
+  - A dialog comes up focused (canvas focus); keys go to it.
+  - `platform_set_window_enabled(owner, false)` adds a backdrop over the owner's frame: it dims it and takes its pointer input (wheel passes to the page). A press on it focuses the newest open modal. The input gate drops what still arrives.
+- **message_box** on its own floating canvas (kind 3, not a `WebFrame`), centred over the owner, run on `platform_run_modal_until`: timers, toasts and other frames keep going (a toast animated while a box was up). Enter = default, Esc = cancel, close button = cancel. Boxes can stack.
+- **Popups**: `Session::_popup_frame` records the frame a popup opened in. `paint_popup_menu` paints only there, and hover / key repaints go to that frame (they used to go to the session's first frame). On the web, a press in another frame dismisses the popup and moves there are ignored. Desktop hosts keep their routing.
+- **Paint guard**: `platform_run_modal_until` and `platform_message_box` refuse (log, return at once / 0) while a frame paints.
+- **Menubar**: the in-frame band and `try_menubar_accel` needed no web changes. Ctrl+O / Ctrl+S reach neui (`preventDefault` when handled). Browser-reserved shortcuts never reach the page: Ctrl/Cmd + N / T / W (and Shift variants), Ctrl+Tab, F11; `neui_example`'s "New" accelerator Ctrl+N is one of them.
+- **Driven** in Edge (JSPI), Firefox and WebKit (Asyncify), WebKit (JSPI), dark and light: message box → Esc → toast "Cancel"; box → hover + click "No" → toast; a click on the blocked owner does nothing; Help → About by keyboard, close by OK, reopen, close by the title-bar button, reopen; Ctrl+O / Ctrl+S activate their items; the knob's right-click popup.
 
 ### Stage 5: text input, IME, clipboard (M-L)
 
