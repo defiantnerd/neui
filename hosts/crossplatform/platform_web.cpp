@@ -47,20 +47,39 @@
 // navigator.clipboard.read / readText, which may ask the user, and falls
 // back to the in-process copy when refused. There is no PRIMARY selection.
 //
-// Not yet here: DnD (Stage 6), page embedding (Stage 7).
+// Drag and drop. A drag from the desktop or the page arrives as DOM drag
+// events on a frame's canvas: dragenter / dragover go through the session's
+// DnD dispatch and get their verdict (the dropEffect) like a key; the canvas
+// also applies the last answer at once, so a browser that misses the
+// microtask verdict is one event late, not wrong. The browser's own default
+// never runs over a registered canvas (no dropped file opens in the tab,
+// also where neui refuses it). A drop reads its
+// strings inside the event and its files asynchronously; the files land in
+// the in-memory file system (/tmp/neui-drop/...) and arrive as file://
+// URIs in text/uri-list, plus their bytes under their own MIME type. A
+// browser starts its own drags only from a native dragstart, so begin_drag
+// runs an in-page drag: a nested loop over pointer records that the page
+// routes to the neui frame under the pointer (Linux's internal-drag model).
+// Dragging out of the page is not supported.
+//
+// Not yet here: page embedding (Stage 7).
 
 #include "host.h"
 #include "platform.h"
 #include <neui/neui.h>
 
 #include <emscripten.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -68,6 +87,7 @@
 // Full DataItem definition for the item-based clipboard stubs below.
 #include "../shared/clipboard_item.h"
 #include "../shared/damage.h"
+#include "../shared/dnd_modifier_suggest.h"
 #include "../shared/message_box_painted.h"
 #include "../shared/metrics.h"
 #include "../shared/web/keys_web.h"
@@ -87,7 +107,10 @@
 // 5 press on a blocked frame's backdrop, 10 pointer down, 11 pointer up,
 // 12 pointer move, 13 pointer leave, 14 context menu, 15 wheel, 20 key down,
 // 21 key up, 30 colour scheme (frame 0), 40 composition start, 41
-// composition update, 42 composition end, 43 text without a key.
+// composition update, 42 composition end, 43 text without a key, 50 drag
+// enter / over, 51 drag leave, 52 drop, 60 in-page drag move, 61 in-page
+// drag release, 62 in-page drag cancel (60 / 61: frame = the neui frame
+// under the pointer, 0 = none).
 
 EM_JS_DEPS(neui_web, "$UTF8ToString,$stringToUTF8,$lengthBytesUTF8");
 
@@ -153,6 +176,37 @@ EM_JS(void, web_setup, (), {
     return 0;
   };
   W.css = function(rgb) { return "#" + (0x1000000 + (rgb & 0xFFFFFF)).toString(16).slice(1); };
+  // DnD: NEUI_DND_ACTION_* bits <-> the DataTransfer effect names.
+  W.effectName = function(a) { return (a & 1) ? 'copy' : (a & 2) ? 'move' : (a & 4) ? 'link' : 'none'; };
+  W.allowedOf = function(dt) {
+    var m = { none: 0, copy: 1, move: 2, link: 4, copyMove: 3, copyLink: 5, linkMove: 6 };
+    var a = dt ? m[dt.effectAllowed] : undefined;
+    return a === undefined ? 7 : a;   // "all", "uninitialized"
+  };
+  // A DataTransfer type as a neui MIME ("" = not one neui can carry).
+  W.neuiMime = function(t) {
+    t = String(t).toLowerCase();
+    if (t === 'text/plain' || t === 'text') return 'text/plain;charset=utf-8';
+    if (t === 'files') return 'text/uri-list';
+    return t.indexOf('/') > 0 ? t : "";
+  };
+  // The formats a drag offers: its types, files as text/uri-list plus each
+  // file's own MIME type when the browser tells it before the drop.
+  W.dndTypes = function(dt) {
+    var out = [], add = function(m) { if (m && out.indexOf(m) < 0) out.push(m); };
+    if (!dt) return out;
+    var ts = dt.types ? Array.prototype.slice.call(dt.types) : [];
+    for (var i = 0; i < ts.length; i++) add(W.neuiMime(ts[i]));
+    var it = dt.items ? Array.prototype.slice.call(dt.items) : [];
+    for (var j = 0; j < it.length; j++) if (it[j].kind === 'file' && it[j].type) add(it[j].type.toLowerCase());
+    return out;
+  };
+  // A DnD record; the formats go through the text buffer, one per line.
+  W.pushDnd = function(type, id, x, y, mods, allowed, evId, types) {
+    var n = W.str(types.join('\n'));
+    Module._neui_web_push_dnd(type, id, x, y, mods, allowed, evId, n);
+    W.wakeUp();
+  };
   // Place a floating frame (dialog, message box) in document coordinates.
   // With an owner, x / y keep their offset from the owner's create()
   // position, so a dialog lands where it would over the desktop window;
@@ -337,7 +391,7 @@ EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h), {
   var f = W.frames[id] = { wrap: wrap, cv: cv, ro: null, body: host === document.body, fill: fill,
                            floating: floating, title: title, x: x, y: y, owner: 0, ox: 0, oy: 0,
                            center: false, shade: null, ta: ta, typed: false, paste: null,
-                           want: false, hold: false };
+                           want: false, hold: false, dnd: false, dndAct: 0 };
 
   // Size + device pixel size (zoom, monitor changes) -> one RESIZE record.
   f.ro = new ResizeObserver(function(entries) {
@@ -394,6 +448,64 @@ EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h), {
     var p = at(e);
     W.push(15, id, p[0], p[1], e.deltaX, e.deltaY, e.deltaMode, W.keep(e));
   }, { passive: false });
+  // A drag from the desktop or the page (once the host registered the frame
+  // as a drop target). The browser's default never runs over the canvas (a
+  // file dropped where neui refuses must not open in the tab): refusal is
+  // dropEffect "none". f.dndAct, the last answer, is applied at once; the
+  // drain's verdict then sets this event's (see the file comment).
+  var onDragOver = function(e) {
+    if (!f.dnd || W.drag) return;
+    var dt = e.dataTransfer, p = at(e);
+    e.preventDefault();
+    if (dt) dt.dropEffect = W.effectName(f.dndAct);
+    W.pushDnd(50, id, p[0], p[1], W.mods(e), W.allowedOf(dt), W.keep(e), W.dndTypes(dt));
+  };
+  cv.addEventListener('dragenter', onDragOver);
+  cv.addEventListener('dragover', onDragOver);
+  cv.addEventListener('dragleave', function() {
+    if (!f.dnd || W.drag) return;
+    f.dndAct = 0;
+    W.push(51, id);
+  });
+  // Strings must be read inside the event; files are read after it, then
+  // the drop is queued with everything in the C++ drop item.
+  cv.addEventListener('drop', function(e) {
+    if (!f.dnd || W.drag) return;
+    e.preventDefault();   // never let the browser open a dropped file
+    f.dndAct = 0;
+    var dt = e.dataTransfer, p = at(e), mods = W.mods(e), allowed = W.allowedOf(dt);
+    var types = W.dndTypes(dt), strings = [];
+    var ts = dt && dt.types ? Array.prototype.slice.call(dt.types) : [];
+    for (var i = 0; i < ts.length; i++) {
+      var m = W.neuiMime(ts[i]);
+      if (!m || String(ts[i]).toLowerCase() === 'files') continue;
+      var v = "";
+      try { v = dt.getData(ts[i]); } catch (err) {}
+      if (v) strings.push([m, v]);
+    }
+    var files = dt && dt.files ? Array.prototype.slice.call(dt.files) : [];
+    var send = function(bufs) {
+      Module._neui_web_drop_begin();
+      for (var i = 0; i < strings.length; i++) {
+        var ml = lengthBytesUTF8(strings[i][0]);
+        Module._neui_web_drop_put(ml, W.str(strings[i][0] + strings[i][1]) - ml);
+      }
+      for (var j = 0; j < files.length; j++) {
+        if (!bufs[j]) continue;
+        var name = files[j].name || 'file', type = (files[j].type || "").toLowerCase();
+        var nl = lengthBytesUTF8(name), tl = lengthBytesUTF8(type), u8 = bufs[j];
+        var q = Module._neui_web_text_buf(nl + tl + u8.length + 1);
+        stringToUTF8(name + type, q, nl + tl + 1);
+        HEAPU8.set(u8, q + nl + tl);
+        Module._neui_web_drop_file(nl, tl, u8.length);
+      }
+      W.pushDnd(52, id, p[0], p[1], mods, allowed, 0, types);
+    };
+    if (!files.length) { send([]); return; }
+    Promise.all(files.map(function(fl) {
+      return fl.arrayBuffer().then(function(b) { return new Uint8Array(b); }, function() { return null; });
+    })).then(send);
+  });
   // Keys reach the focused canvas or text proxy. Keys an IME is processing
   // ("Process" / 229) are left to it: the composition events follow.
   var key = function(type, e) {
@@ -659,6 +771,108 @@ EM_ASYNC_JS(int, web_clip_read, (int all, int timeout_ms), {
   }
 });
 
+// Drag and drop: a frame takes drags only once the host registered it.
+EM_JS(void, web_dnd_register, (int id, int on), {
+  var f = Module.neuiWeb.frames[id]; if (!f) return;
+  f.dnd = !!on;
+  f.dndAct = 0;
+});
+
+// The drain's answer to a drag enter / over: the effect it accepts with,
+// "none" = refused (the canvas already cancelled the default).
+EM_JS(void, web_dnd_verdict, (int id, int ev_id, int act), {
+  var W = Module.neuiWeb, f = W.frames[id], e = W.kept.get(ev_id);
+  if (f) f.dndAct = act;
+  if (!e) return;
+  W.kept.delete(ev_id);
+  if (e.dataTransfer) e.dataTransfer.dropEffect = W.effectName(act);
+});
+
+// An in-page drag from neui (begin_drag). Window-level capture listeners
+// take every pointer and key event while it runs (nothing reaches a frame)
+// and report the neui frame under the pointer in frame-local px. The
+// preview (BGRA premultiplied, device px) follows the pointer, hot spot at
+// (hx, hy) logical px, -1 = centre.
+EM_JS(void, web_drag_begin, (const unsigned char* px, int w, int h, double scale, int hx, int hy), {
+  var W = Module.neuiWeb;
+  var d = W.drag = { cx: 0, cy: 0, pv: null, hx: 0, hy: 0, style: null, h: null };
+  if (px && w > 0 && h > 0) {
+    var c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    var cw = w / scale, ch = h / scale;
+    c.style.cssText = 'position:fixed;left:0;top:0;width:' + cw + 'px;height:' + ch + 'px;' +
+                      'pointer-events:none;z-index:2147483647;opacity:0.85;display:none;';
+    var img = c.getContext('2d').createImageData(w, h), s = HEAPU8.subarray(px, px + w * h * 4), o = img.data;
+    for (var i = 0; i < s.length; i += 4) {
+      var a = s[i + 3], k = a ? 255 / a : 0;
+      o[i] = Math.min(255, s[i + 2] * k); o[i + 1] = Math.min(255, s[i + 1] * k);
+      o[i + 2] = Math.min(255, s[i] * k); o[i + 3] = a;
+    }
+    c.getContext('2d').putImageData(img, 0, 0);
+    document.body.appendChild(c);
+    d.pv = c;
+    d.hx = hx < 0 ? cw / 2 : hx;
+    d.hy = hy < 0 ? ch / 2 : hy;
+  }
+  d.style = document.createElement('style');
+  document.head.appendChild(d.style);
+  W.dragCursor = function(name) { d.style.textContent = '*{cursor:' + name + ' !important}'; };
+  W.dragCursor('no-drop');
+  var target = function(x, y) {
+    var el = document.elementFromPoint(x, y);
+    for (var id in W.frames) {
+      var f = W.frames[id];
+      if (f.cv === el && f.dnd) { var r = el.getBoundingClientRect(); return [+id, x - r.left, y - r.top]; }
+    }
+    return [0, 0, 0];
+  };
+  var move = function(x, y, mods) {
+    d.cx = x; d.cy = y;
+    if (d.pv) {
+      d.pv.style.display = 'block';
+      d.pv.style.transform = 'translate(' + (x - d.hx) + 'px,' + (y - d.hy) + 'px)';
+    }
+    var t = target(x, y);
+    W.push(60, t[0], t[1], t[2], mods);
+  };
+  var stop = function(e) { e.stopPropagation(); if (e.cancelable) e.preventDefault(); };
+  d.h = {
+    pointermove: function(e) { stop(e); move(e.clientX, e.clientY, W.mods(e)); },
+    pointerup: function(e) {
+      stop(e);
+      var t = target(e.clientX, e.clientY);
+      W.push(61, t[0], t[1], t[2], W.mods(e));
+    },
+    pointerdown: stop,
+    pointercancel: function(e) { stop(e); W.push(62, 0); },
+    contextmenu: stop,
+    // Esc cancels; Ctrl / Shift change the suggested action where it stands.
+    keydown: function(e) {
+      stop(e);
+      if (e.key === 'Escape') W.push(62, 0); else move(d.cx, d.cy, W.mods(e));
+    },
+    keyup: function(e) { stop(e); move(d.cx, d.cy, W.mods(e)); },
+    // The window losing focus (another app) cancels; an element's blur
+    // reaches this capture listener too and does not.
+    blur: function(e) { if (e.target === window) W.push(62, 0); }
+  };
+  for (var n in d.h) window.addEventListener(n, d.h[n], true);
+});
+
+// Cursor over the current target: the accepted action, or no-drop.
+EM_JS(void, web_drag_cursor, (int act), {
+  var W = Module.neuiWeb; if (!W.drag) return;
+  W.dragCursor((act & 1) ? 'copy' : (act & 2) ? 'grabbing' : (act & 4) ? 'alias' : 'no-drop');
+});
+
+EM_JS(void, web_drag_end, (), {
+  var W = Module.neuiWeb, d = W.drag; if (!d) return;
+  for (var n in d.h) window.removeEventListener(n, d.h[n], true);
+  if (d.pv && d.pv.parentNode) d.pv.parentNode.removeChild(d.pv);
+  if (d.style.parentNode) d.style.parentNode.removeChild(d.style);
+  W.drag = null;
+});
+
 namespace xpl_host
 {
 namespace
@@ -713,6 +927,8 @@ namespace
     EV_KEYDOWN = 20, EV_KEYUP = 21,
     EV_SCHEME = 30,
     EV_COMP_START = 40, EV_COMP_UPDATE = 41, EV_COMP_END = 42, EV_TEXT = 43,
+    EV_DND_OVER = 50, EV_DND_LEAVE = 51, EV_DND_DROP = 52,
+    EV_DRAG_MOVE = 60, EV_DRAG_UP = 61, EV_DRAG_CANCEL = 62,
   };
   struct WebEvent
   {
@@ -768,6 +984,43 @@ namespace
   // Set while a frame paints: a blocking call from a paint callback is
   // refused (the paint must finish before the stack may suspend).
   bool g_in_paint = false;
+
+  // Drag and drop. g_dnd_over = the frame a drag (from outside or in-page)
+  // is over, 0 = none: the browser enters the next canvas before it leaves
+  // the last, so enter / leave are matched here, not per DOM event.
+  int g_dnd_over = 0;
+  // The drop being assembled by the page (neui_web_drop_*), and the files
+  // the last drop wrote (kept until the next drop, so a client can still
+  // open a path after the event).
+  neui_detail::DataItem    g_drop;
+  std::string              g_drop_uris;
+  std::string              g_drop_dir;
+  std::vector<std::string> g_drop_paths;
+  int                      g_drop_serial = 0;
+  // A dropped file larger than this is left out (it would be copied twice
+  // into the wasm heap).
+  constexpr size_t WEB_DROP_FILE_MAX = 256u * 1024u * 1024u;
+
+  // Preview pixels from platform_make_drag_preview, consumed by begin_drag.
+  struct DragPreview
+  {
+    std::vector<uint8_t> bgra;
+    uint32_t w_px = 0, h_px = 0;
+    float    scale = 1.0f;
+  };
+
+  // An in-page drag (begin_drag) in progress.
+  struct WebDrag
+  {
+    neui_detail::DataItem*   item    = nullptr;
+    uint32_t                 allowed = 0;
+    std::vector<std::string> mimes;
+    std::vector<const char*> fmts;
+    uint32_t                 accepted = 0;   // the current target's answer
+    uint32_t                 result   = 0;
+    bool                     running  = true;
+  };
+  WebDrag* g_drag = nullptr;
 
   // One wheel notch scrolls this many lines (the Win32 default, as on Linux).
   constexpr int WEB_WHEEL_LINES = 3;
@@ -1545,6 +1798,156 @@ namespace
     }
   }
 
+  // ---- Drag and drop -----------------------------------------------------------
+
+  // The drag left the frame it was over (or ended there without a drop).
+  void dnd_out()
+  {
+    if (WebFrame* o = find_frame(g_dnd_over))
+      if (o->session) o->session->dispatch_dnd_leave();
+    g_dnd_over = 0;
+  }
+
+  // The drag is over frame f (nullptr = none) at frame-local (x, y). Enter
+  // when it comes from elsewhere, else move. Returns the accepted action.
+  uint32_t dnd_over(WebFrame* f, float x, float y, const std::vector<const char*>& fmts,
+                    uint32_t suggested)
+  {
+    if (!f || !f->session || f->input_disabled) { dnd_out(); return 0; }
+    const int lx = static_cast<int>(x), ly = static_cast<int>(y);
+    const char* const* p = fmts.empty() ? nullptr : fmts.data();
+    const auto n = static_cast<uint32_t>(fmts.size());
+    if (g_dnd_over != f->id) {
+      dnd_out();
+      g_dnd_over = f->id;
+      return f->session->dispatch_dnd_enter(f->widget_index, lx, ly, p, n, suggested, 0);
+    }
+    return f->session->dispatch_dnd_move(f->widget_index, lx, ly, p, n, suggested, 0);
+  }
+
+  // Drop on frame f: a last move at the drop point (as XDND's position
+  // before drop), then the drop if the target still accepts.
+  uint32_t dnd_drop(WebFrame* f, float x, float y, const std::vector<const char*>& fmts,
+                    uint32_t suggested, neui_detail::DataItem* item)
+  {
+    if (dnd_over(f, x, y, fmts, suggested) == 0) { dnd_out(); return 0; }
+    g_dnd_over = 0;
+    return f->session->dispatch_dnd_drop(f->widget_index, static_cast<int>(x), static_cast<int>(y),
+                                         fmts.empty() ? nullptr : fmts.data(),
+                                         static_cast<uint32_t>(fmts.size()), suggested, 0, item);
+  }
+
+  // The page's modifier bits (1 shift, 2 ctrl) -> the shared convention.
+  uint32_t dnd_suggest(uint32_t allowed, uint32_t web_mods)
+  {
+    return neui_detail::dnd_suggest_action(allowed, (web_mods & 2u) != 0, (web_mods & 1u) != 0);
+  }
+
+  // A drag record's formats: one MIME per line.
+  void split_formats(const std::string& s, std::vector<std::string>& mimes,
+                     std::vector<const char*>& fmts)
+  {
+    mimes.clear();
+    fmts.clear();
+    size_t i = 0;
+    while (i < s.size()) {
+      size_t end = s.find('\n', i);
+      if (end == std::string::npos) end = s.size();
+      if (end > i) mimes.emplace_back(s, i, end - i);
+      i = end + 1;
+    }
+    for (auto& m : mimes) fmts.push_back(m.c_str());
+  }
+
+  // A drag from outside (the desktop, the page): enter / over / leave / drop.
+  void external_dnd(WebFrame* f, const WebEvent& e)
+  {
+    std::vector<std::string> mimes;
+    std::vector<const char*> fmts;
+    split_formats(e.key, mimes, fmts);
+    const auto allowed   = static_cast<uint32_t>(e.d);
+    const uint32_t sugg  = dnd_suggest(allowed, static_cast<uint32_t>(e.c));
+    const float x = static_cast<float>(e.a), y = static_cast<float>(e.b);
+    if (e.type == EV_DND_OVER) {
+      const uint32_t act = dnd_over(f, x, y, fmts, sugg) & allowed;
+      web_dnd_verdict(e.frame, static_cast<int>(e.e), static_cast<int>(act));
+    } else if (e.type == EV_DND_LEAVE) {
+      if (g_dnd_over == e.frame) dnd_out();
+    } else {
+      // Files arrive as text/uri-list next to any list the drag carried.
+      if (!g_drop_uris.empty()) {
+        std::string list;
+        const int n = g_drop.get_format(NEUI_MIME_URI_LIST, nullptr, 0);
+        if (n > 0) {
+          list.resize(static_cast<size_t>(n));
+          g_drop.get_format(NEUI_MIME_URI_LIST, &list[0], n);
+          if (list.back() != '\n') list += "\r\n";
+        }
+        list += g_drop_uris;
+        g_drop.set_format(NEUI_MIME_URI_LIST, list.data(), static_cast<uint32_t>(list.size()));
+      }
+      dnd_drop(f, x, y, fmts, sugg, &g_drop);
+      g_drop = neui_detail::DataItem();
+      g_drop_uris.clear();
+    }
+  }
+
+  // An in-page drag record (begin_drag's loop). frame = the neui frame under
+  // the pointer, 0 = none.
+  void drag_record(const WebEvent& e)
+  {
+    WebDrag* d = g_drag;
+    WebFrame* f = find_frame(e.frame);
+    const float x = static_cast<float>(e.a), y = static_cast<float>(e.b);
+    const uint32_t sugg = dnd_suggest(d->allowed, static_cast<uint32_t>(e.c));
+    if (e.type == EV_DRAG_MOVE) {
+      d->accepted = dnd_over(f, x, y, d->fmts, sugg) & d->allowed;
+      web_drag_cursor(static_cast<int>(d->accepted));
+      return;
+    }
+    if (e.type == EV_DRAG_UP && f)
+      d->result = dnd_drop(f, x, y, d->fmts, sugg, d->item) & d->allowed;
+    else
+      dnd_out();
+    d->running = false;
+  }
+
+  // The file part of a drop: written to /tmp/neui-drop/<n>/<name> and listed
+  // as a file:// URI (RFC 2483, percent-encoded).
+  void drop_file(const std::string& name, const std::string& type, const uint8_t* data, size_t len)
+  {
+    if (len > WEB_DROP_FILE_MAX) {
+      std::fprintf(stderr, "neui: dropped file '%s' too large, left out\n", name.c_str());
+      return;
+    }
+    std::string base = name;
+    for (char& c : base) if (c == '/' || c == '\\') c = '_';
+    if (base.empty() || base == "." || base == "..") base = "file";
+    std::string path = g_drop_dir + "/" + base;
+    for (int k = 2; access(path.c_str(), F_OK) == 0; ++k)   // two files, one name
+      path = g_drop_dir + "/" + std::to_string(k) + "-" + base;
+    FILE* fp = std::fopen(path.c_str(), "wb");
+    if (!fp) return;
+    const bool ok = len == 0 || std::fwrite(data, 1, len, fp) == len;
+    std::fclose(fp);
+    if (!ok) { std::remove(path.c_str()); return; }
+    g_drop_paths.push_back(path);
+    std::string uri = "file://";
+    static const char* hex = "0123456789ABCDEF";
+    for (unsigned char c : path) {
+      if (std::isalnum(c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~') {
+        uri += static_cast<char>(c);
+      } else {
+        uri += '%'; uri += hex[c >> 4]; uri += hex[c & 15];
+      }
+    }
+    g_drop_uris += uri + "\r\n";
+    // The first file of each type also under its own MIME type.
+    if (!type.empty() && type.find('/') != std::string::npos &&
+        g_drop.get_format(type, nullptr, 0) <= 0)
+      g_drop.set_format(type, data, static_cast<uint32_t>(len));
+  }
+
   void drain_queue()
   {
     while (!g_queue.empty()) {
@@ -1565,6 +1968,13 @@ namespace
         if (!g_modal_order.empty()) web_frame_focus(g_modal_order.back());
         continue;
       }
+      // An in-page drag owns the pointer: its records drive it, and the
+      // frames' own pointer records (none should come) are dropped.
+      if (e.type >= EV_DRAG_MOVE && e.type <= EV_DRAG_CANCEL) {
+        if (g_drag) drag_record(e);
+        continue;
+      }
+      if (g_drag && e.type >= EV_PDOWN && e.type <= EV_PLEAVE) continue;
 
       // Events that carry a default action get their verdict here, also when
       // the frame is gone or blocked (then: leave it to the browser).
@@ -1646,8 +2056,15 @@ namespace
           case EV_TEXT:
             if (!blocked) text_input(f, e.key);
             break;
+          case EV_DND_OVER:
+          case EV_DND_LEAVE:
+          case EV_DND_DROP:
+            external_dnd(f, e);   // a blocked frame refuses (dnd_over)
+            break;
           default: break;
         }
+      } else if (e.type == EV_DND_OVER) {
+        web_dnd_verdict(e.frame, static_cast<int>(e.e), 0);   // the frame is gone
       }
       if (verdict_id) web_verdict(verdict_id, consumed ? 1 : 0);
     }
@@ -1737,9 +2154,9 @@ namespace
 extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push(int type, int frame, double a, double b,
                                                    double c, double d, double e, double f)
 {
-  if (type == EV_PMOVE && !g_queue.empty()) {
+  if ((type == EV_PMOVE || type == EV_DRAG_MOVE) && !g_queue.empty()) {
     WebEvent& last = g_queue.back();
-    if (last.type == EV_PMOVE && last.frame == frame) {
+    if (last.type == type && last.frame == frame) {
       last.a = a; last.b = b; last.c = c; last.d = d; last.e = e; last.f = f;
       return;
     }
@@ -1787,6 +2204,50 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_clip_put(int kind, int len)
 {
   if (len < 0 || static_cast<size_t>(len) > g_text_buf.size()) return;
   g_clip.set_format(clip_mime(kind), g_text_buf.data(), static_cast<uint32_t>(len));
+}
+
+// A drag record; its formats (one per line, len bytes) are in the text buffer.
+extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push_dnd(int type, int frame, double x, double y,
+                                                       int mods, int allowed, int ev_id, int len)
+{
+  if (len < 0 || static_cast<size_t>(len) > g_text_buf.size()) len = 0;
+  g_queue.push_back({ type, frame, x, y, static_cast<double>(mods), static_cast<double>(allowed),
+                      static_cast<double>(ev_id), 0, std::string(),
+                      std::string(g_text_buf.data(), static_cast<size_t>(len)) });
+}
+
+// A drop being assembled: begin clears the last one (and its files), put
+// adds a string (MIME then data in the text buffer), file adds a file
+// (name, type, then its bytes).
+extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_begin()
+{
+  g_drop = neui_detail::DataItem();
+  g_drop_uris.clear();
+  for (auto& p : g_drop_paths) std::remove(p.c_str());
+  g_drop_paths.clear();
+  if (!g_drop_dir.empty()) rmdir(g_drop_dir.c_str());
+  mkdir("/tmp", 0777);
+  mkdir("/tmp/neui-drop", 0777);
+  g_drop_dir = "/tmp/neui-drop/" + std::to_string(++g_drop_serial);
+  mkdir(g_drop_dir.c_str(), 0777);
+}
+extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_put(int mime_len, int len)
+{
+  if (mime_len <= 0 || len < 0 ||
+      static_cast<size_t>(mime_len) + static_cast<size_t>(len) > g_text_buf.size()) return;
+  const char* p = g_text_buf.data();
+  g_drop.set_format(std::string(p, static_cast<size_t>(mime_len)), p + mime_len,
+                    static_cast<uint32_t>(len));
+}
+extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_len, int len)
+{
+  if (name_len < 0 || type_len < 0 || len < 0 ||
+      static_cast<size_t>(name_len) + static_cast<size_t>(type_len) + static_cast<size_t>(len) >
+          g_text_buf.size()) return;
+  const char* p = g_text_buf.data();
+  drop_file(std::string(p, static_cast<size_t>(name_len)),
+            std::string(p + name_len, static_cast<size_t>(type_len)),
+            reinterpret_cast<const uint8_t*>(p + name_len + type_len), static_cast<size_t>(len));
 }
 
 // ===========================================================================
@@ -2101,18 +2562,72 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_clip_put(int kind, int len)
     return any;
   }
 
-  // Drag & drop - Stage 6.
-  bool platform_dnd_register_window(void* /*native_handle*/, void* /*session_ptr*/,
-                                     uint32_t /*frame_widget_id*/)            { return false; }
-  void platform_dnd_unregister_window(void* /*native_handle*/)                {}
-  uint32_t platform_dnd_begin_drag(void* /*native_handle*/,
-                                     neui_detail::DataItem* /*item*/,
-                                     uint32_t /*allowed_actions*/,
-                                     void* /*preview_native*/,
-                                     int /*hot_x*/, int /*hot_y*/)            { return 0;     }
-  void*    platform_make_drag_preview(const uint8_t* /*bgra_premul*/,
-                                       uint32_t /*w_px*/, uint32_t /*h_px*/,
-                                       float /*scale*/)                       { return nullptr; }
+  // ---- Drag & drop --------------------------------------------------------------
+  // Drop target: the frame's canvas takes DOM drag events (the frame's
+  // WebFrame already knows its session and widget). Drag source: an in-page
+  // drag between neui frames; see the file comment.
+
+  bool platform_dnd_register_window(void* native_handle, void* /*session_ptr*/,
+                                     uint32_t /*frame_widget_id*/)
+  {
+    if (!native_handle) return false;
+    web_dnd_register(static_cast<WebFrame*>(native_handle)->id, 1);
+    return true;
+  }
+  void platform_dnd_unregister_window(void* native_handle)
+  {
+    if (!native_handle) return;
+    auto* f = static_cast<WebFrame*>(native_handle);
+    if (g_dnd_over == f->id) g_dnd_over = 0;   // the frame is going: no LEAVE
+    web_dnd_register(f->id, 0);
+  }
+
+  void* platform_make_drag_preview(const uint8_t* bgra_premul,
+                                    uint32_t w_px, uint32_t h_px, float scale)
+  {
+    if (!bgra_premul || w_px == 0 || h_px == 0) return nullptr;
+    auto* p = new DragPreview();
+    p->bgra.assign(bgra_premul, bgra_premul + static_cast<size_t>(w_px) * h_px * 4);
+    p->w_px = w_px; p->h_px = h_px; p->scale = scale > 0.0f ? scale : 1.0f;
+    return p;   // consumed by platform_dnd_begin_drag
+  }
+
+  // Blocking in-page drag: a nested loop until release or Esc. Targets are
+  // neui frames (drop targets of any session on the page); the item goes to
+  // the drop as it is. Returns the negotiated action, 0 = cancelled.
+  uint32_t platform_dnd_begin_drag(void* native_handle, neui_detail::DataItem* item,
+                                   uint32_t allowed_actions, void* preview_native,
+                                   int hot_x, int hot_y)
+  {
+    std::unique_ptr<DragPreview> preview(static_cast<DragPreview*>(preview_native));
+    if (!native_handle || !item || g_drag) return 0;
+    if (g_in_paint) {   // plans rule 3: a paint never suspends
+      std::fprintf(stderr, "neui: begin_drag during paint refused\n");
+      return 0;
+    }
+    auto* src = static_cast<WebFrame*>(native_handle);
+    const int src_id = src->id;
+    WebDrag d;
+    d.item    = item;
+    d.allowed = allowed_actions ? allowed_actions : (NEUI_DND_ACTION_COPY | NEUI_DND_ACTION_MOVE);
+    item->for_each_mime([&](const std::string& mime) { d.mimes.push_back(mime); });
+    for (auto& m : d.mimes) d.fmts.push_back(m.c_str());
+
+    web_drag_begin(preview ? preview->bgra.data() : nullptr,
+                   preview ? static_cast<int>(preview->w_px) : 0,
+                   preview ? static_cast<int>(preview->h_px) : 0,
+                   preview ? static_cast<double>(preview->scale) : 1.0, hot_x, hot_y);
+    g_drag = &d;
+    platform_run_modal_until(&d.running);
+    g_drag = nullptr;
+    web_drag_end();
+    if (d.running) dnd_out();   // the loop quit under the drag
+
+    // The release went to the drag, not to the widget it was pressed on.
+    if (WebFrame* f = find_frame(src_id))
+      if (f->session) f->session->set_pressed(0);
+    return d.running ? 0 : d.result;
+  }
 
   void platform_set_cursor(int kind)
   {

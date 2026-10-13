@@ -12,7 +12,7 @@ Confirmed decisions:
 3. **One `<canvas>` per frame.** APPWINDOW fills its mount element; DIALOGs float above it.
 4. **No new host.** The web target is xpl + Canvas2D backend + `platform_web.cpp`, registered as `"neui.host.crossplatform"`.
 
-This plan replaces that feasibility note. Status: Stages 0-5 done (2026-10-13, results below each stage); Stage 6 (drag and drop) is next.
+This plan replaces that feasibility note. Status: Stages 0-6 done (2026-10-13, results below each stage); Stage 7 (embedding and page interop) is next.
 
 ---
 
@@ -323,6 +323,19 @@ Exit: Ctrl / Cmd + C / X / V round-trip inside neui and with other apps (Chrome,
 - **Drag source:** browsers start drags only from a native `dragstart`. So `platform_dnd_begin_drag` (blocking set) supports **in-page** drags between neui frames and widgets: a nested `run_modal_until` with pointer capture and direct `dispatch_dnd_*`, as Linux does for internal drags. Dragging out of the page is deferred.
 
 Exit: `neui_dnd_example` accepts text and files from the desktop and from page elements; `neui_dnd_source_example` drags between its own widgets.
+
+#### Stage 6 results (2026-10-13)
+
+- **Drop target**: `platform_dnd_register_window` arms the frame's canvas; `dragenter` / `dragover` → `dispatch_dnd_enter` / `move`, with enter / leave matched per page (`g_dnd_over`), because the browser enters the next canvas before it leaves the last. Formats come from `DataTransfer.types` (`text/plain` → `NEUI_MIME_TEXT`, `Files` → `text/uri-list`, other MIME types as they are, plus a file's own type when `items` tells it before the drop). Suggested action: `effectAllowed` + Ctrl / Shift through the shared `dnd_suggest_action`.
+- **Verdict**: the drain sets the kept event's `dropEffect` (rule 5); the canvas also applies the last answer at once, so a browser that misses the microtask is one event late, not wrong. Over a registered canvas the default is always cancelled and refusal is `dropEffect = "none"`. That differs from the plan's "preventDefault only when consumed", deliberately: otherwise a file dropped where neui refuses opens in the tab and unloads the app.
+- **Drop**: strings are read inside the event, files afterwards (`File.arrayBuffer()`); then the drop is queued. Files are written to the in-memory file system as `/tmp/neui-drop/<n>/<name>` and listed as percent-encoded `file://` URIs in `text/uri-list` (appended to any list the drag carried), so desktop client code that opens dropped paths works unchanged. The first file of each type is also there under its own MIME type, as bytes. A drop's files stay until the next drop; a file over 256 MB is left out.
+- **Drag source**: `platform_dnd_begin_drag` runs an in-page drag on `platform_run_modal_until`. Window-level capture listeners take every pointer and key event while it runs and report the neui frame under the pointer (`elementFromPoint`, frames registered as drop targets, any session on the page). Esc / pointercancel / the window losing focus cancel; Ctrl / Shift pick copy / move / link as on the desktop. The preview (`begin_drag_with_preview`) follows the pointer as a fixed canvas; the cursor shows the answer (`copy` / `grabbing` / `alias` / `no-drop`). The item goes to the drop as it is. After the drag the source session's pressed widget is cleared (its release went to the drag). Dragging out of the page is not supported (deferred).
+- **Checked**:
+  - Edge (JSPI): a desktop drag with text + two files (CDP `Input.dispatchDragEvent`) drops both as URIs, and the files are in MEMFS with the right sizes; the same drag over the margin is refused and the page stays the app; a real drag from a page element drops its text and the element sees `dropEffect = copy`.
+  - Firefox (Asyncify): script-made drags with text and files drop.
+  - All four builds (Edge JSPI, Firefox / WebKit Asyncify, WebKit JSPI): `neui_dnd_source_example` left → right gives copy, Shift = move, Ctrl+Shift = link; Esc, releasing over the source pane and releasing outside the canvas cancel; a plain click and a second drag work afterwards; no drag DOM is left behind.
+  - Stage 3-5 regression scripts pass; `neui_tests` passes under node.
+- **Not checked here**: a real desktop drag (Explorer / Finder), a touch drag (there is no long-press-to-drag yet; Stage 8 touch work).
 
 ### Stage 7: embedding and page interop (L): the product goal
 
