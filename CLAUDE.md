@@ -197,7 +197,7 @@ Active plans (`plans/`) are open or deferred work only - completed plans were re
 
 - `win32-pointer-and-directmanipulation.md` - WM_POINTER pen/touch + DirectManipulation smooth-scroll on scrolling SECTION + GRID (deferred; binding spec for when it lands).
 - `winui3-host.md` - third host backend feasibility analysis (deferred indefinitely).
-- `wasm-host.md` - WebAssembly / Canvas-2D host feasibility analysis (deferred; phased path documented).
+- `wasm-host.md` - staged plan for a WebAssembly port of the xpl host (Canvas-2D backend + `platform_web.cpp`, JSPI with Asyncify fallback so blocking calls keep desktop semantics, one canvas per frame, embeddable into existing pages). Stage 0 (toolchain spikes: emsdk 4.0.23, JSPI in Chromium / Firefox / WebKit, Asyncify single-stack only) done; Stage 1 (build plumbing) is next.
 - `lvgl-port.md` - neui-on-LVGL feasibility investigation that picked the approach (superseded by the prototype below; kept for the impedance-mismatch analysis).
 - `lvgl-host-approach-c.md` - the **experimental** LVGL host: design record, per-milestone detail and all measurements. Prototype built + evaluated; **work paused until real target hardware is available** (the open items - appearance cache, embedded display driver / VGLite - need a panel and an MCU to evaluate). Reader-facing status: `docs/host-lvgl.md`.
 - `how-to-port.md` - reference playbook for new-platform ports.

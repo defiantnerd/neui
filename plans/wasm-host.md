@@ -1,498 +1,350 @@
-# WebAssembly Host Feasibility
+# WebAssembly port of the xpl host (plan)
 
 ## Context
 
-neuilib ships three hosts today: the Win32 native-control host, the macOS
-AppKit native-control host, and the crossplatform self-painted host (xpl) that
-drives a pluggable render backend (Direct2D on Windows, CoreGraphics on macOS,
-null elsewhere). The question is whether we can add a **WebAssembly target** so
-the example app runs in a browser, and what it would cost.
+neui runs on Windows, macOS, Linux and iOS. The crossplatform ("xpl") host paints every widget itself through a render backend plus a thin platform layer, which makes it the natural vehicle for a browser target. An earlier feasibility note in this file (see git history) proposed this, but it predated most of today's code: it assumed 16 widget types and 34 backend slots and said modal dialogs don't block. Today the backend has 51 function slots, the xpl host has GRID / TABVIEW / shaders / partial repaint / animation clock / DnD / toasts, `widgets->show` on a modal DIALOG **blocks**, and Linux brought an in-frame menubar, a neui-painted message box and the stb image loader, which the web can reuse.
 
-This is an evaluation, written against the porting playbook in
-`plans/how-to-port.md`. It documents what the work entails and ends with a
-recommendation. There is no implementation here.
+Goal (confirmed with the user): **an embeddable product UI**: real neui apps mounted into an existing web page, sized by CSS and talking to page JS. A demo page alone is not the target.
 
-The confirmed goal is **full widget parity**: the entire example app (all 16
-widget types, menus, clipboard, IME, modal + popup) running in a browser canvas.
-The confirmed render path is **HTML5 Canvas 2D**.
+Confirmed decisions:
+1. **Render backend: Canvas 2D** (new `neui-backend-canvas2d`). Browser text shaping and system fonts, a small wasm, and a retained canvas that makes partial repaint cheap.
+2. **Blocking calls keep desktop semantics** through wasm stack switching: **JSPI** where the browser has it, an **Asyncify** build otherwise.
+3. **One `<canvas>` per frame.** APPWINDOW fills its mount element; DIALOGs float above it.
+4. **No new host.** The web target is xpl + Canvas2D backend + `platform_web.cpp`, registered as `"neui.host.crossplatform"`.
 
-## TL;DR
+This plan replaces that feasibility note. Status: Stage 0 done (2026-10-13, results below); Stage 1 is next.
 
-**Feasible, and a genuinely good architectural fit. Recommend proceeding via a
-phased milestone path: a Canvas-2D backend plus a `platform_web.cpp` to reach a
-core interactive demo first, then layer in the async-bound features (clipboard,
-image load, IME) and a rebuilt menubar for full parity.**
+---
 
-Why this is a much better fit than the WinUI3 evaluation concluded for that
-target:
-
-1. **Every widget is free.** The web target uses the **xpl host**, which already
-   paints all 16 widget types itself through the render backend. Unlike a native
-   host (Win32 / macOS / the hypothetical WinUI3), there is **no per-widget
-   mapping work**. Get the Canvas-2D backend and `platform_web.cpp` right and
-   LABEL / BUTTON / INPUTBOX / MULTILINE / CHECKBOX / LISTBOX / COMBOBOX /
-   TREEVIEW / SLIDER / KNOB / IMAGE / SECTION / CUSTOMDRAW all render and behave
-   for free, from the same `hosts/crossplatform/host.cpp` code that runs on
-   Windows and macOS.
-2. **The cooperative-loop problem is already solved in the API.** The public
-   `neui_api_t` already exposes a non-blocking `pump_once` (`api.h:69`),
-   explicitly "intended for clients that drive their own outer event loop." The
-   browser's `requestAnimationFrame` / `emscripten_set_main_loop` is exactly such
-   an outer loop. `platform_run()` on web becomes "register the main-loop
-   callback and return," driving `platform_pump_once()` per tick. This is the
-   single biggest de-risking fact: the top-level run loop is **not** a
-   re-architecture.
-3. **Canvas 2D maps almost 1:1 to the render backend vtable.** fill/stroke rect,
-   the path API (beginPath/moveTo/lineTo/arc/closePath/fill/stroke), the
-   transform stack (save/restore/translate/rotate/scale), clip stack
-   (save+clip/restore), `globalAlpha`, and `font` + `fillText` + `measureText`
-   all have direct Canvas 2D equivalents. The per-frame "one live context" model
-   mirrors the existing CoreGraphics backend's `set_current_frame` pattern.
-4. **Single UI thread matches.** The framework's "single UI thread, non-atomic
-   palette/listener tables" invariant is exactly the browser default. No
-   SharedArrayBuffer / COOP-COEP threading needed for the UI.
-
-The real costs are bounded and concentrated in three places: the **one** nested
-blocking pump (popup menus), the **async** browser APIs (clipboard, image
-decode) versus our synchronous seams, and the **menubar** (no OS menu strip on
-the web - rebuild as DOM or in-canvas). None is a hard blocker; each is a
-workaround-with-cost, detailed below.
-
-## What gets built
-
-### Two new build targets, one new platform source
-
-| Target | Purpose |
-|---|---|
-| `neui-backend-canvas2d` | New render backend implementing `neui_render_backend_t` over an HTML5 Canvas 2D context. Per-frame live-context binding via a `set_current_frame` hook (mirrors `backends/cg`). |
-| `platform_web.cpp` | New xpl platform layer (`hosts/crossplatform/platform_web.cpp`) implementing `xpl_host::platform_*` via Emscripten `html5.h` callbacks. Reuses the existing `neui-xplhost` target; no new host library. |
-
-There is **no new host library**. The web target is "xpl host + Canvas-2D
-backend + platform_web.cpp," exactly the shape the porting playbook calls the
-common case (new backend + new platform layer, reuse xpl). It registers as the
-existing `"neui.host.crossplatform"`.
-
-### File layout
+## Architecture
 
 ```
-backends/canvas2d/
-  CMakeLists.txt          # produces neui-backend-canvas2d (guarded if(EMSCRIPTEN))
-  canvas2d_backend.h      # namespace neui_canvas2d_backend { get_backend(); set_current_frame(...); }
-  canvas2d_backend.cpp    # 34 vtable slots over Canvas 2D + the per-frame ctx bind
-hosts/crossplatform/
-  platform_web.cpp        # xpl_host::platform_* via html5.h; the cooperative loop
-examples/
-  shell.html (optional)   # custom Emscripten shell hosting the <canvas>
+ page JS / DOM events (pointer, key, wheel, composition, paste, drag,
+   │                   resize, DPR, theme, visibility, page messages)
+   │        handlers ENQUEUE (by frame id) and resolve the pending wait
+   ▼
+ WebEventQueue (C++, platform_web.cpp)
+   ▲ drained on main's stack
+ main() → neui->run() → platform_run():
+          loop { drain queue → dispatch into Session / client
+                 paint dirty frames (Canvas2D backend; never suspends)
+                 web_wait(next deadline)   ← suspends (JSPI / Asyncify)
+               }
+ nested loops (modal show, popup_menu, message_box, in-page drag)
+   = the same loop with another exit condition, on the same stack
 ```
 
-## 1 - Toolchain (Emscripten + CMake)
+### Event-loop rules
 
-Emscripten's CMake integration is first-class and stable: `emcmake cmake -B
-out/web` injects `Emscripten.cmake` as the toolchain file and sets the
-`EMSCRIPTEN` CMake variable; `cmake --build out/web` then drives `emcc`. Output
-is `neui_example.{js,wasm}` plus an HTML shell. This is unlike the WinUI3 case,
-where there was no first-class CMake story - here the build wiring is small.
+1. **Everything dispatches on one suspendable stack.** DOM listeners (a custom `--js-library`, not `html5.h`, whose callbacks call into wasm synchronously and use page-wide selectors) only push records keyed by **frame id** (never a `WebFrame*`: teardown frees it) and resolve the pending wait. Session dispatch, client `onevent`, theme `onchange` (`host.cpp:273-278`), RESIZE, focus and page messages all run inside `platform_run` / `platform_run_modal_until`. A handler that calls `show(modal_dialog)` or `message_box` runs a nested loop on the same stack, which is the Linux `select()` model with `web_wait()` in place of `select()`.
+2. **The blocking set** is every caller of `platform_run_modal_until` plus the calls that run their own loop:
+   - modal `w_show` (`widgets.cpp:451`)
+   - `open_popup_menu` (`host.cpp:4439`), reached from public `popup_menu` (`widgets.cpp:789`), behavior `ctx.popup_menu` (`host.cpp:3368`) and KNOB reset (`host.cpp:3522`)
+   - `message_box` (`widgets.cpp:2026`)
+   - DnD `begin_drag` (`widgets.cpp:3869`, behavior DRAG `host.cpp:3372`)
+   - async clipboard reads (Stage 5)
+3. **Paint never suspends.** `paint_frame` calls the client (PREUPDATE / WIDGET_PAINT, `host.cpp:2385-2517`), and Canvas 2D draws straight into the visible canvas. A guard flag makes every blocking API return 0 and log while a paint is in progress.
+4. **`web_wait(timeout)`** is an async import (`EM_ASYNC_JS` / `ASYNCIFY_IMPORTS`). It resolves on the first of these:
+   - a queue push
+   - a rAF tick when a paint is pending (rAF, not polling, so hidden tabs sleep)
+   - the next deadline (animation clock, toast, scroll bounce, modal 16 ms tick)
 
-### CMake changes (precise)
+   This mirrors `platform_linux.cpp` `platform_run` (:2166), including the rule "don't sleep while a paint is pending".
+5. **Synchronous verdicts** (`preventDefault` on keydown / wheel / contextmenu, `dropEffect` on dragover) are decided only after dispatch. Primary design (proven in Chromium and WebKit in Stage 0; real Firefox still to check): the listener resolves the wait directly, the stack resumes in the microtask checkpoint right after the listener, which is still inside event dispatch, and the drain calls `preventDefault` on the event it kept. Fallback: small query-only exports that never dispatch (`would_consume_key/wheel`, a drop-accept query).
+6. **`run()` really blocks.** Code after `run()` (cleanup in `examples/main.cpp:1356-1412`) runs on unmount, and stack-allocated client state (`AppState app`) stays valid. There is no `emscripten_set_main_loop`.
+7. **Service loop for clients that never call `run()`.** Two cases need it:
+   - an embedded PLUGWINDOW: the embed contract says "never call run()", and `platform_run` returns at once with no APPWINDOW (`:2172`)
+   - an app that only uses `pump_once`
 
-The repo's gating pattern (top-level `CMakeLists.txt`) is `if(WIN32) /
-if(APPLE) / always(null + xpl)`. The web additions:
+   On the first `show` without an active `run`, the platform starts its own promising loop export. `pump_once` from a suspendable stack yields once. `pump_once` from rAF (not suspendable) never blocks, and blocking calls there are refused like in paint.
 
-1. **Top-level `CMakeLists.txt`** - add a backend subdir gated on `EMSCRIPTEN`,
-   alongside the existing per-platform blocks:
-   ```cmake
-   if(EMSCRIPTEN)
-     add_subdirectory("backends/canvas2d")
-   endif()
-   ```
-   No new `NEUI_HAS_*HOST` define is needed: `NEUI_HAS_XPLHOST` is already
-   defined unconditionally, and the web target ships only the xpl host.
+   **At most one loop owns the suspendable stack** (Stage 0: Asyncify corrupts memory with two suspended stacks; JSPI copes, but one rule for both flavours keeps them identical). The service loop starts only when no `run()` is active, and `run()` called while the service loop is active joins it rather than starting a second loop.
+8. **Two flavours from one source.** `-sJSPI` is preferred, `-sASYNCIFY` is the fallback, and a loader picks one by detecting `WebAssembly.Suspending`. Asyncify can't be scoped narrowly here, because client handlers reach blocking calls through function pointers. It instruments broadly. Exceptions differ per flavour: `-fwasm-exceptions` with JSPI, `-fexceptions` (JS) with Asyncify (Stage 0 item 5).
 
-2. **Top-level `CMakeLists.txt`** - the example executable's per-platform branch
-   (currently `if(MSVC)/elseif(WIN32)/elseif(APPLE)/else()`) gets an
-   `elseif(EMSCRIPTEN)` arm: a plain `add_executable(neui_example
-   examples/main.cpp)` plus Emscripten link options on the target, e.g.
-   `-sUSE_WEBGL2=0`, `-sWASM=1`, `--shell-file`, the canvas size flags, and (see
-   section 4) `-sASYNCIFY` for the modal-pump path. The example also lists its
-   bitmap resources here via `--preload-file` (one per image; see section 5.1) -
-   the web analog to the Win32 `.rc` embed and the macOS `.app` Resources copy.
-   The example links the same `neui neui-xplhost` it links everywhere; the
-   `if(WIN32)` / `if(APPLE)` native-host link blocks are simply not taken.
+---
 
-3. **`hosts/crossplatform/CMakeLists.txt`** - the platform-source selector is
-   today `if(WIN32) / elseif(APPLE) / else()`. Insert an `elseif(EMSCRIPTEN)`
-   arm that compiles `platform_web.cpp` and links `neui-backend-canvas2d`:
-   ```cmake
-   elseif(EMSCRIPTEN)
-     target_sources(neui-xplhost PRIVATE platform_web.cpp)
-     target_link_libraries(neui-xplhost PRIVATE neui-backend-canvas2d)
-   ```
-   (The current `else()` fall-through to `platform_null.cpp` +
-   `neui-backend-null` stays as the catch-all for unrecognised platforms.)
+## Stages
 
-4. **`backends/canvas2d/CMakeLists.txt`** - mirror `backends/null/CMakeLists.txt`:
-   a static lib `neui-backend-canvas2d` with `target_include_directories(...
-   PUBLIC ${CMAKE_SOURCE_DIR}/include)`. Guard the whole file body on
-   `if(EMSCRIPTEN)` so a desktop build never compiles it.
+Each stage ends green on all existing CI jobs plus the new web job. Rough sizes: S ≈ 1-2 days, M ≈ 3-5 days, L ≈ 1-2 weeks.
 
-Estimated build wiring: **1-2 days**, including a first `emcmake` configure +
-link of an empty frame. Compare with WinUI3's 1-2 weeks of NuGet/MSBuild glue -
-this is the easy end.
+### Stage 0: spikes and toolchain decisions (M, throwaway code on a scratch branch)
 
-## 2 - The event-loop question (central architecture point)
+Small standalone programs answer the questions the later stages depend on:
+1. **Pin an emsdk version** (record it in the doc and in CI).
+2. **JSPI loop:**
+   - `main` suspends in a loop while DOM listeners re-enter wasm (queue push)
+   - nested suspend from inside a function-pointer callback
+   - a second promising export (the service loop)
+   - shadow-stack integrity
+3. **Microtask-resume verdict (rule 5):** does `preventDefault` from the resumed drain still take effect for keydown, wheel, contextmenu and dragover in Chrome, Firefox and Safari, under both JSPI and Asyncify?
+4. **Asyncify:** the same tests; size and per-frame cost against the JSPI build; `ASYNCIFY_STACK_SIZE` (the 4 KB default is far too small for nested modals).
+5. **Exceptions.** `catch` is needed in:
+   - `src/shader/nsl_compile.cpp` (compile errors)
+   - `hosts/shared/widget_paint_compound.h:338-367` (QR `data_too_long`, compiled into `host.cpp`)
+   - the `bad_alloc` guards in `hosts/shared/shader_asset.h:179,523`
 
-This is the part every browser port lives or dies on, so it gets its own
-section. There are two distinct loops, and they have very different costs.
+   Verify `-fwasm-exceptions` with JSPI and with Asyncify. If Asyncify plus wasm exceptions fails, choose between JS exceptions for that flavour and a QR capacity pre-check (then `bad_alloc` aborts).
+6. **Canvas 2D call cost:** 10k `fillRect` and 2k `fillText` / `measureText` per frame through direct `EM_JS` calls against a command buffer decoded once per frame. All calls go through one internal `c2d_*` layer, so a later switch stays local.
+7. **`FontFace` from an `ArrayBuffer`:** when can `measureText` use it?
+8. **Browser matrix** for JSPI (Chrome / Edge, Firefox, Safari incl. iPadOS).
 
-### 2.1 The top-level run loop - already solved
+Exit: a "Stage 0 results" section in the in-repo plan with the decisions (exception mode, verdict mechanism, call model, flavour matrix).
 
-Desktop `platform_run()` blocks (`GetMessageW` loop on Win32,
-`[NSApp run]` on macOS) until the last window closes. The browser cannot block
-the main thread.
+#### Stage 0 results (2026-10-13)
 
-We do **not** need to fight this, because the public API already ships a
-cooperative drive path: `neui_api_t::pump_once` (`api.h:61-69`) -> the xpl
-`platform_pump_once()` (`platform_win32.cpp` uses a non-blocking `PeekMessage`
-drain; macOS uses `nextEventMatchingMask:untilDate:distantPast`). On web:
+Spikes ran on Windows with emsdk **4.0.23** against Edge 155 (the installed Chromium) and Playwright 1.64's Firefox 157 and WebKit 27.2. The spike code was throwaway: a loop with canaries, a Canvas 2D bench, a font timing page, and a Playwright driver.
 
-```
-platform_run():       emscripten_set_main_loop(tick, 0 /*rAF*/, true);  // returns via unwind
-tick():               platform_pump_once();   // drain queued JS events, repaint dirty windows
-```
-
-The example's `neui->run(sess)` at `main.cpp:877` therefore works unchanged: on
-web, `run` installs the rAF callback. Clients that prefer to own the loop can
-call `pump_once` directly, which the API already documents and supports. **No
-re-architecture of the outer loop.**
-
-### 2.2 The nested modal pump - the one real blocker
-
-There is exactly **one** re-entrant blocking pump in the codebase:
-`platform_run_modal_until(bool* keep_running)`, called from
-`Session::open_popup_menu()` at `host.cpp:3046`. `popup_menu` is synchronous: it
-opens an overlay, spins a nested OS message loop until the user picks or
-dismisses, and returns the 1-based index to its caller. It backs the KNOB
-right-click "Reset to default" menu and any client `widgets->popup_menu` call.
-
-Important precision: **modal DIALOGs do not use this path.** Per the CLAUDE.md
-"Deferred Issues" note ("Native blocking modal ... Current non-blocking modal
-matches the event-loop shape"), `NEUI_W_DIALOG` modality is implemented by
-disabling the owner window (`platform_set_window_enabled(owner, false)`), not by
-a nested pump. So the modal-dialog case is **already** cooperative and ports for
-free. Only `popup_menu` blocks.
-
-Three ways to handle the popup nested pump on web:
-
-- **(A) Asyncify (recommended).** Compile the web build with `-sASYNCIFY` and let
-  `platform_run_modal_until` yield to the browser while watching
-  `*keep_running`. Smallest code change; the nested pump's control flow stays
-  intact. Cost: Asyncify adds roughly +50% wasm size and a baseline runtime
-  overhead even when not suspending. We can scope the instrumentation with
-  `ASYNCIFY_ONLY` to the modal pump + clipboard read paths to contain the cost.
-- **(B) JSPI.** Newer VM-level stack switching with near-zero size/perf overhead,
-  but as of this writing it leads in Chromium and trails in Firefox/Safari.
-  Re-check browser support at implementation time; if broad, prefer it over (A).
-- **(C) Refactor popup_menu to async on web.** Make the web popup return via a
-  callback / deferred pick instead of a synchronous return. Cleanest at runtime,
-  but it changes the `popup_menu` contract for one host and touches the KNOB
-  reset-menu caller. More code, more risk than (A).
-
-Recommended: **(A) Asyncify, scoped**, with (B) as a drop-in upgrade once JSPI
-is broadly shipped. Budget for verifying the re-entrant pump behaves under
-Asyncify (stack-unwinding reentrancy is the classic Asyncify footgun).
-
-## 3 - Render integration (Canvas 2D backend)
-
-The backend implements the full `neui_render_backend_t` (34 function pointers +
-version; see `include/neui/d/renderer.h`). The per-frame model copies
-`backends/cg/cg_backend.mm`: a `CanvasContextState` holds the live
-`CanvasRenderingContext2D` JS handle, bound each frame by a public
-`neui_canvas2d_backend::set_current_frame(ctx, js_context, w_logical,
-h_logical)` that `platform_web.cpp` calls at the top of its paint callback
-(exactly as `platform_macos.mm:122` calls the CG hook in `drawRect:`).
-
-Vtable -> Canvas 2D mapping:
-
-| Backend slot | Canvas 2D |
-|---|---|
-| `begin_frame(clear_argb)` | reset transform/clip/alpha; `clearRect` + `fillRect` whole canvas |
-| `end_frame` | no-op (immediate); optional `flush` if double-buffered |
-| `fill_rect` / `draw_rect` | `fillRect` / `strokeRect` (lineWidth = stroke) |
-| `begin_path/move_to/line_to/arc/close_path/fill_path/stroke_path` | native Canvas Path verbs; `arc` Y-down clockwise matches |
-| `push_transform/pop_transform` | `save()` / `restore()` (transform-only subset) |
-| `translate/rotate/scale` | direct |
-| `push_clip/pop_clip` | `save()` + `rect()` + `clip()` / `restore()` (nestable) |
-| `push_alpha/pop_alpha` | multiply into `globalAlpha`; maintain a software stack like d2d/cg |
-| `push_font/pop_font` | compose `ctx.font = "<weight> <size>px <family>"` (size stays per-call) |
-| `draw_text` | `fillText`, manual clip to (x,y,w,h) box |
-| `measure_text` | `ctx.measureText(s).width` |
-| `create_bitmap/draw_bitmap/destroy_bitmap` | BGRA8-premult -> RGBA `ImageData`/`ImageBitmap`, cache per context, `drawImage` |
-| `get_scale_factor` | `emscripten_get_device_pixel_ratio()` |
-| `update_dpi` | recompute backing-store size = logical * dpr |
-| `get_context_generation` | constant 0 (Canvas has no device-loss, like cg) |
-
-Notes / gotchas:
-
-- **Interop mechanism.** `EM_JS` / Embind to reach the Canvas 2D object. The
-  hot-path draw calls (`fill_rect`, `draw_text`, clip/transform) cross the
-  JS<->wasm boundary; batch where cheap, but Canvas 2D state is sticky so most
-  ops are single calls. This is the same per-call cost shape as the other
-  backends' brush lookups.
-- **Bitmaps** need a BGRA->RGBA channel swap (Canvas wants RGBA) and the
-  create-from-heap path should consume pixels immediately, matching the
-  contract. Cache the uploaded `ImageBitmap` keyed by handle for the context's
-  lifetime (mirrors d2d/cg per-ctx caches).
-- **Fonts** must be loaded before first measure or `measureText` returns
-  fallback metrics; gate the first paint on `document.fonts.ready` if custom
-  `@font-face` families are used. System families work immediately.
-
-Estimate to parity with a working desktop backend: **~1 to 1.5 weeks**
-(primitives + path + transform/clip/alpha are quick; text box-clipping and the
-bitmap upload/cache path are the time sinks).
-
-## 4 - Per-widget effort
-
-**Effectively zero incremental per-widget work.** This is the decisive
-difference from the WinUI3 evaluation. The web target runs the xpl host, which
-already implements every widget by painting through the backend in
-`hosts/crossplatform/host.cpp` (LISTBOX/COMBOBOX/TREEVIEW/MULTILINE scrollbars,
-KNOB drag, popup overlay, combo overlay, SECTION, CUSTOMDRAW + compound assets).
-The same C++ that draws these on Windows/macOS draws them on web once the
-backend exists. The CUSTOMDRAW painter API and compound-asset layer walk are
-backend-agnostic and come along for free.
-
-The only widget-shaped items needing thought are the ones whose *behaviour*
-leans on an OS facility the browser lacks - all of which are platform-layer
-work, not widget work:
-
-| Widget / facility | Web treatment | Effort |
+| Question | Result | Decision |
 |---|---|---|
-| `APPWINDOW` | the page's `<canvas>` (one per frame) | part of platform core |
-| `PLUGWINDOW` | a `<canvas>` inside a host `<div>`; the DAW-embed semantic is moot on web but the widget still renders | S |
-| `DIALOG` (+ modal) | second canvas/overlay layer; modal = pointer-events:none on the owner (already non-blocking - see 2.2) | S |
-| `MENUBAR` | no OS menu strip; rebuild as a DOM strip or paint in-canvas; route `set_shortcut`/`set_menu_cmd` via keydown | **L (~1 week)** |
-| `IMAGE` | needs async decode (see 5) | M |
-| popup menu | the Asyncify path (see 2.2) | M |
+| 1. emsdk pin | 4.0.23 installs and builds. Bootstrapping emsdk needs Python ≥ 3.10; emsdk then brings its own Python 3.13 + node 24. emcc warns that `-sJSPI` is "still experimental" (`-Wexperimental`). | Pin 4.0.23 in CI and the docs; pass `-Wno-experimental` on the JSPI link. |
+| 2. JSPI loop | Passes in all three engines. 266 events were pushed from JS while `main` was suspended; each push used a 16 KB stack frame, and no canary broke. Modals nested 3 deep through a function-pointer handler. A **second promising export** (service loop) ran alongside the suspended `main`, and both canaries stayed intact. Exports that suspend must be listed in `-sJSPI_EXPORTS`; otherwise `SuspendError`. | Design as planned. List the service loop in `JSPI_EXPORTS`. |
+| 3. Verdict after dispatch (rule 5) | **Works** in Edge and WebKit for keydown (text insertion prevented), wheel (no scroll), contextmenu and dragover (drop fires), under all three builds. The `queueMicrotask` control behaved the same and the `setTimeout` control failed, so the test separates the cases. Firefox: wheel and contextmenu worked; keydown and dragover did not. A plain-JS `queueMicrotask` control failed there too, while a synchronous `preventDefault` worked. That points to Playwright's Firefox input injection (script still on the stack when the event is dispatched), not to Firefox itself. | Microtask resume is the primary mechanism. **Verify by hand in a real Firefox** during the Stage 3 browser pass. Keep the query-export fallback designed but unbuilt until then. |
+| 4. Asyncify | Loop, nesting, canaries and verdicts pass in all three engines **as long as only one stack is suspended**. With the service loop suspended next to `main`, Asyncify corrupts memory (`memory access out of bounds` in later calls). Spike size: JSPI 28 KB wasm against Asyncify 40 KB (+43 %, wasm EH) / 38 KB (JS EH), with `ASYNCIFY_STACK_SIZE=65536`. | **Rule: at most one suspended loop at a time, in both flavours** (see rule 7). Real-code size is measured in Stage 1. |
+| 5. Exceptions | JSPI + `-fwasm-exceptions`: works, including a suspend inside a `try`. Asyncify + `-fwasm-exceptions`: emcc warns "not compatible … parts that mix will not compile"; the spike happened to run, but this is unsupported. Asyncify + JS exceptions (`-fexceptions`): works. | JSPI flavour: `-fwasm-exceptions`. Asyncify flavour: `-fexceptions`. No QR capacity pre-check needed. |
+| 6. Canvas 2D call cost | Per frame of 10k `fillRect` + 2k clipped `fillText` + 2k `measureText` (headless, medians): Edge direct 17.4 ms against buffered 15.2 ms; Firefox 52 against 42; WebKit 17 against 15. 2k uncached `measureText`: 1–4 ms. The time is canvas work, not JS↔wasm crossings. | **Direct `EM_JS` calls** behind the `c2d_*` layer. The command buffer is dropped from the plan unless Stage 8 profiling says otherwise. Keep the measure cache. |
+| 7. `FontFace` from `ArrayBuffer` | In all three engines `status` is `loaded` straight after construction; `measureText` uses the face right after `document.fonts.add`, and `load()` resolves in about 0 ms. | `register_font` is **synchronous**; no relayout on font load. `get_context_generation` is bumped only for context loss. |
+| 8. Browser matrix | `WebAssembly.Suspending` exists, and JSPI runs, in Edge 155, Firefox 157 and Playwright WebKit 27.2. Playwright's WebKit is not Safari; it also lacks `OffscreenCanvas`. Real Safari / iPadOS were not tested (no Mac here). | JSPI is the main target; Asyncify stays as the fallback for older browsers and is tested less. Off-screen contexts **must** have the hidden-canvas fallback. Check Safari on a Mac in Stage 8. |
 
-Everything else (LABEL, BUTTON, INPUTBOX, MULTILINE, CHECKBOX/3, LISTBOX,
-COMBOBOX, TREEVIEW, SLIDER, KNOB, SECTION, CUSTOMDRAW) is **S / free** because
-it is already painted by the xpl host.
+### Stage 1: build plumbing, null-on-web, tests under node (M)
 
-## 5 - Async + blocking mismatches (the real costs)
+- **CMake gates.** Emscripten's toolchain sets `UNIX`, so today every `UNIX AND NOT APPLE` gate fires and configure fails on Cairo / X11 / fontconfig marked REQUIRED. Add `EMSCRIPTEN` arms before them:
+  - root `CMakeLists.txt:160-162`: skip cairo on EMSCRIPTEN.
+  - `hosts/crossplatform/CMakeLists.txt:63`: an `elseif(EMSCRIPTEN)` arm before `elseif(UNIX)` with `platform_web.cpp`, the stb include and `NEUI_PLATFORM_WEB`. It links `neui-backend-null` until Stage 2 and does **not** copy the null arm's `NEUI_NO_SHADERS=1`.
+  - `backends/cairo/CMakeLists.txt:5-7`: return early on EMSCRIPTEN.
+  - `tests/CMakeLists.txt:135-209` (cairo smoke + X11 harnesses): add `AND NOT EMSCRIPTEN`.
+  - Examples (`CMakeLists.txt:221+`, ~17 repeated if/elseif blocks): one helper `neui_add_example(name sources... RESOURCES ...)`. On web it sets the `.html` suffix (per target, never global, so `neui_tests` stays `.js` for node), the shell file, the flavour flags and `--preload-file`.
+  - A `NEUI_WEB_FLAVOR=jspi|asyncify` cache option.
+  - Link flags: `-sALLOW_MEMORY_GROWTH`, `-sSTACK_SIZE=1MB` or more (paint recursion, mujson depth 128, the recursive-descent `.nsl` compiler), `-sSTACK_OVERFLOW_CHECK=2` in Debug.
+- **`platform_web.cpp`** starts as a copy of `platform_null.cpp`.
+- **Shader lib:** keep `-O2 -ffp-contract=off`. Plain wasm32 takes the portable SIMD path (`nsl_math.h:296-336`), and `FpEnvGuard` is empty because wasm has no FTZ, so this is correct by construction. Do not pass `-msse2`.
+- **Warnings:** emsdk's clang is newer than any CI compiler; budget a fix-up pass so `-DNEUI_WERROR=ON` holds. Fix the warnings, don't suppress them.
+- **Tests under node.** `neui_tests` uses no files, threads or env, and runs under node through `CMAKE_CROSSCOMPILING_EMULATOR`. Shader goldens must stay bit-exact. Watch `test_shader_exec.cpp:372`: it CRCs raw floats that may be NaN, and wasm doesn't pin NaN payloads. If it fails, canonicalise in the test, never in the executor.
+- **CI:** a `web` job on `ubuntu-latest` with the pinned emsdk runs `emcmake cmake -DNEUI_WERROR=ON`, builds both flavours and runs `ctest`.
+- `readme_example` links and loads (blank page).
 
-These are the items where a synchronous neui seam meets an asynchronous browser
-API. None is a hard blocker; each costs either Asyncify instrumentation or a
-JS-side cache.
+Exit: the web CI job is green, `neui_tests` passes under node, desktop jobs are unchanged.
 
-- **Clipboard.** `platform_clipboard_get_text` is synchronous (returns bytes);
-  the browser `navigator.clipboard.readText()` is a Promise gated behind a user
-  gesture + permission. `set_text` via `writeText()` is easy inside a gesture.
-  Read options: (a) Asyncify the get path, or (b) keep a JS-side text cache
-  updated on `copy`/`cut`/`paste` + the `clipboardchange` event and answer
-  `get_text`/`has_text` synchronously from it. The listener
-  (`platform_register_clipboard_listener`) maps to those DOM events. Effort:
-  **3-5 days**.
-- **Image loading.** This is **not** an async mismatch for build-time-bundled
-  resources - see section 5.1. It only becomes async for images fetched at
-  runtime from a URL (not the example's case), which need an `emscripten_fetch`
-  into MEMFS before the synchronous loader runs. Effort for bundled assets:
-  **2-3 days** (mostly the in-wasm decoder + BGRA swizzle).
-- **IME / composition.** Browser `compositionstart`/`update`/`end` on a hidden
-  contenteditable/input proxy positioned at `WidgetData::caret_rect_local`,
-  translated to the existing `WidgetData::on_composition(kind, utf8, len,
-  caret_byte)` seam. The seam already exists and is platform-agnostic. Effort:
-  **3-5 days** (kiosk builds can stub it; plain `KEYCHAR` typing still works).
-- **No native menubar.** Covered above (L). The framework already routes
-  `set_shortcut` + `set_menu_cmd` internally to command dispatch; the web layer
-  supplies a keydown->command translation and renders the strip.
+### Stage 2: Canvas 2D backend + minimal window (L)
 
-### 5.1 - Bitmap resources: how images are bundled and loaded
+**2a: minimal `platform_web` window (no input).** Frame wrapper `<div>` + `<canvas>`, the loop (`run` / `web_wait` / paint), invalidate + damage, ResizeObserver, DPR. This is just enough to see paint; it is Stage 3's core, done early on purpose.
 
-This is its own concern (how files *ship*), separate from the async question
-above, and the project already solves it differently per platform:
+**2b: backend.** New `backends/canvas2d/`:
+- `CMakeLists.txt`: an EMSCRIPTEN-only static lib
+- `canvas2d_backend.{h,cpp}`
+- `canvas2d.js`: a js-library linked through `target_link_options(INTERFACE --js-library ...)`. It holds handle tables (ctx → canvas + context + stacks, bitmap → canvas, fonts) and never keeps a `HEAPU8` view across calls that can allocate (memory growth).
 
-- **Win32**: PNGs are embedded into the exe as user-defined `"PNG"` resources by
-  `examples/neui_example.rc`; `platform_load_image` resolves them via
-  `FindResourceW(name, L"PNG")` before falling back to disk (no runtime file
-  dependency). See `CMakeLists.txt:107-110`.
-- **macOS**: images are copied into the `.app` bundle's `Resources/`
-  (`MACOSX_PACKAGE_LOCATION "Resources"`) and resolved by bundle path.
+Slot mapping (`renderer.h:34-418`):
 
-The web target needs the **third** strategy, and it is straightforward:
-
-1. **Bundle at build time** with Emscripten `--preload-file
-   <src>@<virtual-path>` (packages assets into a `.data` sidecar the runtime
-   fetches automatically *before* `main()` runs) or `--embed-file` (bakes the
-   bytes into the wasm/js, best for a few small files). The example's images
-   (`myimage.png`, `myimage@2x.png`, `lemur@2x.jpg`, `lion@2x.jpg`,
-   `panda@2x.jpg`) are listed in the example's `elseif(EMSCRIPTEN)` CMake arm -
-   the direct analog to the `.rc` embed / `.app` Resources copy.
-2. **Resolve + decode synchronously at runtime.** Once preloaded, the files live
-   in Emscripten's in-memory FS (MEMFS) at their virtual paths.
-   `platform_load_image("myimage.png", w, h)` keeps its **exact synchronous
-   signature**: `fopen` the MEMFS path, read the bytes, decode them with a
-   decoder compiled into the wasm module. `stb_image` is the natural fit
-   (header-only, PNG + JPG, outputs RGBA8 which we swizzle to the BGRA8
-   premultiplied the contract wants). `platform_free_image` frees the buffer.
-3. **No Asyncify for bundled assets.** The only asynchronous step is the runtime's
-   automatic `.data` fetch before `main()`, which Emscripten handles for you;
-   nothing in the load path yields. The `@2x` / `@3x` resolution in the asset API
-   (`create_from_file`) also works unchanged - it just probes MEMFS for
-   `name@2x.png` via `fopen`, which succeeds when that variant was preloaded.
-
-The IMAGE widget's path-based load (`set_text` = file path) and the
-`NEUI_API_ASSETS` `create_from_file` path both flow through
-`platform_load_image`, so both are covered by the in-wasm decoder with no
-per-widget changes. Only images fetched from a remote URL *after* startup need
-the async `emscripten_fetch` -> MEMFS -> sync-load detour.
-
-## 6 - Input, DPI, focus, resize (platform core)
-
-Straightforward `html5.h` wiring, mirroring the playbook's event contract:
-
-- **Mouse**: `emscripten_set_{mousemove,mousedown,mouseup,dblclick,click,
-  mouseenter,mouseleave,wheel}_callback`. Synthesize capture (drag-out) by
-  tracking the pressed widget on the platform side (the playbook's capture
-  model). Wheel delta normalised to signed "lines."
-- **Keyboard**: `keydown`/`keyup` -> `KEYDOWN`/`KEYUP` (translate `code`/`key`
-  to `NEUI_KEY_*`, which share Win32 VK values - a translation table is needed,
-  modelled on `keys_macos.h`); text input -> `KEYCHAR` per codepoint. Tab /
-  Shift-Tab consumed for `focus_next`, not dispatched as KEYDOWN.
-- **DPI**: `emscripten_get_device_pixel_ratio()` -> `get_scale_factor`; backing
-  store = logical * dpr; re-read on `resize`. Maps cleanly to the per-monitor
-  model.
-- **Focus**: canvas `focus`/`blur` -> `Session::_os_focused` + `WIDGET_FOCUS`.
-- **Resize**: `ResizeObserver` / `emscripten_set_resize_callback` -> resize the
-  render context (physical px) + `NEUI_EVENT_RESIZE` (logical px).
-- **Paint trigger**: `platform_invalidate` -> request a rAF tick;
-  the tick binds the live canvas context via `set_current_frame` then calls
-  `Session::paint_frame`.
-
-Estimate for platform core (window-as-canvas + the above + the cooperative
-loop): **~1.5-2 weeks**.
-
-## 7 - What we lose vs the desktop hosts
-
-- **Native menubar + system accelerators.** Rebuilt in-app; functional but a
-  parallel implementation to maintain.
-- **Synchronous clipboard ergonomics.** Behind a JS cache or Asyncify; subject
-  to browser permission/gesture rules.
-- **The PLUGWINDOW DAW-embed use case.** No web analog; the widget renders but
-  the audio-plugin-in-a-DAW scenario that motivates it does not exist on web.
-- **True multi-top-level-window.** Each frame is a canvas on one page; multiple
-  OS windows would mean `window.open` popups (fragile) or stacked canvases.
-- **Pixel-identical text** vs desktop - Canvas 2D AA/hinting is browser-defined
-  (acceptable for parity-of-behaviour, not parity-of-pixels).
-- **Asyncify tax** on wasm size/startup if used for the modal pump + clipboard.
-
-## 8 - What we gain
-
-- **A real browser target with full widget parity** off the existing painted
-  host - the multi-platform story extends to the web with no per-widget rewrite.
-- **Zero-install distribution** - the example runs from a URL.
-- **The single-threaded model matches the framework's invariants exactly** (no
-  threading retrofit, unlike Qt-for-wasm's Asyncify-doesn't-scale pain).
-- **Validation of the backend/platform seam** as genuinely portable - a third
-  backend + fourth platform layer with no host changes is strong evidence the
-  abstractions hold.
-
-## 9 - Effort estimate
-
-Notation matches `winui3-host.md`: S = ~1/2-1 day, M = 2-4 days, L = ~1 week.
-
-| Workstream | Estimate |
+| Slots | Canvas 2D |
 |---|---|
-| CMake wiring + first empty-frame `emcmake` build | 1-2 days |
-| Canvas-2D backend to parity (primitives/path/transform/clip/alpha/font/text/bitmap) | 1-1.5 weeks |
-| platform_web.cpp core (window-as-canvas, html5 input, cooperative loop, DPI, focus, resize, paint bind) | 1.5-2 weeks |
-| Popup nested-pump via Asyncify (+ reentrancy verification) | 3-5 days |
-| Clipboard (async, JS cache + listener) | 3-5 days |
-| Image / asset async decode | 2-3 days |
-| IME composition proxy | 3-5 days |
-| Menubar rebuilt (DOM or in-canvas) + keydown accelerator routing | ~1 week |
-| Testing, payload tuning, deployment (shell.html, headers), debugging | 1-2 weeks |
+| create/destroy_context, resize | `native_handle` = frame id. Context `alpha:true`. Backing store from ResizeObserver `devicePixelContentBoxSize` (rounded on Safari). Resize clears the canvas, so the backend marks "no complete frame". |
+| get_scale_factor / update_dpi | `update_dpi` takes an integer DPI (`renderer.h:73`); 96×DPR is not an integer at 90 % / 110 % zoom. The exact DPR comes from `platform_web` through a backend side channel. |
+| begin/end_frame | Reset transform to `scale(dpr)` and the clip / alpha / font stacks; `clearRect`, then fill with the clear colour (alpha < 255 stays transparent, as in the overlay example). end_frame is a no-op: the canvas presents at the end of the task. |
+| fill/draw_rect | `fillRect` / `strokeRect`; colour strings cached per ARGB |
+| draw_text | Same semantics as Cairo (`cairo_backend.cpp:653-686`): split on `\n`, centre the line block using font ascent + descent (`fontBoundingBoxAscent/Descent`, cached per font, `textBaseline='alphabetic'`), clamp the top to y, clip to the box. Skip save/clip/restore when the measured text fits. |
+| measure_text | `text_len` counts bytes, so slice in C++ before `UTF8ToString`. A dedicated measuring context with an LRU cache keyed (family, weight, size, string), because MULTILINE wrap measures heavily. |
+| push/pop_font | Compose `ctx.font` with quoted, escaped family names (an invalid string is silently ignored). An empty family maps to `system-ui, sans-serif` (`widget_font.h:57`). |
+| paths: begin / move / line / arc / close / cubic_to / quad_to, fill / stroke_path, set_fill_rule, stroke_path_styled | Use the context's **own current path**, not `Path2D`. Points are recorded under the transform current when they are added, which is the Cairo / CG behaviour; a `Path2D` would be transformed at fill time. The current path survives `fillRect` / `strokeRect` / `fillText`. `arc` passes `anticlockwise = end < start` (`renderer.h:160`, Cairo `:861-864`). `fill('evenodd' or 'nonzero')`; `lineCap` / `lineJoin` / `miterLimit` / `setLineDash` / `lineDashOffset`. |
+| push/pop_clip | `save()` + `clip(new Path2D(rect))` (keeps the current path) / `restore()`. A C++ transform mirror serves `get_device_transform`. |
+| push/pop_transform, translate / rotate / scale | `save` / `restore` subset; the C++ mirror is updated alongside |
+| push/pop_alpha | `globalAlpha` through the `backend_util.h` alpha stack |
+| gradients (rect / path / stroke) | `createLinearGradient` / `createRadialGradient` (start = centre, end = focal, `gradient.h:44-58`). REPEAT / MIRROR degrade to CLAMP like CG in v1; stop expansion comes later. |
+| bitmaps create / destroy / draw (+ tint) | BGRA premultiplied → straight RGBA → `putImageData` into a backing **canvas** (`createImageBitmap` is async). The source rect is in the bitmap's logical units, so multiply by `scale` (`:792-795`). Tint ≠ 0xFFFFFFFF: a cached tinted copy keyed (bitmap, tint). Pool backing canvases by size for per-frame CPU-shader uploads. |
+| create_offscreen_context / read_pixels_bgra | `OffscreenCanvas`, with a hidden `<canvas>` fallback that is required (Playwright's WebKit has no `OffscreenCanvas`), with `willReadFrequently:true`; `getImageData`, premultiply, BGRA. Lossy at low alpha (unpremultiply round trip); documented, with a tolerance in tests. |
+| register_font / register_font_file / unregister_font | `new FontFace(family, bytes)` + `document.fonts.add`; the family comes from the font's own `name` table (small sfnt parser in C++). An `ArrayBuffer` face is usable as soon as it is constructed in every engine tested (Stage 0), so registration is synchronous; drop the measure cache entries for that family on register / unregister. |
+| set_frame_damage | The canvas keeps its pixels: clip to the damage rects and clear only those. Returns false until one full frame has been drawn at the current size / DPR (Cairo rule, `:550`). |
+| get_context_generation | Bumped on 2D `contextlost` / `contextrestored` |
+| shader program slots | NULL, so shaders take the CPU executor path, drawn as bitmaps |
 
-**Realistic total for full parity: ~6-9 weeks of focused work.**
+Reuse `backends/shared/backend_util.h` (`argb_unpack`, `quad_to_cubic`, the alpha stack, `font_size_q10`, `damage_rect_to_device`).
 
-Phased milestones (the recommended execution order):
+**Test:** `tests/canvas2d_smoke`, the web twin of `tests/cairo_backend_smoke.cpp`: an off-screen context, rect / arc / bitmap / text, `read_pixels_bgra` assertions with alpha tolerance, damage. Built as `.html`, run in headless Chromium by a small Playwright script in the web CI job (a CI-only dependency) that waits for a `PASS` / `FAIL` console line.
 
-- **Phase 1 - Static render proof (~1.5-2.5 weeks):** CMake + Canvas-2D backend +
-  minimal `platform_web.cpp` that opens one canvas and paints a frame. Verifies
-  the backend draws the example's static widgets.
-- **Phase 2 - Core interactive demo (~+1.5-2 weeks):** mouse/keyboard/wheel/focus
-  + the cooperative loop + resize/DPI + the Asyncify popup pump. The example app
-  is usable (button, checkbox, slider, knob drag, input typing, custom-draw).
-- **Phase 3 - Full parity (~+2.5-4 weeks):** clipboard, image/asset decode, IME,
-  menubar, dialog overlays. Reaches the confirmed full-parity target.
+Exit: smoke test green in CI; `path_example`, `arc_example` and `neui_example` paint statically and match desktop screenshots side by side.
 
-This is materially less than the WinUI3 estimate (10-12 weeks) precisely because
-there is no per-widget mapping: ~7 weeks of that estimate was widget work that
-the xpl host already does for us.
+### Stage 3: `platform_web` core: input, focus, timers, theme, resources (L)
 
-## 10 - Recommendation
+Builds on 2a (`hosts/crossplatform/platform_web.{cpp,js}`, helpers in `hosts/shared/web/`). Logic that Linux already solved is **copied with "mirrors platform_linux.cpp:NNN" comments**, not extracted: the Linux routing is tied to `LinuxWindow` fields, X event types and the XI2 state.
+- **Frames:**
+  - APPWINDOW mounts into the configured container (default `#neui-root`, else `document.body`) and fills it.
+  - create() w/h is the size used when the container has none.
+  - APPWINDOW `set_pos` / `set_size` (`widgets.cpp:481-513`) resize the container only when neui created it; otherwise CSS wins.
+  - `show` / `hide` use `display`; the title goes to `document.title` only in full-page mode; the icon is a no-op; size constraints become CSS min/max.
+  - Closing a frame destroys only its canvas; the widgets stay (the documented contract).
+- **Pointer:**
+  - Pointer Events with `setPointerCapture` as the capture model; enter / leave like Linux `do_motion` (:685).
+  - Press / motion overlay pre-check order: popup → toast → combo → menubar (:578-589, :694-709).
+  - Double-click synthesis at 400 ms / 4 px (:591-605); right button → RBUTTON; `contextmenu` suppressed only when neui consumed the event (rule 5); touch / pen → left button.
+- **Wheel:**
+  - An explicit pixel-precise path: `deltaMode 0` → the shared `scroll_kinetics` smooth path (GRID / SECTION as the XI2 path does, :1246-1317).
+  - Line / page `deltaMode` → notches.
+  - Normalise Chrome's ±100 px mouse notches and read `deltaMode` first (Firefox).
+  - `preventDefault` only when neui consumed the event, so page scrolling is not trapped.
+- **Keyboard (no IME yet):**
+  - `hosts/shared/web/keys_web.h` maps to `NEUI_KEY_*`. Letters and digits come from `key` (VK letters follow the layout; `code` would break Ctrl+Z on QWERTZ), everything else from `code`.
+  - Cmd = `NEUI_KMOD_CTRL` on Apple browsers.
+  - Key order as Linux (:735-793): Tab → `focus_next`, open menubar, `try_menubar_accel`, KEYDOWN, `handle_input_key`, KEYCHAR (one codepoint, no Ctrl / Cmd).
+  - `preventDefault` only when the key was handled.
+- **Focus:** canvas `focus` / `blur` → `_os_focused` + `WIDGET_FOCUS`.
+- **Cursor:** `canvas.style.cursor`.
+- **Timers:** animation timer, toast, scroll bounce → `web_wait` deadlines; `platform_now_ms` from `performance.now()`. An IntersectionObserver skips paints of canvases that are off-screen.
+- **Theme:** `hosts/shared/web/theme_provider_web.h` (modelled on `theme_provider_linux.h`) reads `prefers-color-scheme` in `platform_init`, before any Session exists. The change listener enqueues. `platform_reduced_motion` comes from `prefers-reduced-motion`.
+- **Metrics:** add a `measure` seam through `metrics_add_measure_seam` (`metrics.h:110-117`) backed by `measureText` (the default is a 0.5×size estimate), and a safe-area seam from `env(safe-area-inset-*)` for iPad.
+- **Images and resources:**
+  - `platform_load_image[_bytes]` via `hosts/shared/image_loader_stb.h`.
+  - Example resources are bundled into MEMFS by `--preload-file <src>@<name>` under the names the code uses (`myimage.png`, `@2x` JPGs, `components/`), so the `@2x` ladder (`asset_store.h:1033-1081`) and `resource_provider.h` work unchanged.
+  - `font_loading_example`'s system font paths don't exist in a browser (`:76-88`), and there is no `examples/fonts/`. Bundle one OFL font for it.
+  - Product clients should prefer `NEUI_API_RESOURCE_CLIENT`.
+- **Debug:** URL query parameters `?NEUI_DEBUG_PAINT=1` are mapped into `ENV` in `preRun` (`getenv` is cached, `host.cpp:2390,2426`). stderr goes to `console.error`. `main` gets `argv` from the mount options.
 
-**Proceed, phased.** WASM is a good fit for neui's architecture: the painted xpl
-host transfers wholesale, Canvas 2D maps cleanly to the backend vtable, the
-single-threaded model matches, and the cooperative event loop the browser
-demands is already a first-class API path (`pump_once`). The costs are real but
-bounded: one Asyncify-scoped nested pump, two async-bound features behind a JS
-cache or Asyncify, and a from-scratch menubar.
+Exit: `readme_example`, `path_example`, `overlay_example`, `neui_grid_example`, `neui_tabview_example`, `neui_section_scroll_example`, `neui_shader_example` (CPU, animated) and `neui_partial_repaint_example` run interactively. The last one needs its `pump_once + sleep_for` loop (`:150-182`) ported to the web pattern. The how-to-port §12 checks for mouse, keyboard, focus, resize, DPI, theme and images pass in Chrome and Firefox, including a manual check in a real Firefox that the keydown / dragover verdicts (rule 5) take effect.
 
-Start with **Phase 1 (static render proof)**. That milestone alone validates the
-Canvas-2D backend and the `set_current_frame` per-frame binding, and surfaces
-the JS<->wasm interop ergonomics before committing to the larger input + async
-work. Decide whether to continue to Phases 2-3 after seeing the example paint in
-a browser.
+### Stage 4: blocking UI: dialogs, popups, message box, menubar (M-L)
 
-Re-check at implementation time: JSPI browser support (may replace Asyncify with
-near-zero overhead), and whether any client genuinely needs PLUGWINDOW/multi-
-window on web (if not, scope them as no-ops/single-canvas).
+- **Message box extraction (desktop change, done just before it is needed):**
+  - Move the backend-only layout / render / hit-test from `platform_linux.cpp:1684-1766, 1817-1868` into `hosts/shared/message_box_painted.h`; the X11 window and loop stay in place.
+  - `message_box_linux.h` is gated on `__unix__`, which Emscripten defines, so it is reusable as is.
+  - Linux is verified by CI and by an on-screen pass by the user.
+- **Modal DIALOG** (`widgets.cpp:451`):
+  - An absolutely positioned wrapper with a **DOM title bar** (title, close button, draggable, styled from the palette through CSS custom properties).
+  - x / y are relative to the viewport (`position:fixed`), clamped into view; centred over the owner when they would land off-screen.
+  - `platform_set_window_enabled(owner,false)` = a backdrop blocking pointer input + the input gate (Linux :1387-1437).
+  - `teardown_window` ends the pump (`host.h:283-288`) and re-enables the owner. The close button goes through `handle_close` → `APP_QUIT` veto.
+- **popup_menu:** works through the nested loop. Painted in the frame canvas, so it clips at the canvas edge, which matters for small embedded canvases (limitation, noted). Fix the latent bug that a multi-canvas page exposes: `paint_popup_menu` (`host.cpp:4358`) paints on every frame while open; gate it on the owning frame.
+- **message_box** (`widgets.cpp:2026`): a modal wrapper + canvas painted by `message_box_painted.h`, run on `platform_run_modal_until`, so timers, toasts and other frames keep running (the Linux box loop has no timer, :1881-1886).
+- **Menubar:**
+  - `platform_menubar_in_frame()` = true, which reuses the in-frame band (`host.cpp:4679-5019`) and `try_menubar_accel` (:5135).
+  - `platform_menubar_create` returns the non-null sentinel, as on Linux.
+  - Document the browser-reserved shortcuts: Ctrl / Cmd + W / T / N can't be caught; Ctrl + S / P / F can, through `preventDefault` when handled.
 
-## 11 - Critical files to reference (for the work, if authorised)
+Exit: `neui_example`'s About dialog (open / close / reopen), knob right-click reset, message box → toast, menus by mouse, keyboard and accelerators.
 
-- `include/neui/d/renderer.h` - the 34-slot `neui_render_backend_t` the new
-  backend must fill.
-- `backends/null/null_backend.{h,cpp}` - skeleton to copy for
-  `neui-backend-canvas2d` (one static fn per slot + aggregate + `get_backend`).
-- `backends/cg/cg_backend.{h,mm}` - the per-frame live-context model
-  (`set_current_frame`, context valid only between bind and `end_frame`) to
-  mirror for the Canvas context.
-- `hosts/crossplatform/platform.h` - the full `xpl_host::platform_*` surface
-  `platform_web.cpp` must implement.
-- `hosts/crossplatform/platform_null.cpp` - minimal stub starting point.
-- `hosts/crossplatform/platform_macos.mm` (`drawRect:` ~line 122; `platform_run`
-  / `platform_pump_once` / `platform_run_modal_until` ~lines 1103-1133) - the
-  closest reference (per-frame context bind; the run/pump/modal shapes).
-- `hosts/crossplatform/host.cpp:3046` - the single nested-pump call site
-  (`open_popup_menu` -> `platform_run_modal_until(&_popup_running)`).
-- `include/neui/d/api.h:61-69` - the `pump_once` contract that makes the
-  cooperative loop a non-event.
-- `CMakeLists.txt` (root), `hosts/crossplatform/CMakeLists.txt`,
-  `backends/null/CMakeLists.txt` - the gating + per-platform-source + backend-lib
-  patterns to extend with `EMSCRIPTEN` arms.
-- `hosts/shared/macos/keys_macos.h` - model for the browser `code`/`key` ->
-  `NEUI_KEY_*` translation table.
+### Stage 5: text input, IME, clipboard (M-L)
 
-## 12 - Verification
+- **Hidden text proxy:**
+  - A visually hidden `<textarea>` per frame, focused while an INPUTBOX / MULTILINE / GRID editor has focus.
+  - Positioned at `WidgetData::caret_rect_local` (`host.h:242`), so the IME candidate window and the mobile virtual keyboard appear at the caret.
+  - `beforeinput` / `input` → KEYCHAR; `compositionstart` / `update` / `end` → `on_composition(START/UPDATE/RESULT/END, utf8, len, caret_byte, attrs)` (`host.h:223-236`; reference translations: win32 `:1288-1373`, macOS `:944-1113`).
+  - Key events come from the proxy while it has focus, so dead keys work.
+- **Clipboard** (synchronous seams `platform.h:203-227`; callers `host.cpp:1833-1862, 6203-6232, 7264-7284`):
+  - `set_text` / `write_item`: update the in-process cache, then `navigator.clipboard.writeText` / `write(ClipboardItem)` (text/plain, text/html, image/png), fire-and-forget inside the transient user activation.
+  - Ctrl / Cmd + V: the drain holds the paste KEYDOWN until the proxy's `paste` event delivers `clipboardData` (short timeout), fills the cache, then dispatches. No permission prompt.
+  - Programmatic reads (menu "Paste", `NEUI_API_CLIPBOARD` from a click): suspend on `navigator.clipboard.read/readText()` (added to the blocking set). On denial, fall back to the cache.
+  - `has_text` answers from the cache (possibly stale; clients already poll).
+  - PRIMARY is a no-op.
 
-This evaluation produces a document. Its "verification" is the user reading it
-and either accepting "proceed, phased" or redirecting. There is no code to run.
+Exit: Ctrl / Cmd + C / X / V round-trip inside neui and with other apps (Chrome, Firefox, Safari); a CJK IME composition commits as one undo unit; the Android / iOS virtual keyboard types into an INPUTBOX.
 
-If implementation is authorised, the end-to-end verification per phase follows
-the `how-to-port.md` test checklist, run in a browser:
+### Stage 6: drag and drop (M)
 
-- **Phase 1:** `emcmake cmake -B out/web && cmake --build out/web`; serve and open
-  `neui_example.html`; confirm the frame clears to the expected colour and all
-  static widgets (labels, button, checkbox, section, knob, slider) render.
-- **Phase 2:** hover/click the button (onclick fires); drag the knob clockwise
-  (value rises - verifies MOUSE_MOVE + synthesized capture); right-click the knob
-  (popup appears, "Reset to default" dispatches through the Asyncify modal pump);
-  Tab cycles focus + focus ring shows; type into INPUTBOX; resize the window
-  (layout reflows, RESIZE fires); DPI scaling correct on a HiDPI display.
-- **Phase 3:** Ctrl/Cmd-C/X/V in INPUTBOX round-trips via the clipboard cache;
-  IMAGE widget shows an aspect-fitted picture; menubar picks dispatch and bound
-  accelerators fire; modal DIALOG blocks the owner; IME composition (if wired)
-  commits as one undo unit.
+- **Drop target:**
+  - `dragenter` / `over` / `leave` / `drop` → `Session::dispatch_dnd_*` (`host.cpp:833-866`); the `dropEffect` verdict through rule 5.
+  - `drop` captures `DataTransfer` strings inside the event. Files are read with `File.arrayBuffer()` into a `DataItem` before the drop is queued.
+- **Drag source:** browsers start drags only from a native `dragstart`. So `platform_dnd_begin_drag` (blocking set) supports **in-page** drags between neui frames and widgets: a nested `run_modal_until` with pointer capture and direct `dispatch_dnd_*`, as Linux does for internal drags. Dragging out of the page is deferred.
 
-Run an open/close stress loop to confirm no Canvas context / ImageBitmap leaks
-across window lifecycles.
+Exit: `neui_dnd_example` accepts text and files from the desktop and from page elements; `neui_dnd_source_example` drags between its own widgets.
+
+### Stage 7: embedding and page interop (L): the product goal
+
+- **Mounting:**
+  - APPWINDOW mounts into the container the page chooses.
+  - PLUGWINDOW + `NEUI_API_EMBED::set_parent` (`widgets.cpp:2041-2088`) takes a CSS selector, which the platform **copies** (`embed_parent` is stored as a raw `uintptr_t`, `:2020`), and embeds there.
+  - The service loop (rule 7) drives it; `embed_event_fd` = -1 and `embed_pump_and_tick` is a no-op.
+- **Module shape:**
+  - `-sMODULARIZE -sEXPORT_ES6`, with `.wasm` / `.data` resolved from `import.meta.url` (`locateFile`).
+  - Compile once and instantiate per mount (`instantiateWasm`), so several apps can share a page.
+  - Wrapper `neui-web.js`: `await NeuiApp.mount(element, {flavour:'auto', args, theme})`, `app.unmount()`, `app.postMessage()`, `app.on('message')`.
+- **`NEUI_API_WEB`** (`include/neui/d/web.h`), optional and exposed on web only, following the `NEUI_API_IOS` pattern:
+  - mount element per frame (set before show)
+  - send a string / JSON to the page, plus a client callback interface for page messages (delivered through the queue)
+  - page lifecycle events (`visibilitychange`, `pagehide`)
+  - theme mode set by the page (product pages run their own dark mode)
+  - query the flavour
+
+  Appended per the vtable-append rule.
+- **Unmount:**
+  - Enqueued. Closes **every** frame (`endsession` closes only the first root, `host.cpp:430-443`) through the no-veto "gone" path (`platform_linux.cpp:500,509`), so a client that vetoes `APP_QUIT` cannot hang it.
+  - `run()` returns, the client cleans up, the module exits.
+  - All canvases, listeners, observers and `FontFace`s are removed.
+- **Leak test:** mount / unmount 100× and check that DOM node counts stay flat and no detached instance stays alive (heap snapshot: count `WebAssembly.Instance`). The wasm heap size says nothing once an instance is dropped.
+- **Page etiquette:** no `preventDefault` unless neui consumed the event; no global listeners beyond `matchMedia`; focus only on a click or an explicit request; respect `inert` / hidden containers.
+- **Deliverables:**
+  - `examples/web/`: a host page with two apps side by side, a PLUGWINDOW in a resizable panel, and page↔app messaging.
+  - A `dist/` layout (`.wasm`, `.js`, `neui-web.js`, `.data`). No COOP / COEP is needed, since there are no threads.
+
+Exit: the demo page mounts / unmounts both apps, messages flow both ways, the leak test is flat.
+
+### Stage 8: performance, polish, documentation (M-L)
+
+- **Profile** `neui_grid_example` (10k rows), `neui_partial_repaint_example` (48 knobs) and `neui_shader_example`, plus filters over surface readback. Stage 0 measured the JS↔wasm crossings at ~15 % of a heavy frame, so the command buffer is only revisited if profiling of real examples disagrees.
+- **Shaders:** an optional native wasm SIMD128 path in `nsl_math.h` next to SSE2 / NEON (`-msimd128`), bit-exact against the goldens (no relaxed SIMD, no FMA); the portable path stays selectable.
+- **Size:** compare `-Oz` and `-O3`, `wasm-opt`, `--closure 1`; record numbers for both flavours.
+- **Gradients:** REPEAT / MIRROR through stop expansion.
+- **Touch:** long-press → right click (as on iOS).
+- **Browser matrix** (Chrome / Edge, Firefox, Safari on macOS and iPadOS) over the full how-to-port §12 checklist.
+- **Docs:**
+  - `docs/host-web.md` (build, flavours, embedding API, what works, what is stubbed, limits)
+  - CLAUDE.md (build line, platform selection, file map, `NEUI_API_WEB`, Plans)
+  - `plans/how-to-port.md` (web as a worked example, including stack switching)
+  - `docs/deferred-issues.md`
+
+### Deferred (out of scope, recorded in the docs)
+
+- A WebGL2 GPU shader path (a new `NEUI_SHADER_LANG_*` + a GLSL ES emitter next to `nsl_gpu.cpp`).
+- Accessibility (an ARIA mirror tree). Canvas UIs are invisible to screen readers; the desktop xpl host has no accessibility either, but web reviewers will ask.
+- Drag out of the page; overlays reaching beyond the canvas; runtime URL image fetch; multi-window through `window.open`; threads.
+
+---
+
+## Critical files
+
+- **New:**
+  - `backends/canvas2d/{CMakeLists.txt, canvas2d_backend.h, canvas2d_backend.cpp, canvas2d.js}`
+  - `hosts/crossplatform/{platform_web.cpp, platform_web.js}`
+  - `hosts/shared/web/{keys_web.h, theme_provider_web.h, clipboard_web.h}`
+  - `hosts/shared/message_box_painted.h`
+  - `include/neui/d/web.h`
+  - `tests/canvas2d_smoke.cpp` + Playwright runner
+  - `examples/web/` (shell, host page, `neui-web.js`)
+  - `docs/host-web.md`
+  - CI web job
+- **Modified:**
+  - root `CMakeLists.txt` (EMSCRIPTEN arms, `neui_add_example` helper)
+  - `hosts/crossplatform/CMakeLists.txt`, `backends/cairo/CMakeLists.txt`, `tests/CMakeLists.txt`
+  - `hosts/crossplatform/platform_linux.cpp` (message box extraction only)
+  - `hosts/crossplatform/host.cpp` (popup paint gate, paint-guard for blocking APIs, `NEUI_API_WEB` in `get_interface`)
+  - `hosts/crossplatform/widgets.cpp` (refuse blocking calls in paint / non-suspendable context)
+  - `.github/workflows/ci.yml`, `CLAUDE.md`
+- **References:**
+  - `include/neui/d/renderer.h`, `hosts/crossplatform/platform.h`
+  - `platform_linux.cpp` (loop, frames, input order, close / teardown, message box, menubar)
+  - `backends/cairo/cairo_backend.cpp` (text box, arc, path, damage rules), `backends/cg/cg_backend.mm`
+  - `tests/cairo_backend_smoke.cpp`
+  - `hosts/shared/image_loader_stb.h`, `hosts/shared/theme_provider_linux.h`, `hosts/shared/metrics.h`
+  - `platform_ios.mm` (platform-only interface precedent)
+
+## Risks
+
+| Risk | Mitigation |
+|---|---|
+| Microtask-resume verdict doesn't hold in real Firefox (unverified, harness limitation) | manual Firefox check in Stage 3; query-only exports (rule 5 fallback) if it fails |
+| JSPI missing in Safari / Firefox at ship time | Asyncify flavour + auto-pick loader |
+| Asyncify instruments broadly → larger and slower; breaks with two suspended stacks | accepted as the fallback; single-loop rule (rule 7); real-code size measured in Stage 1 |
+| Exceptions + Asyncify | resolved in Stage 0: JS exceptions for the Asyncify flavour |
+| JS call overhead per draw | measured small in Stage 0; `c2d_*` indirection keeps a command buffer possible |
+| Premultiplied round-trip loss in surfaces / filters | documented; test tolerance; `willReadFrequently` |
+| Paste needs a gesture / permission | paste-event cache primary, async read fallback |
+| Message box extraction regresses Linux | mechanical move; CI + on-screen pass by the user |
+| Text pixels differ from desktop | accepted (behaviour parity, not pixel parity); shader goldens are CPU-side and unaffected |
+
+## Verification
+
+- **Every stage:** existing CI jobs green with `-DNEUI_WERROR=ON`; the web job green: both flavours built, `neui_tests` under node, and `canvas2d_smoke` in headless Chromium from Stage 2 on.
+- **Locally on this Windows machine:**
+  - Install the pinned emsdk.
+  - `emcmake cmake -B out/web -DCMAKE_BUILD_TYPE=Release && cmake --build out/web`.
+  - Serve `out/web` with `python -m http.server` or `emrun`.
+  - Drive Chrome (the claude-in-chrome skill can open, click, type and screenshot) through each stage's exit list and the `plans/how-to-port.md` §12 checklist.
+- **Linux regression (Stage 4):** the user runs `neui_example` on X11 and checks the message box.
+- **Embedding (Stage 7):** demo page with two apps, a resizable PLUGWINDOW panel, page↔app messages, and 100× mount / unmount with flat DOM count and no detached instances.
+- **Browser matrix (Stage 8):** Chrome / Edge (JSPI); Firefox and Safari (whichever flavour they get); iPadOS Safari for touch and the virtual keyboard.
