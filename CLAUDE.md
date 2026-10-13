@@ -20,6 +20,9 @@ cmake -B out/build -DCMAKE_BUILD_TYPE=Debug && cmake --build out/build
 
 # macOS (Xcode generator - multi-config; IDE + lldb integration)
 cmake -B out/build -G Xcode && cmake --build out/build --config Debug
+
+# Web (Emscripten, plans/wasm-host.md; emsdk 4.0.23 + Ninja; NEUI_WEB_FLAVOR=jspi|asyncify)
+emcmake cmake -B out/web -G Ninja -DCMAKE_BUILD_TYPE=Debug && cmake --build out/web
 ```
 
 Outputs - Windows: `out/build/Debug/{neui_example.exe, neui.lib}` + per-subdir `neui-*.lib` (`neui-win32host`, `neui-xplhost`, `neui-backend-d2d`, `neui-shader`, …). macOS: `out/build/Debug/{neui_example.app, libneui.a}` + per-subdir `libneui-*.a`. Example apps (CMake targets): `neui_example`, `neui_grid_example`, `neui_section_scroll_example`, `neui_surface_example`, `neui_dnd_example`, `neui_dnd_source_example`, `neui_tabview_example`, `neui_font_loading_example`, `neui_filter_knob_example`, `neui_path_example`, `neui_overlay_example` (transparent CUSTOMDRAW overlay - DirectComposition on win32), `neui_arc_example` (value-driven arc / ring / pie compound layer), `neui_partial_repaint_example` (simulated automation over 48 knobs + a rotating IMAGE, to see / measure partial repaint), `neui_shader_example` (`.nsl` shaders via `NEUI_API_SHADER`: baked banner / knob strips / tiles, live SHADER-layer knobs, a JSON component with an inline shader, a CUSTOMDRAW panel drawn with `draw`, an animated row, and a sampling row: knobs lit from a baked normal map, a meter on a baked colour ramp, water from a baked noise tile), `neui_component_knob_example` (JSON component), `neui_filmstrip_knob_example`, `neui_resource_client_example` (`NEUI_API_RESOURCE_CLIENT`), and `readme_example`; iOS builds the bundled `neui_ios_example` instead.
@@ -34,6 +37,7 @@ Outputs - Windows: `out/build/Debug/{neui_example.exe, neui.lib}` + per-subdir `
 - **macOS**: `neui-macoshost` + `neui-xplhost`; backend `neui-backend-cg`; xpl platform `platform_macos.mm`.
 - **Linux** (X11): `neui-xplhost` only (no native host); backend `neui-backend-cairo` (software, blitted via XShm/XPutImage); xpl platform `platform_linux.cpp`. Clipboard (CLIPBOARD + PRIMARY + INCR), full XDND v5, neui-drawn message box, in-frame menubar, XI2 smooth scroll, D-Bus theme tracking, and DAW-embedding seams all live here - **see `docs/host-linux.md`**.
 - **iOS / iPadOS**: `neui-ioshost` (native UIKit) + `neui-xplhost`; backend `neui-backend-cg`; xpl platform `platform_ios.mm`. Both are registered and can be linked together - **see `docs/host-ios.md`**.
+- **Web** (Emscripten, **in progress** - `plans/wasm-host.md`): `neui-xplhost`; xpl platform `platform_web.cpp` (still the null layer until Stage 2); backend `neui-backend-null` until the Canvas 2D backend lands. Every example builds as a page (`.html` + `.js` + `.wasm`, resources bundled with `--preload-file` via `neui_link_example`'s `WEB_PRELOAD`); `neui_tests` runs under node through ctest. Emscripten sets `UNIX`, so any new `UNIX AND NOT APPLE` gate meant for X11 must add `AND NOT EMSCRIPTEN`.
 - **Other**: `neui-xplhost`; backend `neui-backend-null`; xpl platform `platform_null.cpp`.
 - **LVGL** (opt-in, **experimental**, Windows only): `neui-xplhost`; backend `neui-backend-lvgl`; xpl platform `platform_lvgl.cpp`. Replaces the Windows pairing above when `-DNEUI_WITH_LVGL=ON` - **see `docs/host-lvgl.md`**.
 
@@ -197,7 +201,7 @@ Active plans (`plans/`) are open or deferred work only - completed plans were re
 
 - `win32-pointer-and-directmanipulation.md` - WM_POINTER pen/touch + DirectManipulation smooth-scroll on scrolling SECTION + GRID (deferred; binding spec for when it lands).
 - `winui3-host.md` - third host backend feasibility analysis (deferred indefinitely).
-- `wasm-host.md` - staged plan for a WebAssembly port of the xpl host (Canvas-2D backend + `platform_web.cpp`, JSPI with Asyncify fallback so blocking calls keep desktop semantics, one canvas per frame, embeddable into existing pages). Stage 0 (toolchain spikes: emsdk 4.0.23, JSPI in Chromium / Firefox / WebKit, Asyncify single-stack only) done; Stage 1 (build plumbing) is next.
+- `wasm-host.md` - staged plan for a WebAssembly port of the xpl host (Canvas-2D backend + `platform_web.cpp`, JSPI with Asyncify fallback so blocking calls keep desktop semantics, one canvas per frame, embeddable into existing pages). Stage 0 (toolchain spikes: emsdk 4.0.23, JSPI in Chromium / Firefox / WebKit, Asyncify single-stack only) and Stage 1 (Emscripten build of the whole tree on the null layer, tests under node, CI job) done; Stage 2 (Canvas 2D backend + minimal window) is next.
 - `lvgl-port.md` - neui-on-LVGL feasibility investigation that picked the approach (superseded by the prototype below; kept for the impedance-mismatch analysis).
 - `lvgl-host-approach-c.md` - the **experimental** LVGL host: design record, per-milestone detail and all measurements. Prototype built + evaluated; **work paused until real target hardware is available** (the open items - appearance cache, embedded display driver / VGLite - need a panel and an MCU to evaluate). Reader-facing status: `docs/host-lvgl.md`.
 - `how-to-port.md` - reference playbook for new-platform ports.

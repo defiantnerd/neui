@@ -98,6 +98,39 @@ else()
   endif()
 endif()
 
+# Web (Emscripten) build - plans/wasm-host.md. The browser must never block,
+# so the blocking calls (run, modal show, popup_menu, message_box) keep their
+# desktop semantics by suspending the wasm stack: JSPI where the browser has
+# it, Asyncify as the fallback for older browsers. Stage 0 settled the
+# exception mode per flavour: native wasm exceptions work with JSPI, but are
+# unsupported with Asyncify, which therefore uses JS exceptions. The flags are
+# directory-wide so every TU agrees on the exception ABI.
+if(EMSCRIPTEN)
+  set(NEUI_WEB_FLAVOR "jspi" CACHE STRING
+      "Web stack switching for blocking calls: jspi or asyncify")
+  set_property(CACHE NEUI_WEB_FLAVOR PROPERTY STRINGS jspi asyncify)
+  set(NEUI_WEB_ASYNCIFY_STACK "262144" CACHE STRING
+      "Asyncify unwind buffer in bytes (the 4 KB default is far too small)")
+  if(NOT NEUI_WEB_FLAVOR MATCHES "^(jspi|asyncify)$")
+    message(FATAL_ERROR "NEUI_WEB_FLAVOR must be jspi or asyncify, not '${NEUI_WEB_FLAVOR}'")
+  endif()
+  if(NEUI_WEB_FLAVOR STREQUAL "jspi")
+    # The current exnref encoding (try_table); the legacy `try` encoding still
+    # works but Firefox reports it as deprecated.
+    add_compile_options(-fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0)
+    add_link_options(-fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0)
+  else()
+    add_compile_options(-fexceptions)
+    add_link_options(-fexceptions)
+  endif()
+  # Paint recursion, mujson's depth cap of 128 and the recursive-descent .nsl
+  # compiler all need more than Emscripten's 64 KB default stack.
+  add_link_options(-sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=1048576
+                   "$<$<CONFIG:Debug>:-sSTACK_OVERFLOW_CHECK=2>"
+                   "$<$<CONFIG:Debug>:-sASSERTIONS=1>")
+  message(STATUS "neui: web build, ${NEUI_WEB_FLAVOR} flavour")
+endif()
+
 # The registry lib (neui) and the host libs reference each other's symbols:
 # neui calls each host's register wrapper, and those wrappers double as the
 # forced-symbol refs that pull the host objects out of their static archives.
@@ -157,7 +190,7 @@ endif()
 if(NEUI_IOS)
   add_subdirectory("hosts/ios")
 endif()
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
   add_subdirectory("backends/cairo")
 endif()
 # LVGL backend + platform prototype - gated; FetchContent of LVGL lives in the
@@ -219,6 +252,58 @@ set_target_properties(neui PROPERTIES
 # scene manifest, so they cannot link or run on iOS - gate them off there.
 # A dedicated iOS example app target is a later milestone.
 if(NEUI_BUILD_EXAMPLES AND NOT NEUI_IOS)
+
+# Links an example to the hosts this platform builds and, on the web, makes it
+# a page (.html + .js + .wasm) and bundles its resources into the in-memory
+# file system: WEB_PRELOAD takes "<path under the source dir>|<path at
+# runtime>" pairs. Runtime paths are relative to the working directory "/",
+# which is where the examples look ("myimage.png", "components/knob.json").
+# emcc's own separator is '@', so a literal '@' in a file name
+# (myimage@2x.png) is escaped as '@@' here.
+function(neui_link_example name)
+  cmake_parse_arguments(EX "" "" "WEB_PRELOAD" ${ARGN})
+  target_link_libraries(${name} PRIVATE neui neui-xplhost)
+  if(WIN32)
+    target_link_libraries(${name} PRIVATE neui-win32host)
+  endif()
+  if(APPLE)
+    target_link_libraries(${name} PRIVATE neui-macoshost)
+  endif()
+  if(EMSCRIPTEN)
+    set_target_properties(${name} PROPERTIES SUFFIX ".html")
+    foreach(pair IN LISTS EX_WEB_PRELOAD)
+      string(FIND "${pair}" "|" bar)
+      string(SUBSTRING "${pair}" 0 ${bar} src)
+      math(EXPR after "${bar} + 1")
+      string(SUBSTRING "${pair}" ${after} -1 dst)
+      set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/${src}")
+      string(REPLACE "@" "@@" src "${CMAKE_CURRENT_SOURCE_DIR}/${src}")
+      string(REPLACE "@" "@@" dst "${dst}")
+      target_link_options(${name} PRIVATE "SHELL:--preload-file ${src}@${dst}")
+    endforeach()
+  endif()
+endfunction()
+
+# The usual example: a GUI executable per platform (the WIN32 subsystem on
+# Windows, MSVC also embedding the shared manifest via neui_example.rc; an app
+# bundle on macOS; a plain executable elsewhere), linked by neui_link_example.
+function(neui_add_example name)
+  cmake_parse_arguments(EX "" "" "SOURCES;WEB_PRELOAD" ${ARGN})
+  if(MSVC)
+    add_executable(${name} WIN32 ${EX_SOURCES} examples/neui_example.rc)
+    target_link_options(${name} PRIVATE "/MANIFEST:NO")
+    set_property(TARGET ${name} APPEND PROPERTY
+      LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+  elseif(WIN32)
+    add_executable(${name} WIN32 ${EX_SOURCES})
+  elseif(APPLE)
+    add_executable(${name} MACOSX_BUNDLE ${EX_SOURCES})
+  else()
+    add_executable(${name} ${EX_SOURCES})
+  endif()
+  neui_link_example(${name} WEB_PRELOAD ${EX_WEB_PRELOAD})
+endfunction()
 
 # Example program
 # On MSVC we provide the application manifest via an .rc file that
@@ -283,119 +368,43 @@ endif()
 # resources by examples/neui_example.rc. The xpl host's
 # platform_load_image looks them up via FindResourceW(name, L"PNG")
 # before falling back to disk - no runtime file dependency on the example.
-
-# Link the appropriate hosts. The win32 host is omitted on non-Windows;
-# the xpl host is built everywhere.
-target_link_libraries(neui_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_example PRIVATE neui-macoshost)
-endif()
+# Web: the same images are preloaded into the page's in-memory file system.
+#
+# Link the appropriate hosts (the win32 host is omitted on non-Windows; the
+# xpl host is built everywhere).
+neui_link_example(neui_example WEB_PRELOAD
+  "examples/myimage.png|myimage.png"
+  "examples/myimage@2x.png|myimage@2x.png"
+  "examples/knob_bg.png|knob_bg.png"
+  "examples/knob_bg@2x.png|knob_bg@2x.png"
+  "examples/knob_move.png|knob_move.png"
+  "examples/knob_move@2x.png|knob_move@2x.png"
+  "examples/lemur@2x.jpg|lemur@2x.jpg"
+  "examples/lion@2x.jpg|lion@2x.jpg"
+  "examples/panda@2x.jpg|panda@2x.jpg")
 
 # GRID widget example - standalone demo separate from the monolithic
 # neui_example so the new widget can be exercised on its own.
 # Reuses the same Win32 application manifest the main example uses (the
 # manifest is generic; it gates dark-mode HMENU theming + per-monitor v2
 # DPI + UTF-8 ACP, all of which apply identically to this app).
-if(MSVC)
-  add_executable(neui_grid_example WIN32
-    examples/grid_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_grid_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_grid_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_grid_example WIN32 examples/grid_example.cpp)
-elseif(APPLE)
-  add_executable(neui_grid_example MACOSX_BUNDLE examples/grid_example.cpp)
-else()
-  add_executable(neui_grid_example examples/grid_example.cpp)
-endif()
-target_link_libraries(neui_grid_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_grid_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_grid_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_grid_example SOURCES examples/grid_example.cpp)
 
 # DnD drop-receiver example. Standalone executable so the drop-target
 # code path can be exercised without dragging the broader example app
 # around. Reuses the same Win32 manifest as neui_example.
-if(MSVC)
-  add_executable(neui_dnd_example WIN32
-    examples/dnd_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_dnd_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_dnd_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_dnd_example WIN32 examples/dnd_example.cpp)
-elseif(APPLE)
-  add_executable(neui_dnd_example MACOSX_BUNDLE examples/dnd_example.cpp)
-else()
-  add_executable(neui_dnd_example examples/dnd_example.cpp)
-endif()
-target_link_libraries(neui_dnd_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_dnd_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_dnd_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_dnd_example SOURCES examples/dnd_example.cpp)
 
 # DnD drag-source example. Side-by-side source + target panes that
 # exercise the begin_drag API end to end (and accept the drag back into
 # the same window, plus into external apps).
-if(MSVC)
-  add_executable(neui_dnd_source_example WIN32
-    examples/dnd_source_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_dnd_source_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_dnd_source_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_dnd_source_example WIN32 examples/dnd_source_example.cpp)
-elseif(APPLE)
-  add_executable(neui_dnd_source_example MACOSX_BUNDLE examples/dnd_source_example.cpp)
-else()
-  add_executable(neui_dnd_source_example examples/dnd_source_example.cpp)
-endif()
-target_link_libraries(neui_dnd_source_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_dnd_source_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_dnd_source_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_dnd_source_example SOURCES examples/dnd_source_example.cpp)
 
 # Render-to-surface example. Renders a procedural bar chart into an
 # off-screen SURFACE asset and displays it via a CUSTOMDRAW widget that
 # calls painter->draw_asset, exercising create_surface + paint_surface
 # (incl. the per-window upload-cache drop on re-render).
-if(MSVC)
-  add_executable(neui_surface_example WIN32
-    examples/surface_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_surface_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_surface_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_surface_example WIN32 examples/surface_example.cpp)
-elseif(APPLE)
-  add_executable(neui_surface_example MACOSX_BUNDLE examples/surface_example.cpp)
-else()
-  add_executable(neui_surface_example examples/surface_example.cpp)
-endif()
-target_link_libraries(neui_surface_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_surface_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_surface_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_surface_example SOURCES examples/surface_example.cpp)
 
 # Filter knob example. Bakes a knob's static art (bezel + linear-gradient face)
 # into a SURFACE, then bakes in the designer's drop shadow by hand-wiring its
@@ -404,209 +413,48 @@ endif()
 # 2-layer compound draws the baked face + a rotating indicator surface; a
 # rotational drag behavior turns the knob. Demonstrates the "bake once, blit
 # many" architecture from plans/svg-adaption.md.
-if(MSVC)
-  add_executable(neui_filter_knob_example WIN32
-    examples/filter_knob_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_filter_knob_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_filter_knob_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_filter_knob_example WIN32 examples/filter_knob_example.cpp)
-elseif(APPLE)
-  add_executable(neui_filter_knob_example MACOSX_BUNDLE examples/filter_knob_example.cpp)
-else()
-  add_executable(neui_filter_knob_example examples/filter_knob_example.cpp)
-endif()
-target_link_libraries(neui_filter_knob_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_filter_knob_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_filter_knob_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_filter_knob_example SOURCES examples/filter_knob_example.cpp)
 
 # Path example. A CUSTOMDRAW widget exercises the extended path API directly:
 # cubic + quadratic Bézier curves, the even-odd fill-rule, and a styled stroke
 # (round cap/join + dash array) - the calls an SVG renderer issues unflattened.
-if(MSVC)
-  add_executable(neui_path_example WIN32
-    examples/path_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_path_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_path_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_path_example WIN32 examples/path_example.cpp)
-elseif(APPLE)
-  add_executable(neui_path_example MACOSX_BUNDLE examples/path_example.cpp)
-else()
-  add_executable(neui_path_example examples/path_example.cpp)
-endif()
-target_link_libraries(neui_path_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_path_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_path_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_path_example SOURCES examples/path_example.cpp)
 
 # Overlay example. A transparent CUSTOMDRAW (NEUI_ATTR_OVERLAY +
 # NEUI_ATTR_INPUT_TRANSPARENT) composited over a backdrop CUSTOMDRAW - exercises
 # widget-local mouse coords, input-transparent hit-testing, and per-pixel-alpha
 # overlay compositing (DirectComposition on the native win32 host) together.
-if(MSVC)
-  add_executable(neui_overlay_example WIN32
-    examples/overlay_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_overlay_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_overlay_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_overlay_example WIN32 examples/overlay_example.cpp)
-elseif(APPLE)
-  add_executable(neui_overlay_example MACOSX_BUNDLE examples/overlay_example.cpp)
-else()
-  add_executable(neui_overlay_example examples/overlay_example.cpp)
-endif()
-target_link_libraries(neui_overlay_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_overlay_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_overlay_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_overlay_example SOURCES examples/overlay_example.cpp)
 
 # Client resource provider example (NEUI_API_RESOURCE_CLIENT). The client builds
 # a BMP in memory at startup and hands the bytes to the host on demand, so the
 # image resolves under a name that exists nowhere on disk. WIN32 subsystem like
 # the other GUI examples - the native Win32 host's window/pump lives behind
 # WinMain, so a console-subsystem build never gets a frame.
-if(MSVC)
-  add_executable(neui_resource_client_example WIN32
-    examples/resource_client_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_resource_client_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_resource_client_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_resource_client_example WIN32
-    examples/resource_client_example.cpp)
-elseif(APPLE)
-  add_executable(neui_resource_client_example MACOSX_BUNDLE
-    examples/resource_client_example.cpp)
-else()
-  add_executable(neui_resource_client_example examples/resource_client_example.cpp)
-endif()
-target_link_libraries(neui_resource_client_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_resource_client_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_resource_client_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_resource_client_example
+  SOURCES examples/resource_client_example.cpp)
 
 # Arc example. Value-driven arc / ring / pie compound layers
 # (NEUI_COMPOUND_LAYER_ARC) - ring, elliptical ring, filled wedge, and a
 # center-polarity bipolar arc, each bound to NEUI_PARAM_VALUE.
-if(MSVC)
-  add_executable(neui_arc_example WIN32
-    examples/arc_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_arc_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_arc_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_arc_example WIN32 examples/arc_example.cpp)
-elseif(APPLE)
-  add_executable(neui_arc_example MACOSX_BUNDLE examples/arc_example.cpp)
-else()
-  add_executable(neui_arc_example examples/arc_example.cpp)
-endif()
-target_link_libraries(neui_arc_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_arc_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_arc_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_arc_example SOURCES examples/arc_example.cpp)
 
 # Partial-repaint example: simulated automation over a grid of compound knobs
 # on the xpl host, driven by a client pump_once loop that reports how long the
 # pumps (which include the paints) take. Compare against
 # NEUI_DEBUG_FULL_REPAINT=1; NEUI_DEBUG_DAMAGE=1 tints the repainted rects.
-if(MSVC)
-  add_executable(neui_partial_repaint_example WIN32
-    examples/partial_repaint_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_partial_repaint_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_partial_repaint_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_partial_repaint_example WIN32 examples/partial_repaint_example.cpp)
-elseif(APPLE)
-  add_executable(neui_partial_repaint_example MACOSX_BUNDLE examples/partial_repaint_example.cpp)
-else()
-  add_executable(neui_partial_repaint_example examples/partial_repaint_example.cpp)
-endif()
-target_link_libraries(neui_partial_repaint_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_partial_repaint_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_partial_repaint_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_partial_repaint_example SOURCES examples/partial_repaint_example.cpp)
 
 # Filmstrip / stitchmap knob example. Generates a vertical frame strip into a
 # SURFACE, tags it via assets->set_frame_layout, and drives it with a compound
 # asset layer whose "frame" prop is bound to NEUI_PARAM_VALUE + a rotational
 # drag behavior - value scrubs frames.
-if(MSVC)
-  add_executable(neui_filmstrip_knob_example WIN32
-    examples/filmstrip_knob_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_filmstrip_knob_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_filmstrip_knob_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_filmstrip_knob_example WIN32 examples/filmstrip_knob_example.cpp)
-elseif(APPLE)
-  add_executable(neui_filmstrip_knob_example MACOSX_BUNDLE examples/filmstrip_knob_example.cpp)
-else()
-  add_executable(neui_filmstrip_knob_example examples/filmstrip_knob_example.cpp)
-endif()
-target_link_libraries(neui_filmstrip_knob_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_filmstrip_knob_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_filmstrip_knob_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_filmstrip_knob_example SOURCES examples/filmstrip_knob_example.cpp)
 
 # Shader example (plans/shader-effects.md, phase 2). Compiles .nsl shaders via
 # NEUI_API_SHADER and bakes them once: a bitmap banner, 128-frame knob strips
 # driven by a compound "frame" binding, tiles, and a broken shader's diagnostic.
-if(MSVC)
-  add_executable(neui_shader_example WIN32
-    examples/shader_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_shader_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_shader_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_shader_example WIN32 examples/shader_example.cpp)
-elseif(APPLE)
-  add_executable(neui_shader_example MACOSX_BUNDLE examples/shader_example.cpp)
-else()
-  add_executable(neui_shader_example examples/shader_example.cpp)
-endif()
-target_link_libraries(neui_shader_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_shader_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_shader_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_shader_example SOURCES examples/shader_example.cpp)
 
 # Font-loading example. Registers a client-supplied font (NEUI_ASSET_KIND_FONT)
 # via assets->create_font_from_file and proves the family reaches both the
@@ -614,27 +462,7 @@ endif()
 # push_font). Any .ttf dropped in examples/fonts/ is copied next to the
 # executable so the bundled-resource path can be exercised; absent that the
 # example falls back to a distinctive system font so it always renders.
-if(MSVC)
-  add_executable(neui_font_loading_example WIN32
-    examples/font_loading_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_font_loading_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_font_loading_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_font_loading_example WIN32 examples/font_loading_example.cpp)
-elseif(APPLE)
-  add_executable(neui_font_loading_example MACOSX_BUNDLE examples/font_loading_example.cpp)
-else()
-  add_executable(neui_font_loading_example examples/font_loading_example.cpp)
-endif()
-target_link_libraries(neui_font_loading_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_font_loading_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_font_loading_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_font_loading_example SOURCES examples/font_loading_example.cpp)
 # Copy any bundled fonts next to the executable (no-op if examples/fonts is
 # empty / absent). On macOS bundles, place them in Resources/fonts.
 file(GLOB NEUI_BUNDLED_FONTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/fonts/*.ttf"
@@ -657,27 +485,7 @@ endif()
 # Declarative "component" format example. Loads components/knob.json into a
 # COMPONENT asset and instantiates four knobs from it (both create_from_component
 # and create + set_asset), then re-serializes it (designer round-trip).
-if(MSVC)
-  add_executable(neui_component_knob_example WIN32
-    examples/component_knob_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_component_knob_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_component_knob_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_component_knob_example WIN32 examples/component_knob_example.cpp)
-elseif(APPLE)
-  add_executable(neui_component_knob_example MACOSX_BUNDLE examples/component_knob_example.cpp)
-else()
-  add_executable(neui_component_knob_example examples/component_knob_example.cpp)
-endif()
-target_link_libraries(neui_component_knob_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_component_knob_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_component_knob_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_component_knob_example SOURCES examples/component_knob_example.cpp WEB_PRELOAD "examples/components|components")
 # Copy the component document(s) next to the executable so the relative
 # "components/knob.json" path resolves at runtime. On macOS bundles, place them
 # in Resources/components.
@@ -700,52 +508,12 @@ endif()
 # NEUI_ATTR_ALIGN_TEXT="none" with runtime toggles for chip position,
 # scroll axes, and a row-count-driven content generator. Pinned to the
 # crossplatform host (where scrolling SECTION ships in v1).
-if(MSVC)
-  add_executable(neui_section_scroll_example WIN32
-    examples/section_scroll_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_section_scroll_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_section_scroll_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_section_scroll_example WIN32 examples/section_scroll_example.cpp)
-elseif(APPLE)
-  add_executable(neui_section_scroll_example MACOSX_BUNDLE examples/section_scroll_example.cpp)
-else()
-  add_executable(neui_section_scroll_example examples/section_scroll_example.cpp)
-endif()
-target_link_libraries(neui_section_scroll_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_section_scroll_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_section_scroll_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_section_scroll_example SOURCES examples/section_scroll_example.cpp)
 
 # Tabbed-view example: NEUI_W_TABVIEW / NEUI_W_TABPAGE - all 13 chip
 # positions, scrolling page, per-chip colours, background + tab-outline
 # border, and tab select/deselect events.
-if(MSVC)
-  add_executable(neui_tabview_example WIN32
-    examples/tabview_example.cpp
-    examples/neui_example.rc)
-  target_link_options(neui_tabview_example PRIVATE "/MANIFEST:NO")
-  set_property(TARGET neui_tabview_example APPEND PROPERTY
-    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
-elseif(WIN32)
-  add_executable(neui_tabview_example WIN32 examples/tabview_example.cpp)
-elseif(APPLE)
-  add_executable(neui_tabview_example MACOSX_BUNDLE examples/tabview_example.cpp)
-else()
-  add_executable(neui_tabview_example examples/tabview_example.cpp)
-endif()
-target_link_libraries(neui_tabview_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(neui_tabview_example PRIVATE neui-win32host)
-endif()
-if(APPLE)
-  target_link_libraries(neui_tabview_example PRIVATE neui-macoshost)
-endif()
+neui_add_example(neui_tabview_example SOURCES examples/tabview_example.cpp)
 
 # LVGL host prototype example (plans/lvgl-host-approach-c.md): the knob-heavy
 # measurement screen for the Milestone 3 FPS/CPU evaluation. Console app so
@@ -778,13 +546,13 @@ endif()
 # compile as C++. The source is kept C99-clean so the snippet in the
 # README still reads as C code.
 set_source_files_properties(examples/readme_example.c PROPERTIES LANGUAGE CXX)
-target_link_libraries(readme_example PRIVATE neui neui-xplhost)
-if(WIN32)
-  target_link_libraries(readme_example PRIVATE neui-win32host)
+# em++ compiles a .c input as C++ but warns that this is deprecated unless the
+# language is named explicitly (-Wdeprecated, fatal under NEUI_WERROR).
+if(EMSCRIPTEN)
+  set_source_files_properties(examples/readme_example.c PROPERTIES
+    COMPILE_OPTIONS "-xc++")
 endif()
-if(APPLE)
-  target_link_libraries(readme_example PRIVATE neui-macoshost)
-endif()
+neui_link_example(readme_example)
 
 endif() # NEUI_BUILD_EXAMPLES
 

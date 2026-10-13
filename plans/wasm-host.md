@@ -12,7 +12,7 @@ Confirmed decisions:
 3. **One `<canvas>` per frame.** APPWINDOW fills its mount element; DIALOGs float above it.
 4. **No new host.** The web target is xpl + Canvas2D backend + `platform_web.cpp`, registered as `"neui.host.crossplatform"`.
 
-This plan replaces that feasibility note. Status: Stage 0 done (2026-10-13, results below); Stage 1 is next.
+This plan replaces that feasibility note. Status: Stages 0 and 1 done (2026-10-13, results below each stage); Stage 2 (Canvas 2D backend + minimal window) is next.
 
 ---
 
@@ -123,6 +123,17 @@ Spikes ran on Windows with emsdk **4.0.23** against Edge 155 (the installed Chro
 - `readme_example` links and loads (blank page).
 
 Exit: the web CI job is green, `neui_tests` passes under node, desktop jobs are unchanged.
+
+#### Stage 1 results (2026-10-13)
+
+- **Configure + build:** `emcmake cmake -G Ninja` (Ninja on Windows; emsdk ships none) builds all 90 targets, including all 17 examples, warning-free with `-DNEUI_WERROR=ON`, in both flavours, Debug and Release.
+- **Warnings emsdk's clang found:** `FpEnvGuard` (`nsl_math.h`) and the test's `HostFlushToZero` have no members on the portable path, so their locals were "unused". Both now have an explicit `#else` arm with user-provided constructor and destructor. `readme_example.c` compiled as C++ needs `-xc++` on em++. Nothing was suppressed.
+- **Tests:** `neui_tests` passes under node 24 in both flavours: 469 cases, 6885 checks. The shader goldens are bit-exact on wasm; the NaN-payload concern did not materialise.
+- **Exceptions:** JSPI uses `-fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0` (the current exnref encoding; the legacy `try` encoding makes Firefox warn). Asyncify uses `-fexceptions`.
+- **Release sizes**, before any size work (`neui_example`): JSPI 854 KB wasm + 79 KB JS; Asyncify 1.67 MB wasm + 106 KB JS (×2.0; JS exceptions + broad instrumentation). `readme_example` is 840 KB / 1.64 MB, so most of that is the host + shader library, not the example. Stage 8 does the size pass.
+- **Browser smoke:** `readme_example` and `neui_example` load and run `main` to completion in Edge 155, Firefox 157 and WebKit 27.2, in both flavours. On the null layer `run()` returns at once, and the example's own cleanup after `run()` runs without errors.
+- **CMake:** 15 of the 17 per-example if/elseif blocks collapsed onto `neui_add_example` (byte-identical Windows projects: same `.rc`, same `/MANIFEST:NO`). `neui_example` and `readme_example` keep their custom creation and use `neui_link_example`. Web settings live in one `if(EMSCRIPTEN)` block in the root `CMakeLists.txt`. The flavour's link flags sit on `neui-xplhost` as INTERFACE options, so `neui_tests` never needs stack switching.
+- **Not yet verified:** the new `web` CI job (it runs on the next push), and the Linux / macOS / iOS jobs after the CMake refactor (Windows was rebuilt and tested locally).
 
 ### Stage 2: Canvas 2D backend + minimal window (L)
 

@@ -110,6 +110,11 @@ struct HostFlushToZero {
     __asm__ volatile("msr fpcr, %0" : : "r"(saved | (uint64_t(1) << 24)) : "memory");
   }
   ~HostFlushToZero() { __asm__ volatile("msr fpcr, %0" : : "r"(saved) : "memory"); }
+#else
+  // No flush-to-zero mode to set (wasm has none), so the test checks plain
+  // IEEE behaviour there. User-provided so `host` is not an unused variable.
+  HostFlushToZero() {}
+  ~HostFlushToZero() {}
 #endif
 };
 

@@ -189,6 +189,12 @@ struct FpEnvGuard {
     __asm__ volatile("msr fpcr, %0" : : "r"(uint64_t(0)) : "memory");
   }
   ~FpEnvGuard() { __asm__ volatile("msr fpcr, %0" : : "r"(saved) : "memory"); }
+#else
+  // Nothing to pin: wasm (the portable path's main user) always rounds to
+  // nearest and keeps denormals. User-provided so a guard is not flagged as
+  // an unused variable.
+  FpEnvGuard() {}
+  ~FpEnvGuard() {}
 #endif
 };
 

@@ -4,6 +4,7 @@ name: CI
 #   - Linux   : crossplatform host + Cairo/X11 backend (GCC)
 #   - macOS   : native AppKit host + CoreGraphics backend (AppleClang, Xcode)
 #   - Windows : native Win32 host + Direct2D backend (MSVC)
+# plus the iOS simulator and the web (Emscripten, unit suite under node).
 # Each job configures, builds Debug, and runs the ctest suite. The build is
 # warning-clean by design (the project turns warnings up but not into errors),
 # so this guards against compile breaks and test regressions on every host.
@@ -69,6 +70,40 @@ jobs:
       # neui_embed_smoke is built but not ctest-registered, so it is not run.
       - name: Test
         run: ${{ matrix.test }}
+
+  # Web (plans/wasm-host.md): the whole tree built with Emscripten in both
+  # stack-switching flavours, then the unit suite run under node (the
+  # toolchain sets node as the ctest emulator). The emsdk version is pinned
+  # to the one the Stage 0 spikes were measured with.
+  web:
+    name: Web (Emscripten · ${{ matrix.flavor }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [jspi, asyncify]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up emsdk
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 4.0.23
+          actions-cache-folder: emsdk-cache
+
+      - name: Configure
+        run: >
+          emcmake cmake -B build-web
+          -DCMAKE_BUILD_TYPE=Debug
+          -DNEUI_WERROR=ON
+          -DNEUI_WEB_FLAVOR=${{ matrix.flavor }}
+
+      - name: Build
+        run: cmake --build build-web --parallel
+
+      - name: Test
+        run: ctest --test-dir build-web --output-on-failure
 
   # iOS: build the UIKit host + the whole portable tree for the simulator
   # (arm64), then RUN the unit suite on a booted simulator. Running on the iOS

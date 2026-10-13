@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.15)
 
 # Cairo software rendering backend for the crossplatform host on Linux.
-# Mirrors backends/d2d on Windows and backends/cg on macOS.
-if(WIN32 OR APPLE)
+# Mirrors backends/d2d on Windows and backends/cg on macOS. Not on the web:
+# Emscripten sets UNIX but has no X11 / Cairo (the web uses Canvas 2D).
+if(WIN32 OR APPLE OR EMSCRIPTEN)
   return()
 endif()
 

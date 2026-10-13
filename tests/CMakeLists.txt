@@ -131,8 +131,9 @@ endif()
 
 # Linux-only: Cairo software backend offscreen smoke test. Unlike neui_tests
 # this links a real backend (neui-backend-cairo), so it is gated to the
-# platforms where that backend is built.
-if(UNIX AND NOT APPLE)
+# platforms where that backend is built (Emscripten sets UNIX too, but has
+# neither Cairo nor X11).
+if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
   add_executable(neui_cairo_smoke cairo_backend_smoke.cpp)
   target_include_directories(neui_cairo_smoke PRIVATE ${PROJECT_SOURCE_DIR}/include)
   target_compile_features(neui_cairo_smoke PRIVATE cxx_std_17)
