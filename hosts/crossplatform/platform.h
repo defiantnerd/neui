@@ -432,6 +432,12 @@ namespace xpl_host
   void platform_retained_tree_changed(Session* session, uint32_t widget_index);
 #endif
 
+#if defined(NEUI_PLATFORM_WEB)
+  // The NEUI_API_WEB vtable (include/neui/d/web.h), as an opaque pointer for
+  // get_interface to return. Implemented in platform_web.cpp.
+  void* platform_web_api();
+#endif
+
 #if defined(NEUI_PLATFORM_IOS)
   // -------------------------------------------------------------------------
   // NEUI_API_IOS seams (include/neui/d/ios.h). Implemented in platform_ios.mm.

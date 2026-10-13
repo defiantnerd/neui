@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>neui in a page</title>
+<style>
+  /* Host page for the neui embedding demo (plans/wasm-host.md Stage 7). The
+     page is ordinary HTML; the neui apps live in the slots below. Serve the
+     build directory over http and open embed.html. */
+  html, body { margin: 0; background: #f3f3f3; color: #222;
+               font: 14px system-ui, -apple-system, "Segoe UI", sans-serif; }
+  @media (prefers-color-scheme: dark) { html, body { background: #181818; color: #ddd; } }
+  main { padding: 12px 20px 40px; }
+  h1 { font-size: 20px; margin: 4px 0 12px; }
+  h2 { font-size: 15px; margin: 22px 0 8px; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+  .card { border: 1px solid #8884; border-radius: 6px; padding: 8px; }
+  .card header { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .card header b { flex: 1; }
+  .slot { width: 360px; height: 220px; background: #8882; }
+  .slot.free { width: auto; height: auto; display: inline-block; }
+  #plug-panel { width: 420px; height: 240px; resize: both; overflow: hidden;
+                border: 1px dashed #888; min-width: 200px; min-height: 120px; }
+  #log { height: 140px; overflow: auto; background: #8881; padding: 6px; margin: 0;
+         font: 12px ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<main>
+  <h1>neui apps in an ordinary page</h1>
+  <div class="controls">
+    <label>Theme <select id="theme"><option>auto</option><option>dark</option><option>light</option></select></label>
+    <input id="msg" value="hello from the page" size="28">
+    <button id="send">Send to every app</button>
+  </div>
+
+  <h2>Two apps side by side (APPWINDOW, each fills its slot)</h2>
+  <div class="row">
+    <section class="card"><header><b>left</b><button data-toggle="left">Unmount</button></header>
+      <div class="slot" id="slot-left"></div></section>
+    <section class="card"><header><b>right</b><button data-toggle="right">Unmount</button></header>
+      <div class="slot" id="slot-right"></div></section>
+  </div>
+
+  <h2>A PLUGWINDOW embedded in a resizable panel (drag the corner)</h2>
+  <section class="card" id="plug-host"><header><b>plug</b><button data-toggle="plug">Unmount</button></header>
+    <div id="plug-panel"></div></section>
+
+  <h2>Messages from the apps</h2>
+  <pre id="log"></pre>
+
+  <h2>The full neui example (keeps its own size)</h2>
+  <section class="card"><header><b>example</b><button data-toggle="example">Unmount</button></header>
+    <div class="slot free" id="slot-example"></div></section>
+</main>
+<script type="module">
+  import { NeuiApp } from './neui-web.js';
+
+  const log = (t) => { const l = document.getElementById('log'); l.textContent += t + '\n'; l.scrollTop = l.scrollHeight; };
+  const theme = () => document.getElementById('theme').value;
+  const specs = {
+    left:    { el: 'slot-left',    module: './neui_web_embed_example.mjs', args: ['--name=left'] },
+    right:   { el: 'slot-right',   module: './neui_web_embed_example.mjs', args: ['--name=right'] },
+    // Mounted in the card; the app embeds its PLUGWINDOW into #plug-panel
+    // itself (NEUI_API_EMBED set_parent with a CSS selector).
+    plug:    { el: 'plug-host',    module: './neui_web_embed_example.mjs', args: ['--name=plug', '--plug=#plug-panel'] },
+    example: { el: 'slot-example', module: './neui_example_module.mjs',    args: [] },
+  };
+  const apps = {};
+  window.neuiApps = apps;   // for the test driver
+
+  async function mount(name) {
+    const s = specs[name];
+    const app = await NeuiApp.mount(document.getElementById(s.el), { module: s.module, args: s.args, theme: theme() });
+    app.on('message', (t) => log(name + ': ' + t));
+    app.on('exit', () => log(name + ': exited'));
+    app.on('error', (e) => log(name + ': error ' + e));
+    apps[name] = app;
+    return app;
+  }
+  async function unmount(name) {
+    const app = apps[name];
+    delete apps[name];
+    if (app) await app.unmount();
+    log(name + ': unmounted');
+  }
+  window.neuiMount = mount;
+  window.neuiUnmount = unmount;
+
+  for (const b of document.querySelectorAll('button[data-toggle]')) {
+    b.addEventListener('click', async () => {
+      const name = b.dataset.toggle;
+      b.disabled = true;
+      if (apps[name]) { await unmount(name); b.textContent = 'Mount'; }
+      else { await mount(name); b.textContent = 'Unmount'; }
+      b.disabled = false;
+    });
+  }
+  document.getElementById('send').addEventListener('click', () => {
+    const text = document.getElementById('msg').value;
+    for (const app of Object.values(apps)) app.postMessage(text);
+  });
+  document.getElementById('theme').addEventListener('change', () => {
+    for (const app of Object.values(apps)) app.setTheme(theme());
+  });
+
+  await Promise.all(Object.keys(specs).map(mount));
+  window.neuiReady = true;
+</script>
+</body>
+</html>

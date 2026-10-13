@@ -33,6 +33,7 @@ extern "C" {
 #define DEF_DND_EVENT(x)    (((x)<<16) | 0x0007)
 #define DEF_TAB_EVENT(x)    (((x)<<16) | 0x0008)
 #define DEF_IOS_EVENT(x)    (((x)<<16) | 0x000B)
+#define DEF_WEB_EVENT(x)    (((x)<<16) | 0x000C)
 
   typedef enum neui_event_type
   {
@@ -94,6 +95,9 @@ extern "C" {
     NEUI_EVENT_TAB_SELECTED             = DEF_TAB_EVENT(2),  // tabview: incoming tab, fired before the page swap / repaint
 
     NEUI_EVENT_IOS_ENVIRONMENT_CHANGED  = DEF_IOS_EVENT(1),  // iOS only: orientation / power / thermal / battery / accessibility / keyboard moved (see neui_event_ios_env_t)
+
+    NEUI_EVENT_WEB_MESSAGE              = DEF_WEB_EVENT(1),  // web only: the page sent the app a message (see neui_event_web_t, d/web.h)
+    NEUI_EVENT_WEB_PAGE                 = DEF_WEB_EVENT(2),  // web only: the page was hidden / shown / is being left
 
     NEUI_EVENT_CUSTOM                   = 0x1ffff,
   } neui_event_type_t;
@@ -377,6 +381,20 @@ extern "C" {
     uint32_t      changed;    // NEUI_IOS_ENV_* bitmask
   } neui_event_ios_env_t;
 
+  // Web page interop (NEUI_EVENT_WEB_MESSAGE / NEUI_EVENT_WEB_PAGE, d/web.h).
+  // Fired by the crossplatform host on the web only, to every live session;
+  // `widget` is that session's oldest frame (widget_none if it has none).
+  // WEB_MESSAGE: `data`
+  // is the page's message as UTF-8 (`length` bytes, NUL-terminated, valid
+  // during the callback only). WEB_PAGE: `page_state` is a NEUI_WEB_PAGE_*.
+  typedef struct neui_event_web
+  {
+    neui_widget_t widget;      // the session's first frame
+    const char*   data;        // WEB_MESSAGE: the message; NULL otherwise
+    uint32_t      length;      // its length in bytes
+    uint32_t      page_state;  // WEB_PAGE: NEUI_WEB_PAGE_*; 0 otherwise
+  } neui_event_web_t;
+
   // Grid sort-changed event - fires after a user-driven header click that
   // mutates the sort stack (or removes a level). Carries the column that
   // was clicked and its new direction in the stack; clients that need the
@@ -460,6 +478,7 @@ extern "C" {
       neui_event_tab_t                tab;
       neui_event_metrics_t            metrics;
       neui_event_ios_env_t            ios_env;
+      neui_event_web_t                web;
     } data;
 
     // more event data can be added here

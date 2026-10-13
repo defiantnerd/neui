@@ -62,7 +62,16 @@
 // routes to the neui frame under the pointer (Linux's internal-drag model).
 // Dragging out of the page is not supported.
 //
-// Not yet here: page embedding (Stage 7).
+// Embedding. An app built as an ES module is mounted into a page element by
+// examples/web/neui-web.js, one wasm instance per mount; its frames mount in
+// that element (or where NEUI_API_WEB set_mount / NEUI_API_EMBED set_parent
+// name one by CSS selector). A client that never calls run() (an embedded
+// PLUGWINDOW, as in a DAW) is run by the service loop, started from the
+// first show when no loop runs. Unmount closes every frame for good (APP_QUIT
+// cannot keep one), ends every loop so run() returns to the client, and
+// removes what the app put on the page: canvases, listeners, fonts. Messages
+// to and from the page and the page's visibility go through NEUI_API_WEB and
+// NEUI_EVENT_WEB_*.
 
 #include "host.h"
 #include "platform.h"
@@ -79,6 +88,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -116,7 +126,11 @@ EM_JS_DEPS(neui_web, "$UTF8ToString,$stringToUTF8,$lengthBytesUTF8");
 
 EM_JS(void, web_setup, (), {
   if (Module.neuiWeb) return;
-  var W = Module.neuiWeb = { frames: {}, wake: null, kept: new Map(), nextEv: 1, z: 1000 };
+  // mount: the element the page started the app in (neui-web.js), else null.
+  // off: removes every page-level listener at shutdown.
+  var W = Module.neuiWeb = { frames: {}, wake: null, kept: new Map(), nextEv: 1, z: 1000,
+                             mount: Module.neuiMount || null, theme: Module.neuiTheme || 'auto',
+                             off: [], dead: false };
   Module.neuiCanvases = Module.neuiCanvases || {};
   W.wakeUp = function() { if (W.wake) { var w = W.wake; W.wake = null; w(2); } };
   // Queue a record for the loop and wake it if it is waiting.
@@ -168,8 +182,11 @@ EM_JS(void, web_setup, (), {
   };
   W.apple = /Mac|iPhone|iPad|iPod/.test((navigator.userAgentData && navigator.userAgentData.platform) ||
                                         navigator.platform || navigator.userAgent || "");
-  // Colour scheme: 1 dark, 2 light, 0 no preference.
+  // Colour scheme: 1 dark, 2 light, 0 no preference. The page can fix it
+  // (W.theme "dark" / "light"; "auto" follows prefers-color-scheme).
   W.scheme = function() {
+    if (W.theme === 'dark') return 1;
+    if (W.theme === 'light') return 2;
     if (typeof matchMedia !== 'function') return 0;
     if (matchMedia('(prefers-color-scheme: dark)').matches) return 1;
     if (matchMedia('(prefers-color-scheme: light)').matches) return 2;
@@ -236,26 +253,94 @@ EM_JS(void, web_setup, (), {
   // resize a canvas' device-pixel box, so watch the ratio itself: the query
   // for the current ratio stops matching once it changes. Every frame then
   // re-reports its size (device size 0 = derive it from the new ratio).
+  // A listener on a media query / the document, removed again at shutdown.
+  var listen = function(t, name, fn) {
+    if (t.addEventListener) t.addEventListener(name, fn); else if (t.addListener) t.addListener(fn);
+    var off = function() {
+      if (t.removeEventListener) t.removeEventListener(name, fn); else if (t.removeListener) t.removeListener(fn);
+    };
+    W.off.push(off);
+    return off;
+  };
   W.watchDpr = function() {
     if (typeof matchMedia !== 'function') return;
-    var q = matchMedia('(resolution: ' + devicePixelRatio + 'dppx)');
-    var once = function() {
-      if (q.removeEventListener) q.removeEventListener('change', once); else if (q.removeListener) q.removeListener(once);
+    var q = matchMedia('(resolution: ' + devicePixelRatio + 'dppx)'), off = null;
+    off = listen(q, 'change', function() {
+      off();
       for (var id in W.frames) {
         var cv = W.frames[id].cv;
         W.push(1, +id, cv.clientWidth, cv.clientHeight, 0, 0);
       }
       W.watchDpr();
-    };
-    if (q.addEventListener) q.addEventListener('change', once); else if (q.addListener) q.addListener(once);
+    });
   };
   W.watchDpr();
-  if (typeof matchMedia === 'function') {
-    var mq = matchMedia('(prefers-color-scheme: dark)');
-    var onScheme = function() { W.push(30, 0, W.scheme()); };
-    if (mq.addEventListener) mq.addEventListener('change', onScheme); else if (mq.addListener) mq.addListener(onScheme);
-  }
+  if (typeof matchMedia === 'function')
+    listen(matchMedia('(prefers-color-scheme: dark)'), 'change', function() {
+      if (W.theme === 'auto') W.push(30, 0, W.scheme());
+    });
+  // Page lifecycle (record 31: 1 visible, 2 hidden, 3 leaving).
+  listen(document, 'visibilitychange', function() { W.push(31, 0, document.hidden ? 2 : 1); });
+  listen(window, 'pagehide', function() { W.push(31, 0, 3); });
+
+  // The page side (neui-web.js) talks to the app through these.
+  W.setTheme = function(mode) {
+    if (W.dead) return;
+    W.theme = (mode === 'dark' || mode === 'light') ? mode : 'auto';
+    W.push(30, 0, W.scheme());
+  };
+  W.postToApp = function(text) { if (!W.dead) W.pushText(70, 0, String(text), 0); };
+  W.unmount = function() { if (!W.dead) { Module._neui_web_unmount(); W.wakeUp(); } };
+  if (Module.neuiOnSetup) Module.neuiOnSetup(W);
 });
+
+// The loop for clients that never call run() (an embedded PLUGWINDOW, an app
+// whose main returned), started from a fresh task: neui_web_service returns
+// at once while another loop runs.
+EM_JS(void, web_schedule_service, (), {
+  setTimeout(function() {
+    var W = Module.neuiWeb;
+    if (!W || W.dead) return;
+    try {
+      var r = Module._neui_web_service();
+      if (r && r.catch) r.catch(function(e) { console.error(e); });
+    } catch (e) { console.error(e); }
+  }, 0);
+});
+
+// The app is done (run() returned): unmounted = after an unmount, which also
+// removes everything the app put on the page. Tells neui-web.js, outside the
+// wasm call.
+EM_JS(void, web_ended, (int unmounted), {
+  var W = Module.neuiWeb;
+  if (unmounted && W) {
+    W.dead = true;
+    for (var i = 0; i < W.off.length; i++) { try { W.off[i](); } catch (e) {} }
+    W.off = [];
+    for (var id in W.frames) {
+      var f = W.frames[id];
+      if (f.ro) f.ro.disconnect();
+      if (f.wrap.parentNode) f.wrap.parentNode.removeChild(f.wrap);
+    }
+    W.frames = {};
+    W.kept.clear();
+    Module.neuiCanvases = {};
+  }
+  var cb = Module.neuiOnEnd;
+  if (cb) queueMicrotask(function() { cb(!!unmounted); });
+});
+
+// A message for the page (neui-web.js: app.on('message')), delivered outside
+// the wasm call. 0 = nobody on the page side.
+EM_JS(int, web_post_to_page, (const char* p, int n), {
+  var cb = Module.neuiOnMessage;
+  if (!cb) return 0;
+  var t = UTF8ToString(p, n);
+  queueMicrotask(function() { cb(t); });
+  return 1;
+});
+
+EM_JS(int, web_page_hidden, (), { return (typeof document !== 'undefined' && document.hidden) ? 1 : 0; });
 
 // Suspend until a record is queued (returns 2), the next animation frame when
 // want_raf (1), or timeout_ms (0; < 0 = no timeout).
@@ -305,16 +390,25 @@ EM_JS(int, web_reduced_motion, (), {
   return (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches) ? 1 : 0;
 });
 
-// kind: 0 APPWINDOW, 1 PLUGWINDOW, 2 DIALOG, 3 message box. An APPWINDOW
-// mounts into #neui-root when the page has one, else into <body>. In a
-// container with a size of its own the APPWINDOW fills it (and follows it);
+// kind: 0 APPWINDOW, 1 PLUGWINDOW, 2 DIALOG, 3 message box. An APPWINDOW or
+// PLUGWINDOW mounts into the element its CSS selector names (NEUI_API_WEB
+// set_mount, NEUI_API_EMBED set_parent; searched in the app's mount element
+// first), else into the app's mount element, else #neui-root, else <body>.
+// In a container with a size of its own the frame fills it (and follows it);
 // otherwise the canvas takes the frame's create() size. A dialog or message
 // box floats above the page with a DOM title bar (title, close button, drag
 // to move) over its canvas; the canvas stays the client area.
-EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h), {
-  var W = Module.neuiWeb;
-  var host = (kind === 0 && document.getElementById('neui-root')) || document.body;
-  var fill = kind === 0 && host !== document.body && host.clientWidth > 0 && host.clientHeight > 0;
+EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h, const char* selp), {
+  var W = Module.neuiWeb, host = null, sel = selp ? UTF8ToString(selp) : "";
+  if (kind <= 1) {
+    if (sel) {
+      try { host = (W.mount && W.mount.querySelector(sel)) || document.querySelector(sel); } catch (err) {}
+      if (!host) console.warn('neui: no element matches "' + sel + '"');
+    }
+    host = host || W.mount || document.getElementById('neui-root');
+  }
+  host = host || document.body;
+  var fill = kind <= 1 && host !== document.body && host.clientWidth > 0 && host.clientHeight > 0;
   var floating = kind >= 2;
   var wrap = document.createElement('div');
   wrap.className = floating ? 'neui-frame neui-dialog' : 'neui-frame';
@@ -875,6 +969,10 @@ EM_JS(void, web_drag_end, (), {
 
 namespace xpl_host
 {
+  // The host's session registry (host.cpp).
+  Session* session_by_id(uint32_t session_id);
+  uint32_t session_count();
+
 namespace
 {
   // Per-frame record, stashed on WidgetData::native_handle.
@@ -925,10 +1023,11 @@ namespace
     EV_RESIZE = 1, EV_FOCUS = 2, EV_BLUR = 3, EV_CLOSE = 4, EV_BACKDROP = 5,
     EV_PDOWN = 10, EV_PUP = 11, EV_PMOVE = 12, EV_PLEAVE = 13, EV_CONTEXT = 14, EV_WHEEL = 15,
     EV_KEYDOWN = 20, EV_KEYUP = 21,
-    EV_SCHEME = 30,
+    EV_SCHEME = 30, EV_PAGE = 31,
     EV_COMP_START = 40, EV_COMP_UPDATE = 41, EV_COMP_END = 42, EV_TEXT = 43,
     EV_DND_OVER = 50, EV_DND_LEAVE = 51, EV_DND_DROP = 52,
     EV_DRAG_MOVE = 60, EV_DRAG_UP = 61, EV_DRAG_CANCEL = 62,
+    EV_MESSAGE = 70, EV_UNMOUNT = 71,
   };
   struct WebEvent
   {
@@ -1021,6 +1120,18 @@ namespace
     bool                     running  = true;
   };
   WebDrag* g_drag = nullptr;
+
+  // Loops running now (run, a modal loop, the service loop); 0 = none, so a
+  // shown frame needs the service loop (rule 7).
+  int  g_loop_depth = 0;
+  // Unmounting (neui-web.js app.unmount()): every frame closed for good, no
+  // new frame or blocking call; g_ended once the page side was told.
+  bool g_unmounting = false;
+  bool g_ended      = false;
+  uint32_t g_page_state = NEUI_WEB_PAGE_VISIBLE;
+  // Mount selectors (NEUI_API_WEB set_mount, NEUI_API_EMBED set_parent),
+  // copied; taken by the frame's creation at show.
+  std::map<std::pair<const Session*, uint32_t>, std::string> g_mounts;
 
   // One wheel notch scrolls this many lines (the Win32 default, as on Linux).
   constexpr int WEB_WHEEL_LINES = 3;
@@ -1240,7 +1351,8 @@ namespace
   }
 
   // Client gets APP_QUIT (and may veto), then the frame is torn down.
-  void handle_close(WebFrame* f)
+  // `gone` (unmount): the client still hears APP_QUIT but cannot keep it.
+  void handle_close(WebFrame* f, bool gone = false)
   {
     Session* s = f->session;
     const int id = f->id;
@@ -1251,8 +1363,56 @@ namespace
     const bool allow = !s || s->dispatch_event(&ev);
     // The handler may have destroyed the frame itself.
     f = find_frame(id);
-    if (!f || !allow) return;
+    if (!f || (!allow && !gone)) return;
     teardown_window(f, s ? s->get_widget(f->widget_index) : nullptr);
+  }
+
+  // ---- Page interop (NEUI_API_WEB) -------------------------------------------
+
+  void set_mount(const Session* s, uint32_t idx, const char* selector)
+  {
+    if (selector && *selector) g_mounts[{ s, idx }] = selector;
+    else g_mounts.erase({ s, idx });
+  }
+
+  // NEUI_EVENT_WEB_MESSAGE / _PAGE to every live session; widget = its first
+  // frame (the oldest), widget_none when it has none.
+  void deliver_web(neui_event_type_t type, const std::string* text, uint32_t state)
+  {
+    const uint32_t n = session_count();
+    for (uint32_t i = 1; i <= n; ++i) {
+      Session* s = session_by_id(i);
+      if (!s) continue;
+      neui_event_t ev = {};
+      ev.type = type;
+      ev.data.web.widget.id = UINT32_MAX;
+      int first = 0;
+      for (auto& kv : g_frames) {
+        if (kv.second->session != s || (first && kv.first > first)) continue;
+        if (auto* wd = s->get_widget(kv.second->widget_index)) {
+          first = kv.first;
+          ev.data.web.widget.id = wd->widget_id;
+        }
+      }
+      ev.data.web.data       = text ? text->c_str() : nullptr;
+      ev.data.web.length     = text ? static_cast<uint32_t>(text->size()) : 0u;
+      ev.data.web.page_state = state;
+      s->dispatch_event(&ev);
+    }
+  }
+
+  // Unmount: end every blocking loop and close every frame for good. The
+  // loops see g_quit and unwind; run() returns to the client.
+  void unmount_all()
+  {
+    g_unmounting = true;
+    if (g_drag) g_drag->running = false;
+    for (auto* b : g_boxes) { b->running = false; b->result = 0; }
+    std::vector<int> ids;
+    for (auto& kv : g_frames) ids.push_back(kv.first);
+    for (int id : ids)
+      if (WebFrame* f = find_frame(id)) handle_close(f, /*gone*/true);
+    g_quit = true;
   }
 
   // ---- Pointer (mirrors platform_linux.cpp) ---------------------------------
@@ -1964,6 +2124,19 @@ namespace
         for (auto* b : g_boxes) { style_chrome(b->id, b->session); b->need_paint = true; }
         continue;
       }
+      if (e.type == EV_PAGE) {   // page-wide, no frame
+        g_page_state = static_cast<uint32_t>(e.a);
+        deliver_web(NEUI_EVENT_WEB_PAGE, nullptr, g_page_state);
+        continue;
+      }
+      if (e.type == EV_MESSAGE) {
+        deliver_web(NEUI_EVENT_WEB_MESSAGE, &e.key, 0);
+        continue;
+      }
+      if (e.type == EV_UNMOUNT) {
+        unmount_all();
+        continue;
+      }
       if (e.type == EV_BACKDROP) {   // bring the newest modal forward
         if (!g_modal_order.empty()) web_frame_focus(g_modal_order.back());
         continue;
@@ -2095,6 +2268,7 @@ namespace
                     int kind, bool is_appwindow, WebFrame* owner)
   {
     platform_init();
+    if (g_unmounting) return;   // the app is leaving the page: no new frame
     auto* f = new WebFrame();
     f->id = g_next_frame_id++;
     f->session = session;
@@ -2106,7 +2280,10 @@ namespace
 
     const int w = wd.width  > 0 ? wd.width  : 1;
     const int h = wd.height > 0 ? wd.height : 1;
-    web_frame_create(f->id, kind, wd.x, wd.y, w, h);
+    std::string mount;
+    auto mit = g_mounts.find({ session, widget_index });
+    if (mit != g_mounts.end()) { mount = mit->second; g_mounts.erase(mit); }
+    web_frame_create(f->id, kind, wd.x, wd.y, w, h, mount.empty() ? nullptr : mount.c_str());
     if (!wd.text.empty()) web_frame_title(f->id, wd.text.c_str());
     if (f->is_dialog) {
       if (owner) {
@@ -2206,6 +2383,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_clip_put(int kind, int len)
   g_clip.set_format(clip_mime(kind), g_text_buf.data(), static_cast<uint32_t>(len));
 }
 
+// The page side ends the app (neui-web.js app.unmount()). Handled by the
+// running loop, or by the service loop when none runs (main returned).
+extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_unmount()
+{
+  g_queue.push_back({ EV_UNMOUNT, 0, 0, 0, 0, 0, 0, 0, std::string(), std::string() });
+  if (g_loop_depth == 0) web_schedule_service();
+}
+
 // A drag record; its formats (one per line, len bytes) are in the text buffer.
 extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_push_dnd(int type, int frame, double x, double y,
                                                        int mods, int allowed, int ev_id, int len)
@@ -2274,6 +2459,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
     // Before any Session exists, so the first frame already matches the page.
     neui_detail::theme_apply_web_scheme(web_scheme());
     neui_detail::metrics_add_measure_seam(&metrics_measure_web);
+    g_page_state = web_page_hidden() ? NEUI_WEB_PAGE_HIDDEN : NEUI_WEB_PAGE_VISIBLE;
   }
 
   neui_render_backend_t* platform_get_backend()
@@ -2310,6 +2496,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
     auto* f = static_cast<WebFrame*>(native_handle);
     web_frame_show(f->id, 1);
     f->needs_paint = true;
+    // No loop yet: main is about to call run(), or never will (an embedded
+    // PLUGWINDOW). The service loop starts in a fresh task if none runs then.
+    if (g_loop_depth == 0) web_schedule_service();
     if (f->is_dialog) {   // a dialog comes up focused, as a desktop one does
       forget_modal(f->id);
       g_modal_order.push_back(f->id);
@@ -2386,6 +2575,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
   static void loop_turn(int cap_ms)
   {
     drain_queue();
+    if (g_quit) return;   // the last window closed / unmount: don't wait again
     service_timers();
     sync_text_proxy();
     if (any_paint_pending()) {
@@ -2399,11 +2589,28 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
     }
   }
 
+  // After the outermost loop: tell the page side the app is done; after an
+  // unmount, everything the app put on the page goes too.
+  static void loop_finished()
+  {
+    if (g_loop_depth > 0 || g_ended) return;
+    if (g_unmounting) {
+      g_ended = true;
+      g_mounts.clear();
+      neui_canvas2d_backend::shutdown();
+    }
+    web_ended(g_unmounting ? 1 : 0);
+  }
+
   bool platform_run()
   {
     platform_init();
+    if (g_unmounting) return true;
     g_quit = false;
+    ++g_loop_depth;
     while (!g_quit && g_appwindow_count > 0) loop_turn(-1);
+    --g_loop_depth;
+    loop_finished();
     return true;
   }
 
@@ -2424,16 +2631,39 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
       std::fprintf(stderr, "neui: blocking call during paint refused\n");
       return !g_quit;
     }
+    ++g_loop_depth;
     while (keep_running && *keep_running && !g_quit) loop_turn(16);
+    --g_loop_depth;
     return !g_quit;
   }
 
-  // DAW-embedding seams - mounting into a page element comes in Stage 7.
+  // The service loop (plans rule 7): runs the frames of a client that never
+  // calls run() - an embedded PLUGWINDOW (the embed contract forbids run()),
+  // or an app whose main returned - and an unmount that comes after run()
+  // returned. Started by web_schedule_service; returns at once while another
+  // loop runs. A promising export under JSPI (JSPI_EXPORTS).
+  extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_service()
+  {
+    if (g_loop_depth > 0 || g_ended) return;
+    ++g_loop_depth;
+    drain_queue();
+    while (!g_quit && !g_frames.empty()) loop_turn(-1);
+    --g_loop_depth;
+    loop_finished();
+  }
+
+  // Embedding: the "native parent" of a PLUGWINDOW is a CSS selector (a
+  // const char*), copied like NEUI_API_WEB set_mount. There is no DAW pump:
+  // the service loop runs the frame, so event_fd is -1 and pump_and_tick a
+  // no-op.
   void platform_set_embed_parent(Session* session, uint32_t widget_index, void* native_parent)
   {
     if (!session) return;
     auto* wd = session->get_widget(widget_index);
-    if (wd) wd->embed_parent = reinterpret_cast<uintptr_t>(native_parent);
+    if (!wd) return;
+    const char* sel = static_cast<const char*>(native_parent);
+    set_mount(session, widget_index, sel);
+    wd->embed_parent = (sel && *sel) ? 1u : 0u;   // a flag here, not a pointer
   }
   int  platform_embed_event_fd(void* /*native_handle*/) { return -1; }
   void platform_embed_pump_and_tick(void* /*native_handle*/) {}
@@ -2600,7 +2830,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
                                    int hot_x, int hot_y)
   {
     std::unique_ptr<DragPreview> preview(static_cast<DragPreview*>(preview_native));
-    if (!native_handle || !item || g_drag) return 0;
+    if (!native_handle || !item || g_drag || g_unmounting) return 0;
     if (g_in_paint) {   // plans rule 3: a paint never suspends
       std::fprintf(stderr, "neui: begin_drag during paint refused\n");
       return 0;
@@ -2671,7 +2901,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
   int platform_message_box(void* native_handle, const char* text,
                            const char* caption, uint32_t flags)
   {
-    if (!native_handle) return 0;
+    if (!native_handle || g_unmounting) return 0;
     if (g_in_paint) {
       std::fprintf(stderr, "neui: message box during paint refused\n");
       return 0;
@@ -2690,7 +2920,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
     }
     const int w = b->box.win_w, h = b->box.win_h;
     b->dpr = static_cast<float>(web_dpr());
-    web_frame_create(b->id, 3, 0, 0, w, h);
+    web_frame_create(b->id, 3, 0, 0, w, h, nullptr);
     web_frame_title(b->id, caption ? caption : "");
     web_frame_owner(b->id, owner_id, 0, 0, /*centred*/1);
     style_chrome(b->id, b->session);
@@ -2725,5 +2955,56 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
     }
     return result;
   }
+
+  // ---- NEUI_API_WEB (include/neui/d/web.h) ----------------------------------
+
+  static Session* web_session(neui_session_t session)
+  {
+    return session_by_id(session.session & 0xffff);
+  }
+
+  static bool NEUI_ABI web_set_mount(neui_session_t session, neui_widget_t frame,
+                                     const char* selector)
+  {
+    Session* s = web_session(session);
+    if (!s || ((frame.id >> 16) & 0xffff) != (s->get_session_id() & 0xffff)) return false;
+    const uint32_t idx = frame.id & 0xffff;
+    auto* wd = s->get_widget(idx);
+    if (!wd || wd->native_handle || !wd->type) return false;
+    if (std::strcmp(wd->type, NEUI_W_APPWINDOW) != 0 && std::strcmp(wd->type, NEUI_W_PLUGWINDOW) != 0)
+      return false;
+    set_mount(s, idx, selector);
+    return true;
+  }
+
+  static bool NEUI_ABI web_post_message(neui_session_t session, const char* data, uint32_t length)
+  {
+    if (!web_session(session) || (!data && length)) return false;
+    return web_post_to_page(data ? data : "", static_cast<int>(length)) != 0;
+  }
+
+  static uint32_t NEUI_ABI web_page_state(neui_session_t /*session*/)
+  {
+    return g_page_state;
+  }
+
+  static uint32_t NEUI_ABI web_flavor(neui_session_t /*session*/)
+  {
+#if defined(NEUI_WEB_JSPI)
+    return NEUI_WEB_FLAVOR_JSPI;
+#else
+    return NEUI_WEB_FLAVOR_ASYNCIFY;
+#endif
+  }
+
+  static neui_web_api_t g_web_api = {
+    NEUI_VERSION,
+    web_set_mount,
+    web_post_message,
+    web_page_state,
+    web_flavor,
+  };
+
+  void* platform_web_api() { return &g_web_api; }
 
 } // namespace xpl_host

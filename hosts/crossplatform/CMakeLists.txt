@@ -71,8 +71,12 @@ elseif(EMSCRIPTEN)
   target_link_libraries(neui-xplhost PRIVATE neui-backend-canvas2d)
   # The flavour's stack switching goes on every program that links the host
   # (and only those: neui_tests never suspends, so it runs on any node).
+  # neui_web_service is the loop for clients that never call run() (an
+  # embedded PLUGWINDOW): it suspends, so JSPI must wrap it like main.
   if(NEUI_WEB_FLAVOR STREQUAL "jspi")
-    target_link_options(neui-xplhost INTERFACE "-sJSPI" "-Wno-experimental")
+    target_compile_definitions(neui-xplhost PRIVATE NEUI_WEB_JSPI=1)
+    target_link_options(neui-xplhost INTERFACE "-sJSPI" "-Wno-experimental"
+      "-sJSPI_EXPORTS=neui_web_service")
   else()
     target_link_options(neui-xplhost INTERFACE "-sASYNCIFY"
       "-sASYNCIFY_STACK_SIZE=${NEUI_WEB_ASYNCIFY_STACK}")

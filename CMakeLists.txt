@@ -263,8 +263,10 @@ if(NEUI_BUILD_EXAMPLES AND NOT NEUI_IOS)
 # which is where the examples look ("myimage.png", "components/knob.json").
 # emcc's own separator is '@', so a literal '@' in a file name
 # (myimage@2x.png) is escaped as '@@' here.
+# WEB_MODULE makes it an ES module for embedding (.mjs + .wasm, no page):
+# examples/web/neui-web.js mounts it into an element of any page (Stage 7).
 function(neui_link_example name)
-  cmake_parse_arguments(EX "" "" "WEB_PRELOAD" ${ARGN})
+  cmake_parse_arguments(EX "WEB_MODULE" "" "WEB_PRELOAD" ${ARGN})
   target_link_libraries(${name} PRIVATE neui neui-xplhost)
   if(WIN32)
     target_link_libraries(${name} PRIVATE neui-win32host)
@@ -272,12 +274,20 @@ function(neui_link_example name)
   if(APPLE)
     target_link_libraries(${name} PRIVATE neui-macoshost)
   endif()
-  if(EMSCRIPTEN)
+  if(EMSCRIPTEN AND EX_WEB_MODULE)
+    # One factory per module, instantiated once per mount (each mount gets
+    # its own heap and its own neui state).
+    set_target_properties(${name} PROPERTIES SUFFIX ".mjs")
+    target_link_options(${name} PRIVATE -sMODULARIZE=1 -sEXPORT_ES6=1
+      -sEXPORT_NAME=createNeuiApp -sENVIRONMENT=web)
+  elseif(EMSCRIPTEN)
     set_target_properties(${name} PROPERTIES SUFFIX ".html")
     target_link_options(${name} PRIVATE
       "SHELL:--shell-file ${CMAKE_CURRENT_SOURCE_DIR}/examples/web/shell.html")
     set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/examples/web/shell.html")
+  endif()
+  if(EMSCRIPTEN)
     foreach(pair IN LISTS EX_WEB_PRELOAD)
       string(FIND "${pair}" "|" bar)
       string(SUBSTRING "${pair}" 0 ${bar} src)
@@ -379,7 +389,7 @@ endif()
 #
 # Link the appropriate hosts (the win32 host is omitted on non-Windows; the
 # xpl host is built everywhere).
-neui_link_example(neui_example WEB_PRELOAD
+set(NEUI_EXAMPLE_WEB_PRELOAD
   "examples/myimage.png|myimage.png"
   "examples/myimage@2x.png|myimage@2x.png"
   "examples/knob_bg.png|knob_bg.png"
@@ -389,6 +399,24 @@ neui_link_example(neui_example WEB_PRELOAD
   "examples/lemur@2x.jpg|lemur@2x.jpg"
   "examples/lion@2x.jpg|lion@2x.jpg"
   "examples/panda@2x.jpg|panda@2x.jpg")
+neui_link_example(neui_example WEB_PRELOAD ${NEUI_EXAMPLE_WEB_PRELOAD})
+
+# Web embedding (plans/wasm-host.md Stage 7): ES modules that
+# examples/web/neui-web.js mounts into a page, and the demo host page
+# (embed.html) that mounts them side by side. Served from the build dir.
+if(EMSCRIPTEN)
+  add_executable(neui_web_embed_example examples/web_embed_example.cpp)
+  neui_link_example(neui_web_embed_example WEB_MODULE)
+  add_executable(neui_example_module examples/main.cpp)
+  neui_link_example(neui_example_module WEB_MODULE WEB_PRELOAD ${NEUI_EXAMPLE_WEB_PRELOAD})
+  foreach(f neui-web.js embed.html)
+    set_property(TARGET neui_web_embed_example APPEND PROPERTY LINK_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/examples/web/${f}")
+    add_custom_command(TARGET neui_web_embed_example POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples/web/${f}" "$<TARGET_FILE_DIR:neui_web_embed_example>/${f}")
+  endforeach()
+endif()
 
 # GRID widget example - standalone demo separate from the monolithic
 # neui_example so the new widget can be exercised on its own.

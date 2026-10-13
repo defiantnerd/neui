@@ -12,7 +12,7 @@ Confirmed decisions:
 3. **One `<canvas>` per frame.** APPWINDOW fills its mount element; DIALOGs float above it.
 4. **No new host.** The web target is xpl + Canvas2D backend + `platform_web.cpp`, registered as `"neui.host.crossplatform"`.
 
-This plan replaces that feasibility note. Status: Stages 0-6 done (2026-10-13, results below each stage); Stage 7 (embedding and page interop) is next.
+This plan replaces that feasibility note. Status: Stages 0-7 done (2026-10-14, results below each stage); Stage 8 (performance, polish, documentation) is next.
 
 ---
 
@@ -366,6 +366,26 @@ Exit: `neui_dnd_example` accepts text and files from the desktop and from page e
   - A `dist/` layout (`.wasm`, `.js`, `neui-web.js`, `.data`). No COOP / COEP is needed, since there are no threads.
 
 Exit: the demo page mounts / unmounts both apps, messages flow both ways, the leak test is flat.
+
+#### Stage 7 results (2026-10-14)
+
+- **Module shape**: `neui_link_example(<target> WEB_MODULE)` links an ES module (`-sMODULARIZE -sEXPORT_ES6 -sEXPORT_NAME=createNeuiApp -sENVIRONMENT=web`, `.mjs` + `.wasm` [+ `.data`]). Built here: `neui_web_embed_example` (new, `examples/web_embed_example.cpp`) and `neui_example_module` (`examples/main.cpp` with its resources).
+- **Page side**: `examples/web/neui-web.js`. `NeuiApp.mount(element, { module, flavor, args, theme })` imports the module once, compiles its wasm once (`compileStreaming`, cached per URL) and instantiates it per mount (`instantiateWasm`). `module` may be `{ jspi, asyncify }`; 'auto' picks JSPI where `WebAssembly.Suspending` exists. Then `app.on('message' | 'exit' | 'error')`, `app.postMessage(data)` (non-strings as JSON), `app.setTheme('dark' | 'light' | 'auto')`, `await app.unmount()`. Messages the app sends before the first listener (its startup runs before `mount()` resolves) are held for it. `.data` packages are fetched per mount (the browser cache covers repeats).
+- **`NEUI_API_WEB`** (`include/neui/d/web.h`, exposed by the web xpl host only, NULL elsewhere): `set_mount(frame, selector)`, `post_message(data, length)`, `page_state()`, `flavor()`. Page → app arrives as events in a new category 0x000C: `NEUI_EVENT_WEB_MESSAGE` and `NEUI_EVENT_WEB_PAGE` (`visibilitychange` / `pagehide` → `NEUI_WEB_PAGE_VISIBLE / HIDDEN / LEAVING`), payload `neui_event_web_t`. They go to every live session, `widget` = its oldest frame. Events instead of the planned client callback interface, following the iOS precedent (`NEUI_EVENT_IOS_ENVIRONMENT_CHANGED`).
+- **Mounting**: a frame's selector is searched in the app's mount element first, then in the document; no selector = the mount element (then `#neui-root`, then `<body>`). The frame fills a container that has a size and follows it. `NEUI_API_EMBED::set_parent` takes the selector as its `native_parent` (copied); `event_fd` = -1, `pump_and_tick` a no-op. Dialogs still float in `<body>`.
+- **Service loop** (rule 7): `neui_web_service`, a `JSPI_EXPORTS` export, started in a fresh task from a frame's show when no loop runs. It returns at once if `main` has entered `run()` by then. It runs the frames of a client whose `main` returned (the embedded PLUGWINDOW of the demo calls `set_parent` and returns, as in a DAW), and an unmount that comes after `run()` returned.
+- **Unmount**: a queued record. Every frame closes through the "gone" path (APP_QUIT is delivered, a veto is ignored); open message boxes, an in-page drag and modal loops end; `run()` returns and the client's cleanup runs. No new frame or blocking call is accepted after that. When the outermost loop ends, the page side is told; after an unmount every page-level listener (media queries, `visibilitychange`, `pagehide`), every DOM node and the client fonts (`document.fonts`) are removed. An app that ends by itself (its last window closed) reports `exit` and is unmounted the same way.
+- **Fixed along the way**: `loop_turn` waited for one more record after a drain that set `g_quit`, so `run()` returned only at the next input event after the last window closed (on unmount: never).
+- **Checked** on `examples/web/embed.html` (two APPWINDOW apps side by side, a PLUGWINDOW in a CSS-resizable panel, the full `neui_example`):
+  - Edge (JSPI), Firefox (Asyncify), WebKit (Asyncify and JSPI):
+    - messages page → app (all three apps show the page's text) and app → page ("ready", button pings, knob values);
+    - the panel resize reaches the PLUGWINDOW (RESIZE, status 560 × 200);
+    - the page's theme switch (frames with `NEUI_ATTR_FOLLOW_SYSTEM_THEME`);
+    - mounting doesn't take focus (`document.activeElement` stays `<body>`);
+    - unmounting `neui_example` with its message box open (the box goes, `run()` returns);
+    - unmounting and remounting the PLUGWINDOW app (service loop).
+  - **Leak test**, 100 mount / unmount cycles of one app in about 1 s: DOM nodes 50 → 50, no fonts left. In Edge, live wasm instances after forced GC stayed at 2 (the two apps still mounted) of 105 created; counted through `WeakRef`s on every instance, because DevTools' `Runtime.queryObjects` never finishes on a page with JSPI apps running. Firefox / WebKit ran 30 cycles with DOM counts only (no forced GC there).
+- **Not done here**: a `dist/` layout with both flavours side by side (the page loads modules from its own build directory; `{ jspi, asyncify }` in `mount()` is ready for it). That goes with the Stage 8 docs.
 
 ### Stage 8: performance, polish, documentation (M-L)
 

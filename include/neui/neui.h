@@ -33,6 +33,7 @@
 #include "d/metrics.h"
 #include "d/embed.h"
 #include "d/ios.h"
+#include "d/web.h"
 
 #ifdef __cplusplus
 extern "C" {

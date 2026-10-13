@@ -362,6 +362,18 @@ EM_JS(int, c2d_font_add, (const char* fam, const uint8_t* data, int len, int wei
   }
 });
 
+// The app leaves the page: its fonts leave the document, the only page-wide
+// reference the backend holds. Everything else lives on the module object
+// and goes with the instance; the backend stays callable (the client's own
+// cleanup after run() still destroys contexts and bitmaps).
+EM_JS(void, c2d_shutdown, (), {
+  var S = Module.neuiC2D; if (!S) return;
+  var set = (typeof document !== 'undefined') ? document.fonts : self.fonts;
+  for (var k in S.fonts) { try { set.delete(S.fonts[k]); } catch (e) {} }
+  S.fonts = {};
+  S.metrics.clear(); S.mfont = null;
+});
+
 EM_JS(void, c2d_font_remove, (int tok), {
   var S = Module.neuiC2D, f = S.fonts[tok]; if (!f) return;
   var set = (typeof document !== 'undefined') ? document.fonts : self.fonts;
@@ -1139,6 +1151,11 @@ namespace neui_canvas2d_backend
   {
     auto* st = static_cast<C2DCtx*>(ctx);
     if (st && scale > 0.0f) st->scale = scale;
+  }
+
+  void shutdown()
+  {
+    c2d_shutdown();
   }
 
 } // namespace neui_canvas2d_backend

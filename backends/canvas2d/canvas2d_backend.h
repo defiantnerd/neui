@@ -24,4 +24,9 @@ namespace neui_canvas2d_backend
   // (96 x 1.1 is not a whole number); the platform passes the real value
   // through here after update_dpi. Takes effect at the next begin_frame.
   void set_scale(neui_render_ctx_t ctx, float scale);
+
+  // The app leaves the page (unmount): removes the fonts it registered from
+  // the document (font handles still held become no-ops). The backend stays
+  // callable for the client's cleanup.
+  void shutdown();
 }

@@ -192,6 +192,10 @@ namespace xpl_host
     // d/ios.h asks clients to feature-detect on.
     if (!strcmp(iface, NEUI_API_IOS))       return platform_ios_api();
 #endif
+#if defined(NEUI_PLATFORM_WEB)
+    // Web page interop (d/web.h); NULL on every other build.
+    if (!strcmp(iface, NEUI_API_WEB))       return platform_web_api();
+#endif
     return nullptr;
   }
 
