@@ -12,7 +12,7 @@ Confirmed decisions:
 3. **One `<canvas>` per frame.** APPWINDOW fills its mount element; DIALOGs float above it.
 4. **No new host.** The web target is xpl + Canvas2D backend + `platform_web.cpp`, registered as `"neui.host.crossplatform"`.
 
-This plan replaces that feasibility note. Status: Stages 0-2 done (2026-10-13, results below each stage); Stage 3 (input, focus, theme, container sizing) is next.
+This plan replaces that feasibility note. Status: Stages 0-3 done (2026-10-13, results below each stage); Stage 4 (dialogs, popups, message box, menubar) is next.
 
 ---
 
@@ -218,6 +218,36 @@ Builds on 2a (`hosts/crossplatform/platform_web.{cpp,js}`, helpers in `hosts/sha
 - **Debug:** URL query parameters `?NEUI_DEBUG_PAINT=1` are mapped into `ENV` in `preRun` (`getenv` is cached, `host.cpp:2390,2426`). stderr goes to `console.error`. `main` gets `argv` from the mount options.
 
 Exit: `readme_example`, `path_example`, `overlay_example`, `neui_grid_example`, `neui_tabview_example`, `neui_section_scroll_example`, `neui_shader_example` (CPU, animated) and `neui_partial_repaint_example` run interactively. The last one needs its `pump_once + sleep_for` loop (`:150-182`) ported to the web pattern. The how-to-port §12 checks for mouse, keyboard, focus, resize, DPI, theme and images pass in Chrome and Firefox, including a manual check in a real Firefox that the keydown / dragover verdicts (rule 5) take effect.
+
+#### Stage 3 results (2026-10-13)
+
+- **Input** (`platform_web.cpp`, routing copied from `platform_linux.cpp`):
+  - Pointer Events with pointer capture. Overlay pre-checks: popup → toast → combo → menubar.
+  - Double-click synthesis (400 ms / 4 px), right button, leave.
+  - Wheel: a pixel path into the smooth GRID / SECTION kinetics plus a line path for stepped widgets, with spring-back on the heartbeat.
+  - Keys in Linux order: Tab, open menubar, accelerators, KEYDOWN, KEYCHAR.
+  - Consecutive pointer moves coalesce in the queue.
+- **Key mapping**: `hosts/shared/web/keys_web.h` (letters from `key`, digits / named keys from `code`, Cmd = `NEUI_KMOD_CTRL` on Apple, AltGr is not Ctrl+Alt), unit-tested in `tests/test_keys_web.cpp` (7 cases).
+- **Verdicts (rule 5)**: the deferred `preventDefault` works for wheel, Tab, Space and context menu in Edge and WebKit. With a 400 px viewport:
+  - a wheel over the listbox scrolls the list, not the page;
+  - a wheel over an empty canvas area scrolls the page;
+  - Space typed into the INPUTBOX does not scroll;
+  - PageDown with nothing focused scrolls the page.
+
+  In Playwright's Firefox, wheel and Tab work but Space still scrolls (its injected input runs the keypress default before microtasks). **Still to check by hand in a real Firefox.**
+- **Driven in Edge, Firefox and WebKit** (`neui_example`, both flavours):
+  - typing into the INPUTBOX, buttons, checkboxes;
+  - slider and rotational knob drags, double-click reset to default;
+  - knob right-click popup (through the nested modal loop);
+  - listbox wheel, Tab traversal;
+  - File menu by mouse + arrow keys, combo selection, toast animation.
+- **Theme**: `prefers-color-scheme` read in `platform_init` and followed live (`hosts/shared/web/theme_provider_web.h`); "no preference" keeps the dark default.
+- **Container sizing**: an APPWINDOW in a `#neui-root` with its own size fills it and follows it (700×420 → 900×520 checked); otherwise the canvas takes the create() size. Size constraints map to CSS min / max.
+- **DPR changes**: a `matchMedia('(resolution: Ndppx)')` watcher re-reports every frame's size. The CDP device-scale override fires neither it nor ResizeObserver; with the record queued the backing store follows (1010 → 1515 px at 1.5).
+- **Metrics**: a `NEUI_API_METRICS` measure seam backed by the browser's text measurement.
+- **Debug**: `?NEUI_DEBUG_DAMAGE=1` (any `NEUI_*` query parameter) sets the environment variable before the host reads it.
+- **`neui_partial_repaint_example`** yields with `emscripten_sleep(1)` on the web (a `sleep_for` spins without handing control back). It runs at 55 ticks/s and ~0.3 ms pump per tick.
+- **Not done here**: the iPad safe-area seam (moved to Stage 8, needs a device), and `argv` from mount options (Stage 7).
 
 ### Stage 4: blocking UI: dialogs, popups, message box, menubar (M-L)
 

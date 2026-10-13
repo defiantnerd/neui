@@ -33,7 +33,24 @@
 #include <thread>
 #include <vector>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
 namespace {
+
+// Give the platform a moment between pumps. In a browser a sleep_for would
+// spin without ever handing control back (no input, no frames), so the web
+// build yields instead: emscripten_sleep suspends the stack (JSPI / Asyncify)
+// and the browser runs.
+void pause_1ms()
+{
+#ifdef __EMSCRIPTEN__
+  emscripten_sleep(1);
+#else
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
+}
 
 struct AppState
 {
@@ -179,7 +196,7 @@ int main(int argc, char* argv[])
       pump_ms = 0.0;
       ticks   = 0;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    pause_1ms();
   }
 
   host->destroy(sess);
