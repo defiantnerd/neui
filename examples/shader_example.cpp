@@ -327,7 +327,9 @@ struct AppState
   neui_behavior_api_t* behavior = nullptr;
   neui_shader_api_t*   shaders  = nullptr;  // null where shaders are unsupported
   neui_items_api_t*    items    = nullptr;
+  neui_tree_api_t*     tree     = nullptr;
   neui_session_t       session  = { 0 };
+  uint32_t             menubar_id = 0;
 
   uint32_t knob_ids[k_knobs] = {};
   uint32_t live_ids[k_live] = {};
@@ -431,6 +433,13 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
 {
   auto* a = static_cast<AppState*>(token);
   if (event->type == NEUI_EVENT_APP_QUIT) return true;  // let the window close
+  if (event->type == NEUI_EVENT_TREE_ITEM_ACTIVATED && a->tree &&
+      event->data.tree.widget.id == a->menubar_id) {
+    // File > Quit carries userdata (void*)1; end the session to unwind run().
+    if (a->tree->get_userdata(a->session, event->data.tree.widget, event->data.tree.item) == (void*)1)
+      a->neui->endsession(a->session);
+    return true;
+  }
   if (event->type == NEUI_EVENT_ATTR_CHANGED) {
     for (int i = 0; i < k_knobs; ++i)
       if (a->knob_ids[i] && event->data.attr.widget.id == a->knob_ids[i]) {
@@ -562,6 +571,7 @@ int main(int argc, char* argv[])
   app.behavior = (neui_behavior_api_t*)host->get_interface(app.session, NEUI_API_BEHAVIOR);
   app.shaders  = (neui_shader_api_t*)host->get_interface(app.session, NEUI_API_SHADER);
   app.items    = (neui_items_api_t*)host->get_interface(app.session, NEUI_API_ITEMS);
+  app.tree     = (neui_tree_api_t*)host->get_interface(app.session, NEUI_API_TREE);
   if (!app.widgets || !app.assets || !app.attrs || !app.compound || !app.behavior || !app.items) {
     dbglog("[shader] missing API\n");
     return 1;
@@ -579,6 +589,20 @@ int main(int argc, char* argv[])
   neui_widget_t win = app.widgets->create(app.session, widget_none, NEUI_W_APPWINDOW,
                                           120, 120, win_w, win_h, nullptr);
   app.widgets->set_text(app.session, win, "neui shaders");
+
+  // Menu bar with a File > Quit item (Ctrl/Cmd+Q).
+  if (app.tree) {
+    neui_widget_t mb = app.widgets->create(app.session, win, NEUI_W_MENUBAR, 0, 0, 0, 0, nullptr);
+    app.menubar_id = mb.id;
+    neui_item_t file = app.tree->add(app.session, mb, tree_item_root, "File", nullptr);
+    neui_item_t quit = app.tree->add(app.session, mb, file, "Quit", (void*)1);
+    app.tree->set_shortcut(app.session, mb, quit, NEUI_KMOD_CTRL, NEUI_KEY_Q);
+    // An in-frame menubar (Linux) takes a band off the top of the client area
+    // and moves the children down by it: grow the window so the layout fits.
+    int cx = 0, cy = 0, cw = win_w, ch = win_h;
+    app.widgets->get_client_rect(app.session, win, &cx, &cy, &cw, &ch);
+    if (ch < win_h) app.widgets->set_size(app.session, win, win_w, 2 * win_h - ch);
+  }
 
   neui_widget_t readout = app.widgets->create(app.session, win, NEUI_W_LABEL,
                                               pad, readout_y, 300, 22, nullptr);
