@@ -37,9 +37,9 @@ Desktop neui has blocking calls (`run`, a modal `show`, `popup_menu`, `message_b
 | Mechanism | JS promise integration (`WebAssembly.Suspending`) | Asyncify instrumentation (unwind / rewind) |
 | Exceptions | native wasm exceptions (exnref) | JS exceptions |
 | `neui_example` Release (`-O3`), wasm / gzip | 1.07 MB / 365 KB | 1.99 MB / 568 KB |
-| Browsers | where `WebAssembly.Suspending` exists (checked: Edge 155, Firefox 157, Playwright WebKit 27.2) | any browser with wasm (and SIMD128, unless `NEUI_WEB_SIMD=OFF`) |
+| Browsers | where `WebAssembly.Suspending` exists (checked: Edge 155, Firefox 157, Playwright WebKit 27.2) | any browser with wasm (and SIMD128, unless `NEUI_WEB_SIMD=OFF`); Safari 26 (macOS and iPadOS) has no JSPI and gets this one |
 
-JSPI is the main target; Asyncify is the fallback and is tested less. `neui-web.js` picks per browser (`WebAssembly.Suspending` present → JSPI). Asyncify can suspend only one stack at a time, so neither flavour ever suspends two loops at once (the service loop below steps aside when `main` already runs a loop).
+JSPI is the main target; Asyncify is the fallback and is tested less. `neui-web.js` picks per browser (`WebAssembly.Suspending` present → JSPI). A standalone JSPI page opened in a browser without JSPI says so in its status line (`examples/web/shell.html`) instead of hanging at "Downloading". Asyncify can suspend only one stack at a time, so neither flavour ever suspends two loops at once (the service loop below steps aside when `main` already runs a loop).
 
 Size options, measured on `neui_example` (wasm / gzip -9; the shader library keeps `-O2` in every case):
 
@@ -71,14 +71,14 @@ Size options, measured on `neui_example` (wasm / gzip -9; the shader library kee
 - **DIALOG**: floats over the page (`position:absolute` in document coordinates) with a DOM title bar (title, close button through `handle_close` so `APP_QUIT` can veto, drag to move), coloured from the palette through CSS custom properties. x / y keep their offset from the owner's create() position and are clamped into view. A modal dialog's owner gets a backdrop that dims it and takes its pointer input.
 - **message_box**: `hosts/shared/message_box_painted.h` (shared with Linux) on its own floating canvas, run on the modal loop, so timers, toasts and other frames keep going. Enter = default, Esc = cancel. Boxes can stack.
 - **popup_menu**: painted in the frame it opened in (`Session::_popup_frame`), so it clips at that canvas's edge. Esc / Enter / Space / Up / Down drive it; a press in another frame dismisses it.
-- **Menubar**: the in-frame band (`platform_menubar_in_frame()` = true, as on Linux) with `try_menubar_accel`. Browser-reserved shortcuts never reach the page: Ctrl/Cmd + N / T / W (and Shift variants), Ctrl+Tab, F11.
+- **Menubar**: the in-frame band (`platform_menubar_in_frame()` = true, as on Linux) with `try_menubar_accel`. Browser-reserved shortcuts never reach the page: Ctrl/Cmd + N / T / W (and Shift variants), Ctrl+Tab, F11, and in Safari Cmd+O (it opens Safari's own Open dialog). On Apple devices the band shows Apple shortcut labels (⇧⌘Z, `format_shortcut_label_mac`), since Cmd triggers them.
 - Closing a frame destroys only its canvas; the widgets stay (the desktop contract).
 
 ### Input
 
 - **Pointer**: Pointer Events with pointer capture (a drag keeps reporting outside the canvas and its release always arrives). Routing is copied from `platform_linux.cpp` ("mirrors" comments): overlay pre-checks popup → toast → combo → menubar, double-click synthesis (400 ms / 4 px), right button → RBUTTON. Pen and touch arrive as the left button.
 - **Touch**: `touch-action:none` on the canvas (a drag is a neui drag, not a page pan), no callout or text selection. A **long press** (500 ms within 8 px, the primary touch only) is the right click: the left press ends (BUTTON_UP, no CLICK; a knob grab ends its gesture), then RBUTTON_DOWN / UP go to the widget under the finger, so a knob's "Reset to default" popup opens while the finger is down; the finger's release is swallowed.
-- **Wheel**: `deltaMode` 0 (pixels) takes the smooth GRID / SECTION kinetics, lines / pages are notches; Chrome's ±100 px mouse notches are normalised. Page scrolling continues where neui has nothing to scroll.
+- **Wheel**: `deltaMode` 0 (pixels) takes the smooth GRID / SECTION kinetics, lines / pages are notches; Chrome's ±100 px mouse notches are normalised. On the line path (listbox, treeview, multiline, custom) pixel input comes in slivers (Safari's mouse notch is 40 px, a trackpad sends a few px): the first event of a gesture (same widget, under 300 ms apart) scrolls a whole line at once, and a later sliver that doesn't make a line yet takes the verdict of the gesture's last line, so the page doesn't scroll between the lines. Page scrolling continues where neui has nothing to scroll.
 - **Keys**: `hosts/shared/web/keys_web.h` (letters from `KeyboardEvent.key`, so Ctrl+Z follows the layout; digits and named keys from `code`; Cmd = `NEUI_KMOD_CTRL` on Apple; AltGr is not Ctrl+Alt). Order as on Linux: popup keys, Tab (focus traversal), open menubar, accelerators, KEYDOWN, KEYCHAR.
 - **Focus**: canvas `focus` / `blur` → the frame's OS focus. Mounting never takes focus; a click or an explicit request does.
 - **Cursor**: `canvas.style.cursor`.
@@ -158,4 +158,5 @@ Shader executor under node (`neui_shader_bench`, ns per pixel, portable → SIMD
 
 - Dragging out of the page; overlays (popups, combo lists) reaching beyond their canvas; image URLs fetched at runtime; multiple browser windows; threads.
 - A GPU shader path (WebGL2) and accessibility (an ARIA mirror; canvas UIs are invisible to screen readers, as the desktop xpl host has no accessibility either) are deferred (`docs/deferred-issues.md`).
-- Not verified here (no device): Safari on macOS / iPadOS, a real IME, Android / iOS virtual keyboards, real touch screens (the long press is checked with emulated touch), a real desktop drag from Explorer / Finder. Playwright's WebKit is not Safari.
+- In Safari a canvas over an element's `resize:` grip hides the grip and takes its drags; leave the corner free (`examples/web/embed.html` pads `#plug-panel`).
+- Checked on a Mac (2026-10-14): Safari 26.6 on macOS (Asyncify) - rendering, mouse, keys, menubar, dialogs, message box, popups, theme switch, clipboard both ways, dead keys, DnD from a page, the drag source, shader / grid examples, `embed.html` from `dist/`; the iPad simulator (Safari 26.5) - touch drag, long press, virtual keyboard. Not verified yet: a real CJK IME, a file drag from Finder / Explorer, real iPad and Android devices. Playwright's WebKit is not Safari.

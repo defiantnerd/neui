@@ -18,10 +18,28 @@
 <div id="neui-status">Loading…</div>
 <div id="neui-root"></div>
 <script>
+  function neuiFail(what) {
+    var text = String(what);
+    // A JSPI build in a browser without JSPI (Safari, older Firefox) fails
+    // while instantiating; say so instead of hanging at "Downloading".
+    if (typeof WebAssembly.Suspending !== 'function' && /Suspending|Suspender|promising/.test(text))
+      text = 'This page is the JSPI build, which this browser does not support. '
+           + 'Open the Asyncify build of this example instead (or mount it through neui-web.js, which picks one).';
+    var status = document.getElementById('neui-status');
+    status.textContent = 'Failed: ' + text;
+    Module.setStatus = function() {};   // keep the message
+  }
   var Module = {
     setStatus: function(text) { document.getElementById('neui-status').textContent = text || ''; },
-    onAbort: function(what) { document.getElementById('neui-status').textContent = 'Failed: ' + what; },
+    onAbort: neuiFail,
   };
+  // The JSPI failure surfaces as an uncaught rejection, not through onAbort.
+  function neuiNoJspi(what) {
+    if (typeof WebAssembly.Suspending !== 'function' && /Suspending|Suspender|promising/.test(String(what)))
+      neuiFail(what);
+  }
+  window.addEventListener('error', function(e) { neuiNoJspi(e.error || e.message); });
+  window.addEventListener('unhandledrejection', function(e) { neuiNoJspi(e.reason); });
 </script>
 {{{ SCRIPT }}}
 </body>

@@ -436,6 +436,10 @@ namespace xpl_host
   // The NEUI_API_WEB vtable (include/neui/d/web.h), as an opaque pointer for
   // get_interface to return. Implemented in platform_web.cpp.
   void* platform_web_api();
+
+  // The page runs on an Apple device (Cmd is the primary modifier), so the
+  // in-frame menubar shows Apple shortcut labels.
+  bool platform_web_apple();
 #endif
 
 #if defined(NEUI_PLATFORM_IOS)

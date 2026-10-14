@@ -1570,8 +1570,14 @@ namespace xpl_host
       if (it == mb.menu_items.end()) return;
       it->second.shortcut_mods = modifiers;
       it->second.shortcut_key  = key;
+#if defined(NEUI_PLATFORM_WEB)
+      it->second.shortcut      = platform_web_apple()
+        ? neui_detail::format_shortcut_label_mac(modifiers, key)
+        : neui_detail::format_shortcut_label_win(modifiers, key);
+#else
       it->second.shortcut      =
         neui_detail::format_shortcut_label_win(modifiers, key);
+#endif
       if (!it->second.submenu && !it->second.is_separator) {
         std::string dt = make_menu_text(it->second.text.c_str(),
                                         it->second.shortcut.c_str());

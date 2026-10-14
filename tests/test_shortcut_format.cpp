@@ -36,6 +36,20 @@ TEST_CASE("shortcut: named keys, digits, no modifier")
   CHECK_EQ(fmt(0, NEUI_KEY_RETURN), std::string("Enter"));
 }
 
+TEST_CASE("shortcut: Apple labels (Control, Option, Shift, Command)")
+{
+  // NEUI_KMOD_CTRL is Cmd on Apple, NEUI_KMOD_META the Control key.
+  CHECK_EQ(format_shortcut_label_mac(NEUI_KMOD_CTRL, NEUI_KEY_O),
+           std::string("\xE2\x8C\x98O"));
+  CHECK_EQ(format_shortcut_label_mac(NEUI_KMOD_CTRL | NEUI_KMOD_SHIFT, NEUI_KEY_Z),
+           std::string("\xE2\x87\xA7\xE2\x8C\x98Z"));
+  CHECK_EQ(format_shortcut_label_mac(NEUI_KMOD_META | NEUI_KMOD_ALT, NEUI_KEY_F4),
+           std::string("\xE2\x8C\x83\xE2\x8C\xA5" "F4"));
+  CHECK_EQ(format_shortcut_label_mac(NEUI_KMOD_CTRL, NEUI_KEY_BACK),
+           std::string("\xE2\x8C\x98\xE2\x8C\xAB"));
+  CHECK_EQ(format_shortcut_label_mac(NEUI_KMOD_CTRL, NEUI_KEY_NONE), std::string(""));
+}
+
 TEST_CASE("shortcut: unknown key falls back to hex")
 {
   // 0x99 is not a named key, digit, or letter -> hex display.

@@ -20,7 +20,10 @@
   .card header b { flex: 1; }
   .slot { width: 360px; height: 220px; background: #8882; }
   .slot.free { width: auto; height: auto; display: inline-block; }
+  /* The padding keeps the resize grip clear: in Safari a canvas over the
+     corner hides the grip and takes its drags. */
   #plug-panel { width: 420px; height: 240px; resize: both; overflow: hidden;
+                padding: 0 14px 14px 0;
                 border: 1px dashed #888; min-width: 200px; min-height: 120px; }
   #log { height: 140px; overflow: auto; background: #8881; padding: 6px; margin: 0;
          font: 12px ui-monospace, Consolas, monospace; white-space: pre-wrap; }

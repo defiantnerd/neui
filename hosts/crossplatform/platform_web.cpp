@@ -1020,6 +1020,12 @@ namespace
     // Fractional wheel-notch accumulators for the classic line path.
     double    scroll_v_accum = 0.0;
     double    scroll_h_accum = 0.0;
+    // The pixel wheel gesture in progress (see feed_scroll): the widget it
+    // is over, when it last moved, and who took its last whole line
+    // (0 = nobody, WEB_WHEEL_SINK_COMBO = the open combo list).
+    uint32_t  wheel_hit     = 0;
+    uint64_t  wheel_last_ms = 0;
+    uint32_t  wheel_sink    = 0;
     // A left press the in-frame menubar consumed: swallow its release.
     bool      swallow_release = false;
     // Text proxy state last sent to the page (-1 = never).
@@ -1158,6 +1164,9 @@ namespace
   constexpr int WEB_WHEEL_LINES = 3;
   // A pixel-mode wheel delta this large is one notch (Chromium's mouse wheel).
   constexpr double WEB_PX_PER_NOTCH = 100.0;
+  // A pixel wheel gesture ends after this long without an event.
+  constexpr uint64_t WEB_WHEEL_GESTURE_MS = 300;
+  constexpr uint32_t WEB_WHEEL_SINK_COMBO = UINT32_MAX;
 
   WebFrame* find_frame(int id)
   {
@@ -1603,10 +1612,15 @@ namespace
     return 0;
   }
 
-  int take_lines(double& accum, double notches)
+  // fresh = the first event of a pixel gesture: it scrolls a whole line at
+  // once (Safari's mouse notch is 40 px, a trackpad flick a few px), and
+  // the rest of the gesture accumulates against that line.
+  int take_lines(double& accum, double notches, bool fresh)
   {
+    if (fresh) accum = 0.0;
     accum += notches;
     int lines = static_cast<int>(accum);   // toward zero
+    if (lines == 0 && fresh && notches != 0.0) lines = notches > 0.0 ? 1 : -1;
     accum -= lines;
     return lines;
   }
@@ -1657,12 +1671,31 @@ namespace
   {
     using namespace neui_detail;
     Session* s = f->session;
-    int vline = take_lines(f->scroll_v_accum, dv);
-    int hline = take_lines(f->scroll_h_accum, dh);
-
-    if (s->_open_combo && vline != 0 && s->handle_combo_wheel(lx, ly, vline)) return true;
-
     uint32_t hit = s->widget_at(lx, ly, f->widget_index);
+
+    // Pixel input arrives in slivers. An event too small to make a line
+    // gets the verdict of the gesture's last line: had the widget taken
+    // it, the sliver is consumed too, else the page would scroll between
+    // the lines.
+    bool fresh = false;
+    if (have_px) {
+      uint64_t now = platform_now_ms();
+      fresh = hit != f->wheel_hit || now - f->wheel_last_ms > WEB_WHEEL_GESTURE_MS;
+      if (fresh) f->wheel_sink = 0;
+      f->wheel_hit = hit; f->wheel_last_ms = now;
+    }
+    int vline = take_lines(f->scroll_v_accum, dv, fresh);
+    int hline = take_lines(f->scroll_h_accum, dh, fresh);
+    bool sliver = vline == 0 && hline == 0;
+
+    if (s->_open_combo) {
+      if (sliver && f->wheel_sink == WEB_WHEEL_SINK_COMBO) return true;
+      if (vline != 0 && s->handle_combo_wheel(lx, ly, vline)) {
+        f->wheel_sink = WEB_WHEEL_SINK_COMBO;
+        return true;
+      }
+    }
+
     if (hit == 0) return false;
     auto* hw = s->get_widget(hit);
     if (!hw) return false;
@@ -1687,19 +1720,21 @@ namespace
     // otherwise the section scrolls.
     uint32_t sec_idx = find_scrolling_section(s, hit);
     if (sec_idx != 0) {
-      if (hit != sec_idx && (vline != 0 || hline != 0)) {
+      if (hit != sec_idx && sliver && f->wheel_sink == hit) return true;
+      if (hit != sec_idx && !sliver) {
         neui_event_t ev = {};
         ev.type         = NEUI_EVENT_MOUSE_WHEEL;
         ev.data.wheel.x = static_cast<int>(lx);
         ev.data.wheel.y = static_cast<int>(ly);
         if (vline != 0) {
           ev.data.wheel.delta = vline; ev.data.wheel.is_horizontal = 0;
-          if (s->dispatch_wheel_event(hit, &ev, sec_idx)) return true;
+          if (s->dispatch_wheel_event(hit, &ev, sec_idx)) { f->wheel_sink = hit; return true; }
         }
         if (hline != 0) {
           ev.data.wheel.delta = hline; ev.data.wheel.is_horizontal = 1;
-          if (s->dispatch_wheel_event(hit, &ev, sec_idx)) return true;
+          if (s->dispatch_wheel_event(hit, &ev, sec_idx)) { f->wheel_sink = hit; return true; }
         }
+        f->wheel_sink = 0;
       }
       const double line_px = static_cast<double>(WEB_WHEEL_LINES) * SECTION_WHEEL_LINE_PX;
       return section_kinetic_wheel(f, sec_idx, have_px ? pv : dv * line_px,
@@ -1707,6 +1742,7 @@ namespace
     }
 
     // Classic line path (listbox / treeview / multiline / custom).
+    if (sliver) return f->wheel_sink == hit;
     bool consumed = false;
     if (vline != 0) {
       neui_event_t ev = {};
@@ -1722,6 +1758,7 @@ namespace
       ev.data.wheel.delta = hline; ev.data.wheel.is_horizontal = 1;
       consumed |= s->dispatch_wheel_event(hit, &ev);
     }
+    f->wheel_sink = consumed ? hit : 0;
     return consumed;
   }
 
@@ -2940,6 +2977,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
   }
 
   bool platform_reduced_motion() { return web_reduced_motion() != 0; }
+
+  bool platform_web_apple() { return g_apple; }
 
   uint64_t platform_now_ms()
   {

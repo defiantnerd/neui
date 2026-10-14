@@ -12,7 +12,7 @@ Confirmed decisions:
 3. **One `<canvas>` per frame.** APPWINDOW fills its mount element; DIALOGs float above it.
 4. **No new host.** The web target is xpl + Canvas2D backend + `platform_web.cpp`, registered as `"neui.host.crossplatform"`.
 
-This plan replaces that feasibility note. Status: Stages 0-8 done (2026-10-14, results below each stage). The reader-facing reference is now `docs/host-web.md`. Open: the browser matrix on devices not available here (Safari on macOS / iPadOS, a real IME, mobile virtual keyboards, real touch screens).
+This plan replaces that feasibility note. Status: Stages 0-8 done (2026-10-14, results below each stage). The reader-facing reference is now `docs/host-web.md`. Safari on macOS and the iPad simulator were checked on a Mac afterwards (see "Mac check" under Stage 8). Open: a real CJK IME, a file drag from Finder / Explorer, real iPad and Android devices.
 
 ---
 
@@ -427,7 +427,8 @@ Exit: the demo page mounts / unmounts both apps, messages flow both ways, the le
 - **CI**: the first web run showed the Asyncify job killed while linking: `cmake --build --parallel` without a number is an unbounded `make -j`, and twenty Asyncify links at once ran the runner out of memory. Now `--parallel "$(nproc)"`. JSPI and every desktop job were green.
 - **Linux check** (the peer session `neui-linux`, of `4e41031`): GCC build warning-free with `-DNEUI_WERROR=ON`, ctest 2/2, all 18 examples and 7 X11 harnesses build, and every on-screen check (message box, knob popup, About, menus, accelerators, DnD) is pixel-identical to the pre-wasm baseline `0546745`.
 - **Docs**: `docs/host-web.md` (new), CLAUDE.md, `plans/how-to-port.md` (the web as the worked example of a platform that cannot block), `docs/deferred-issues.md`, `d/gradient.h`.
-- **Browser matrix**: Edge (JSPI), Firefox and WebKit (both flavours) through Playwright for every stage. Not done: Safari on macOS / iPadOS, real touch devices, real IMEs (no devices here). Still open, as is the iPad safe-area seam (needs a device).
+- **Browser matrix**: Edge (JSPI), Firefox and WebKit (both flavours) through Playwright for every stage; Safari in the Mac check below. Still open: real touch devices, a real CJK IME, the iPad safe-area seam (needs a device).
+- **Mac check** (the peer session `neui-mac`, of `5f452b4`): the native macOS host, the macOS xpl host, both web flavours built there warning-free with ctest green, and Safari 26.6 (no JSPI, so Asyncify) plus the iPad simulator's Safari 26.5 over the Stage 3-7 checklists. Bugs it found and fixed on the Mac (pre-existing on every xpl platform unless noted): `WIDGET_PREUPDATE` carried the tree slot instead of the widget id (so `neui_example`'s knob value text never showed); `open_popup_menu` placed the popup without the menubar band (24 px above the pointer on Linux and the web); a stale `swallow_release` after Help > About ate the next click (web, Linux); popup keys on the macOS xpl host. Fixed here after its report: pixel wheel slivers over a line-scrolling widget scrolled the page (Safari's 40 px notch and trackpad deltas never reached a line at 100 px per notch); a JSPI page in a browser without JSPI hung at "Downloading"; Apple shortcut labels in the in-frame menubar; the `embed.html` plug panel's resize grip under the canvas (Safari). Recorded: Safari keeps Cmd+O. Not verified: a real CJK IME (dead keys compose), a file drag from Finder, real devices.
 
 ### Deferred (out of scope, recorded in the docs)
 

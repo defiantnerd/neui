@@ -8,9 +8,11 @@
 // Format a (modifiers, key) shortcut into a Win/Linux-style display label
 // like "Ctrl+S", "Ctrl+Shift+Z", "F11", "Alt+F4". The label is what gets
 // appended to a menu item's text (after a tab) so the OS can right-align
-// it in the popup menu.
+// it in the popup menu. format_shortcut_label_mac gives the Apple form
+// (the modifier symbols, then the key; UTF-8) for a neui-painted menu on
+// an Apple device (the web host in Safari), where NEUI_KMOD_CTRL is Cmd.
 //
-// Returns an empty string if `key` is NEUI_KEY_NONE.
+// Both return an empty string if `key` is NEUI_KEY_NONE.
 
 namespace neui_detail
 {
@@ -69,6 +71,44 @@ namespace neui_detail
       char buf[16];
       std::snprintf(buf, sizeof(buf), "0x%02X", key);
       if (!out.empty()) out += '+';
+      out += buf;
+    }
+    return out;
+  }
+
+  // Apple order Control, Option, Shift, Command; no separators. On Apple
+  // NEUI_KMOD_CTRL is Command and NEUI_KMOD_META the Control key.
+  inline std::string format_shortcut_label_mac(uint32_t mods, uint32_t key)
+  {
+    if (key == NEUI_KEY_NONE) return {};
+
+    std::string out;
+    if (mods & NEUI_KMOD_META)  out += "\xE2\x8C\x83";   // Control
+    if (mods & NEUI_KMOD_ALT)   out += "\xE2\x8C\xA5";   // Option
+    if (mods & NEUI_KMOD_SHIFT) out += "\xE2\x87\xA7";   // Shift
+    if (mods & NEUI_KMOD_CTRL)  out += "\xE2\x8C\x98";   // Command
+
+    switch (key) {
+    case NEUI_KEY_BACK:   out += "\xE2\x8C\xAB"; return out;
+    case NEUI_KEY_DELETE: out += "\xE2\x8C\xA6"; return out;
+    case NEUI_KEY_TAB:    out += "\xE2\x87\xA5"; return out;
+    case NEUI_KEY_RETURN: out += "\xE2\x86\xA9"; return out;
+    case NEUI_KEY_ESCAPE: out += "\xE2\x8E\x8B"; return out;
+    case NEUI_KEY_LEFT:   out += "\xE2\x86\x90"; return out;
+    case NEUI_KEY_UP:     out += "\xE2\x86\x91"; return out;
+    case NEUI_KEY_RIGHT:  out += "\xE2\x86\x92"; return out;
+    case NEUI_KEY_DOWN:   out += "\xE2\x86\x93"; return out;
+    default: break;
+    }
+    if (const char* named = shortcut_key_name(key)) {
+      out += named;
+    } else if (key >= NEUI_KEY_0 && key <= NEUI_KEY_9) {
+      out += static_cast<char>('0' + (key - NEUI_KEY_0));
+    } else if (key >= NEUI_KEY_A && key <= NEUI_KEY_Z) {
+      out += static_cast<char>('A' + (key - NEUI_KEY_A));
+    } else {
+      char buf[16];
+      std::snprintf(buf, sizeof(buf), "0x%02X", key);
       out += buf;
     }
     return out;
