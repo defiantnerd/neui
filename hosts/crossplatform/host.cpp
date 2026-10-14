@@ -2261,7 +2261,7 @@ namespace xpl_host
           if (wd.emit_events && wd.session) {
             neui_event_t pre{};
             pre.type = NEUI_EVENT_WIDGET_PREUPDATE;
-            pre.data.preupdate.widget.id = idx;
+            pre.data.preupdate.widget.id = wd.widget_id;
             wd.session->dispatch_event(&pre);
           }
           // Dim disabled widgets uniformly via the backend's alpha stack.
@@ -2573,7 +2573,7 @@ namespace xpl_host
       if (wd.emit_events) {
         neui_event_t pre{};
         pre.type = NEUI_EVENT_WIDGET_PREUPDATE;
-        pre.data.preupdate.widget.id = widget_index;
+        pre.data.preupdate.widget.id = wd.widget_id;
         dispatch_event(&pre);
       }
       bool dim = !wd.enabled && _backend->push_alpha && _backend->pop_alpha;
