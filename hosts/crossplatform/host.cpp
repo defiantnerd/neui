@@ -4399,20 +4399,28 @@ namespace xpl_host
 
     auto& anchor = _widgets[anchor_idx];
 
-    // Convert anchor-local logical to absolute frame-local logical by
-    // walking up the tree summing x/y offsets. Frames have native_handle
-    // set; their x/y is screen-relative so we stop there.
+    // Convert anchor-local logical to absolute frame-local logical. The
+    // paint walk caches abs_x / abs_y in the space the popup is painted and
+    // hit-tested in (in-frame menubar band, section chip band and scroll
+    // included); before the anchor's first paint, walk up the tree summing
+    // x/y offsets. Frames have native_handle set; their x/y is
+    // screen-relative so we stop there.
     int abs_x = lx;
     int abs_y = ly;
     auto parents = _widgets.get_all_parents(anchor_idx);
-    abs_x += anchor.x;
-    abs_y += anchor.y;
-    for (auto p : parents) {
-      if (p == 0 || !_widgets.exists(p)) continue;
-      auto& pw = _widgets[p];
-      if (pw.native_handle) break;  // stop at the frame
-      abs_x += pw.x;
-      abs_y += pw.y;
+    if (anchor.abs_valid && !anchor.native_handle) {
+      abs_x += anchor.abs_x;
+      abs_y += anchor.abs_y;
+    } else {
+      abs_x += anchor.x;
+      abs_y += anchor.y;
+      for (auto p : parents) {
+        if (p == 0 || !_widgets.exists(p)) continue;
+        auto& pw = _widgets[p];
+        if (pw.native_handle) break;  // stop at the frame
+        abs_x += pw.x;
+        abs_y += pw.y;
+      }
     }
 
     _popup_items     = items;
