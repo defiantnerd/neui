@@ -455,6 +455,10 @@ namespace neui_cg_backend
   // glyphs draw upward from the baseline in user space, which would render
   // upside-down under an inverted CTM. We counter-flip locally around the
   // baseline so glyphs come out the right way up.
+  //
+  // Embedded '\n' (CRLF tolerated) starts a new line, as in the d2d / cairo /
+  // canvas2d backends: the line block is centred vertically as a whole, so
+  // one line behaves as before. CTLineDraw itself does not break lines.
   static void cg_draw_text(neui_render_ctx_t raw,
                             float x, float y, float w, float h,
                             const char* text, float font_size,
@@ -463,15 +467,35 @@ namespace neui_cg_backend
     auto* st = static_cast<CGContextState*>(raw);
     if (!st || !st->cg_ctx || !text || !*text || font_size <= 0.0f) return;
 
-    CTLineRef line = make_ctline(st, text, -1, font_size);
-    if (!line) return;
+    // One CTLine per text line (nullptr for an empty line); every line
+    // advances by the tallest line's height.
+    std::vector<CTLineRef> lines;
+    for (const char* start = text, *p = text;; ++p) {
+      if (*p == '\n' || *p == '\0') {
+        int len = static_cast<int>(p - start);
+        if (len && start[len - 1] == '\r') --len;   // strip CR of a CRLF
+        lines.push_back(len ? make_ctline(st, start, len, font_size) : nullptr);
+        if (*p == '\0') break;
+        start = p + 1;
+      }
+    }
+    CGFloat ascent = 0, line_height = 0;
+    for (CTLineRef line : lines) {
+      if (!line) continue;
+      CGFloat a = 0, d = 0, l = 0;
+      CTLineGetTypographicBounds(line, &a, &d, &l);
+      if (a > ascent) ascent = a;
+      if (a + d + l > line_height) line_height = a + d + l;
+    }
+    if (line_height <= 0) {
+      for (CTLineRef line : lines) if (line) CFRelease(line);
+      return;
+    }
 
-    CGFloat ascent = 0, descent = 0, leading = 0;
-    CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
-    CGFloat line_height = ascent + descent + leading;
-    CGFloat text_y_top  = y + (h - line_height) * 0.5f;
+    CGFloat block_height = line_height * static_cast<CGFloat>(lines.size());
+    CGFloat text_y_top   = y + (h - block_height) * 0.5f;
     if (text_y_top < y) text_y_top = y;
-    CGFloat baseline_y  = text_y_top + ascent;
+    CGFloat baseline_y   = text_y_top + ascent;
 
     CGContextRef cg = st->cg_ctx;
     CGContextSaveGState(cg);
@@ -483,14 +507,21 @@ namespace neui_cg_backend
     CGFloat rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     CGContextSetRGBFillColor(cg, rgba[0], rgba[1], rgba[2], rgba[3]);
 
-    // Origin -> baseline; counter-flip Y so glyphs draw upright.
-    CGContextTranslateCTM(cg, x, baseline_y);
-    CGContextScaleCTM(cg, 1.0, -1.0);
-    CGContextSetTextPosition(cg, 0, 0);
-    CTLineDraw(line, cg);
+    for (CTLineRef line : lines) {
+      if (line) {
+        // Origin -> baseline; counter-flip Y so glyphs draw upright.
+        CGContextSaveGState(cg);
+        CGContextTranslateCTM(cg, x, baseline_y);
+        CGContextScaleCTM(cg, 1.0, -1.0);
+        CGContextSetTextPosition(cg, 0, 0);
+        CTLineDraw(line, cg);
+        CGContextRestoreGState(cg);
+        CFRelease(line);
+      }
+      baseline_y += line_height;
+    }
 
     CGContextRestoreGState(cg);
-    CFRelease(line);
   }
 
   static float cg_measure_text(neui_render_ctx_t raw,
