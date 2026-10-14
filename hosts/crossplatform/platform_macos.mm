@@ -1809,8 +1809,13 @@ namespace xpl_host
   void platform_menubar_destroy(void* hmenu)
   {
     if (!hmenu) return;
+    // Callers pass submenus too (Win32 DestroyMenu's them), but a submenu's
+    // handle is non-owning (see platform_menubar_add_popup): its parent item
+    // owns it, and releasing it here would over-release it.
+    if (((__bridge NSMenu*)hmenu).supermenu) return;
     NSMenu* m = (__bridge_transfer NSMenu*)hmenu;
-    (void)m;  // ARC releases on scope exit; submenus + items follow.
+    if (NSApp.mainMenu == m) NSApp.mainMenu = nil;
+    // ARC releases on scope exit; submenus + items follow.
   }
 
   void platform_menubar_attach(void* /*frame*/, void* hmenu)
