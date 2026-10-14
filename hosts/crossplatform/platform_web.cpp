@@ -1460,6 +1460,10 @@ namespace
     Session* s = f->session;
     const uint32_t bm = neui_detail::web_buttonmap(buttons, mods);
     if (button == 0) {
+      // A new press: a release left to swallow from an earlier press never
+      // came (a menu pick that opened a modal dialog released over its
+      // backdrop) and must not eat this press's release.
+      f->swallow_release = false;
       // Overlay pre-checks, in the macOS / Linux order.
       if (s->_popup_active) { s->handle_popup_click(lx, ly); return; }
       if (s->handle_toast_click(f->widget_index, lx, ly)) return;

@@ -576,6 +576,10 @@ namespace
     float lx = static_cast<float>(be.x) / scale, ly = static_cast<float>(be.y) / scale;
 
     if (be.button == 1) {
+      // A new press: a release left to swallow from an earlier press never
+      // came (a menu pick that opened a modal dialog released while the
+      // frame was blocked) and must not eat this press's release.
+      lw->swallow_release = false;
       // Overlay pre-checks (mirror macOS mouseDown: order).
       if (s->_popup_active) { s->handle_popup_click(lx, ly); return; }
       if (s->handle_toast_click(lw->widget_index, lx, ly)) return;
