@@ -4676,4 +4676,22 @@ namespace macos_host
     return true;
   }
 
+  // Close the first top-level window, like the win32 and xpl hosts: the close
+  // goes through windowShouldClose: (APP_QUIT, so the client can still veto)
+  // and the last APPWINDOW to close stops the run loop.
+  void Session::endsession()
+  {
+    uint32_t idx = _widgets.child(0);
+    while (idx != 0) {
+      if (_widgets.exists(idx)) {
+        auto& wd = _widgets[idx];
+        if (wd.isroot && wd.native_window) {
+          [native_window_from(wd.native_window) performClose:nil];
+          return;
+        }
+      }
+      idx = _widgets.next(idx);
+    }
+  }
+
 } // namespace macos_host

@@ -61,8 +61,8 @@ namespace macos_host
 
   Session::~Session() = default;
 
-  // Session::run lives in window.mm (drives [NSApp run] + quit-on-last-frame).
-  void Session::endsession() {}
+  // Session::run and Session::endsession live in window.mm (they drive
+  // [NSApp run] + quit-on-last-frame).
 
   bool Session::dispatch_event(neui_event_t* event)
   {
