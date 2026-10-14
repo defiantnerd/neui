@@ -732,6 +732,9 @@ namespace
     uint32_t mods    = neui_detail::x11_modifiers_to_neui(ke.state);
     uint32_t keycode = neui_detail::x11_keysym_to_neui(ks);
 
+    // An open popup menu takes Esc / Enter / Space / Up / Down (as on win32).
+    if (s->_popup_active && s->handle_popup_key(keycode)) return;
+
     // Tab cycles logical focus (hand-rolled traversal, like win32/macOS).
     if (keycode == NEUI_KEY_TAB) {
       s->focus_next(!(mods & NEUI_KMOD_SHIFT));

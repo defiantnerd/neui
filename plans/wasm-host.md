@@ -12,7 +12,7 @@ Confirmed decisions:
 3. **One `<canvas>` per frame.** APPWINDOW fills its mount element; DIALOGs float above it.
 4. **No new host.** The web target is xpl + Canvas2D backend + `platform_web.cpp`, registered as `"neui.host.crossplatform"`.
 
-This plan replaces that feasibility note. Status: Stages 0-7 done (2026-10-14, results below each stage); Stage 8 (performance, polish, documentation) is next.
+This plan replaces that feasibility note. Status: Stages 0-8 done (2026-10-14, results below each stage). The reader-facing reference is now `docs/host-web.md`. Open: the browser matrix on devices not available here (Safari on macOS / iPadOS, a real IME, mobile virtual keyboards, real touch screens).
 
 ---
 
@@ -400,6 +400,34 @@ Exit: the demo page mounts / unmounts both apps, messages flow both ways, the le
   - CLAUDE.md (build line, platform selection, file map, `NEUI_API_WEB`, Plans)
   - `plans/how-to-port.md` (web as a worked example, including stack switching)
   - `docs/deferred-issues.md`
+
+#### Stage 8 results (2026-10-14)
+
+- **Profiling** (Edge, Release JSPI, headless; `?NEUI_DEBUG_PAINT_STATS=1` + a CDP CPU profile):
+  - `neui_grid_example`, smooth wheel scrolling: ~1.8 ms per paint at 60 fps; the busy time is mostly the browser's own `fillText` / `save` / `clip`, wasm ~10 %, the JS glue ~17 %. (The example has 500 rows; a GRID paints only the visible ones, so 10k rows change nothing.)
+  - `neui_partial_repaint_example`: 0.3 ms per partial paint, 55 ticks/s.
+  - `neui_shader_example`'s animated row: 15 ms per paint, 90 % of it in the CPU shader executor.
+
+  The JS ↔ wasm crossings are not the cost anywhere, so **no command buffer**: the decision from Stage 0 stands.
+- **SIMD128**: a wasm SIMD128 arm in `nsl_math.h` next to SSE2 / NEON (only exactly specified operations: no relaxed SIMD, no `f32x4.min / max`, whose NaN / signed-zero rules are not `m_min / m_max`). `-msimd128` on `neui-shader` only (`NEUI_WEB_SIMD`, default ON). The shader goldens stay bit-exact in both flavours. `neui_shader_bench` under node, ns per pixel portable → SIMD128: ring_glow 44.6 → 19.5, plasma 147 → 53, fbm5 563 → 201, metal_knob 210 → 79, tex_blur9 655 → 408. The shader example's paint dropped from 15 to 8.2 ms, CPU from 491 to 286 ms/s.
+- **Size** (`neui_example`, wasm / gzip -9, the shader library at `-O2` throughout):
+
+  | Link flags | JSPI | Asyncify |
+  |---|---|---|
+  | `-O3` (Release) | 1071 / 365 KB | 1991 / 568 KB |
+  | `-Os` | 879 / 322 KB | 1809 / 519 KB |
+  | `-Oz` | 754 / 289 KB | 1752 / 490 KB |
+  | `-O3 --closure=1` | wasm the same, JS 105 → 56 KB | wasm the same, JS 132 → 67 KB |
+
+  `-Oz` costs little speed (steady-state paints the same within noise, the first frame 17 → 31 ms). Documented as the option for size; the CMake Release default is unchanged.
+- **Gradients**: REPEAT / MIRROR by stop expansion in the Canvas 2D backend: the gradient is stretched over every tile the fill can reach (the rect, or for a path the visible canvas mapped back through the transform), each tile gets the stops, reversed on odd tiles for MIRROR; radial tiles grow from the focal point; past 256 tiles it clamps. Four new `canvas2d_smoke` checks (linear repeat, mirror, path repeat both ways, radial clamp / repeat / mirror at t = 1.25) pass in Edge, Firefox and WebKit.
+- **Touch**: a long press (500 ms within 8 px, the primary touch) is the right click: the left press ends without a CLICK, RBUTTON_DOWN / UP go to the widget under the finger, the finger's release is swallowed. Checked in Edge with emulated touch (CDP `Input.dispatchTouchEvent`): the knob's reset popup opens while the finger is held and stays after release; a tap and a moved touch open nothing. The canvas also suppresses the touch callout and text selection.
+- **Popup menus** (pre-existing bugs found by the Linux check): hover counted items from 0 while paint, click and keys count from 1, so the highlight sat one row off on every xpl platform; fixed in `Session::handle_popup_hover`. Linux and the web now route keys to `handle_popup_key` first, as win32 does (Esc / Enter / Space / Up / Down). macOS / iOS still don't (`docs/deferred-issues.md`). Checked on the web; the Linux change is not built or run yet (no X11 here).
+- **Deploy layout**: the `web` install component. `cmake --install <build> --prefix dist --component web` for a JSPI and an Asyncify build gives `dist/{neui-web.js, embed.html, jspi/, asyncify/}`; `embed.html` loads from the flavour directories there. Checked: the Stage 7 script against `dist/` in Edge and Firefox, and with `WebAssembly.Suspending` removed the page loads the Asyncify modules and all four apps run.
+- **CI**: the first web run showed the Asyncify job killed while linking: `cmake --build --parallel` without a number is an unbounded `make -j`, and twenty Asyncify links at once ran the runner out of memory. Now `--parallel "$(nproc)"`. JSPI and every desktop job were green.
+- **Linux check** (the peer session `neui-linux`, of `4e41031`): GCC build warning-free with `-DNEUI_WERROR=ON`, ctest 2/2, all 18 examples and 7 X11 harnesses build, and every on-screen check (message box, knob popup, About, menus, accelerators, DnD) is pixel-identical to the pre-wasm baseline `0546745`.
+- **Docs**: `docs/host-web.md` (new), CLAUDE.md, `plans/how-to-port.md` (the web as the worked example of a platform that cannot block), `docs/deferred-issues.md`, `d/gradient.h`.
+- **Browser matrix**: Edge (JSPI), Firefox and WebKit (both flavours) through Playwright for every stage. Not done: Safari on macOS / iPadOS, real touch devices, real IMEs (no devices here). Still open, as is the iPad safe-area seam (needs a device).
 
 ### Deferred (out of scope, recorded in the docs)
 

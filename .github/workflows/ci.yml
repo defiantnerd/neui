@@ -99,8 +99,11 @@ jobs:
           -DNEUI_WERROR=ON
           -DNEUI_WEB_FLAVOR=${{ matrix.flavor }}
 
+      # A bounded job count: plain --parallel is an unbounded make -j, and
+      # twenty Asyncify links (each a memory-hungry wasm-opt pass) at once
+      # exhaust the runner.
       - name: Build
-        run: cmake --build build-web --parallel
+        run: cmake --build build-web --parallel "$(nproc)"
 
       - name: Test
         run: ctest --test-dir build-web --output-on-failure

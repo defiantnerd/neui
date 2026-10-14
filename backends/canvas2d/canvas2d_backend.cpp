@@ -19,8 +19,10 @@
 //   - Text is laid out by the browser (shaping, fallback fonts). draw_text
 //     reproduces Cairo's box rules: split on '\n', centre the line block
 //     vertically using the font's ascent + descent, clip to the box.
-//   - Canvas 2D gradients have no REPEAT / MIRROR; they degrade to CLAMP, as
-//     on CG.
+//   - Canvas 2D gradients only clamp. REPEAT / MIRROR are drawn by expanding
+//     the stops: the gradient is stretched over every tile the filled area
+//     can reach (the rect, or the visible canvas for a path) and each tile
+//     gets a copy of the stops, reversed on odd tiles for MIRROR.
 //
 // All coordinates are logical px at 96 DPI; colours are 0xAARRGGBB; bitmaps
 // arrive as BGRA8 premultiplied and are converted to the straight RGBA that
@@ -85,15 +87,79 @@ EM_JS(void, c2d_setup, (), {
   S.mctx = S.mk(1, 1).getContext('2d');
   S.add = function(arr, v) { for (var i = 1; i < arr.length; ++i) if (!arr[i]) { arr[i] = v; return i; } arr.push(v); return arr.length - 1; };
   S.rect = function(x, y, w, h) { var p = new Path2D(); p.rect(x, y, w, h); return p; };
-  S.grad = function(c, kind, sx, sy, ex, ey, r, sp, n, mul) {
-    // Radial: the start point is the centre, the end point the focal point
-    // (gradient.h), so the focal circle (radius 0) is the inner one.
-    var g = (kind === 1) ? c.createRadialGradient(ex, ey, 0, sx, sy, Math.max(r, 0))
-                         : c.createLinearGradient(sx, sy, ex, ey);
+  // The corners of what a fill can touch, in user space: the rect when there
+  // is one, else the canvas mapped back through the current transform.
+  S.reach = function(c, rect, x, y, w, h) {
+    if (rect) return [x, y, x + w, y, x, y + h, x + w, y + h];
+    var m = c.getTransform().inverse(), W = c.canvas.width, H = c.canvas.height, out = [];
+    var px = [0, W, 0, W], py = [0, 0, H, H];
+    for (var i = 0; i < 4; ++i) {
+      out.push(m.a * px[i] + m.c * py[i] + m.e, m.b * px[i] + m.d * py[i] + m.f);
+    }
+    return out;
+  };
+  // extend: 0 = clamp, 1 = repeat, 2 = mirror. pts = S.reach(...).
+  S.grad = function(c, kind, sx, sy, ex, ey, r, sp, n, mul, extend, pts) {
+    var stops = [];
     for (var i = 0; i < n; ++i) {
       var off = HEAPF32[(sp >> 2) + i * 2];
-      var argb = HEAPU32[(sp >> 2) + i * 2 + 1];
-      g.addColorStop(Math.min(1, Math.max(0, off)), S.col(argb, mul));
+      stops.push([Math.min(1, Math.max(0, off)), S.col(HEAPU32[(sp >> 2) + i * 2 + 1], mul)]);
+    }
+    // Tiles [t0, t1) of the gradient parameter the fill reaches.
+    var t0 = 0, t1 = 1;
+    if (extend === 1 || extend === 2) {
+      var lo = Infinity, hi = -Infinity, k;
+      if (kind === 1) {
+        // Radial from the focal point f to the circle (centre, r): the point
+        // at parameter t lies on the circle around f + t (centre - f) with
+        // radius t r, so t <= |p - f| / (r - |centre - f|).
+        var dx = sx - ex, dy = sy - ey, slack = r - Math.sqrt(dx * dx + dy * dy);
+        lo = 0;
+        for (k = 0; k < 8; k += 2) {
+          var qx = pts[k] - ex, qy = pts[k + 1] - ey, q = Math.sqrt(qx * qx + qy * qy);
+          hi = Math.max(hi, slack > 1e-3 ? q / slack : 64);
+        }
+      } else {
+        var ax = ex - sx, ay = ey - sy, len2 = ax * ax + ay * ay;
+        if (len2 > 1e-12) {
+          for (k = 0; k < 8; k += 2) {
+            var t = ((pts[k] - sx) * ax + (pts[k + 1] - sy) * ay) / len2;
+            lo = Math.min(lo, t); hi = Math.max(hi, t);
+          }
+        } else { lo = 0; hi = 1; }
+      }
+      t0 = Math.floor(lo); t1 = Math.max(t0 + 1, Math.ceil(hi));
+      // A pattern far finer than the fill would need thousands of stops;
+      // past 256 tiles it clamps.
+      if (t1 - t0 > 256) {
+        if (kind === 1) t1 = t0 + 256;
+        else { var mid = Math.floor((lo + hi) / 2); t0 = mid - 128; t1 = mid + 128; }
+      }
+    }
+    var g;
+    if (kind === 1) {
+      // Radial: the start point is the centre, the end point the focal point
+      // (gradient.h), so the focal circle (radius 0) is the inner one.
+      g = c.createRadialGradient(ex, ey, 0, ex + (sx - ex) * t1, ey + (sy - ey) * t1,
+                                 Math.max(r, 0) * t1);
+    } else {
+      g = c.createLinearGradient(sx + (ex - sx) * t0, sy + (ey - sy) * t0,
+                                 sx + (ex - sx) * t1, sy + (ey - sy) * t1);
+    }
+    if (t0 === 0 && t1 === 1) {
+      for (var j = 0; j < n; ++j) g.addColorStop(stops[j][0], stops[j][1]);
+      return g;
+    }
+    // Each tile holds the whole [0, 1] range, its end colours included.
+    var tile = [[0, stops[0][1]]].concat(stops, [[1, stops[n - 1][1]]]);
+    var span = t1 - t0;
+    for (var tt = t0; tt < t1; ++tt) {
+      var flip = extend === 2 && (tt & 1) !== 0;
+      for (var s = 0; s < tile.length; ++s) {
+        var e = flip ? tile[tile.length - 1 - s] : tile[s];
+        var o = flip ? 1 - e[0] : e[0];
+        g.addColorStop(Math.min(1, Math.max(0, (tt - t0 + o) / span)), e[1]);
+      }
     }
     return g;
   };
@@ -273,11 +339,13 @@ EM_JS(void, c2d_stroke_path, (int id, float lw, uint32_t argb, float a,
 // Gradient fills / strokes. what: 0 = rect, 1 = path fill, 2 = path stroke.
 EM_JS(void, c2d_gradient, (int id, int what, float x, float y, float w, float h,
                            int kind, float sx, float sy, float ex, float ey, float r,
-                           const void* stops, int n, float a, int evenodd,
+                           const void* stops, int n, float a, int extend, int evenodd,
                            float lw, int cap, int join, float miter,
                            const float* dp, int dn, float doff), {
   var S = Module.neuiC2D, st = S.ctx[id]; if (!st) return;
-  var c = st.c, g = S.grad(c, kind, sx, sy, ex, ey, r, stops, n, a);
+  var c = st.c;
+  var g = S.grad(c, kind, sx, sy, ex, ey, r, stops, n, a, extend,
+                 S.reach(c, what === 0, x, y, w, h));
   if (what === 0) { c.fillStyle = g; c.fillRect(x, y, w, h); }
   else if (what === 1) { c.fillStyle = g; c.fill(evenodd ? 'evenodd' : 'nonzero'); }
   else {
@@ -832,7 +900,7 @@ namespace neui_canvas2d_backend
     c2d_gradient(st->id, what, x, y, w, h, g->kind == NEUI_GRADIENT_RADIAL ? 1 : 0,
                  g->start_x, g->start_y, g->end_x, g->end_y, g->radius,
                  g->stops, static_cast<int>(g->stop_count), current_alpha(st),
-                 st->eo_fill ? 1 : 0, stroke_width, cap, join, miter, dp, dn, doff);
+                 static_cast<int>(g->extend), st->eo_fill ? 1 : 0, stroke_width, cap, join, miter, dp, dn, doff);
   }
 
   static void c2d_fill_rect_gradient(neui_render_ctx_t raw, float x, float y, float w, float h,

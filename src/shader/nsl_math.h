@@ -21,6 +21,9 @@
 #elif defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
 #include <arm_neon.h>
 #define NSL_A64 1
+#elif defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#define NSL_WASM 1
 #endif
 
 namespace neui {
@@ -199,8 +202,8 @@ struct FpEnvGuard {
 };
 
 // ---------------------------------------------------------------------------
-// Explicit 4-wide SIMD: SSE2 on x86-64, NEON on arm64, plain arrays
-// elsewhere. Phase 0 showed that auto-vectorisation of the scalar kernels
+// Explicit 4-wide SIMD: SSE2 on x86-64, NEON on arm64, SIMD128 on wasm
+// (built with -msimd128), plain arrays elsewhere. Phase 0 showed that auto-vectorisation of the scalar kernels
 // depends on the compiler: clang vectorises everything, GCC part of it, and
 // MSVC only add / sub / mul / div / min / max / sqrt / lt. The f4_* math
 // mirrors the scalar m_* functions operation for operation, so both produce
@@ -299,6 +302,45 @@ template <int N> NSL_FI I4 i4_shr(I4 a) {  // logical
 NSL_FI I4 i4_lt(I4 a, I4 b) { return m4(vcltq_s32(a.v, b.v)); }
 NSL_FI I4 i4_eq(I4 a, I4 b) { return m4(vceqq_s32(a.v, b.v)); }
 NSL_FI I4 i4_mul(I4 a, I4 b) { return {vmulq_s32(a.v, b.v)}; }  // low 32 bits
+#elif NSL_WASM && !defined(NSL_FORCE_PORTABLE)
+// wasm SIMD128. Only the exactly specified operations; no relaxed SIMD (its
+// results may differ between engines) and no f32x4.min / max (their NaN and
+// signed-zero rules are not m_min / m_max). f4_trunc saturates where SSE
+// returns INT32_MIN, which the in-range rule makes moot.
+struct F4 { v128_t v; };
+struct I4 { v128_t v; };
+NSL_FI F4 f4_load(const float* p) { return {wasm_v128_load(p)}; }
+NSL_FI void f4_store(float* p, F4 a) { wasm_v128_store(p, a.v); }
+NSL_FI F4 f4(float f) { return {wasm_f32x4_splat(f)}; }
+NSL_FI I4 i4(int32_t i) { return {wasm_i32x4_splat(i)}; }
+NSL_FI F4 operator+(F4 a, F4 b) { return {wasm_f32x4_add(a.v, b.v)}; }
+NSL_FI F4 operator-(F4 a, F4 b) { return {wasm_f32x4_sub(a.v, b.v)}; }
+NSL_FI F4 operator*(F4 a, F4 b) { return {wasm_f32x4_mul(a.v, b.v)}; }
+NSL_FI F4 operator/(F4 a, F4 b) { return {wasm_f32x4_div(a.v, b.v)}; }
+NSL_FI F4 f4_sqrt(F4 a) { return {wasm_f32x4_sqrt(a.v)}; }
+NSL_FI I4 f4_lt(F4 a, F4 b) { return {wasm_f32x4_lt(a.v, b.v)}; }
+NSL_FI I4 f4_gt(F4 a, F4 b) { return {wasm_f32x4_gt(a.v, b.v)}; }
+NSL_FI I4 f4_ge(F4 a, F4 b) { return {wasm_f32x4_ge(a.v, b.v)}; }
+NSL_FI I4 f4_le(F4 a, F4 b) { return {wasm_f32x4_le(a.v, b.v)}; }
+NSL_FI void i4_store(void* p, I4 a) { wasm_v128_store(p, a.v); }
+NSL_FI I4 f4_eq(F4 a, F4 b) { return {wasm_f32x4_eq(a.v, b.v)}; }
+NSL_FI I4 f4_ne(F4 a, F4 b) { return {wasm_f32x4_ne(a.v, b.v)}; }
+NSL_FI F4 f4_sel(I4 m, F4 a, F4 b) { return {wasm_v128_bitselect(a.v, b.v, m.v)}; }
+NSL_FI I4 i4_sel(I4 m, I4 a, I4 b) { return {wasm_v128_bitselect(a.v, b.v, m.v)}; }
+NSL_FI I4 f4_bits(F4 a) { return {a.v}; }
+NSL_FI F4 f4_from_bits(I4 a) { return {a.v}; }
+NSL_FI I4 f4_trunc(F4 a) { return {wasm_i32x4_trunc_sat_f32x4(a.v)}; }  // in-range values only
+NSL_FI F4 i4_to_f4(I4 a) { return {wasm_f32x4_convert_i32x4(a.v)}; }
+NSL_FI I4 operator+(I4 a, I4 b) { return {wasm_i32x4_add(a.v, b.v)}; }
+NSL_FI I4 operator-(I4 a, I4 b) { return {wasm_i32x4_sub(a.v, b.v)}; }
+NSL_FI I4 operator&(I4 a, I4 b) { return {wasm_v128_and(a.v, b.v)}; }
+NSL_FI I4 operator|(I4 a, I4 b) { return {wasm_v128_or(a.v, b.v)}; }
+NSL_FI I4 operator^(I4 a, I4 b) { return {wasm_v128_xor(a.v, b.v)}; }
+template <int N> NSL_FI I4 i4_shl(I4 a) { return {wasm_i32x4_shl(a.v, N)}; }
+template <int N> NSL_FI I4 i4_shr(I4 a) { return {wasm_u32x4_shr(a.v, N)}; }  // logical
+NSL_FI I4 i4_lt(I4 a, I4 b) { return {wasm_i32x4_lt(a.v, b.v)}; }
+NSL_FI I4 i4_eq(I4 a, I4 b) { return {wasm_i32x4_eq(a.v, b.v)}; }
+NSL_FI I4 i4_mul(I4 a, I4 b) { return {wasm_i32x4_mul(a.v, b.v)}; }  // low 32 bits
 #else
 // Portable fallback: four scalars per value.
 struct F4 { float v[4]; };

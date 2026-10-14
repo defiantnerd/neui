@@ -342,6 +342,16 @@ If your platform has no system menu bar (iOS, Android, embedded), make every `pl
 
 If your platform doesn't naturally support re-entrant pumps (some console RTOSes), you can simulate it by buffering events and dispatching synchronously — but the popup model assumes you can pump while another pump is on the stack. Verify before promising.
 
+**Worked example: a target that must never block (the web).** A browser runs the page's script on one thread and never lets it wait, yet `run()`, a modal `show`, `popup_menu` and `message_box` block on the desktop and clients rely on it (code after `run()` is cleanup; stack-allocated state must stay valid). `platform_web.cpp` keeps the desktop semantics with **stack switching** instead of turning neui inside out:
+
+- The OS event handlers (DOM listeners) never dispatch; they only queue a record keyed by frame id and wake the loop. Everything dispatches on `main`'s stack, so a handler that opens a modal simply runs a nested loop there, exactly as on Linux.
+- The one place that "waits" is an async import (`web_wait`, `EM_ASYNC_JS`): the wasm stack is suspended (JSPI's `WebAssembly.Suspending`, or Asyncify's unwind / rewind in the fallback build) until a record, a paint slot or a deadline arrives.
+- Painting must not suspend (the client's paint handler runs inside it), so every blocking call is refused during a paint.
+- Decisions the OS wants synchronously (cancel the browser's default action for a key / wheel / drop) are taken after dispatch: the stack resumes in the microtask checkpoint right after the listener, still inside the event, and the drain applies the verdict.
+- A client that never calls `run()` (an embedded plugin) gets a second suspendable entry point, the service loop; at most one loop is ever suspended at a time (Asyncify cannot hold two).
+
+Details: `docs/host-web.md` ("The event loop"); design record `plans/wasm-host.md`.
+
 ---
 
 ## 10. Build wiring (CMake)
@@ -480,6 +490,9 @@ If any step fails, the gotcha checklist in §13 is the first place to look.
 | Theme provider (Apple) | `hosts/shared/macos/theme_provider_macos.h` | NSAppearance + KVO. |
 | Keymap | `hosts/shared/macos/keys_macos.h` | kVK_* → NEUI_KEY_* translation table; modifier mapping including the Cmd-as-CTRL convention. |
 | Clipboard | `hosts/shared/win32/clipboard_win32.h`, `hosts/shared/macos/clipboard_macos.h` | Both shapes (CF_UNICODETEXT vs NSPasteboardTypeString). |
+| Platform without blocking (web) | `hosts/crossplatform/platform_web.cpp` | Queue-only OS handlers, a suspending wait, nested loops by stack switching, post-dispatch verdicts, a service loop for clients without `run()`. |
+| Backend over a retained 2D API | `backends/canvas2d/canvas2d_backend.cpp` | Canvas 2D through `EM_JS`; keeps pixels between frames (cheap partial repaint); gradient extend modes by stop expansion. |
+| Painted message box | `hosts/shared/message_box_painted.h` | A neui-drawn `message_box` for a platform with no native dialog (Linux, web). |
 
 ---
 

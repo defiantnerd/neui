@@ -278,6 +278,54 @@ int main()
     be->read_pixels_bgra(ctx, out.data());
     check(px(out, W, 4, 32)[1] < 40 && px(out, W, 60, 32)[1] > 215,
           "linear gradient runs dark -> light");
+
+    // REPEAT / MIRROR (stop expansion): a 16 px black -> white axis over 64 px.
+    g.end_x = 16;
+    g.extend = NEUI_GRADIENT_EXTEND_REPEAT;
+    be->begin_frame(ctx, 0xFF000000u);
+    be->fill_rect_gradient(ctx, 0, 0, 64, 64, &g);
+    be->end_frame(ctx);
+    be->read_pixels_bgra(ctx, out.data());
+    check(px(out, W, 2, 32)[1] < 50 && px(out, W, 14, 32)[1] > 200 &&
+          px(out, W, 18, 32)[1] < 50 && px(out, W, 62, 32)[1] > 200,
+          "linear REPEAT tiles the axis");
+    g.extend = NEUI_GRADIENT_EXTEND_MIRROR;
+    be->begin_frame(ctx, 0xFF000000u);
+    be->fill_rect_gradient(ctx, 0, 0, 64, 64, &g);
+    be->end_frame(ctx);
+    be->read_pixels_bgra(ctx, out.data());
+    check(px(out, W, 2, 32)[1] < 50 && px(out, W, 18, 32)[1] > 200 &&
+          px(out, W, 30, 32)[1] < 50 && px(out, W, 34, 32)[1] < 50,
+          "linear MIRROR reflects every other tile");
+    // A path fill reaches the visible canvas; tiles left of the start too.
+    g.start_x = 32; g.end_x = 48; g.extend = NEUI_GRADIENT_EXTEND_REPEAT;
+    be->begin_frame(ctx, 0xFF000000u);
+    be->begin_path(ctx);
+    be->move_to(ctx, 0, 0); be->line_to(ctx, 64, 0); be->line_to(ctx, 64, 64);
+    be->line_to(ctx, 0, 64); be->close_path(ctx);
+    be->fill_path_gradient(ctx, &g);
+    be->end_frame(ctx);
+    be->read_pixels_bgra(ctx, out.data());
+    check(px(out, W, 2, 32)[1] < 50 && px(out, W, 14, 32)[1] > 200 &&
+          px(out, W, 62, 32)[1] > 200, "path REPEAT covers the canvas both ways");
+
+    // Radial, r = 8 around (32, 32); a pixel 10 px out sits at t = 1.25.
+    g.kind = NEUI_GRADIENT_RADIAL;
+    g.start_x = 32; g.start_y = 32; g.end_x = 32; g.end_y = 32; g.radius = 8;
+    const int kinds[3] = { NEUI_GRADIENT_EXTEND_CLAMP, NEUI_GRADIENT_EXTEND_REPEAT,
+                           NEUI_GRADIENT_EXTEND_MIRROR };
+    int at[3] = { 0, 0, 0 };
+    for (int i = 0; i < 3; ++i) {
+      g.extend = static_cast<neui_gradient_extend_t>(kinds[i]);
+      be->begin_frame(ctx, 0xFF000000u);
+      be->fill_rect_gradient(ctx, 0, 0, 64, 64, &g);
+      be->end_frame(ctx);
+      be->read_pixels_bgra(ctx, out.data());
+      at[i] = px(out, W, 42, 32)[1];
+    }
+    check(at[0] > 240 && at[1] > 40 && at[1] < 90 && at[2] > 165 && at[2] < 215,
+          "radial CLAMP / REPEAT / MIRROR outside the radius");
+    if (g_failures) std::printf("  radial at t=1.25: %d %d %d\n", at[0], at[1], at[2]);
   }
   {
     // A scaled off-screen context: logical draws land at scale x device px.

@@ -19,3 +19,8 @@ else()
   target_compile_options(neui-shader PRIVATE -O2 -ffp-contract=off)
   set_target_properties(neui-shader PROPERTIES XCODE_ATTRIBUTE_GCC_OPTIMIZATION_LEVEL "2")
 endif()
+# wasm: the SIMD128 arm of nsl_math.h. Only this library is built with it
+# (nothing else includes nsl_math.h); the module then needs a SIMD engine.
+if(EMSCRIPTEN AND NEUI_WEB_SIMD)
+  target_compile_options(neui-shader PRIVATE -msimd128)
+endif()

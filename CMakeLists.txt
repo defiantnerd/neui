@@ -111,6 +111,9 @@ if(EMSCRIPTEN)
   set_property(CACHE NEUI_WEB_FLAVOR PROPERTY STRINGS jspi asyncify)
   set(NEUI_WEB_ASYNCIFY_STACK "262144" CACHE STRING
       "Asyncify unwind buffer in bytes (the 4 KB default is far too small)")
+  # The shader executor's 4-wide math as wasm SIMD128 (every current browser
+  # has it). OFF builds the portable path, for an engine without SIMD.
+  option(NEUI_WEB_SIMD "Build the shader executor with wasm SIMD128 (-msimd128)" ON)
   if(NOT NEUI_WEB_FLAVOR MATCHES "^(jspi|asyncify)$")
     message(FATAL_ERROR "NEUI_WEB_FLAVOR must be jspi or asyncify, not '${NEUI_WEB_FLAVOR}'")
   endif()
@@ -416,6 +419,28 @@ if(EMSCRIPTEN)
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/examples/web/${f}" "$<TARGET_FILE_DIR:neui_web_embed_example>/${f}")
   endforeach()
+
+  # The deployable layout (docs/host-web.md): one directory per flavour next
+  # to the page side. Install a JSPI and an Asyncify build into the same
+  # prefix and neui-web.js picks per browser:
+  #   cmake --install out/web-jspi     --prefix dist --component web
+  #   cmake --install out/web-asyncify --prefix dist --component web
+  # -> dist/{neui-web.js, embed.html, jspi/*.mjs|wasm|data, asyncify/...}
+  foreach(t neui_web_embed_example neui_example_module)
+    install(FILES "$<TARGET_FILE:${t}>"
+                  "$<TARGET_FILE_DIR:${t}>/$<TARGET_FILE_BASE_NAME:${t}>.wasm"
+            DESTINATION ${NEUI_WEB_FLAVOR} COMPONENT web)
+    install(FILES "$<TARGET_FILE_DIR:${t}>/$<TARGET_FILE_BASE_NAME:${t}>.data"
+            DESTINATION ${NEUI_WEB_FLAVOR} COMPONENT web OPTIONAL)
+  endforeach()
+  install(FILES examples/web/neui-web.js DESTINATION . COMPONENT web)
+  # The demo page loads its modules from the flavour directories there.
+  install(CODE "
+    file(READ \"${CMAKE_CURRENT_SOURCE_DIR}/examples/web/embed.html\" page)
+    string(REPLACE \"const layout = 'build';\" \"const layout = 'dist';\" page \"\${page}\")
+    file(WRITE \"\${CMAKE_INSTALL_PREFIX}/embed.html\" \"\${page}\")
+    message(STATUS \"Installing: \${CMAKE_INSTALL_PREFIX}/embed.html\")
+  " COMPONENT web)
 endif()
 
 # GRID widget example - standalone demo separate from the monolithic

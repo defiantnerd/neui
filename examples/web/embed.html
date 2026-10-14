@@ -60,13 +60,19 @@
 
   const log = (t) => { const l = document.getElementById('log'); l.textContent += t + '\n'; l.scrollTop = l.scrollHeight; };
   const theme = () => document.getElementById('theme').value;
+  // 'build': served from a build directory (one flavour, modules next to the
+  // page). 'dist': the installed layout (cmake --install ... --component web),
+  // one directory per flavour; neui-web.js picks JSPI where the browser has it.
+  const layout = 'build';
+  const mod = (file) => layout === 'dist'
+    ? { jspi: './jspi/' + file, asyncify: './asyncify/' + file } : './' + file;
   const specs = {
-    left:    { el: 'slot-left',    module: './neui_web_embed_example.mjs', args: ['--name=left'] },
-    right:   { el: 'slot-right',   module: './neui_web_embed_example.mjs', args: ['--name=right'] },
+    left:    { el: 'slot-left',    module: mod('neui_web_embed_example.mjs'), args: ['--name=left'] },
+    right:   { el: 'slot-right',   module: mod('neui_web_embed_example.mjs'), args: ['--name=right'] },
     // Mounted in the card; the app embeds its PLUGWINDOW into #plug-panel
     // itself (NEUI_API_EMBED set_parent with a CSS selector).
-    plug:    { el: 'plug-host',    module: './neui_web_embed_example.mjs', args: ['--name=plug', '--plug=#plug-panel'] },
-    example: { el: 'slot-example', module: './neui_example_module.mjs',    args: [] },
+    plug:    { el: 'plug-host',    module: mod('neui_web_embed_example.mjs'), args: ['--name=plug', '--plug=#plug-panel'] },
+    example: { el: 'slot-example', module: mod('neui_example_module.mjs'),    args: [] },
   };
   const apps = {};
   window.neuiApps = apps;   // for the test driver

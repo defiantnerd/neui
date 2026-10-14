@@ -4283,17 +4283,17 @@ namespace xpl_host
       return false;
     }
     int rel_y = (int)ly - _popup_y_abs - POPUP_PAD_Y;
-    int idx = 0;
+    int idx = 0;       // 1-based, like the click, the keys and the paint
     int run_y = 0;
     int new_hover = -1;
     for (auto& s : _popup_items) {
+      ++idx;
       int h = popup_item_height(s);
       if (rel_y >= run_y && rel_y < run_y + h) {
         if (!popup_item_is_separator(s)) new_hover = idx;
         break;
       }
       run_y += h;
-      ++idx;
     }
     if (new_hover != _popup_hover) {
       _popup_hover = new_hover;

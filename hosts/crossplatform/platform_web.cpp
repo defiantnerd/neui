@@ -115,7 +115,8 @@
 //
 // Record types (neui_web_push): 1 resize, 2 focus, 3 blur, 4 close button,
 // 5 press on a blocked frame's backdrop, 10 pointer down, 11 pointer up,
-// 12 pointer move, 13 pointer leave, 14 context menu, 15 wheel, 20 key down,
+// 12 pointer move, 13 pointer leave, 14 context menu, 15 wheel, 16 touch
+// long-press (the right click of a touch screen), 20 key down,
 // 21 key up, 30 colour scheme (frame 0), 40 composition start, 41
 // composition update, 42 composition end, 43 text without a key, 50 drag
 // enter / over, 51 drag leave, 52 drop, 60 in-page drag move, 61 in-page
@@ -461,7 +462,9 @@ EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h, con
   var cv = document.createElement('canvas');
   cv.tabIndex = 0;
   // touch-action:none: a drag on the canvas is a neui drag, not a page pan.
+  // No touch callout or text selection on a long press (iOS).
   cv.style.cssText = 'display:block;outline:none;touch-action:none;' +
+                     '-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;' +
                      (fill ? 'width:100%;height:100%;' : 'width:' + w + 'px;height:' + h + 'px;');
   wrap.appendChild(cv);
   // The text proxy (not on a message box): invisible, never hit by the
@@ -515,22 +518,39 @@ EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h, con
   // captures the pointer, so a drag keeps reporting outside the canvas and
   // its release always arrives (the Linux pressed-widget model).
   var at = function(e) { var r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  // A touch held 500 ms within 8 px of where it went down is a right click
+  // (as on iOS); the first touch only, so a pinch never counts.
+  var lp = null;
+  var lpStop = function() { if (lp) { clearTimeout(lp.t); lp = null; } };
   cv.addEventListener('pointerdown', function(e) {
     var p = at(e);
     try { cv.setPointerCapture(e.pointerId); } catch (err) {}
     if (!inside(document.activeElement)) { try { cv.focus({ preventScroll: true }); } catch (err) { cv.focus(); } }
+    lpStop();
+    if (e.pointerType === 'touch' && e.isPrimary && e.button === 0) {
+      lp = { id: e.pointerId, x: e.clientX, y: e.clientY, t: 0 };
+      lp.t = setTimeout(function() {
+        var q = lp; lp = null;
+        var r = cv.getBoundingClientRect();
+        W.push(16, id, q.x - r.left, q.y - r.top);
+      }, 500);
+    }
     W.push(10, id, p[0], p[1], e.button, e.buttons, W.mods(e), e.timeStamp);
   });
   cv.addEventListener('pointerup', function(e) {
     var p = at(e);
+    if (lp && lp.id === e.pointerId) lpStop();
     W.push(11, id, p[0], p[1], e.button, e.buttons, W.mods(e), e.timeStamp);
   });
   cv.addEventListener('pointercancel', function(e) {
     var p = at(e);
+    if (lp && lp.id === e.pointerId) lpStop();
     W.push(11, id, p[0], p[1], 0, 0, W.mods(e), e.timeStamp);
   });
   cv.addEventListener('pointermove', function(e) {
     var p = at(e);
+    if (lp && (e.pointerId !== lp.id || Math.abs(e.clientX - lp.x) > 8 ||
+               Math.abs(e.clientY - lp.y) > 8)) lpStop();
     W.push(12, id, p[0], p[1], 0, e.buttons, W.mods(e), e.timeStamp);
   });
   cv.addEventListener('pointerleave', function() { W.push(13, id); });
@@ -1022,6 +1042,7 @@ namespace
   enum : int {
     EV_RESIZE = 1, EV_FOCUS = 2, EV_BLUR = 3, EV_CLOSE = 4, EV_BACKDROP = 5,
     EV_PDOWN = 10, EV_PUP = 11, EV_PMOVE = 12, EV_PLEAVE = 13, EV_CONTEXT = 14, EV_WHEEL = 15,
+    EV_LONGPRESS = 16,
     EV_KEYDOWN = 20, EV_KEYUP = 21,
     EV_SCHEME = 30, EV_PAGE = 31,
     EV_COMP_START = 40, EV_COMP_UPDATE = 41, EV_COMP_END = 42, EV_TEXT = 43,
@@ -1513,6 +1534,27 @@ namespace
     }
   }
 
+  // A touch long-press: the right click of a touch screen. The touch went
+  // down as a left press, so that press ends first (BUTTON_UP, no CLICK; a
+  // knob grab ends its gesture), then the right button goes down and up
+  // where the finger is. The finger's own release later is swallowed.
+  void long_press(WebFrame* f, float lx, float ly)
+  {
+    Session* s = f->session;
+    if (s->_popup_active || s->_menu_open || f->swallow_release) return;
+    if (uint32_t pressed = s->_pressed_widget) {
+      s->set_pressed(0);
+      send_mouse(f, NEUI_EVENT_MOUSE_BUTTON_UP, pressed, lx, ly, 0);
+    }
+    f->swallow_release = true;
+    f->last_click_ms   = -1.0e9;   // nor is the next tap a double click
+    const uint32_t hit = s->widget_at(lx, ly, f->widget_index);
+    send_mouse(f, NEUI_EVENT_MOUSE_RBUTTON_DOWN, hit, lx, ly, 0x0002);
+    // The press may have run a popup (a knob's reset menu), which can take
+    // the widget or the frame away.
+    if (s->get_widget(hit)) send_mouse(f, NEUI_EVENT_MOUSE_RBUTTON_UP, hit, lx, ly, 0);
+  }
+
   void pointer_move(WebFrame* f, float lx, float ly, uint32_t buttons, uint32_t mods)
   {
     Session* s = f->session;
@@ -1807,6 +1849,8 @@ namespace
     const uint32_t mods    = neui_detail::web_modifiers_to_neui(web_mods, g_apple);
     const uint32_t keycode = neui_detail::web_key_to_neui(code.c_str(), key.c_str());
 
+    // An open popup menu takes Esc / Enter / Space / Up / Down (as on win32).
+    if (s->_popup_active && s->handle_popup_key(keycode)) return true;
     // Tab cycles logical focus.
     if (keycode == NEUI_KEY_TAB) {
       s->focus_next(!(mods & NEUI_KMOD_SHIFT));
@@ -2147,7 +2191,8 @@ namespace
         if (g_drag) drag_record(e);
         continue;
       }
-      if (g_drag && e.type >= EV_PDOWN && e.type <= EV_PLEAVE) continue;
+      if (g_drag && ((e.type >= EV_PDOWN && e.type <= EV_PLEAVE) || e.type == EV_LONGPRESS))
+        continue;
 
       // Events that carry a default action get their verdict here, also when
       // the frame is gone or blocked (then: leave it to the browser).
@@ -2205,6 +2250,9 @@ namespace
             break;
           case EV_PLEAVE:
             pointer_leave(f);
+            break;
+          case EV_LONGPRESS:
+            if (!blocked) long_press(f, x, y);
             break;
           case EV_CONTEXT:
             // neui handles the right button itself (RBUTTON_DOWN / UP, the
