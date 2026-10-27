@@ -6,6 +6,8 @@
 #import <objc/runtime.h>
 #include <string>
 
+#include "../objc_class_names.h"   // NEUI_OBJC_SUFFIX
+
 // macOS toast overlay. Header-only helper used by both the native macOS
 // host and the xpl macOS glue. Creates a borderless child NSWindow with
 // rounded corners + soft shadow, animates fly-in (slide + fade) and

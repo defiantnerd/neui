@@ -33,7 +33,10 @@ jobs:
             test: ctest --test-dir build --output-on-failure
           - name: macOS (AppleClang · Xcode)
             os: macos-latest
-            configure: cmake -B build -G Xcode -DNEUI_WERROR=ON
+            # With an Objective-C class suffix (hosts/shared/objc_class_names.h),
+            # so every class is built renamed and the check below can see one
+            # that isn't.
+            configure: cmake -B build -G Xcode -DNEUI_WERROR=ON -DNEUI_OBJC_SUFFIX=_CI
             build: cmake --build build --config Debug --parallel
             test: ctest --test-dir build -C Debug --output-on-failure
           - name: Windows (MSVC · Direct2D)
@@ -63,6 +66,19 @@ jobs:
 
       - name: Build
         run: ${{ matrix.build }}
+
+      # Every Objective-C class neui defines carries the suffix configured
+      # above: a class missing from hosts/shared/objc_class_names.h would still
+      # be registered under its bare name, and meet another neui binary's.
+      - name: Objective-C class names
+        if: runner.os == 'macOS'
+        run: |
+          bare=$(find build -name 'libneui*.a' -exec nm -g {} + 2>/dev/null \
+                 | grep -E ' [SD] _OBJC_CLASS_\$_' | grep -v -E '_CI$' || true)
+          if [ -n "$bare" ]; then
+            echo "Objective-C classes without NEUI_OBJC_SUFFIX:"; echo "$bare"; exit 1
+          fi
+          echo "$(find build -name 'libneui*.a' -exec nm -g {} + 2>/dev/null | grep -c -E ' [SD] _OBJC_CLASS_\$_.*_CI$') classes, all suffixed"
 
       # Headless-safe: the registered tests (neui_tests, and on Linux the
       # offscreen neui_cairo_smoke) need no display. The X-display-dependent
