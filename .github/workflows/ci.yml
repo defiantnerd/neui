@@ -33,7 +33,11 @@ jobs:
             test: ctest --test-dir build --output-on-failure
           - name: macOS (AppleClang · Xcode)
             os: macos-latest
-            configure: cmake -B build -G Xcode -DNEUI_WERROR=ON
+            # The oldest macOS the code compiles for, so an API newer than that
+            # without an @available guard (-Wunguarded-availability-new) fails
+            # here instead of crashing on an older Mac. With the SDK's own
+            # version as the target the compiler cannot see it.
+            configure: cmake -B build -G Xcode -DNEUI_WERROR=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
             build: cmake --build build --config Debug --parallel
             test: ctest --test-dir build -C Debug --output-on-failure
           - name: Windows (MSVC · Direct2D)
