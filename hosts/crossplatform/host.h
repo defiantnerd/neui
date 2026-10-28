@@ -956,6 +956,12 @@ namespace xpl_host
     // dispatch when _popup_active. lx/ly are in frame-local logical px.
     bool handle_popup_click(float lx, float ly);
     bool handle_popup_hover(float lx, float ly);
+    // Lays _popup_items out for a frame of frame_w x frame_h logical px
+    // (0: unknown) and moves _popup_x_abs / _popup_y_abs to keep it inside.
+    void layout_popup(int frame_w, int frame_h);
+    // The 1-based item at frame-local (lx, ly); 0 inside the popup but on no
+    // item, -1 outside it.
+    int  popup_item_at(float lx, float ly) const;
     bool handle_popup_key(uint32_t keycode);
 
     // Combo-overlay management.
@@ -1058,6 +1064,14 @@ namespace xpl_host
     int                      _popup_x_abs      = 0;     // logical px, frame-local
     int                      _popup_y_abs      = 0;
     std::vector<std::string> _popup_items;
+    // The popup's layout, fitted to the frame when it opens (layout_popup):
+    // each item's column and its y / height in it (popup-local), the
+    // columns' width, their count and the tallest one's height.
+    struct PopupCell { int col = 0; int y = 0; int h = 0; };
+    std::vector<PopupCell>   _popup_cells;
+    int                      _popup_col_w      = 0;
+    int                      _popup_cols       = 1;
+    int                      _popup_h          = 0;
 
     // In-frame menubar overlay state (see the handle_menubar_* methods).
     // _menu_open gates the band/dropdown interaction; _menu_bar is the open
