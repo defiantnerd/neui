@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "../objc_class_names.h"   // NEUI_OBJC_SUFFIX
 #include "../clipboard_item.h"
 #include "../../../include/neui/d/dnd.h"
 #include "dnd_helpers_macos.h"   // dnd_nsop_from_action

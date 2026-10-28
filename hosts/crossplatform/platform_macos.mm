@@ -21,6 +21,7 @@
 
 #include <cstring>
 
+#include "../shared/objc_class_names.h"   // NEUI_OBJC_SUFFIX
 #include "host.h"
 #include "platform.h"
 #include "../shared/macos/modal_pump_macos.h"

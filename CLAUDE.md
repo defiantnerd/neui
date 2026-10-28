@@ -159,6 +159,7 @@ Win32:
 - **Frame create sizing** - the xpl host grows the requested logical client to the outer window via `AdjustWindowRectExForDpi` (reserving the menu row); `platform_set_window_pos` + `platform_menubar_attach` keep the client = requested size on resize / late menubar.
 
 macOS:
+- **Objective-C class names are process-wide** - a plugin's host loads several neui binaries into one process, and a name two of them define runs one image's code for both. Every class neui defines (macOS + iOS, except `NEUIApplication`) is listed in `hosts/shared/objc_class_names.h`, which renames it with the `NEUI_OBJC_SUFFIX` CMake option (empty = unchanged); a new class needs a line there, and every file that names one includes it first. CI's macOS job builds with a suffix and fails on a class symbol without it.
 - **`isFlipped = YES`** on content + painted views - CGContext CTM matches Y-down renderer convention.
 - **`drawRect:` rect is logical pixels** - backing scale via `NSWindow.backingScaleFactor`; `CGContextScaleCTM` accounts for it.
 - **`keyEquivalent`** is a single lowercase character string (`@"z"`); modifier mask `NSEventModifierFlagCommand | ...`.

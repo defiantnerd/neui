@@ -8,6 +8,7 @@
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
 
+#include "../shared/objc_class_names.h"   // NEUI_OBJC_SUFFIX
 #include "host.h"
 #include "checkbox_image.h"
 #include "../shared/macos/image_loader_macos.h"

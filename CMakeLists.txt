@@ -27,6 +27,20 @@ option(NEUI_WERROR         "Treat compiler warnings as errors" OFF)
 # from git (see backends/lvgl/). Windows-only; configuration FAILS on other
 # platforms (no silent fallback).
 option(NEUI_WITH_LVGL      "EXPERIMENTAL: build the LVGL host + backend (see docs/host-lvgl.md)" OFF)
+# Objective-C class names are global to a process (hosts/shared/objc_class_names.h):
+# a plugin built on neui sets a suffix of its own, one per product and release,
+# so its classes never meet another neui binary's in a host. Empty (the
+# default) keeps the names as they are. Letters, digits and '_' only - it ends
+# a class name. Directory-scoped, so it reaches every host target below.
+set(NEUI_OBJC_SUFFIX "" CACHE STRING
+    "Suffix for the Objective-C class names neui defines (macOS / iOS); empty: none")
+if(NEUI_OBJC_SUFFIX)
+  if(NOT NEUI_OBJC_SUFFIX MATCHES "^[A-Za-z0-9_]+$")
+    message(FATAL_ERROR "NEUI_OBJC_SUFFIX ends Objective-C class names: letters, "
+                        "digits and '_' only, not '${NEUI_OBJC_SUFFIX}'")
+  endif()
+  add_compile_definitions(NEUI_OBJC_SUFFIX=${NEUI_OBJC_SUFFIX})
+endif()
 
 # iOS is an APPLE platform too, so it must be detected distinctly from macOS:
 # the CoreGraphics backend is shared (gated on APPLE), but the AppKit macOS
