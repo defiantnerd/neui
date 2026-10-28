@@ -3983,13 +3983,6 @@ namespace xpl_host
     return popup_item_is_separator(s) ? POPUP_SEP_H : POPUP_ITEM_H();
   }
 
-  static int popup_total_height(const std::vector<std::string>& items)
-  {
-    int h = POPUP_PAD_Y * 2;
-    for (auto& s : items) h += popup_item_height(s);
-    return h;
-  }
-
   static int popup_total_width(neui_render_backend_t* backend,
                                 neui_render_ctx_t ctx,
                                 const std::vector<std::string>& items)
@@ -4006,6 +3999,49 @@ namespace xpl_host
     return w < POPUP_MIN_W ? POPUP_MIN_W : w;
   }
 
+  void Session::layout_popup(int frame_w, int frame_h)
+  {
+    // One column below the anchor while the items fit the frame's height;
+    // a longer list wraps into columns of the frame's height. Then moved up
+    // and left as far as it takes to stay inside the frame.
+    _popup_cells.clear();
+    _popup_col_w = popup_total_width(_backend, nullptr, _popup_items);
+    int col = 0, y = POPUP_PAD_Y, tallest = 0;
+    for (auto& s : _popup_items) {
+      int h = popup_item_height(s);
+      if (frame_h > 0 && y > POPUP_PAD_Y && y + h + POPUP_PAD_Y > frame_h) {
+        tallest = (std::max)(tallest, y + POPUP_PAD_Y);
+        ++col;
+        y = POPUP_PAD_Y;
+      }
+      _popup_cells.push_back({col, y, h});
+      y += h;
+    }
+    _popup_h    = (std::max)(tallest, y + POPUP_PAD_Y);
+    _popup_cols = col + 1;
+    if (frame_h > 0 && _popup_y_abs + _popup_h > frame_h)
+      _popup_y_abs = (std::max)(0, frame_h - _popup_h);
+    int w = _popup_col_w * _popup_cols;
+    if (frame_w > 0 && _popup_x_abs + w > frame_w)
+      _popup_x_abs = (std::max)(0, frame_w - w);
+  }
+
+  int Session::popup_item_at(float lx, float ly) const
+  {
+    int w = _popup_col_w * _popup_cols;
+    if (lx < static_cast<float>(_popup_x_abs) || lx >= static_cast<float>(_popup_x_abs + w) ||
+        ly < static_cast<float>(_popup_y_abs) || ly >= static_cast<float>(_popup_y_abs + _popup_h)) {
+      return -1;
+    }
+    int col = _popup_col_w > 0 ? ((int)lx - _popup_x_abs) / _popup_col_w : 0;
+    int rel_y = (int)ly - _popup_y_abs;
+    for (size_t i = 0; i < _popup_cells.size(); ++i) {
+      auto& c = _popup_cells[i];
+      if (c.col == col && rel_y >= c.y && rel_y < c.y + c.h) return (int)i + 1;
+    }
+    return 0;
+  }
+
   // Handle a click on the popup at frame-local (lx, ly). Updates
   // _popup_picked / _popup_running so the nested pump in
   // open_popup_menu returns. Returns true unconditionally - when a
@@ -4013,69 +4049,31 @@ namespace xpl_host
   bool Session::handle_popup_click(float lx, float ly)
   {
     if (!_popup_active) return false;
-    int width = popup_total_width(_backend, nullptr, _popup_items);
-    int height = popup_total_height(_popup_items);
-    if (lx < static_cast<float>(_popup_x_abs) || lx >= static_cast<float>(_popup_x_abs + width) ||
-        ly < static_cast<float>(_popup_y_abs) || ly >= static_cast<float>(_popup_y_abs + height)) {
+    int idx = popup_item_at(lx, ly);
+    if (idx < 0) {
       // click outside -> dismiss
       _popup_picked = 0;
       _popup_active = false;
       _popup_running = false;
       return true;
     }
-    int rel_y = (int)ly - _popup_y_abs - POPUP_PAD_Y;
-    int idx = 0;       // 1-based pick
-    int run_y = 0;
-    for (auto& s : _popup_items) {
-      ++idx;
-      int h = popup_item_height(s);
-      if (rel_y >= run_y && rel_y < run_y + h) {
-        if (popup_item_is_separator(s)) {
-          // ignore separator click; stay open
-          return true;
-        }
-        _popup_picked = idx;
-        _popup_active = false;
-        _popup_running = false;
-        return true;
-      }
-      run_y += h;
+    if (idx == 0 || popup_item_is_separator(_popup_items[static_cast<size_t>(idx - 1)])) {
+      // padding or a separator: stay open
+      return true;
     }
+    _popup_picked = idx;
+    _popup_active = false;
+    _popup_running = false;
     return true;
   }
 
   bool Session::handle_popup_hover(float lx, float ly)
   {
     if (!_popup_active) return false;
-    int width  = popup_total_width(_backend, nullptr, _popup_items);
-    int height = popup_total_height(_popup_items);
-    if (lx < static_cast<float>(_popup_x_abs) || lx >= static_cast<float>(_popup_x_abs + width) ||
-        ly < static_cast<float>(_popup_y_abs) || ly >= static_cast<float>(_popup_y_abs + height)) {
-      if (_popup_hover != -1) {
-        _popup_hover = -1;
-        void* frame = nullptr;
-        uint32_t f = _widgets.child(0);
-        while (f != 0 && _widgets.exists(f)) {
-          if (_widgets[f].native_handle) { frame = _widgets[f].native_handle; break; }
-          f = _widgets.next(f);
-        }
-        if (frame) platform_invalidate(frame);
-      }
-      return false;
-    }
-    int rel_y = (int)ly - _popup_y_abs - POPUP_PAD_Y;
-    int idx = 0;
-    int run_y = 0;
+    int idx = popup_item_at(lx, ly);
+    // 1-based, as paint_popup_menu and handle_popup_key read it; -1: none
     int new_hover = -1;
-    for (auto& s : _popup_items) {
-      int h = popup_item_height(s);
-      if (rel_y >= run_y && rel_y < run_y + h) {
-        if (!popup_item_is_separator(s)) new_hover = idx;
-        break;
-      }
-      run_y += h;
-      ++idx;
-    }
+    if (idx > 0 && !popup_item_is_separator(_popup_items[static_cast<size_t>(idx - 1)])) new_hover = idx;
     if (new_hover != _popup_hover) {
       _popup_hover = new_hover;
       uint32_t f = _widgets.child(0);
@@ -4087,7 +4085,7 @@ namespace xpl_host
         f = _widgets.next(f);
       }
     }
-    return true;
+    return idx >= 0;
   }
 
   bool Session::handle_popup_key(uint32_t keycode)
@@ -4138,8 +4136,9 @@ namespace xpl_host
   {
     if (!_popup_active || !_backend) return;
     using neui_detail::ColorRole;
-    int w = popup_total_width(_backend, ctx, _popup_items);
-    int h = popup_total_height(_popup_items);
+    int cw = _popup_col_w;
+    int w = cw * _popup_cols;
+    int h = _popup_h;
     float fx = (float)_popup_x_abs;
     float fy = (float)_popup_y_abs;
 
@@ -4147,33 +4146,35 @@ namespace xpl_host
                         neui_detail::color(ColorRole::control_bg_alt));
     _backend->draw_rect(ctx, fx, fy, (float)w, (float)h, 1.0f,
                         neui_detail::color(ColorRole::border));
+    for (int c = 1; c < _popup_cols; ++c) {
+      _backend->fill_rect(ctx, fx + (float)(c * cw), fy + 4.0f, 1.0f, (float)h - 8.0f,
+                          neui_detail::color(ColorRole::scrollbar_separator));
+    }
 
-    int run_y = POPUP_PAD_Y;
-    int idx = 0;
-    for (auto& s : _popup_items) {
-      ++idx;
-      int ih = popup_item_height(s);
+    for (size_t i = 0; i < _popup_items.size() && i < _popup_cells.size(); ++i) {
+      auto& s = _popup_items[i];
+      auto& cell = _popup_cells[i];
+      float cx = fx + (float)(cell.col * cw);
+      float cy = fy + (float)cell.y;
       if (popup_item_is_separator(s)) {
-        float sy = fy + (float)run_y + (float)POPUP_SEP_H * 0.5f;
-        _backend->fill_rect(ctx, fx + 4.0f, sy,
-                             (float)w - 8.0f, 1.0f,
+        float sy = cy + (float)POPUP_SEP_H * 0.5f;
+        _backend->fill_rect(ctx, cx + 4.0f, sy,
+                             (float)cw - 8.0f, 1.0f,
                              neui_detail::color(ColorRole::scrollbar_separator));
-        run_y += ih;
         continue;
       }
-      bool hovered = (idx == _popup_hover);
+      bool hovered = ((int)i + 1 == _popup_hover);
       if (hovered) {
-        _backend->fill_rect(ctx, fx + 1.0f, fy + (float)run_y,
-                             (float)w - 2.0f, (float)ih,
+        _backend->fill_rect(ctx, cx + 1.0f, cy,
+                             (float)cw - 2.0f, (float)cell.h,
                              neui_detail::color(ColorRole::accent));
       }
       _backend->draw_text(ctx,
-        fx + (float)POPUP_PAD_X, fy + (float)run_y,
-        (float)w - (float)POPUP_PAD_X * 2.0f, (float)ih,
+        cx + (float)POPUP_PAD_X, cy,
+        (float)cw - (float)POPUP_PAD_X * 2.0f, (float)cell.h,
         s.c_str(), (float)POPUP_FONT_PX(),
         hovered ? neui_detail::color(ColorRole::accent_text)
                 : neui_detail::color(ColorRole::text_primary));
-      run_y += ih;
     }
   }
 
@@ -4193,10 +4194,15 @@ namespace xpl_host
     auto parents = _widgets.get_all_parents(anchor_idx);
     abs_x += anchor.x;
     abs_y += anchor.y;
+    int frame_w = 0, frame_h = 0;
     for (auto p : parents) {
       if (p == 0 || !_widgets.exists(p)) continue;
       auto& pw = _widgets[p];
-      if (pw.native_handle) break;  // stop at the frame
+      if (pw.native_handle) {       // stop at the frame
+        frame_w = pw.width;
+        frame_h = pw.height;
+        break;
+      }
       abs_x += pw.x;
       abs_y += pw.y;
     }
@@ -4204,6 +4210,7 @@ namespace xpl_host
     _popup_items     = items;
     _popup_x_abs     = abs_x;
     _popup_y_abs     = abs_y;
+    layout_popup(frame_w, frame_h);
     _popup_hover     = -1;
     _popup_picked    = 0;
     _popup_active    = true;
@@ -4220,6 +4227,7 @@ namespace xpl_host
     int picked = _popup_picked;
     _popup_active = false;
     _popup_items.clear();
+    _popup_cells.clear();
     _popup_hover  = -1;
     _popup_picked = 0;
 

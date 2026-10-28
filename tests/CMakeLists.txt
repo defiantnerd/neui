@@ -93,6 +93,20 @@ if(WIN32)
     neui neui-xplhost neui-win32host)
 endif()
 
+# Win32: the hosts linked into a DLL, as an audio plugin embedding a frame
+# (NEUI_API_EMBED) links them. A DLL has no main(); WinMain, which calls it, is
+# an object of its own (hosts/win32/winmain.cpp) that only an application's C
+# runtime pulls in. Building the DLL is the check - it fails to link if WinMain
+# comes back into an object every use of the host needs.
+if(WIN32)
+  add_library(neui_dll_link_check SHARED dll_link_check.cpp)
+  target_include_directories(neui_dll_link_check PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_dll_link_check PRIVATE cxx_std_17)
+  target_link_libraries(neui_dll_link_check PRIVATE
+    neui neui-xplhost neui-win32host)
+endif()
+
 # Linux-only: Cairo software backend offscreen smoke test. Unlike neui_tests
 # this links a real backend (neui-backend-cairo), so it is gated to the
 # platforms where that backend is built.

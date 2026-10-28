@@ -3,9 +3,6 @@
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
-#include <shellapi.h>   // CommandLineToArgvW (was transitively pulled in
-                         // before WIN32_LEAN_AND_MEAN started excluding it
-                         // via the asset_manager_w32.h include chain).
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "uxtheme.lib")
 #include "../../backends/d2d/d2d_backend.h"
@@ -18,8 +15,6 @@
 
 #include <winrt/windows.foundation.h>
 #include <winrt/Windows.UI.ViewManagement.h>
-
-int main(int argc, wchar_t** argv);
 
 namespace win32_host
 {
@@ -1598,14 +1593,4 @@ namespace win32_host
 
 } // namespace win32_host
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
-{
-  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-  CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);  // required for WIC image loading
-  win32_host::set_hinstance(hInstance);
-  win32_host::register_classes();
-  win32_host::register_host();
-  int argc;
-  wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-  return main(argc, argv);
-}
+// WinMain, the application's entry point, is in winmain.cpp.

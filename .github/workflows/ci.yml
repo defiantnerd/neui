@@ -33,10 +33,16 @@ jobs:
             test: ctest --test-dir build --output-on-failure
           - name: macOS (AppleClang · Xcode)
             os: macos-latest
-            # With an Objective-C class suffix (hosts/shared/objc_class_names.h),
+
+            # The oldest macOS the code compiles for, so an API newer than that
+            # without an @available guard (-Wunguarded-availability-new) fails
+            # here instead of crashing on an older Mac. With the SDK's own
+            # version as the target the compiler cannot see it.
+
+            # DNEUI_OBJC_SUFFIX: With an Objective-C class suffix (hosts/shared/objc_class_names.h),
             # so every class is built renamed and the check below can see one
             # that isn't.
-            configure: cmake -B build -G Xcode -DNEUI_WERROR=ON -DNEUI_OBJC_SUFFIX=_CI
+            configure: cmake -B build -G Xcode -DNEUI_WERROR=ON -DNEUI_OBJC_SUFFIX=_CI -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
             build: cmake --build build --config Debug --parallel
             test: ctest --test-dir build -C Debug --output-on-failure
           - name: Windows (MSVC · Direct2D)
