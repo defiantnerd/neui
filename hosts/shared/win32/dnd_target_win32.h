@@ -60,6 +60,11 @@ namespace neui_detail
     MoveFn  on_move  = nullptr;
     LeaveFn on_leave = nullptr;
     DropFn  on_drop  = nullptr;
+
+    // Optional: the DPI that maps the frame's client px to its logical px
+    // (a zoomed frame's is not the window's). Unset: the window's DPI.
+    using ClientDpiFn = uint32_t (*)(void* session_ptr, uint32_t frame_widget_id);
+    ClientDpiFn client_dpi = nullptr;
   };
 
   // Build a seam whose callbacks forward straight into the host Session's
@@ -421,7 +426,8 @@ namespace neui_detail
       POINT p = { pt.x, pt.y };
       ScreenToClient(_hwnd, &p);
       // Convert from physical pixels to logical pixels at 96 DPI.
-      UINT dpi = GetDpiForWindow(_hwnd);
+      UINT dpi = _seam.client_dpi ? _seam.client_dpi(_seam.session_ptr, _seam.frame_widget_id)
+                                  : GetDpiForWindow(_hwnd);
       if (dpi == 0) dpi = 96;
       out_x = MulDiv(p.x, 96, static_cast<int>(dpi));
       out_y = MulDiv(p.y, 96, static_cast<int>(dpi));

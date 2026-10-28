@@ -113,11 +113,33 @@ void wake_app_event_pump()
 }
 - (void)toastStart;
 - (void)toastStop;
+- (void)neuiApplyZoom;
 @end
 
 @implementation NEUIView
 
 - (BOOL)isFlipped { return YES; }
+
+// The frame's zoom (NEUI_ATTR_ZOOM): the bounds keep the frame's logical
+// size while the frame (the view's size in the window) is that times the
+// zoom, so drawRect:'s CTM and every convertPoint: carry the zoom. Re-applied
+// on every frame size change, since AppKit resizes the bounds along with it.
+- (void)neuiApplyZoom
+{
+  float zoom = 1.0f;
+  if (session) {
+    if (xpl_host::WidgetData* wd = session->get_widget(widget_index)) zoom = wd->zoom;
+  }
+  NSSize f = self.frame.size;
+  NSSize b = NSMakeSize(f.width / zoom, f.height / zoom);
+  if (!NSEqualSizes(self.bounds.size, b)) [self setBoundsSize:b];
+}
+
+- (void)setFrameSize:(NSSize)size
+{
+  [super setFrameSize:size];
+  [self neuiApplyZoom];
+}
 
 - (BOOL)isOpaque  { return YES; }
 
@@ -156,6 +178,10 @@ void wake_app_event_pump()
   uint32_t dpi = (uint32_t)(96.0 * scale + 0.5);
   if (dpi != wd->dpi) {
     wd->dpi = dpi;
+    if (wd->render_ctx) {
+      if (auto* backend = xpl_host::platform_get_backend())
+        backend->update_dpi(wd->render_ctx, wd->client_dpi());
+    }
     [self setNeedsDisplay:YES];
   }
 }
@@ -1299,6 +1325,17 @@ namespace {
 NSRect logical_window_rect(int x, int y, int w, int h)
 { return neui_detail::logical_window_rect_macos(x, y, w, h); }
 
+// A logical size on screen: times the frame's zoom (NEUI_ATTR_ZOOM).
+CGFloat zoomed(int v, float zoom) { return (CGFloat)v * (CGFloat)zoom; }
+
+// A frame's window rect for its logical size, zoomed; (x, y) unchanged.
+NSRect zoomed_window_rect(const xpl_host::WidgetData& wd)
+{
+  return neui_detail::logical_window_rect_macos(wd.x, wd.y,
+                                                (int)(zoomed(wd.width, wd.zoom) + 0.5),
+                                                (int)(zoomed(wd.height, wd.zoom) + 0.5));
+}
+
 // A frame's native_handle is an NSWindow* for standalone frames and an
 // NEUIView* for a DAW-embedded PLUGWINDOW (see platform_set_embed_parent).
 // These three accessors are the only place that distinction lives: window-
@@ -1327,6 +1364,17 @@ NSView* frame_content_view(void* nh)
   return (NSView*)obj;
 }
 
+// The zoom of the frame behind a native handle (1 when it has none).
+float frame_zoom(void* nh)
+{
+  NSView* v = frame_content_view(nh);
+  if (![v isKindOfClass:[NEUIView class]]) return 1.0f;
+  NEUIView* nv = (NEUIView*)v;
+  if (!nv->session) return 1.0f;
+  xpl_host::WidgetData* wd = nv->session->get_widget(nv->widget_index);
+  return wd ? wd->zoom : 1.0f;
+}
+
 NSWindowStyleMask styles_for_appwindow()
 { return neui_detail::styles_for_appwindow_macos(); }
 
@@ -1348,10 +1396,12 @@ void install_view_and_context(xpl_host::Session* session,
   [window setAcceptsMouseMovedEvents:YES];
 
   // Content view (also the render target).
-  NEUIView* view = [[NEUIView alloc] initWithFrame:NSMakeRect(0, 0, wd.width, wd.height)];
+  NEUIView* view = [[NEUIView alloc] initWithFrame:NSMakeRect(0, 0, zoomed(wd.width, wd.zoom),
+                                                              zoomed(wd.height, wd.zoom))];
   view->session      = session;
   view->widget_index = widget_index;
   [window setContentView:view];
+  [view neuiApplyZoom];
 
   // Force the view to be the initial / current first responder. Without this
   // AppKit may leave the window itself as first responder (which doesn't
@@ -1385,6 +1435,8 @@ void install_view_and_context(xpl_host::Session* session,
   CGFloat scale = window.backingScaleFactor;
   if (scale <= 0) scale = 1.0;
   wd.dpi = (uint32_t)(96.0 * scale + 0.5);
+  if (backend && wd.render_ctx && wd.zoom != 1.0f)
+    backend->update_dpi(wd.render_ctx, wd.client_dpi());
 
   // Hand back a +1 retain on the NSWindow as the native_handle. ARC will
   // release it via __bridge_transfer in platform_destroy_window or in the
@@ -1442,7 +1494,7 @@ namespace xpl_host
   void platform_create_appwindow(Session* session, uint32_t widget_index,
                                   WidgetData& wd)
   {
-    NSRect frame_rect = logical_window_rect(wd.x, wd.y, wd.width, wd.height);
+    NSRect frame_rect = zoomed_window_rect(wd);
     NSWindow* window = [[NSWindow alloc] initWithContentRect:frame_rect
                                                     styleMask:styles_for_appwindow()
                                                       backing:NSBackingStoreBuffered
@@ -1463,9 +1515,11 @@ namespace xpl_host
     if (wd.embed_parent) {
       NSView* parent = (__bridge NSView*)reinterpret_cast<void*>(wd.embed_parent);
       NEUIView* view = [[NEUIView alloc]
-        initWithFrame:NSMakeRect(wd.x, wd.y, wd.width, wd.height)];
+        initWithFrame:NSMakeRect(wd.x, wd.y, zoomed(wd.width, wd.zoom),
+                                 zoomed(wd.height, wd.zoom))];
       view->session      = session;
       view->widget_index = widget_index;
+      [view neuiApplyZoom];
       view.hidden = YES;
       [parent addSubview:view];
 
@@ -1480,6 +1534,8 @@ namespace xpl_host
                                     : NSScreen.mainScreen.backingScaleFactor;
       if (scale <= 0) scale = 1.0;
       wd.dpi = (uint32_t)(96.0 * scale + 0.5);
+      if (backend && wd.render_ctx && wd.zoom != 1.0f)
+        backend->update_dpi(wd.render_ctx, wd.client_dpi());
 
       // +1 retain on the NEUIView as the native_handle; released via
       // __bridge_transfer in platform_destroy_window (there is no window
@@ -1488,7 +1544,7 @@ namespace xpl_host
       return;
     }
 
-    NSRect frame_rect = logical_window_rect(wd.x, wd.y, wd.width, wd.height);
+    NSRect frame_rect = zoomed_window_rect(wd);
     NSWindow* window = [[NSWindow alloc] initWithContentRect:frame_rect
                                                     styleMask:NSWindowStyleMaskBorderless
                                                       backing:NSBackingStoreBuffered
@@ -1507,13 +1563,13 @@ namespace xpl_host
       // Convert owner's bottom-left frame back to top-left logical coords.
       int or_x = (int)or_rect.origin.x;
       int or_y = (int)(screen_h - or_rect.origin.y - or_rect.size.height);
-      wd.x = or_x + ((int)or_rect.size.width  - wd.width)  / 2;
-      wd.y = or_y + ((int)or_rect.size.height - wd.height) / 2;
+      wd.x = or_x + ((int)or_rect.size.width  - (int)zoomed(wd.width, wd.zoom))  / 2;
+      wd.y = or_y + ((int)or_rect.size.height - (int)zoomed(wd.height, wd.zoom)) / 2;
       if (wd.x < 0) wd.x = 0;
       if (wd.y < 0) wd.y = 0;
     }
 
-    NSRect frame_rect = logical_window_rect(wd.x, wd.y, wd.width, wd.height);
+    NSRect frame_rect = zoomed_window_rect(wd);
     NSWindow* window = [[NSWindow alloc] initWithContentRect:frame_rect
                                                     styleMask:styles_for_dialog()
                                                       backing:NSBackingStoreBuffered
@@ -1636,14 +1692,51 @@ namespace xpl_host
                                 int x, int y, int w, int h, uint32_t /*dpi*/)
   {
     if (!native_handle) return;
+    // w / h are the logical client size; on screen it is zoomed.
+    float zoom = frame_zoom(native_handle);
     if (is_embedded_view(native_handle)) {
       // (x, y) is parent-view-relative in the parent's coordinate system;
       // drawRect: reads bounds each frame so the render follows the resize.
-      [frame_content_view(native_handle) setFrame:NSMakeRect(x, y, w, h)];
+      [frame_content_view(native_handle) setFrame:NSMakeRect(x, y, zoomed(w, zoom), zoomed(h, zoom))];
       return;
     }
     NSWindow* win = native_window(native_handle);
-    [win setFrame:logical_window_rect(x, y, w, h) display:YES];
+    [win setFrame:logical_window_rect(x, y, (int)(zoomed(w, zoom) + 0.5),
+                                      (int)(zoomed(h, zoom) + 0.5)) display:YES];
+  }
+
+  void platform_apply_zoom(WidgetData& wd)
+  {
+    if (!wd.native_handle) return;
+    NSView* v = frame_content_view(wd.native_handle);
+    if (![v isKindOfClass:[NEUIView class]]) return;
+    // The bounds are the logical size the user may have resized the window
+    // to; the view's new size is that times the new zoom.
+    NSSize logical = v.bounds.size;
+    NSSize size = NSMakeSize(logical.width * wd.zoom, logical.height * wd.zoom);
+    if (is_embedded_view(wd.native_handle)) {
+      [v setFrameSize:size];
+    } else {
+      // The window's content grows or shrinks with its top-left kept.
+      NSWindow* win = native_window(wd.native_handle);
+      NSRect content = [win contentRectForFrameRect:win.frame];
+      content.origin.y += content.size.height - size.height;
+      content.size = size;
+      if (wd.attrs) {
+        platform_apply_size_constraints(wd.native_handle,
+                                        wd.attrs->get_int(NEUI_ATTR_MIN_WIDTH,  0),
+                                        wd.attrs->get_int(NEUI_ATTR_MIN_HEIGHT, 0),
+                                        wd.attrs->get_int(NEUI_ATTR_MAX_WIDTH,  0),
+                                        wd.attrs->get_int(NEUI_ATTR_MAX_HEIGHT, 0));
+      }
+      [win setFrame:[win frameRectForContentRect:content] display:NO];
+    }
+    [(NEUIView*)v neuiApplyZoom];
+    if (wd.render_ctx) {
+      if (auto* backend = platform_get_backend())
+        backend->update_dpi(wd.render_ctx, wd.client_dpi());
+    }
+    [v setNeedsDisplay:YES];
   }
 
   void platform_post_close(void* native_handle)
@@ -1895,10 +1988,12 @@ namespace xpl_host
     // host's window.
     if (is_embedded_view(native_handle)) return;
     NSWindow* w = native_window(native_handle);
-    NSSize min_sz = NSMakeSize(min_w > 0 ? min_w : 0,
-                                min_h > 0 ? min_h : 0);
-    NSSize max_sz = NSMakeSize(max_w > 0 ? max_w : FLT_MAX,
-                                max_h > 0 ? max_h : FLT_MAX);
+    // Logical sizes; the content is zoomed.
+    float zoom = frame_zoom(native_handle);
+    NSSize min_sz = NSMakeSize(min_w > 0 ? zoomed(min_w, zoom) : 0,
+                                min_h > 0 ? zoomed(min_h, zoom) : 0);
+    NSSize max_sz = NSMakeSize(max_w > 0 ? zoomed(max_w, zoom) : FLT_MAX,
+                                max_h > 0 ? zoomed(max_h, zoom) : FLT_MAX);
     [w setContentMinSize:min_sz];
     [w setContentMaxSize:max_sz];
   }

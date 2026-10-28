@@ -183,6 +183,19 @@ extern "C" {
 #define NEUI_ATTR_MAX_WIDTH  "neui.attr.max_width"
 #define NEUI_ATTR_MAX_HEIGHT "neui.attr.max_height"
 
+// float: zoom of a frame (APPWINDOW / PLUGWINDOW / DIALOG). Default 1.0.
+// The frame's content keeps its logical coordinates - widget positions,
+// sizes, fonts, the frame's own width / height and every event coordinate
+// stay as laid out - and the native window shows it scaled: a 1000 x 600
+// frame at zoom 0.5 is a 500 x 300 logical-px window (on a 2x display
+// 1000 x 600 device px). Clamped to 0.25 .. 4. Set before show() or any time
+// after: a change resizes the native window around the content (an embedded
+// PLUGWINDOW resizes its own view; asking the DAW for the new size is the
+// plugin's part). The popup menu and the toast stay unzoomed, at the size
+// they have in an unzoomed frame. Honoured by the crossplatform host on
+// Win32, macOS and Linux/X11; ignored elsewhere.
+#define NEUI_ATTR_ZOOM "neui.attr.zoom"
+
 // string: file path to an icon image for a frame window (APPWINDOW).
 // Accepted formats: .ico (preferred - multi-resolution), .png, .bmp, .jpg.
 // Empty string clears the icon back to the default. Set before show() for

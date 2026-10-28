@@ -106,6 +106,7 @@ namespace
     bool         is_appwindow = false;
     bool         counted      = false;     // contributes to g_appwindow_count
     uint32_t     dpi          = 96;
+    float        zoom         = 1.0f;      // the frame's NEUI_ATTR_ZOOM
     bool         needs_paint  = false;
     bool         toast_anim   = false;
     // Modal blocking: set while a modal child dialog is up (X11 has no native
@@ -139,6 +140,19 @@ namespace
   {
     auto it = g_windows.find(w);
     return it == g_windows.end() ? nullptr : it->second;
+  }
+
+  // Physical px per logical client px: the DPI's scale times the frame's
+  // zoom. Positions stay at the DPI's scale alone.
+  float client_scale(const LinuxWindow* lw)
+  {
+    float scale = static_cast<float>(lw->dpi) / 96.0f * lw->zoom;
+    return scale > 0.0f ? scale : 1.0f;
+  }
+
+  uint32_t client_dpi(const LinuxWindow* lw)
+  {
+    return static_cast<uint32_t>(static_cast<float>(lw->dpi) * lw->zoom + 0.5f);
   }
 
   // ---- XInput2 smooth scroll ------------------------------------------------
@@ -484,7 +498,7 @@ namespace
   void dispatch_button_press(LinuxWindow* lw, XButtonEvent& be)
   {
     Session* s = lw->session;
-    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float scale = client_scale(lw);
     // Wheel (legacy core Button 4-7): the stepped fallback. Once XI2 scroll has
     // proven it delivers on this server, the same physical scroll also arrives
     // as XI2 valuators, so drop the legacy buttons to avoid double-counting.
@@ -563,7 +577,7 @@ namespace
   {
     if (be.button >= 4 && be.button <= 7) return;  // wheel: press carried it
     Session* s = lw->session;
-    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float scale = client_scale(lw);
     float lx = static_cast<float>(be.x) / scale, ly = static_cast<float>(be.y) / scale;
 
     if (be.button == 1) {
@@ -635,7 +649,7 @@ namespace
 
   void dispatch_motion(LinuxWindow* lw, XMotionEvent& me)
   {
-    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float scale = client_scale(lw);
     do_motion(lw, static_cast<float>(me.x) / scale, static_cast<float>(me.y) / scale, me.state);
   }
 
@@ -1269,7 +1283,7 @@ namespace
     if (dv == 0.0 && dh == 0.0) return;
     g_xi2_scroll_seen = true;   // XI2 scroll works here -> suppress core Button 4-7
 
-    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float scale = client_scale(lw);
     feed_scroll(lw, static_cast<float>(de->event_x) / scale, static_cast<float>(de->event_y) / scale, dv, dh);
   }
 
@@ -1295,7 +1309,7 @@ namespace
           // then to avoid double-dispatching the move.
           if (lw->session->_pressed_widget == 0) {
             unsigned int state = static_cast<unsigned int>(de->mods.effective);
-            float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+            float scale = client_scale(lw);
             do_motion(lw, static_cast<float>(de->event_x) / scale, static_cast<float>(de->event_y) / scale, state);
           }
         }
@@ -1371,7 +1385,7 @@ namespace
         s->resize_render_ctx(lw->widget_index, wphys, hphys);
         auto* wd = s->get_widget(lw->widget_index);
         if (wd) {
-          float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+          float scale = client_scale(lw);
           int wlog = static_cast<int>(static_cast<float>(wphys) / scale + 0.5f);
           int hlog = static_cast<int>(static_cast<float>(hphys) / scale + 0.5f);
           if (wd->width != wlog || wd->height != hlog) {
@@ -1468,8 +1482,10 @@ namespace
 
     uint32_t dpi   = query_display_dpi(dpy);
     float    scale = static_cast<float>(dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
-    int w_phys = static_cast<int>(static_cast<float>(wd.width)  * scale + 0.5f); if (w_phys < 1) w_phys = 1;
-    int h_phys = static_cast<int>(static_cast<float>(wd.height) * scale + 0.5f); if (h_phys < 1) h_phys = 1;
+    // The client at the frame's zoom (NEUI_ATTR_ZOOM); the position unzoomed.
+    float cscale = scale * wd.zoom;
+    int w_phys = static_cast<int>(static_cast<float>(wd.width)  * cscale + 0.5f); if (w_phys < 1) w_phys = 1;
+    int h_phys = static_cast<int>(static_cast<float>(wd.height) * cscale + 0.5f); if (h_phys < 1) h_phys = 1;
     int x_phys = static_cast<int>(static_cast<float>(wd.x) * scale + 0.5f);
     int y_phys = static_cast<int>(static_cast<float>(wd.y) * scale + 0.5f);
 
@@ -1550,7 +1566,7 @@ namespace
     lw->dpy = dpy; lw->owns_display = embedded;
     lw->win = win; lw->visual = vis; lw->depth = depth;
     lw->ic = ic; lw->session = session; lw->widget_index = widget_index;
-    lw->is_appwindow = is_appwindow; lw->dpi = dpi;
+    lw->is_appwindow = is_appwindow; lw->dpi = dpi; lw->zoom = wd.zoom;
     g_windows[win] = lw;
 
     wd.native_handle = lw;
@@ -1563,7 +1579,7 @@ namespace
       wd.render_ctx = backend->create_context(&ns,
                                               static_cast<uint32_t>(w_phys),
                                               static_cast<uint32_t>(h_phys));
-      if (wd.render_ctx) backend->update_dpi(wd.render_ctx, dpi);
+      if (wd.render_ctx) backend->update_dpi(wd.render_ctx, client_dpi(lw));
     }
 
     // Pre-show attribute-driven size constraints + window icon.
@@ -2064,11 +2080,37 @@ namespace
     if (!native_handle) return;
     auto* lw = static_cast<LinuxWindow*>(native_handle);
     float scale = static_cast<float>(dpi ? dpi : lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float cscale = scale * lw->zoom;   // w / h are the logical client size
     XMoveResizeWindow(lw->dpy, lw->win,
                       static_cast<int>(static_cast<float>(x) * scale + 0.5f),
                       static_cast<int>(static_cast<float>(y) * scale + 0.5f),
-                      static_cast<unsigned int>(static_cast<float>(w) * scale + 0.5f),
-                      static_cast<unsigned int>(static_cast<float>(h) * scale + 0.5f));
+                      static_cast<unsigned int>(static_cast<float>(w) * cscale + 0.5f),
+                      static_cast<unsigned int>(static_cast<float>(h) * cscale + 0.5f));
+    XFlush(lw->dpy);
+  }
+
+  void platform_apply_zoom(WidgetData& wd)
+  {
+    if (!wd.native_handle) return;
+    auto* lw = static_cast<LinuxWindow*>(wd.native_handle);
+    lw->zoom = wd.zoom;
+    auto* backend = platform_get_backend();
+    if (backend && wd.render_ctx) backend->update_dpi(wd.render_ctx, client_dpi(lw));
+    auto dt = g_drop_targets.find(lw->win);
+    if (dt != g_drop_targets.end()) dt->second.dpi = client_dpi(lw);
+    if (wd.attrs) {
+      platform_apply_size_constraints(lw,
+                                      wd.attrs->get_int(NEUI_ATTR_MIN_WIDTH,  0),
+                                      wd.attrs->get_int(NEUI_ATTR_MIN_HEIGHT, 0),
+                                      wd.attrs->get_int(NEUI_ATTR_MAX_WIDTH,  0),
+                                      wd.attrs->get_int(NEUI_ATTR_MAX_HEIGHT, 0));
+    }
+    // ConfigureNotify maps the new size back to the unchanged logical size.
+    float cscale = client_scale(lw);
+    XResizeWindow(lw->dpy, lw->win,
+                  static_cast<unsigned int>(static_cast<float>(wd.width)  * cscale + 0.5f),
+                  static_cast<unsigned int>(static_cast<float>(wd.height) * cscale + 0.5f));
+    lw->needs_paint = true;
     XFlush(lw->dpy);
   }
 
@@ -2236,7 +2278,7 @@ namespace
   {
     if (!native_handle) return;
     auto* lw = static_cast<LinuxWindow*>(native_handle);
-    float scale = static_cast<float>(lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+    float scale = client_scale(lw);
     XSizeHints* sh = XAllocSizeHints();
     if (!sh) return;
     sh->flags = 0;
@@ -2294,7 +2336,7 @@ namespace
   {
     if (!native_handle || !g_display) return false;
     auto* lw = static_cast<LinuxWindow*>(native_handle);
-    xdnd_register(lw->dpy ? lw->dpy : g_display, lw->win, session_ptr, frame_widget_id, lw->dpi);
+    xdnd_register(lw->dpy ? lw->dpy : g_display, lw->win, session_ptr, frame_widget_id, client_dpi(lw));
     return true;
   }
   void platform_dnd_unregister_window(void* native_handle)

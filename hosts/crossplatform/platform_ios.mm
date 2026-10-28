@@ -2395,6 +2395,9 @@ namespace xpl_host
     // The view controller's bounds drive layout instead (see RESIZE handling).
   }
 
+  // NEUI_ATTR_ZOOM is not supported on iOS.
+  void platform_apply_zoom(WidgetData& /*wd*/) {}
+
   void platform_post_close(void* /*native_handle*/)
   {
     // No user-driven window close on iOS (the system manages scenes); the
