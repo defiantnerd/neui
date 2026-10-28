@@ -86,6 +86,14 @@ namespace xpl_host
     void* native_icon   = nullptr;
     neui_render_ctx_t render_ctx = nullptr;
     uint32_t dpi = 96;
+    // A frame's NEUI_ATTR_ZOOM (1.0: none). dpi above stays the monitor's;
+    // the client area maps logical px to physical px by client_dpi().
+    float zoom = 1.0f;
+    uint32_t client_dpi() const
+    {
+      uint32_t d = dpi ? dpi : 96;
+      return zoom == 1.0f ? d : static_cast<uint32_t>(static_cast<float>(d) * zoom + 0.5f);
+    }
 
     // For DIALOG frames: tree index of the owner frame (APPWINDOW or DIALOG).
     // Set via widgets->set_owner before show. 0 means no owner. While the
@@ -956,11 +964,11 @@ namespace xpl_host
     // dispatch when _popup_active. lx/ly are in frame-local logical px.
     bool handle_popup_click(float lx, float ly);
     bool handle_popup_hover(float lx, float ly);
-    // Lays _popup_items out for a frame of frame_w x frame_h logical px
+    // Lays _popup_items out for a frame of frame_w x frame_h popup px
     // (0: unknown) and moves _popup_x_abs / _popup_y_abs to keep it inside.
     void layout_popup(int frame_w, int frame_h);
-    // The 1-based item at frame-local (lx, ly); 0 inside the popup but on no
-    // item, -1 outside it.
+    // The 1-based item at frame-local (lx, ly) popup px; 0 inside the popup
+    // but on no item, -1 outside it.
     int  popup_item_at(float lx, float ly) const;
     bool handle_popup_key(uint32_t keycode);
 
@@ -1061,8 +1069,11 @@ namespace xpl_host
     bool                     _popup_running    = false;  // controls the nested pump
     int                      _popup_picked     = 0;
     int                      _popup_hover      = -1;
-    int                      _popup_x_abs      = 0;     // logical px, frame-local
+    int                      _popup_x_abs      = 0;     // popup px, frame-local
     int                      _popup_y_abs      = 0;
+    // The popup keeps its unzoomed size in a zoomed frame: its geometry is in
+    // popup px, the frame's logical px times its zoom (NEUI_ATTR_ZOOM).
+    float                    _popup_zoom       = 1.0f;
     std::vector<std::string> _popup_items;
     // The popup's layout, fitted to the frame when it opens (layout_popup):
     // each item's column and its y / height in it (popup-local), the

@@ -907,6 +907,17 @@ namespace xpl_host
         stored = static_cast<float>(sidx) / static_cast<float>(steps - 1);
       }
     }
+    if (!strcmp(key, NEUI_ATTR_ZOOM)) {
+      if (!wd.is_frame()) return 0;
+      if (!(stored >= 0.25f)) stored = 0.25f;   // NaN too
+      if (stored > 4.0f) stored = 4.0f;
+      neui_detail::ensure_attrs(wd.attrs).set_float(key, stored);
+      if (stored != wd.zoom) {
+        wd.zoom = stored;
+        if (wd.native_handle) platform_apply_zoom(wd);
+      }
+      return 1;
+    }
     neui_detail::ensure_attrs(wd.attrs).set_float(key, stored);
     // Float attrs feed live paint state (NEUI_PARAM_VALUE on KNOB /
     // SLIDER, NEUI_ATTR_ROTATION on IMAGE, etc.). Invalidate the owning

@@ -939,7 +939,7 @@ namespace xpl_host
     if (new_dpi == 0) new_dpi = 96;
     wd->dpi = new_dpi;
     if (wd->render_ctx && _backend)
-      _backend->update_dpi(wd->render_ctx, new_dpi);
+      _backend->update_dpi(wd->render_ctx, wd->client_dpi());
   }
 
   // -------------------------------------------------------------------------
@@ -3978,9 +3978,9 @@ namespace xpl_host
     return s.size() == 1 && s[0] == '-';
   }
 
-  static int popup_item_height(const std::string& s)
+  static int popup_item_height(const std::string& s, int item_h)
   {
-    return popup_item_is_separator(s) ? POPUP_SEP_H : POPUP_ITEM_H();
+    return popup_item_is_separator(s) ? POPUP_SEP_H : item_h;
   }
 
   static int popup_total_width(neui_render_backend_t* backend,
@@ -4002,23 +4002,29 @@ namespace xpl_host
   void Session::layout_popup(int frame_w, int frame_h)
   {
     // One column below the anchor while the items fit the frame's height;
-    // a longer list wraps into columns of the frame's height. Then moved up
-    // and left as far as it takes to stay inside the frame.
-    _popup_cells.clear();
+    // a longer list wraps into columns of the frame's height, and while those
+    // would be wider than the frame the rows get tighter (down to the font's
+    // height and a little). Then moved up and left as far as it takes to stay
+    // inside the frame.
     _popup_col_w = popup_total_width(_backend, nullptr, _popup_items);
-    int col = 0, y = POPUP_PAD_Y, tallest = 0;
-    for (auto& s : _popup_items) {
-      int h = popup_item_height(s);
-      if (frame_h > 0 && y > POPUP_PAD_Y && y + h + POPUP_PAD_Y > frame_h) {
-        tallest = (std::max)(tallest, y + POPUP_PAD_Y);
-        ++col;
-        y = POPUP_PAD_Y;
+    const int tightest = POPUP_FONT_PX() + 4;
+    for (int item_h = POPUP_ITEM_H(); ; --item_h) {
+      _popup_cells.clear();
+      int col = 0, y = POPUP_PAD_Y, tallest = 0;
+      for (auto& s : _popup_items) {
+        int h = popup_item_height(s, item_h);
+        if (frame_h > 0 && y > POPUP_PAD_Y && y + h + POPUP_PAD_Y > frame_h) {
+          tallest = (std::max)(tallest, y + POPUP_PAD_Y);
+          ++col;
+          y = POPUP_PAD_Y;
+        }
+        _popup_cells.push_back({col, y, h});
+        y += h;
       }
-      _popup_cells.push_back({col, y, h});
-      y += h;
+      _popup_h    = (std::max)(tallest, y + POPUP_PAD_Y);
+      _popup_cols = col + 1;
+      if (frame_w <= 0 || _popup_col_w * _popup_cols <= frame_w || item_h <= tightest) break;
     }
-    _popup_h    = (std::max)(tallest, y + POPUP_PAD_Y);
-    _popup_cols = col + 1;
     if (frame_h > 0 && _popup_y_abs + _popup_h > frame_h)
       _popup_y_abs = (std::max)(0, frame_h - _popup_h);
     int w = _popup_col_w * _popup_cols;
@@ -4049,7 +4055,7 @@ namespace xpl_host
   bool Session::handle_popup_click(float lx, float ly)
   {
     if (!_popup_active) return false;
-    int idx = popup_item_at(lx, ly);
+    int idx = popup_item_at(lx * _popup_zoom, ly * _popup_zoom);
     if (idx < 0) {
       // click outside -> dismiss
       _popup_picked = 0;
@@ -4070,7 +4076,7 @@ namespace xpl_host
   bool Session::handle_popup_hover(float lx, float ly)
   {
     if (!_popup_active) return false;
-    int idx = popup_item_at(lx, ly);
+    int idx = popup_item_at(lx * _popup_zoom, ly * _popup_zoom);
     // 1-based, as paint_popup_menu and handle_popup_key read it; -1: none
     int new_hover = -1;
     if (idx > 0 && !popup_item_is_separator(_popup_items[static_cast<size_t>(idx - 1)])) new_hover = idx;
@@ -4142,6 +4148,12 @@ namespace xpl_host
     float fx = (float)_popup_x_abs;
     float fy = (float)_popup_y_abs;
 
+    // popup px -> the frame's logical px
+    bool zoomed = _popup_zoom != 1.0f && _backend->push_transform && _backend->scale;
+    if (zoomed) {
+      _backend->push_transform(ctx);
+      _backend->scale(ctx, 1.0f / _popup_zoom, 1.0f / _popup_zoom);
+    }
     _backend->fill_rect(ctx, fx, fy, (float)w, (float)h,
                         neui_detail::color(ColorRole::control_bg_alt));
     _backend->draw_rect(ctx, fx, fy, (float)w, (float)h, 1.0f,
@@ -4176,6 +4188,7 @@ namespace xpl_host
         hovered ? neui_detail::color(ColorRole::accent_text)
                 : neui_detail::color(ColorRole::text_primary));
     }
+    if (zoomed) _backend->pop_transform(ctx);
   }
 
   int Session::open_popup_menu(uint32_t anchor_idx, int lx, int ly,
@@ -4195,22 +4208,28 @@ namespace xpl_host
     abs_x += anchor.x;
     abs_y += anchor.y;
     int frame_w = 0, frame_h = 0;
+    float zoom = 1.0f;
     for (auto p : parents) {
       if (p == 0 || !_widgets.exists(p)) continue;
       auto& pw = _widgets[p];
       if (pw.native_handle) {       // stop at the frame
         frame_w = pw.width;
         frame_h = pw.height;
+        zoom    = pw.zoom;
         break;
       }
       abs_x += pw.x;
       abs_y += pw.y;
     }
+    // In popup px (the frame's zoom applied), so a zoomed frame's popup
+    // keeps its unzoomed size.
+    auto zoomed = [zoom](int v) { return static_cast<int>(static_cast<float>(v) * zoom + 0.5f); };
 
     _popup_items     = items;
-    _popup_x_abs     = abs_x;
-    _popup_y_abs     = abs_y;
-    layout_popup(frame_w, frame_h);
+    _popup_zoom      = zoom;
+    _popup_x_abs     = zoomed(abs_x);
+    _popup_y_abs     = zoomed(abs_y);
+    layout_popup(zoomed(frame_w), zoomed(frame_h));
     _popup_hover     = -1;
     _popup_picked    = 0;
     _popup_active    = true;
@@ -5012,7 +5031,9 @@ namespace xpl_host
       }
     }
 
-    int max_box_w = static_cast<int>(static_cast<float>(fw->width) *
+    // In toast px: the frame's logical px times its zoom, so a zoomed
+    // frame's toast keeps its unzoomed size.
+    int max_box_w = static_cast<int>(static_cast<float>(fw->width) * fw->zoom *
                                       TOAST_MAX_FRAME_FRAC);
     if (max_box_w < 80) max_box_w = 80;
     int w_px = static_cast<int>(std::ceil(max_w)) + 2 * TOAST_PAD_X;
@@ -5035,8 +5056,9 @@ namespace xpl_host
     platform_invalidate(fw->native_handle);
   }
 
-  // Compute the toast rect (in frame-local logical px) for a frame's
-  // current ToastState. Returns false if no toast is active.
+  // Compute the toast rect (in frame-local toast px: logical px times the
+  // frame's zoom) for a frame's current ToastState. base_y is in logical px.
+  // Returns false if no toast is active.
   static bool toast_current_rect(FrameWidget* fw, int base_y,
                                   int& out_x, int& out_y,
                                   int& out_w, int& out_h)
@@ -5059,12 +5081,13 @@ namespace xpl_host
       float e     = p * p * p;
       slide_t     = 1.0f - e;
     }
+    base_y      = static_cast<int>(static_cast<float>(base_y) * fw->zoom + 0.5f);
     int rest_y  = base_y + ts.line_h;
     int start_y = base_y - ts.height;
     out_y = static_cast<int>(static_cast<float>(start_y) +
             (static_cast<float>(rest_y) - static_cast<float>(start_y)) *
             slide_t);
-    out_x = (fw->width - ts.width) / 2;
+    out_x = (static_cast<int>(static_cast<float>(fw->width) * fw->zoom + 0.5f) - ts.width) / 2;
     if (out_x < 0) out_x = 0;
     out_w = ts.width;
     out_h = ts.height;
@@ -5079,6 +5102,8 @@ namespace xpl_host
     int rx, ry, rw, rh;
     if (!toast_current_rect(fw, frame_top_inset(frame_widget_idx), rx, ry, rw, rh))
       return false;
+    lx *= fw->zoom;
+    ly *= fw->zoom;
     if (lx < static_cast<float>(rx) || lx >= static_cast<float>(rx + rw) ||
         ly < static_cast<float>(ry) || ly >= static_cast<float>(ry + rh))
       return false;
@@ -5139,6 +5164,10 @@ namespace xpl_host
     // base_y is 0 on native-menu platforms / menubar-less frames.
     int cx, cy, cw, ch;
     widget_client_rect(frame_widget_idx, &cx, &cy, &cw, &ch);
+    // To toast px, so a zoomed frame's toast keeps its unzoomed size.
+    float zoom = fw->zoom;
+    auto zoomed = [zoom](int v) { return static_cast<int>(static_cast<float>(v) * zoom + 0.5f); };
+    cx = zoomed(cx); cy = zoomed(cy); cw = zoomed(cw); ch = zoomed(ch);
     int base_y   = cy;
 
     // Resting position: top edge sits `line_h` below the client-area top
@@ -5149,13 +5178,18 @@ namespace xpl_host
     int top_y    = static_cast<int>(static_cast<float>(start_y) +
                     (static_cast<float>(rest_y) - static_cast<float>(start_y)) *
                     slide_t);
-    int left_x   = (fw->width - ts.width) / 2;
+    int left_x   = (zoomed(fw->width) - ts.width) / 2;
     if (left_x < 0) left_x = 0;
 
     if (!_backend->push_alpha || !_backend->pop_alpha) {
       // Alpha stack is required for the cross-fade; without it skip painting
       // rather than dump a fully opaque toast on top of widgets.
       return;
+    }
+    bool scaled = zoom != 1.0f && _backend->push_transform && _backend->scale;
+    if (scaled) {
+      _backend->push_transform(ctx);
+      _backend->scale(ctx, 1.0f / zoom, 1.0f / zoom);
     }
     // Clip to the client area so the fly-in never paints over the menubar band
     // (the toast is painted after the band). No-op-equivalent full-window clip
@@ -5213,6 +5247,7 @@ namespace xpl_host
 
     _backend->pop_alpha(ctx);
     if (clipped) _backend->pop_clip(ctx);
+    if (scaled) _backend->pop_transform(ctx);
   }
 
   void Session::open_combo(uint32_t idx)
