@@ -143,7 +143,7 @@ namespace macos_host {
   // (flipped) coordinate space, and returns the 1-based index of the picked
   // item (separators consume an index, matching the win32 host) or 0 on
   // dismiss. Defined after the view; the KNOB right-click handler calls it.
-  int run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items);
+  int run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items, int checked);
 
   // Defined in widgets.mm. Routes a built-in command (NEUI_CMD_*) to the key
   // window's first responder; returns true if consumed. The menu-pick router
@@ -314,7 +314,7 @@ namespace macos_host {
     auto* wd = static_cast<WidgetData*>(host_data);
     if (!wd || !wd->native_control || !items) return 0;
     NSView* anchor = (__bridge NSView*)wd->native_control;
-    return run_popup_menu_macos(anchor, local_x, local_y, items);
+    return run_popup_menu_macos(anchor, local_x, local_y, items, 0);
   }
 
   // ------------------------------------------------------------------------
@@ -2154,7 +2154,7 @@ static float neui_snap_to_steps(float v, int steps)
     if (wd && !wd->enabled) return;  // disabled knob: no context menu
     NSPoint p = [self localPointForKnobEvent:event];
     static const char* k_items[] = { "Reset to default", nullptr };
-    int pick = macos_host::run_popup_menu_macos(self, (int)p.x, (int)p.y, k_items);
+    int pick = macos_host::run_popup_menu_macos(self, (int)p.x, (int)p.y, k_items, 0);
     if (pick == 1) {
       float def = 0.0f;
       if (wd && wd->attrs) def = neui_clamp01(wd->attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f));
@@ -2924,7 +2924,7 @@ namespace macos_host {
 @end
 
 namespace macos_host {
-  int run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items)
+  int run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items, int checked)
   {
     if (!items) return 0;
     NSMenu* menu = [[NSMenu alloc] initWithTitle:@""];
@@ -2946,6 +2946,7 @@ namespace macos_host {
       mi.target  = collector;
       mi.tag     = idx;
       mi.enabled = YES;
+      if (idx == checked) mi.state = NSControlStateValueOn;
       [menu addItem:mi];
     }
 

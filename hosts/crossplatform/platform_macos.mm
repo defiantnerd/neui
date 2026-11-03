@@ -775,6 +775,9 @@ void wake_app_event_pump()
   uint32_t mods = mac_modifiers_to_neui(event.modifierFlags);
   uint32_t keycode = mac_keycode_to_neui(event.keyCode);
 
+  // A popup menu absorbs Esc / Enter / Space / arrow keys (win32 parity).
+  if (session->_popup_active && session->handle_popup_key(keycode)) return;
+
   // Tab cycles logical focus inside our hand-rolled Tab traversal - same as
   // the win32 path. Consume here; the focus_next path doesn't fire KEYDOWN.
   if (keycode == NEUI_KEY_TAB) {

@@ -954,9 +954,11 @@ namespace xpl_host
     // nested message loop until the user picks an item or dismisses.
     // anchor_idx is the widget the popup is anchored to; (lx, ly) are in
     // its local logical coordinates. Returns 1-based pick index, or 0 if
-    // dismissed. items contains the displayed strings ("-" = separator).
+    // dismissed. items contains the displayed strings ("-" = separator);
+    // checked is the 1-based index of the item drawn with a check mark (the
+    // keyboard starts there), 0 for none.
     int open_popup_menu(uint32_t anchor_idx, int lx, int ly,
-                        const std::vector<std::string>& items);
+                        const std::vector<std::string>& items, int checked = 0);
     // Paint the popup menu overlay. Called from paint_frame after the
     // combo overlay so the popup sits on top of everything else.
     void paint_popup_menu(neui_render_ctx_t ctx);
@@ -1075,14 +1077,21 @@ namespace xpl_host
     // popup px, the frame's logical px times its zoom (NEUI_ATTR_ZOOM).
     float                    _popup_zoom       = 1.0f;
     std::vector<std::string> _popup_items;
+    int                      _popup_checked    = 0;     // 1-based, 0: none
     // The popup's layout, fitted to the frame when it opens (layout_popup):
-    // each item's column and its y / height in it (popup-local), the
-    // columns' width, their count and the tallest one's height.
+    // each item's column and its y / height in it (popup-local), each
+    // column's left edge and the popup's width last (popup-local), the
+    // tallest column's height, the font, the column that holds the checked
+    // item (its check mark's gutter; -1: none) and the frame's size (popup
+    // px, for the dimmed backdrop).
     struct PopupCell { int col = 0; int y = 0; int h = 0; };
     std::vector<PopupCell>   _popup_cells;
-    int                      _popup_col_w      = 0;
-    int                      _popup_cols       = 1;
+    std::vector<int>         _popup_col_x;
     int                      _popup_h          = 0;
+    int                      _popup_font_px    = 0;
+    int                      _popup_check_col  = -1;
+    int                      _popup_frame_w    = 0;
+    int                      _popup_frame_h    = 0;
 
     // In-frame menubar overlay state (see the handle_menubar_* methods).
     // _menu_open gates the band/dropdown interaction; _menu_bar is the open

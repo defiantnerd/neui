@@ -150,6 +150,15 @@ typedef struct neui_widget_api {
   neui_widget_t      (NEUI_ABI *create_from_component)(neui_session_t session, neui_widget_t parent,
                                                        neui_asset_t component,
                                                        int x, int y, int width, int height);
+  // As popup_menu, with one item checked: `checked` is its 1-based index
+  // (counting separators, as the result does), 0 for none. The host marks
+  // it as its menus mark a checked item (a check mark beside it); on the
+  // crossplatform host the arrow keys start from it. A menu of a value's
+  // choices passes the current one. (Vtable-appended; check the api version
+  // / pointer before calling.)
+  int                (NEUI_ABI *popup_menu_checked)(neui_session_t session, neui_widget_t anchor,
+                                                    int x, int y,
+                                                    const char* const* items, int checked);
 } neui_widget_api_t;
 
 #define NEUI_W_APPWINDOW  "neui.std.appwindow"

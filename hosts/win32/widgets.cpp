@@ -4693,8 +4693,8 @@ namespace win32_host
   // ---------------------------------------------------------------------------
   // Popup menu (context menu, free of the menubar)
 
-  static int NEUI_ABI popup_menu(neui_session_t session, neui_widget_t anchor,
-                                  int x, int y, const char* const* items)
+  static int NEUI_ABI popup_menu_checked(neui_session_t session, neui_widget_t anchor,
+                                          int x, int y, const char* const* items, int checked)
   {
     auto* s = get_session(session);
     if (!s) return 0;
@@ -4725,7 +4725,8 @@ namespace win32_host
         if (wlen > 1) {
           MultiByteToWideChar(CP_UTF8, 0, s8, -1, ws.data(), wlen);
         }
-        AppendMenuW(h, MF_STRING, static_cast<UINT_PTR>(count), ws.c_str());
+        AppendMenuW(h, MF_STRING | (count == checked ? MF_CHECKED : MF_UNCHECKED),
+                    static_cast<UINT_PTR>(count), ws.c_str());
       }
     }
 
@@ -4753,6 +4754,12 @@ namespace win32_host
         pt.x, pt.y, owner, nullptr);
     DestroyMenu(h);
     return static_cast<int>(picked);
+  }
+
+  static int NEUI_ABI popup_menu(neui_session_t session, neui_widget_t anchor,
+                                  int x, int y, const char* const* items)
+  {
+    return popup_menu_checked(session, anchor, x, y, items, 0);
   }
 
   // -------------------------------------------------------------------------
@@ -4835,6 +4842,7 @@ namespace win32_host
     get_enabled,
     get_client_rect_api,
     create_from_component,
+    popup_menu_checked,
   };
 
   // -------------------------------------------------------------------------

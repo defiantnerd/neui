@@ -483,6 +483,12 @@ namespace ios_host
     return 0;
   }
 
+  static int NEUI_ABI w_popup_menu_checked(neui_session_t session, neui_widget_t anchor,
+                                           int x, int y, const char* const* items, int /*checked*/)
+  {
+    return w_popup_menu(session, anchor, x, y, items);
+  }
+
   static void NEUI_ABI w_invalidate(neui_session_t session, neui_widget_t widget)
   {
     auto* s = get_session_for_widget(session, widget);
@@ -623,6 +629,7 @@ namespace ios_host
     w_get_enabled,
     w_get_client_rect,
     w_create_from_component,
+    w_popup_menu_checked,
   };
 
   // -------------------------------------------------------------------------
