@@ -24,6 +24,9 @@
 //                         later click in the frame.
 //   E. NO LEAK-THROUGH  - a pick, a dismiss, and a double-click must not also
 //                         reach the widget under the popup.
+//   F. LONG AND ZOOMED  - a 120-row menu in a frame at NEUI_ATTR_UI_SCALE 0.5
+//                         must keep its unzoomed row height and wrap into
+//                         columns, so every row can be picked.
 //
 // Row geometry is DISCOVERED by probing, never hardcoded: probe_pick() reopens
 // the menu and clicks one point, so a whole column can be mapped a pixel row at
@@ -37,6 +40,7 @@
 
 #include <neui/neui.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -557,6 +561,95 @@ int main()
     titles = main_menu_titles();
     check(titles_contain(titles, "File"),
           "the app menu bar is still intact after the popup's clear + destroy");
+
+    // ---- F. a long list in a zoomed frame ----------------------------------
+    // A 120-row popup in a frame at NEUI_ATTR_UI_SCALE 0.5 (a plugin editor laid
+    // out at twice its window size). Drawn at the frame's zoom its rows were
+    // half height and one column ran off the bottom, so most rows could not be
+    // reached. Now it keeps its unzoomed size and wraps into columns. Probed in
+    // WINDOW points, which at 0.5 are the popup's own px: a horizontal scan finds
+    // the columns, a vertical scan down each one maps its rows.
+    {
+      auto* attrs = (neui_attr_api_t*) g_neui->get_interface(g_sess, NEUI_API_ATTRS);
+      neui_widget_t zwin = g_widgets->create(g_sess, widget_none, NEUI_W_APPWINDOW,
+                                             120, 120, 1424, 1026, nullptr);
+      attrs->set_float(g_sess, zwin, NEUI_ATTR_UI_SCALE, 0.5f);
+      neui_widget_t zpm = g_widgets->create(g_sess, zwin, NEUI_W_POPUPMENU,
+                                            0, 0, 0, 0, nullptr);
+      const int kRows = 120;
+      std::vector<uint32_t> ids;
+      for (int i = 1; i <= kRows; ++i) {
+        char text[32];
+        std::snprintf(text, sizeof text, "Target %d", i);
+        ids.push_back(tree->add(g_sess, zpm, tree_item_root, text, nullptr).id);
+      }
+      tree->set_checked(g_sess, zpm, { ids[56] }, true);
+      g_widgets->show(g_sess, zwin);
+      g_neui->pump_once(g_sess);
+
+      NSWindow* prev = g_window;
+      for (NSWindow* w in [NSApp windows])
+        if (w != prev && [w isVisible]) g_window = w;
+      check(g_window != prev, "precondition: the zoomed frame has its own NSWindow");
+      const NSSize view = [[g_window contentView] bounds].size;
+
+      auto pick_at = [&](float x, float y) -> uint32_t {
+        reset_rec();
+        if (!g_widgets->popup_tree_menu(g_sess, zwin, 40, 60, zpm)) return 0;
+        click_at(x, y);
+        return g_rec.popup_item;
+      };
+      auto row_of = [&](uint32_t id) -> int {
+        for (size_t i = 0; i < ids.size(); ++i) if (ids[i] == id) return (int)i;
+        return -1;
+      };
+
+      // A grid over the whole window: x every 8 pt (a column is several times
+      // that), y every 2 pt (a row is far more). Each probe opens the popup and
+      // clicks one point. Columns are counted as distinct x runs that hit rows;
+      // the pitch is the smallest step between consecutive rows in one column.
+      std::vector<bool> reached(ids.size(), false);
+      float pitch = 1e9f;
+      int columns = 0, first_seen = -1;
+      bool in_column = false;
+      for (float x = 2.0f; x < view.width; x += 8.0f) {
+        int prev_row = -1;
+        float prev_y = 0.0f;
+        bool any = false;
+        for (float y = 1.0f; y < view.height; y += 2.0f) {
+          int r = row_of(pick_at(x, y));
+          if (r < 0) continue;
+          any = true;
+          reached[(size_t)r] = true;
+          if (prev_row >= 0 && r == prev_row + 1) pitch = std::min(pitch, y - prev_y);
+          if (r != prev_row) { prev_row = r; prev_y = y; }
+        }
+        // a column starts where a run of hits starts, or where the first row
+        // seen jumps (two columns side by side, no gap between them)
+        int first = -1;
+        if (any) {
+          for (float y = 1.0f; y < view.height && first < 0; y += 2.0f) first = row_of(pick_at(x, y));
+          if (!in_column || first != first_seen) ++columns;
+          first_seen = first;
+        }
+        in_column = any;
+      }
+      check(columns > 1, "a list taller than the frame wraps into columns");
+      int missing = 0;
+      for (bool b : reached) if (!b) ++missing;
+      check_eq((uint32_t)missing, 0, "every one of the 120 rows can be picked");
+      // Unzoomed rows are at least the font's height and a little (17 px); at the
+      // frame's zoom they would be 22 * 0.5 = 11 window points.
+      check(pitch >= 15.0f && pitch < 1e8f, "the rows keep their unzoomed height (>= 15 pt)");
+      std::printf("        %d columns, row pitch %.0f pt in a %.0f x %.0f pt window\n",
+                  columns, pitch, view.width, view.height);
+
+      // A pick still reports the item it shows: the last row.
+      check(reached[(size_t)kRows - 1], "the last row is reachable and reports its own id");
+
+      g_widgets->destroy(g_sess, zwin);
+      g_window = prev;
+    }
 
     g_neui->pump_once(g_sess);
     g_neui->destroy(g_sess);
