@@ -22,6 +22,7 @@
 #include <cstring>
 #include <cmath>
 
+#include "../shared/objc_class_names.h"   // NEUI_OBJC_SUFFIX
 #include "host.h"
 #include "platform.h"
 // NSAccessibility provider (NEUI_API_A11Y). Lives in its own TU - see the

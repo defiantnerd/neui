@@ -10,6 +10,7 @@
 #import <AppKit/AppKit.h>
 
 #include <string>
+#include "../shared/objc_class_names.h"   // NEUI_OBJC_SUFFIX
 #include "host.h"
 #include "checkbox_image.h"
 #include "../shared/macos/clipboard_macos.h"

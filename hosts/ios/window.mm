@@ -33,6 +33,7 @@
 #import <objc/runtime.h>   // objc_setAssociatedObject - keeps a UITableView's
                            // data source/delegate alive for the table's lifetime
 
+#include "../shared/objc_class_names.h"   // NEUI_OBJC_SUFFIX
 #include "host.h"
 #include "../shared/ios/ios_api.h"   // NEUI_API_IOS shared state + seams
 #include "../shared/compound.h"

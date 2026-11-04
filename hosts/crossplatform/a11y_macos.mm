@@ -32,6 +32,7 @@
 #include <string>
 #include <vector>
 
+#include "../shared/objc_class_names.h"   // NEUI_OBJC_SUFFIX
 #include "a11y_macos.h"
 #include "a11y_adapter.h"
 #include "host.h"
