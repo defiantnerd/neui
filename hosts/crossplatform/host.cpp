@@ -3118,8 +3118,10 @@ namespace xpl_host
     neui_detail::set_active_palette_override(prev_override);
 
     // Widgets that read the animation clock keep the frame's timer running.
-    if (WidgetData* fw = get_widget(parent_index); fw && fw->native_handle)
-      platform_set_animation_timer(fw->native_handle, animation_interval(parent_index));
+    // The frame is looked up again: a paint handler may have destroyed it,
+    // leaving `fw` above dangling.
+    if (WidgetData* frame = get_widget(parent_index); frame && frame->native_handle)
+      platform_set_animation_timer(frame->native_handle, animation_interval(parent_index));
   }
 
 #ifdef NEUI_PLATFORM_LVGL
