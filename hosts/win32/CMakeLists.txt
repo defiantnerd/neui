@@ -14,7 +14,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # build a library with a appropriate host
-add_library(neui-win32host host.cpp widgets.cpp window.cpp)
+# winmain.cpp is the application's entry point, an object of its own: the linker
+# takes it only where the C runtime asks for WinMain (an application), never into
+# a DLL such as an audio plugin embedding a frame (NEUI_API_EMBED).
+add_library(neui-win32host host.cpp widgets.cpp window.cpp winmain.cpp)
 
 target_include_directories(neui-win32host
     PRIVATE
