@@ -21,6 +21,7 @@
 #include "../shared/theme_palette.h"
 #include "../shared/painter.h"
 #include "../shared/widget_font.h"
+#include "../shared/text_style.h"
 #include "../shared/metrics.h"
 #include "asset_manager.h"
 #ifdef _WIN32
@@ -1508,7 +1509,8 @@ namespace xpl_host
       auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
       neui_detail::push_widget_font(backend, ctx, ef);
       backend->draw_text(ctx, fx + 4.0f, fy, fw - 8.0f, fh, text.c_str(), ef.size,
-                         neui_detail::color(ColorRole::text_primary));
+                         neui_detail::resolve_text_color(
+                           attrs.get(), neui_detail::current_palette()));
       neui_detail::pop_widget_font(backend, ctx, ef);
     }
     if (is_focused)
@@ -2064,7 +2066,8 @@ namespace xpl_host
       }
       backend->draw_text(ctx, text_x, fy, fw - (text_x - fx), fh,
                          text.c_str(), ef.size,
-                         neui_detail::color(ColorRole::text_primary));
+                         neui_detail::resolve_text_color(
+                           attrs.get(), neui_detail::current_palette()));
       neui_detail::pop_widget_font(backend, ctx, ef);
     }
     if (is_focused)
@@ -2108,11 +2111,15 @@ namespace xpl_host
   }
 
   // InputBoxWidget paint: text-field surface + text + border, then
-  // selection highlight + cursor when focused.
+  // selection highlight + cursor when focused. The surface / text / border /
+  // selection colours come from the theme unless the widget carries
+  // NEUI_ATTR_BACKGROUND / _TEXT_COLOR / _BORDER_COLOR / _BORDER_FOCUS_COLOR /
+  // _SELECTION_COLOR (hosts/shared/text_style.h), and the text is drawn AND
+  // measured through the widget's NEUI_ATTR_FONT_* font, so the caret and the
+  // selection sit on the glyphs whatever family is in use.
   void InputBoxWidget::paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
                               bool is_focused)
   {
-    using neui_detail::ColorRole;
     float fx = static_cast<float>(x);
     float fy = static_cast<float>(y);
     float fw = static_cast<float>(width);
@@ -2121,22 +2128,21 @@ namespace xpl_host
     const float cline   = fy + 2.0f;
     const float cheight = fh - 4.0f;
 
+    const neui_detail::TextFieldStyle st = neui_detail::resolve_text_field_style(
+        attrs.get(), neui_detail::current_palette());
+
     // Text-field surface (matches MULTILINE / LISTBOX / TREEVIEW).
-    backend->fill_rect(ctx, fx, fy, fw, fh,
-                        neui_detail::color(ColorRole::control_bg));
+    backend->fill_rect(ctx, fx, fy, fw, fh, st.fill);
 
     auto ef = neui_detail::read_widget_font(attrs.get(), 12.0f);
     neui_detail::push_widget_font(backend, ctx, ef);
 
     if (!text.empty() && backend->draw_text)
       backend->draw_text(ctx, fx + pad, fy, fw - 2 * pad, fh,
-                         text.c_str(), ef.size,
-                         neui_detail::color(ColorRole::text_primary));
-    if (backend->draw_rect) {
-      uint32_t border_color = neui_detail::color(
-          is_focused ? ColorRole::border_focused : ColorRole::border);
-      backend->draw_rect(ctx, fx, fy, fw, fh, 1.0f, border_color);
-    }
+                         text.c_str(), ef.size, st.text);
+    if (backend->draw_rect)
+      backend->draw_rect(ctx, fx, fy, fw, fh, 1.0f,
+                         is_focused ? st.border_focused : st.border);
 
     if (!is_focused || !backend->measure_text) {
       neui_detail::pop_widget_font(backend, ctx, ef);
@@ -2149,8 +2155,7 @@ namespace xpl_host
       int hi = neui_detail::te_sel_hi(cursor_pos, sel_anchor);
       float sel_x0 = fx + pad + backend->measure_text(ctx, text.c_str(), lo, ef.size);
       float sel_x1 = fx + pad + backend->measure_text(ctx, text.c_str(), hi, ef.size);
-      backend->fill_rect(ctx, sel_x0, cline, sel_x1 - sel_x0, cheight,
-                          neui_detail::color(neui_detail::ColorRole::accent_translucent));
+      backend->fill_rect(ctx, sel_x0, cline, sel_x1 - sel_x0, cheight, st.selection);
     }
 
     float cursor_x = fx + pad + backend->measure_text(ctx, text.c_str(), cursor_pos, ef.size);
@@ -2163,8 +2168,7 @@ namespace xpl_host
                                            static_cast<int>(composition_text.size()),
                                            ef.size);
       backend->draw_text(ctx, cursor_x, cline, comp_w, cheight,
-                         composition_text.c_str(), ef.size,
-                         neui_detail::color(neui_detail::ColorRole::text_primary));
+                         composition_text.c_str(), ef.size, st.text);
       // Per-clause underlines based on composition_attrs (one byte per
       // UTF-8 byte). Falls back to a single 1px underline if attrs absent.
       paint_composition_underline(backend, ctx, cursor_x, cline + cheight - 2.0f,
@@ -2175,8 +2179,7 @@ namespace xpl_host
 
     // Cursor
     if (!overwrite_mode) {
-      backend->fill_rect(ctx, cursor_x, cline, 1.5f, cheight,
-                          neui_detail::color(neui_detail::ColorRole::text_primary));
+      backend->fill_rect(ctx, cursor_x, cline, 1.5f, cheight, st.text);
     } else {
       float char_w = 8.0f;
       if (cursor_pos < static_cast<int>(text.size())) {
@@ -2186,8 +2189,7 @@ namespace xpl_host
       }
       // Overwrite caret: 50%-alpha block over the next character.
       backend->fill_rect(ctx, cursor_x, cline, std::max(char_w, 2.0f), cheight,
-                          neui_detail::with_alpha(
-                            neui_detail::color(neui_detail::ColorRole::text_primary), 0x80));
+                          neui_detail::with_alpha(st.text, 0x80));
     }
 
     neui_detail::pop_widget_font(backend, ctx, ef);
@@ -7848,10 +7850,18 @@ namespace xpl_host
                               ? n_lines - static_cast<uint32_t>(vis) : 0;
     if (scroll_offset > scroll_range) scroll_offset = scroll_range;
 
-    // Background.
+    // Colours: theme unless the widget carries the text-field colour attrs
+    // (NEUI_ATTR_BACKGROUND / _TEXT_COLOR / _BORDER_COLOR / _BORDER_FOCUS_COLOR /
+    // _SELECTION_COLOR; hosts/shared/text_style.h). The scrollbar keeps the
+    // theme's colours.
     using neui_detail::ColorRole;
-    backend->fill_rect(ctx, fx, fy, content_w, fh,
-                        neui_detail::color(ColorRole::control_bg));
+    const neui_detail::TextFieldStyle st = neui_detail::resolve_text_field_style(
+        attrs.get(), neui_detail::current_palette());
+
+    // Background. With wrap on the scrollbar column is reserved even while no
+    // scrollbar shows (see content_w above); fill it too then, so a field with
+    // its own fill colour has no stripe of whatever lies beneath at its right edge.
+    backend->fill_rect(ctx, fx, fy, show_sb ? content_w : fw, fh, st.fill);
 
     auto ef = neui_detail::read_widget_font(attrs.get(), ML_FONT_SIZE);
     neui_detail::push_widget_font(backend, ctx, ef);
@@ -7915,8 +7925,7 @@ namespace xpl_host
           if (sel_hi > le) x1 += 6.0f;
         }
         if (x1 > x0)
-          backend->fill_rect(ctx, x0, row_y, x1 - x0, row_h,
-                              neui_detail::color(ColorRole::accent_translucent));
+          backend->fill_rect(ctx, x0, row_y, x1 - x0, row_h, st.selection);
       }
 
       // Line text (capped to the visible span; the remainder is clipped).
@@ -7924,8 +7933,7 @@ namespace xpl_host
         _paint_scratch.assign(text, static_cast<size_t>(ls),
                               static_cast<size_t>(ve - ls));
         backend->draw_text(ctx, base_x, row_y, avail_w, row_h,
-                           _paint_scratch.c_str(), ef.size,
-                           neui_detail::color(ColorRole::text_primary));
+                           _paint_scratch.c_str(), ef.size, st.text);
       }
     }
 
@@ -7953,14 +7961,13 @@ namespace xpl_host
           backend->draw_text(ctx, cx, cy, comp_w,
                              static_cast<float>(ML_LINE_H()),
                              composition_text.c_str(),
-                             ef.size,
-                             neui_detail::color(ColorRole::text_primary));
+                             ef.size, st.text);
           paint_composition_underline(backend, ctx, cx,
                                        cy + static_cast<float>(ML_LINE_H()) - 2.0f,
                                        composition_text, composition_attrs, ef.size);
         } else {
           backend->fill_rect(ctx, cx, cy, 1.5f, static_cast<float>(ML_LINE_H()),
-                             neui_detail::color(ColorRole::text_primary));
+                             st.text);
         }
       }
     }
@@ -7984,9 +7991,8 @@ namespace xpl_host
     }
 
     // Border.
-    uint32_t border_color = neui_detail::color(
-        is_focused ? ColorRole::border_focused : ColorRole::border);
-    backend->draw_rect(ctx, fx, fy, fw, fh, 1.0f, border_color);
+    backend->draw_rect(ctx, fx, fy, fw, fh, 1.0f,
+                       is_focused ? st.border_focused : st.border);
   }
 
   // ---- MultilineWidget keyboard ----------------------------------------
@@ -8208,7 +8214,8 @@ namespace xpl_host
     float avail_w = wrap ? ml_wrap_avail_w(*this) : 0.0f;
     auto  ef      = neui_detail::read_widget_font(attrs.get(), ML_FONT_SIZE);
     if (!_ls_dirty && wrap == _cache_wrap &&
-        avail_w == _cache_w && ef.size == _cache_font)
+        avail_w == _cache_w && ef.size == _cache_font &&
+        ef.weight == _cache_weight && ef.family == _cache_family)
       return _ls_cache;
 
     bool built_ok = true;
@@ -8223,6 +8230,8 @@ namespace xpl_host
     _cache_wrap = wrap;
     _cache_w    = avail_w;
     _cache_font = ef.size;
+    _cache_family = ef.family;
+    _cache_weight = ef.weight;
     return _ls_cache;
   }
 

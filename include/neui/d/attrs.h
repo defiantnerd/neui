@@ -247,7 +247,10 @@ extern "C" {
 #define NEUI_ATTR_ROTATION "neui.attr.rotation"
 
 // int (ARGB): background colour for a self-painted widget (KNOB, IMAGE,
-// future painted controls). 0xAARRGGBB. When unset, the host uses
+// future painted controls). 0xAARRGGBB. On an INPUTBOX / MULTILINE it is the
+// field's fill (crossplatform host: the whole field - a scrollbar, while one
+// shows, keeps the theme's scrollbar colours; macOS native: NSTextField / NSTextView backgroundColor; win32 / iOS native:
+// not honoured yet). When unset, the host uses
 // (a) the system-theme palette if the parent frame's
 // NEUI_ATTR_FOLLOW_SYSTEM_THEME is set, otherwise (b) the OS window
 // background colour (COLOR_WINDOW on Win32). Honoured unconditionally -
@@ -389,12 +392,26 @@ extern "C" {
 #define NEUI_ATTR_QRCODE "neui.attr.qrcode"
 
 // string: font family for text rendered by the widget (e.g. "Consolas",
-// "Segoe UI"). Empty / unset leaves the host's system default in place
-// (Segoe UI on the Win32 / D2D backend). Honoured by the Direct2D, CG
-// and Cairo backends (painted text) and by the native hosts' controls
-// (win32 HFONT, macOS NSFont); unknown families fall back to the
-// default, and the null backend ignores it. Live - applies on the next
-// paint for painted widgets, and via WM_SETFONT on the native win32 host.
+// "Menlo", "Segoe UI"), including a family the client registered with
+// <neui/d/assets.h> create_font / create_font_from_file - the registered name
+// resolves exactly as it does for painter->push_font in a CUSTOMDRAW. Empty /
+// unset leaves the host's system default in place. An unknown family falls
+// back to the system default rather than failing.
+//
+//   crossplatform host: every text-bearing widget (LABEL, BUTTON, CHECKBOX,
+//                       INPUTBOX, MULTILINE, LISTBOX, COMBOBOX, TREEVIEW,
+//                       GRID, ...) on every backend (Direct2D, CoreGraphics,
+//                       Cairo, Canvas 2D in the web host) - the text is drawn
+//                       AND measured through the same font, so the INPUTBOX /
+//                       MULTILINE caret, hit-testing, selection, soft-wrap and
+//                       IME candidate position stay consistent with the
+//                       glyphs. The null backend ignores it.
+//   win32 native:       WM_SETFONT (an HFONT built from family / size / weight).
+//   macOS native:       NSFont on the control (registered families included -
+//                       process-scope registration reaches NSFont).
+//
+// Live - applies on the next paint for painted widgets, and immediately on a
+// native control.
 #define NEUI_ATTR_FONT_FAMILY "neui.attr.font_family"
 
 // float (logical pixels at 96 DPI): font size for text rendered by the
@@ -406,11 +423,59 @@ extern "C" {
 #define NEUI_ATTR_FONT_SIZE "neui.attr.font_size"
 
 // int: font weight in CSS-style 100..900. 400 = Normal, 700 = Bold;
-// 0 / unset = Normal. Honoured by the Direct2D backend (mapped to the
-// nearest DWRITE_FONT_WEIGHT_*) and the native win32 host (mapped to
-// LOGFONTW::lfWeight). Italic is not exposed in v1; the style stays
-// Normal regardless of weight.
+// 0 / unset = Normal. Resolved against the family's registered faces (a
+// multi-weight family is several files sharing one family name; the nearest
+// weight wins). Honoured wherever NEUI_ATTR_FONT_FAMILY is - the crossplatform
+// host on every backend (Direct2D, CoreGraphics, Cairo), the win32 native host
+// (LOGFONTW::lfWeight) and the macOS native host (NSFontWeight). Italic is not
+// exposed here; the style stays Normal regardless of weight.
 #define NEUI_ATTR_FONT_WEIGHT "neui.attr.font_weight"
+
+// ---- Text colours (INPUTBOX / MULTILINE; text colour also LABEL / BUTTON) ----
+//
+// A client that draws its own look - a dark editor with its own font, say - needs
+// the text surfaces to follow it instead of the OS theme. Every colour below is
+// an int 0xAARRGGBB, like NEUI_ATTR_BACKGROUND, with one rule for all of them:
+// SET (attrs->has) means "use this exactly" - alpha included, so 0x00000000 is a
+// real, invisible colour, and a translucent value blends over what is beneath -
+// and UNSET (never written, or attrs->remove'd) means "the theme's colour", as
+// before. Live: the next paint picks a change up.
+//
+// Honoured by the crossplatform host (which paints these widgets itself) on
+// every platform and backend. The native hosts honour only what their controls
+// can take - see each key.
+
+// int (ARGB): the colour of the widget's text - and, on INPUTBOX / MULTILINE,
+// of the caret and the IME composition string (the composition underline keeps
+// the theme's colours). Unset = the theme's text colour.
+//   crossplatform host: INPUTBOX, MULTILINE, LABEL, BUTTON.
+//   macOS native:       INPUTBOX, MULTILINE, LABEL (NSTextField / NSTextView
+//                       textColor). BUTTON keeps the system title colour.
+//   win32 / iOS native: not honoured yet.
+#define NEUI_ATTR_TEXT_COLOR "neui.attr.text_color"
+
+// int (ARGB): the colour of the 1 px outline of an INPUTBOX / MULTILINE while
+// it is NOT focused. Unset = the theme's border colour. Use 0x00000000 for a
+// borderless field. NEUI_ATTR_BACKGROUND is the field's fill (see below), so a
+// styled field is BACKGROUND + this + NEUI_ATTR_TEXT_COLOR.
+//   crossplatform host: INPUTBOX, MULTILINE.   Native hosts: not honoured (the
+//   control draws its own bezel).
+#define NEUI_ATTR_BORDER_COLOR "neui.attr.border_color"
+
+// int (ARGB): the colour of the outline while the INPUTBOX / MULTILINE HAS
+// keyboard focus. Unset = the theme's focus colour (the system accent), which
+// is usually the one thing in a custom palette that does not belong - set this
+// to keep the focus cue but make it fit. (Setting only NEUI_ATTR_BORDER_COLOR
+// leaves the focused outline on the theme's accent, so focus never disappears.)
+//   crossplatform host: INPUTBOX, MULTILINE.   Native hosts: not honoured.
+#define NEUI_ATTR_BORDER_FOCUS_COLOR "neui.attr.border_focus_color"
+
+// int (ARGB): the fill behind selected text in an INPUTBOX / MULTILINE (the
+// highlight is drawn only while the field has focus). Translucent values are
+// normal - the text stays readable through them. Unset = the theme's
+// translucent accent.
+//   crossplatform host: INPUTBOX, MULTILINE.   Native hosts: not honoured.
+#define NEUI_ATTR_SELECTION_COLOR "neui.attr.selection_color"
 
 // int: maximum number of item rows shown in a COMBOBOX drop list before it
 // scrolls. Applies to COMBOBOX. The drop list grows to fit the item count

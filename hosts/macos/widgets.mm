@@ -210,6 +210,9 @@ namespace macos_host
   // Defined in window.mm. Applies NEUI_ATTR_FONT_* to a native control's
   // NSFont (no-op for painted widgets + when no font attr is set).
   void apply_font_native_macos(WidgetData& wd);
+  // Defined in window.mm. Applies NEUI_ATTR_TEXT_COLOR / NEUI_ATTR_BACKGROUND to
+  // a native INPUTBOX / MULTILINE / LABEL (no-op for every other type).
+  void apply_colors_native_macos(WidgetData& wd);
 
   // Defined in window.mm. SECTION scrolling helpers; the attr setters
   // call them on NEUI_ATTR_SCROLL_MODE / CONTENT_WIDTH / CONTENT_HEIGHT
@@ -259,6 +262,13 @@ namespace macos_host
     return key && (!strcmp(key, NEUI_ATTR_FONT_FAMILY) ||
                    !strcmp(key, NEUI_ATTR_FONT_SIZE)   ||
                    !strcmp(key, NEUI_ATTR_FONT_WEIGHT));
+  }
+
+  // True for the keys apply_colors_native_macos reads.
+  static inline bool is_text_color_attr(const char* key)
+  {
+    return key && (!strcmp(key, NEUI_ATTR_TEXT_COLOR) ||
+                   !strcmp(key, NEUI_ATTR_BACKGROUND));
   }
 
   // Pack a (session_id, slot) pair into a neui_asset_t handle. Defined
@@ -1529,6 +1539,8 @@ namespace macos_host
     }
     // NEUI_ATTR_FONT_WEIGHT: re-apply native control font + repaint painted text.
     if (is_font_attr(key)) { apply_font_native_macos(wd); mark_widget_dirty_for_paint(wd); }
+    // NEUI_ATTR_TEXT_COLOR / NEUI_ATTR_BACKGROUND on a native text control.
+    if (is_text_color_attr(key)) apply_colors_native_macos(wd);
     return 1;
   }
   static int32_t NEUI_ABI a_get_int   (neui_session_t session, neui_widget_t widget,
@@ -1640,6 +1652,8 @@ namespace macos_host
     // widget can change a binding / template substitution, so repaint.
     // Without this, clearing a bound {token} leaves stale pixels.
     if (is_font_attr(key)) { apply_font_native_macos(wd); mark_widget_dirty_for_paint(wd); }
+    // Removing a colour key returns the native control to the system look.
+    if (is_text_color_attr(key)) apply_colors_native_macos(wd);
     if (wd.type && !strcmp(wd.type, NEUI_W_CUSTOMDRAW) &&
         wd.compound_asset.id != asset_none.id) {
       mark_widget_dirty_for_paint(wd);

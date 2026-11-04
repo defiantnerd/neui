@@ -11,6 +11,7 @@ add_executable(neui_tests
   test_compound.cpp
   test_behavior.cpp
   test_attrs.cpp
+  test_text_style.cpp
   test_edit_history.cpp
   test_text_edit.cpp
   test_tree.cpp
@@ -117,6 +118,20 @@ if(APPLE AND NOT NEUI_IOS)
     ${PROJECT_SOURCE_DIR}/include)
   target_compile_features(neui_zoom_smoke_macos PRIVATE cxx_std_17)
   target_link_libraries(neui_zoom_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
+  # Text-field styling harness (NEUI_ATTR_TEXT_COLOR / _BACKGROUND / _BORDER_* /
+  # _SELECTION_COLOR / NEUI_ATTR_FONT_FAMILY on INPUTBOX + MULTILINE): snapshots
+  # real windows (xpl + CoreGraphics, and the macOS native host) and reads the
+  # pixels back - colours, the family actually drawn, caret vs glyph positions,
+  # the MULTILINE wrap re-flow on a family change. Realizes real NSWindows, so
+  # built but NOT ctest-registered; NEUI_TEST_FONT_FILE adds a registered-family
+  # check.
+  add_executable(neui_text_style_smoke_macos text_style_smoke_macos.mm)
+  target_include_directories(neui_text_style_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_text_style_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_text_style_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
   # Cursor harness (NEUI_ATTR_CURSOR): asserts inheritance up the widget tree,
