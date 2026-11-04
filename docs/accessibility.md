@@ -14,7 +14,7 @@ of the first section — **how much of it has been verified.**
 | macOS (xpl host) | NSAccessibility (`hosts/crossplatform/a11y_macos.mm`) | **Yes** — 106-check harness driving the real protocol, plus VoiceOver. |
 | Windows (xpl host) | UI Automation (`hosts/crossplatform/a11y_win32.cpp`) | **Yes, programmatically** (2026-08-11) — 57-check harness through the real UIA *client* stack. **No screen-reader pass yet.** See below. |
 | Linux (xpl host) | none | n/a — declarations are stored and nothing reads them. |
-| iOS / null | none | n/a — same. |
+| iOS / null / web | none | n/a — same (a canvas UI is invisible to screen readers). |
 | win32 / macOS **native** hosts | none | n/a — `NEUI_API_A11Y` is xpl-only, like `_TIMER` / `_POINTER` / `_EMBED`. |
 
 **The Windows provider shipped unverified and has since been run.** It was written

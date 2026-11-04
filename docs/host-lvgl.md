@@ -49,6 +49,8 @@ scope):
 - Clipboard, drag-and-drop, IME, native menubar, message boxes.
 - Off-screen surfaces: `create_surface` returns `asset_none`, so SURFACE assets and the whole SVG
   filter graph are unreachable.
+- Shaders: the xpl host is built with `NEUI_NO_SHADERS`, so `NEUI_API_SHADER` is NULL and
+  a compound SHADER layer paints only its `"fallback"` layer, if it has one.
 - Font registration (`create_font*`) returns false; family names resolve from `C:\Windows\Fonts`
   by family + weight instead.
 - No DPI scaling: logical px == LVGL px == physical px.

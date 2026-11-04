@@ -3,6 +3,10 @@
 #include "compound.h"
 #include "painter.h"
 
+#include <memory>
+#include <utility>
+#include <vector>
+
 using namespace neui_detail;
 
 // ---------------------------------------------------------------------------
@@ -212,6 +216,37 @@ TEST_CASE("effective_int/float: static value unless a binding overrides")
   CompoundBinding b; b.attr_key = "v"; b.scale = 100.0f; b.offset = 0.0f;
   L.bindings["offset_x"] = b;
   CHECK_EQ(effective_int(L, "offset_x", 17, &bag), 25);   // round(0.25*100)
+}
+
+TEST_CASE("effective_color: a bound int attr's ARGB arrives exactly")
+{
+  // Partly transparent: as an int32 its magnitude is above 2^24, so a trip
+  // through float rounded away the low blue bits.
+  AttrBag bag;
+  bag.set_int("c", (int)0x80123457);
+  bag.set_int("o", (int)0xFF000001);
+  bag.set_float("f", 0.5f);
+  CompoundLayer L;
+  L.fill_color = 0xFF112233u;
+  CHECK_EQ(effective_color(L, "fill_color", L.fill_color, &bag), 0xFF112233u);  // unbound
+
+  CompoundBinding b; b.attr_key = "c";
+  L.bindings["fill_color"] = b;
+  CHECK_EQ(effective_color(L, "fill_color", L.fill_color, &bag), 0x80123457u);
+  CHECK(static_cast<uint32_t>(effective_int(L, "fill_color", 0, &bag)) != 0x80123457u);  // the old path
+
+  b.attr_key = "o";
+  L.bindings["fill_color"] = b;
+  CHECK_EQ(effective_color(L, "fill_color", L.fill_color, &bag), 0xFF000001u);
+
+  // scale / offset still apply, and a float attr still works.
+  CompoundBinding s; s.attr_key = "f"; s.scale = 254.0f; s.offset = 1.0f;
+  L.bindings["stroke_color"] = s;
+  CHECK_EQ(effective_color(L, "stroke_color", 0u, &bag), 128u);
+  // Missing attr: the offset, as for every binding.
+  CompoundBinding m; m.attr_key = "missing"; m.offset = 7.0f;
+  L.bindings["tint"] = m;
+  CHECK_EQ(effective_color(L, "tint", 0xFFFFFFFFu, &bag), 7u);
 }
 
 // ---------------------------------------------------------------------------
@@ -450,12 +485,70 @@ TEST_CASE("compound_remove_layer: removing a GROUP removes its whole subtree")
   uint32_t ng = compound_add_child_layer(ca, g, NEUI_COMPOUND_LAYER_GROUP, 1);  // nested
   uint32_t c2 = compound_add_child_layer(ca, ng, NEUI_COMPOUND_LAYER_TEXT, 0);
 
-  compound_remove_layer(ca, g);
+  compound_remove_layer(ca, g, nullptr);
   CHECK(compound_get_layer(ca, g)  == nullptr);
   CHECK(compound_get_layer(ca, c1) == nullptr);
   CHECK(compound_get_layer(ca, ng) == nullptr);
   CHECK(compound_get_layer(ca, c2) == nullptr);   // nested grandchild gone too
   CHECK(compound_sorted_children(ca, 0).empty());
+}
+
+// ---------------------------------------------------------------------------
+// QR symbol uploads are destroyed with their layer
+// ---------------------------------------------------------------------------
+
+namespace {
+std::vector<std::pair<neui_render_ctx_t, void*>> g_qr_destroyed;
+void NEUI_ABI qr_test_destroy_bitmap(neui_render_ctx_t ctx, void* bmp)
+{
+  g_qr_destroyed.emplace_back(ctx, bmp);
+}
+neui_render_ctx_t qr_ctx(uintptr_t v) { return reinterpret_cast<neui_render_ctx_t>(v); }
+
+// A QR layer holding one symbol uploaded to two contexts.
+uint32_t add_uploaded_qr(CompoundAsset& ca, uint32_t parent, uintptr_t tag)
+{
+  uint32_t slot = parent ? compound_add_child_layer(ca, parent, NEUI_COMPOUND_LAYER_QR, 0)
+                         : compound_add_layer(ca, NEUI_COMPOUND_LAYER_QR, 0);
+  auto sym = std::make_unique<CompoundLayer::QrSymbol>();
+  sym->bitmaps[qr_ctx(1)] = { reinterpret_cast<void*>(tag), 0 };
+  sym->bitmaps[qr_ctx(2)] = { reinterpret_cast<void*>(tag + 1), 0 };
+  compound_get_layer(ca, slot)->qr_cache.push_back(std::move(sym));
+  return slot;
+}
+}  // namespace
+
+TEST_CASE("compound QR: removing or clearing layers destroys their uploads in every ctx")
+{
+  neui_render_backend_t backend{};
+  backend.destroy_bitmap = qr_test_destroy_bitmap;
+
+  CompoundAsset ca;
+  uint32_t q = add_uploaded_qr(ca, 0, 0x100);
+  g_qr_destroyed.clear();
+  compound_remove_layer(ca, q, &backend);
+  CHECK_EQ(g_qr_destroyed.size(), (size_t)2);
+
+  // A QR layer inside a removed GROUP goes too.
+  uint32_t g = compound_add_layer(ca, NEUI_COMPOUND_LAYER_GROUP, 0);
+  add_uploaded_qr(ca, g, 0x200);
+  g_qr_destroyed.clear();
+  compound_remove_layer(ca, g, &backend);
+  REQUIRE(g_qr_destroyed.size() == (size_t)2);
+  CHECK(g_qr_destroyed[0].second == reinterpret_cast<void*>(0x200) ||
+        g_qr_destroyed[1].second == reinterpret_cast<void*>(0x200));
+
+  add_uploaded_qr(ca, 0, 0x300);
+  add_uploaded_qr(ca, 0, 0x400);
+  g_qr_destroyed.clear();
+  compound_clear(ca, &backend);
+  CHECK_EQ(g_qr_destroyed.size(), (size_t)4);
+
+  // Without a backend the handles are only forgotten.
+  q = add_uploaded_qr(ca, 0, 0x500);
+  g_qr_destroyed.clear();
+  compound_remove_layer(ca, q, nullptr);
+  CHECK(g_qr_destroyed.empty());
 }
 
 TEST_CASE("compound_add_layer: a top-level layer's parent defaults to 0")

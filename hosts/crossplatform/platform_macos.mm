@@ -19,6 +19,7 @@
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
 
+#include <cmath>
 #include <cstring>
 #include <cmath>
 
@@ -141,6 +142,9 @@ void wake_app_event_pump()
   // lossy at fractional zoom. 402 px at zoom 0.75 rounds to 302 native, which
   // divides back to 403 - a silent 1 px growth per call plus a spurious RESIZE.
   BOOL               _self_resizing;
+  // Animation clock heartbeat (Session::animation_tick); _anim_ms its interval.
+  NSTimer*           _anim_timer;
+  uint32_t           _anim_ms;
 }
 - (void)toastStart;
 - (void)toastStop;
@@ -149,6 +153,7 @@ void wake_app_event_pump()
 - (void)seedReportedSize:(int)w height:(int)h;
 - (void)beginSelfResize:(int)w height:(int)h;
 - (void)endSelfResize;
+- (void)animSetInterval:(uint32_t)ms;
 @end
 
 @implementation NEUIView
@@ -299,7 +304,6 @@ void wake_app_event_pump()
 
 - (void)drawRect:(NSRect)dirtyRect
 {
-  (void)dirtyRect;
   if (!session) return;
   xpl_host::WidgetData* wd = session->get_widget(widget_index);
   if (!wd || !wd->render_ctx) return;
@@ -310,7 +314,31 @@ void wake_app_event_pump()
   NSSize sz = self.bounds.size;
   neui_cg_backend::set_current_frame(wd->render_ctx, (void*)cg,
                                       (float)sz.width, (float)sz.height);
-  session->paint_frame(wd->render_ctx, widget_index);
+
+  // Partial repaint: when AppKit redraws only part of the view (a
+  // platform_invalidate_rect -> setNeedsDisplayInRect:), it clips the
+  // context to the rects being drawn and keeps every pixel outside them in
+  // the layer's backing store - so those rects are exactly the frame's
+  // damage. The view is flipped, so they are already frame-local, y-down
+  // logical px. A draw covering the whole view (any setNeedsDisplay:YES,
+  // resize, backing-scale change) stays a full frame.
+  neui_detail::DamageRegion damage;
+  if (!NSContainsRect(dirtyRect, self.bounds)) {
+    const NSRect* rects = nullptr;
+    NSInteger     count = 0;
+    [self getRectsBeingDrawn:&rects count:&count];
+    for (NSInteger i = 0; i < count; ++i) {
+      // Outward to whole points: a superset of what AppKit clipped to is
+      // fine (it only widens the cull), a subset would skip a widget.
+      const int x0 = (int)std::floor(NSMinX(rects[i]));
+      const int y0 = (int)std::floor(NSMinY(rects[i]));
+      const int x1 = (int)std::ceil(NSMaxX(rects[i]));
+      const int y1 = (int)std::ceil(NSMaxY(rects[i]));
+      damage.add({ x0, y0, x1 - x0, y1 - y0 });
+    }
+  }
+  session->paint_frame(wd->render_ctx, widget_index,
+                       damage.empty() ? nullptr : &damage);
 }
 
 // ---------------------------------------------------------------------------
@@ -724,7 +752,7 @@ void wake_app_event_pump()
     neui_detail::grid_compute_viewport(*model, hw->width, hw->height,
                                         cfg.row_h, cfg.header_h);
   bool more = neui_detail::grid_scroll_bounce_step(*model, vp, cfg.row_h);
-  [self setNeedsDisplay:YES];
+  session->invalidate_widget_rect(_grid_bounce_widget);   // the grid only
   if (!more) [self gridStopBounce];
 }
 
@@ -763,7 +791,8 @@ void wake_app_event_pump()
   if (!st || !L) { [self sectionStopBounce]; return; }
   bool more_v = neui_detail::section_scroll_bounce_step(*st, *L, false);
   bool more_h = neui_detail::section_scroll_bounce_step(*st, *L, true);
-  [self setNeedsDisplay:YES];
+  // The section's rect covers its scrolled children (clipped to it).
+  session->invalidate_widget_rect(_section_bounce_widget);
   hw->notify_scroll_changed();
   if (!more_v && !more_h) [self sectionStopBounce];
 }
@@ -791,6 +820,28 @@ void wake_app_event_pump()
 {
   (void)timer;
   [self setNeedsDisplay:YES];
+}
+
+// --- Animation clock heartbeat ----------------------------------------------
+
+- (void)animSetInterval:(uint32_t)ms
+{
+  if (ms == _anim_ms) return;
+  if (_anim_timer) { [_anim_timer invalidate]; _anim_timer = nil; }
+  _anim_ms = ms;
+  if (!ms) return;
+  _anim_timer = [NSTimer timerWithTimeInterval:ms / 1000.0
+                                         target:self
+                                       selector:@selector(animTick:)
+                                       userInfo:nil
+                                        repeats:YES];
+  [[NSRunLoop currentRunLoop] addTimer:_anim_timer forMode:NSRunLoopCommonModes];
+}
+
+- (void)animTick:(NSTimer*)timer
+{
+  (void)timer;
+  [self animSetInterval:session ? session->animation_tick(widget_index) : 0];
 }
 
 // Feed a wheel NSEvent into a scrolling SECTION's per-axis kinetics. The
@@ -846,7 +897,7 @@ void wake_app_event_pump()
       changed = true;
     if (changed) {
       [self sectionStopBounce];
-      [self setNeedsDisplay:YES];
+      session->invalidate_widget_rect(secIdx);
       sw->notify_scroll_changed();
     }
     return;
@@ -872,7 +923,7 @@ void wake_app_event_pump()
 
   if (act_v.stop_bounce  || act_h.stop_bounce)  [self sectionStopBounce];
   if (act_v.changed      || act_h.changed) {
-    [self setNeedsDisplay:YES];
+    session->invalidate_widget_rect(secIdx);
     sw->notify_scroll_changed();
   }
   if (act_v.start_bounce || act_h.start_bounce) [self sectionStartBounce:secIdx];
@@ -944,7 +995,7 @@ void wake_app_event_pump()
       if (delta == 0) return;
       [self gridStopBounce];
       if (grid_scroll_step_rows(*model, vp, cfg.row_h, -delta))
-        [self setNeedsDisplay:YES];
+        session->invalidate_widget_rect(hit);
       return;
     }
 
@@ -961,7 +1012,7 @@ void wake_app_event_pump()
 
     GridWheelAction act = grid_scroll_wheel(*model, vp, cfg.row_h, in);
     if (act.stop_bounce)  [self gridStopBounce];
-    if (act.changed)      [self setNeedsDisplay:YES];
+    if (act.changed)      session->invalidate_widget_rect(hit);
     if (act.start_bounce) [self gridStartBounce:hit];
     return;
   }
@@ -1069,6 +1120,11 @@ void wake_app_event_pump()
   // directly. The gate retargets it - see Session::popup_gate_key.
   if (session->popup_gate_key(NEUI_EVENT_KEYDOWN, keycode, mods)) return;
 
+  // The popup_menu overlay takes Esc / Enter / Space / Up / Down (as on win32).
+  // popup_menu is the tree popup here (Session::open_popup_menu), so this only
+  // matters if the overlay is ever used.
+  if (session->_popup_active && session->handle_popup_key(keycode)) return;
+
   // Tab cycles logical focus inside our hand-rolled Tab traversal - same as
   // the win32 path. Consume here; the focus_next path doesn't fire KEYDOWN.
   if (keycode == NEUI_KEY_TAB) {
@@ -1148,7 +1204,10 @@ void wake_app_event_pump()
 {
   if (session) {
     session->_os_focused = true;
-    if (session->_focused_widget != 0
+    // Focus moves into this frame; if it changed, set_focus already told
+    // the client.
+    const bool moved = session->frame_activated(widget_index);
+    if (!moved && session->_focused_widget != 0
      && session->_widgets.exists(session->_focused_widget)) {
       auto& wd = session->_widgets[session->_focused_widget];
       if (wd.emit_events) {
@@ -1533,6 +1592,8 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
   // event first and may veto the close by returning false.
   neui_event_t ev = {};
   ev.type = NEUI_EVENT_APP_QUIT;
+  if (auto* fw = session->get_widget(widget_index))
+    ev.data.mouse.widget.id = fw->widget_id;  // the frame closing
   bool allow = session->dispatch_event(&ev);
   return allow ? YES : NO;
 }
@@ -2204,6 +2265,9 @@ namespace xpl_host
   void platform_destroy_window(WidgetData& wd)
   {
     if (!wd.native_handle) return;
+    // The timer retains the view, which would outlive the session.
+    if (NSView* cv = frame_content_view(wd.native_handle); [cv isKindOfClass:[NEUIView class]])
+      [(NEUIView*)cv animSetInterval:0];
 
     // Embedded PLUGWINDOW: no NSWindow, no delegate - release the render ctx
     // here (standalone frames do it in the delegate's windowWillClose:) and
@@ -2395,6 +2459,16 @@ namespace xpl_host
     [frame_content_view(native_handle) display];
   }
 
+  // Partial repaint: AppKit unions every rect marked before the next display
+  // pass (a whole-view setNeedsDisplay:YES absorbs them) and hands the result
+  // to drawRect: via getRectsBeingDrawn:. The content view is flipped, so the
+  // frame-local logical rect is already in view coordinates.
+  void platform_invalidate_rect(void* native_handle, int x, int y, int w, int h)
+  {
+    if (!native_handle || w <= 0 || h <= 0) return;
+    [frame_content_view(native_handle) setNeedsDisplayInRect:NSMakeRect(x, y, w, h)];
+  }
+
   bool platform_run()
   {
     [NSApp run];
@@ -2467,8 +2541,13 @@ namespace xpl_host
   void platform_menubar_destroy(void* hmenu)
   {
     if (!hmenu) return;
+    // Callers pass submenus too (Win32 DestroyMenu's them), but a submenu's
+    // handle is non-owning (see platform_menubar_add_popup): its parent item
+    // owns it, and releasing it here would over-release it.
+    if (((__bridge NSMenu*)hmenu).supermenu) return;
     NSMenu* m = (__bridge_transfer NSMenu*)hmenu;
-    (void)m;  // ARC releases on scope exit; submenus + items follow.
+    if (NSApp.mainMenu == m) NSApp.mainMenu = nil;
+    // ARC releases on scope exit; submenus + items follow.
   }
 
   void platform_menubar_attach(void* /*frame*/, void* hmenu)
@@ -3077,6 +3156,18 @@ namespace xpl_host
     // A null handle is legal here: an announcement has no node behind it, and
     // the provider falls back to NSApp when there is no window to post on.
     mac_a11y_announce(frame_content_view(frame_native_handle), utf8, assertive);
+  }
+
+  void platform_set_animation_timer(void* native_handle, uint32_t interval_ms)
+  {
+    if (!native_handle) return;
+    NSView* cv = frame_content_view(native_handle);
+    if ([cv isKindOfClass:[NEUIView class]]) [(NEUIView*)cv animSetInterval:interval_ms];
+  }
+
+  bool platform_reduced_motion()
+  {
+    return [[NSWorkspace sharedWorkspace] accessibilityDisplayShouldReduceMotion];
   }
 
   uint64_t platform_now_ms()

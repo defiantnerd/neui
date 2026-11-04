@@ -1270,6 +1270,9 @@ namespace neui_lvgl_backend
     lb_set_fill_rule,
     lb_stroke_path_styled,
     lb_stroke_path_gradient,
+    nullptr,  // font_metrics
+    nullptr,  // push_font_styled
+    nullptr,  // set_frame_damage: LVGL has its own retained invalidation
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

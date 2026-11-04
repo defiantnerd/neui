@@ -21,7 +21,7 @@ if(WIN32 AND NEUI_WITH_LVGL)
   # Win32/D2D pairing. The registered host id stays neui.host.crossplatform;
   # backend + platform are paired per build, exactly like Linux.
   target_sources(neui-xplhost PRIVATE platform_lvgl.cpp)
-  target_compile_definitions(neui-xplhost PRIVATE NEUI_PLATFORM_LVGL=1)
+  target_compile_definitions(neui-xplhost PRIVATE NEUI_PLATFORM_LVGL=1 NEUI_NO_SHADERS=1)
   target_include_directories(neui-xplhost SYSTEM PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/stb)
   # windowsapp.lib as in the native-Win32 branch below: host.cpp compiles the
@@ -76,6 +76,27 @@ elseif(APPLE)
     # hosts/shared/macos/file_dialog_macos.h (macOS 11+; guarded at runtime).
     "-framework UniformTypeIdentifiers"
   )
+elseif(EMSCRIPTEN)
+  # Web (plans/wasm-host.md). MUST come before the UNIX branch: Emscripten's
+  # toolchain sets UNIX too. Canvas 2D backend + the browser platform layer;
+  # shaders run on the CPU executor.
+  target_sources(neui-xplhost PRIVATE platform_web.cpp)
+  target_compile_definitions(neui-xplhost PRIVATE NEUI_PLATFORM_WEB=1)
+  target_include_directories(neui-xplhost SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/stb)
+  target_link_libraries(neui-xplhost PRIVATE neui-backend-canvas2d)
+  # The flavour's stack switching goes on every program that links the host
+  # (and only those: neui_tests never suspends, so it runs on any node).
+  # neui_web_service is the loop for clients that never call run() (an
+  # embedded PLUGWINDOW): it suspends, so JSPI must wrap it like main.
+  if(NEUI_WEB_FLAVOR STREQUAL "jspi")
+    target_compile_definitions(neui-xplhost PRIVATE NEUI_WEB_JSPI=1)
+    target_link_options(neui-xplhost INTERFACE "-sJSPI" "-Wno-experimental"
+      "-sJSPI_EXPORTS=neui_web_service")
+  else()
+    target_link_options(neui-xplhost INTERFACE "-sASYNCIFY"
+      "-sASYNCIFY_STACK_SIZE=${NEUI_WEB_ASYNCIFY_STACK}")
+  endif()
 elseif(UNIX)
   # Linux (and other X11 Unixes): Cairo software backend + X11 platform layer.
   find_package(PkgConfig REQUIRED)
@@ -132,4 +153,6 @@ elseif(UNIX)
 else()
   target_sources(neui-xplhost PRIVATE platform_null.cpp)
   target_link_libraries(neui-xplhost PRIVATE neui-backend-null)
+  # The null backend draws nothing, so no shader interface (never hand one out inert).
+  target_compile_definitions(neui-xplhost PRIVATE NEUI_NO_SHADERS=1)
 endif()

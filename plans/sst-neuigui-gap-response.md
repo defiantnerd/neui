@@ -877,6 +877,14 @@ them). It cannot verify real API signatures.
 
 ### Wave 5 — xpl partial repaint
 
+**Status: built after all, on another line of work** - damage-tracked partial
+repaint now runs on every xpl platform (`plans/xpl-partial-repaint.md`, reader
+reference `docs/widget-internals.md` "Partial repaint"), because animated
+shaders and DAW automation (many widgets changing every frame) made the
+headroom argument below moot. The D2D backend also presents without vsync now,
+paced to the refresh rate, so the Windows caveat below no longer holds. The
+measurement and the reasoning are kept as written.
+
 **MEASURED FIRST, per this plan's own instruction - and the number changes the
 recommendation.** `tests/repaint_bench.cpp` (new, xpl host, built not
 ctest-registered) times one full-frame repaint of an NxN CUSTOMDRAW mesh

@@ -26,6 +26,9 @@ namespace macos_host
   extern neui_compound_api_t  compound_api;
   extern neui_behavior_api_t  behavior_api;
   extern neui_filter_api_t    filter_api;
+#if !defined(NEUI_NO_SHADERS)
+  extern neui_shader_api_t    shader_api;
+#endif
   extern neui_grid_api_t      grid_api;
   extern neui_dnd_api_t       dnd_api;
   extern neui_scroll_api_t    scroll_api;
@@ -58,8 +61,8 @@ namespace macos_host
 
   Session::~Session() = default;
 
-  // Session::run lives in window.mm (drives [NSApp run] + quit-on-last-frame).
-  void Session::endsession() {}
+  // Session::run and Session::endsession live in window.mm (they drive
+  // [NSApp run] + quit-on-last-frame).
 
   bool Session::dispatch_event(neui_event_t* event)
   {
@@ -271,6 +274,7 @@ namespace macos_host
     uint32_t i = session.session - 1;
     if (i < sessions.size() && sessions[i]) {
       void* tok = sessions[i]->get_token();
+      set_animation_timer(sessions[i].get(), 0);
       sessions[i] = nullptr;
       return tok;
     }
@@ -290,6 +294,9 @@ namespace macos_host
     if (!strcmp(iface, NEUI_API_COMPOUND))  return &compound_api;
     if (!strcmp(iface, NEUI_API_BEHAVIOR))  return &behavior_api;
     if (!strcmp(iface, NEUI_API_FILTER))    return &filter_api;
+#if !defined(NEUI_NO_SHADERS)
+    if (!strcmp(iface, NEUI_API_SHADER))    return &shader_api;
+#endif
     if (!strcmp(iface, NEUI_API_GRID))      return &grid_api;
     if (!strcmp(iface, NEUI_API_DND))       return &dnd_api;
     if (!strcmp(iface, NEUI_API_SCROLL))    return &scroll_api;

@@ -272,6 +272,12 @@ namespace xpl_host
   // wrong. Must not be called from inside a paint (it would re-enter).
   void platform_force_paint(void* native_handle);
 
+  // Invalidate one frame-local rect (logical px) so the next paint can be
+  // partial (see Session::paint_frame's `damage`). A pending full-window
+  // invalidation absorbs it. Platforms without partial repaint forward to
+  // platform_invalidate, which is always correct.
+  void platform_invalidate_rect(void* native_handle, int x, int y, int w, int h);
+
   // Start / stop a 16 ms repaint heartbeat on a frame's native window.
   // Used by the toast overlay (and any future animation that does not
   // belong to a single widget). The platform layer is responsible for
@@ -281,6 +287,16 @@ namespace xpl_host
   // is a silent no-op.
   void platform_start_toast_animation(void* native_handle);
   void platform_stop_toast_animation(void* native_handle);
+
+  // Run a frame's animation timer every interval_ms, calling
+  // Session::animation_tick(frame index) and continuing at the interval it
+  // returns; 0 stops it. Setting the interval it already runs at leaves it
+  // undisturbed. A platform may run a fixed heartbeat instead (Linux: the
+  // shared 16 ms one), as the clock gates frames itself.
+  void platform_set_animation_timer(void* native_handle, uint32_t interval_ms);
+
+  // Whether the OS asks for reduced motion (the animation clock stands).
+  bool platform_reduced_motion();
 
   // Returns monotonic milliseconds since some fixed reference. Used by
   // the toast overlay to drive phase math independently of frame-rate.
@@ -722,6 +738,16 @@ namespace xpl_host
   // scroll). The platform re-syncs the mirror tree (positions, sizes,
   // visibility, abs coords) before the next LVGL refresh.
   void platform_retained_tree_changed(Session* session, uint32_t widget_index);
+#endif
+
+#if defined(NEUI_PLATFORM_WEB)
+  // The NEUI_API_WEB vtable (include/neui/d/web.h), as an opaque pointer for
+  // get_interface to return. Implemented in platform_web.cpp.
+  void* platform_web_api();
+
+  // The page runs on an Apple device (Cmd is the primary modifier), so the
+  // in-frame menubar shows Apple shortcut labels.
+  bool platform_web_apple();
 #endif
 
 #if defined(NEUI_PLATFORM_IOS)

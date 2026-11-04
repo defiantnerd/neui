@@ -25,7 +25,7 @@
 #include "../shared/linux/keys_linux.h"
 #include "../shared/linux/clipboard_linux.h"
 #include "../shared/linux/dnd_linux.h"
-#include "../shared/linux/message_box_linux.h"
+#include "../shared/message_box_painted.h"
 #include "../shared/file_dialog_model.h"
 #include "../shared/linux/file_dialog_portal.h"
 #include "../shared/text_edit.h"           // name field in the drawn browser
@@ -192,6 +192,7 @@ namespace
     bool         owns_display = false;     // true => embedded (dedicated XOpenDisplay)
     uint64_t     last_tick_ms = 0;         // 16 ms gate for host-driven embedded ticks
     Window       win          = 0;
+    bool         x_gone       = false;     // another client destroyed `win` (DestroyNotify)
     Visual*      visual       = nullptr;
     int          depth        = 0;
     XIC          ic           = nullptr;   // per-window input context (UTF-8)
@@ -200,8 +201,16 @@ namespace
     bool         is_appwindow = false;
     bool         counted      = false;     // contributes to g_appwindow_count
     uint32_t     dpi          = 96;
+    // needs_paint = a FULL repaint is pending (every pre-existing
+    // invalidation path sets it). `damage` collects partial-repaint rects
+    // from platform_invalidate_rect; it only matters while needs_paint is
+    // false - a pending full repaint absorbs it.
     bool         needs_paint  = false;
+    neui_detail::DamageRegion damage;
     bool         toast_anim   = false;
+    // The animation clock wants ticks (Session::animation_tick). The shared
+    // 16 ms heartbeat serves it; the clock gates frames to its fps itself.
+    bool         clock_anim   = false;
     // Modal blocking: set while a modal child dialog is up (X11 has no native
     // per-window input disable, so dispatch_x_event swallows input to a
     // disabled window). See platform_set_window_enabled.
@@ -489,7 +498,7 @@ namespace
   bool any_window_animating()
   {
     for (auto& kv : g_windows)
-      if (kv.second->toast_anim ||
+      if (kv.second->toast_anim || kv.second->clock_anim ||
           kv.second->bouncing_grid_index || kv.second->bouncing_section_index)
         return true;
     return false;
@@ -513,7 +522,7 @@ namespace
         GridViewport vp = grid_compute_viewport(*model, hw->width, hw->height,
                                                  cfg.row_h, cfg.header_h);
         bool more = grid_scroll_bounce_step(*model, vp, cfg.row_h);
-        lw->needs_paint = true;
+        s->invalidate_widget_rect(lw->bouncing_grid_index);   // the grid only
         if (!more) lw->bouncing_grid_index = 0;
       }
     }
@@ -526,7 +535,8 @@ namespace
       } else {
         bool more_v = section_scroll_bounce_step(*st, *L, false);
         bool more_h = section_scroll_bounce_step(*st, *L, true);
-        lw->needs_paint = true;
+        // The section's rect covers its scrolled children (clipped to it).
+        s->invalidate_widget_rect(lw->bouncing_section_index);
         sw->notify_scroll_changed();
         if (!more_v && !more_h) lw->bouncing_section_index = 0;
       }
@@ -535,13 +545,36 @@ namespace
 
   // ---- Painting -------------------------------------------------------------
 
+  static bool paint_pending(const LinuxWindow* lw)
+  {
+    return lw->needs_paint || !lw->damage.empty();
+  }
+
   void paint_window(LinuxWindow* lw)
   {
-    if (!lw || !lw->session) return;
+    if (!lw) return;
+    // Partial only when nothing asked for a full repaint since the last
+    // paint; paint_frame itself falls back to full when the backend or the
+    // coverage says so. The pending state is taken before painting, so an
+    // invalidation raised DURING the paint (a paint handler that sets a
+    // label's text) is kept for the next frame instead of being dropped. It
+    // is taken even when nothing can paint, or platform_run would poll it
+    // forever.
+    const bool full = lw->needs_paint;
+    neui_detail::DamageRegion damage = std::move(lw->damage);
+    lw->needs_paint = false;
+    lw->damage.clear();
+    if (!lw->session) return;
     auto* wd = lw->session->get_widget(lw->widget_index);
     if (wd && wd->render_ctx)
-      lw->session->paint_frame(wd->render_ctx, lw->widget_index);
-    lw->needs_paint = false;
+      lw->session->paint_frame(wd->render_ctx, lw->widget_index, full ? nullptr : &damage);
+  }
+
+  bool any_paint_pending()
+  {
+    for (auto& kv : g_windows)
+      if (paint_pending(kv.second)) return true;
+    return false;
   }
 
   void flush_pending_paints()
@@ -550,7 +583,7 @@ namespace
     std::vector<LinuxWindow*> todo;
     todo.reserve(g_windows.size());
     for (auto& kv : g_windows)
-      if (kv.second->needs_paint) todo.push_back(kv.second);
+      if (paint_pending(kv.second)) todo.push_back(kv.second);
     for (auto* lw : todo)
       if (g_windows.count(lw->win)) paint_window(lw);
   }
@@ -567,17 +600,28 @@ namespace
     std::vector<LinuxWindow*> todo;
     todo.reserve(g_windows.size());
     for (auto& kv : g_windows)
-      if (kv.second->session == s && kv.second->needs_paint)
+      if (kv.second->session == s && paint_pending(kv.second))
         todo.push_back(kv.second);
     for (auto* lw : todo)
       if (g_windows.count(lw->win)) paint_window(lw);
   }
 
+  void tick_clock(LinuxWindow* lw)
+  {
+    if (lw->clock_anim && lw->session)
+      lw->clock_anim = lw->session->animation_tick(lw->widget_index) != 0;
+  }
+
   void tick_animations()
   {
-    for (auto& kv : g_windows) {
-      if (kv.second->toast_anim) kv.second->needs_paint = true;
-      step_scroll_bounce(kv.second);
+    // Snapshot: a tick only invalidates, but stay safe against window churn.
+    std::vector<LinuxWindow*> wins;
+    wins.reserve(g_windows.size());
+    for (auto& kv : g_windows) wins.push_back(kv.second);
+    for (auto* lw : wins) {
+      if (lw->toast_anim) lw->needs_paint = true;
+      step_scroll_bounce(lw);
+      tick_clock(lw);
     }
     // Client timers ride the same heartbeat. Snapshot first: a handler may
     // add or remove a session's timers, which mutates the map we are walking.
@@ -602,7 +646,7 @@ namespace
     if (lw->ic) { XDestroyIC(lw->ic); lw->ic = nullptr; }
     if (lw->win) {
       g_windows.erase(lw->win);
-      XDestroyWindow(lw->dpy, lw->win);
+      if (!lw->x_gone) XDestroyWindow(lw->dpy, lw->win);
       lw->win = 0;
     }
     // Embedded windows own a dedicated Display connection; close it last.
@@ -616,26 +660,71 @@ namespace
     delete lw;
   }
 
-  // Mirror of macOS windowWillClose: client gets APP_QUIT (and may veto), then
-  // the render ctx + window are torn down and the appwindow count drops.
-  void handle_close(LinuxWindow* lw)
+  // The teardown every close path shares: a WM close, a window another client
+  // destroyed, and widget destroy. Releases the render ctx, ends a dialog's
+  // modal pump (a modal dialog also gives its owner input and focus back, as
+  // on win32), destroys the native window (not the X window itself once
+  // x_gone) and drops the appwindow count.
+  void teardown_window(LinuxWindow* lw, WidgetData* wd)
   {
     Session* s = lw->session;
-    neui_event_t ev = {};
-    ev.type = NEUI_EVENT_APP_QUIT;
-    if (s && !s->dispatch_event(&ev)) return;   // client vetoed
-
+    if (s && wd && wd->is_dialog() && wd->owner_index != 0 &&
+        s->_widgets.exists(wd->owner_index)) {
+      const uint32_t idx       = wd->index;
+      const uint32_t owner_idx = wd->owner_index;
+      const bool modal = !wd->attrs || wd->attrs->get_int(NEUI_ATTR_MODAL, 1) != 0;
+      // Session::end_modal, not a bare flag clear: widget_show's pump unwinds
+      // AND the focus the dialog took from its owner goes back, so a user close
+      // and a client destroy end the same way on every platform. It dispatches
+      // focus events into client code, which may tear this window down itself -
+      // so re-resolve both afterwards.
+      if (dynamic_cast<FrameWidget*>(wd)) {
+        const Window win = lw->win;
+        s->end_modal(idx);
+        lw = find_window(win);
+        if (!lw) return;
+        wd = s->get_widget(idx);
+      }
+      void* owner_native = s->_widgets.exists(owner_idx)
+                             ? s->_widgets[owner_idx].native_handle : nullptr;
+      if (modal && owner_native) {
+        platform_set_window_enabled(owner_native, true);
+        auto* ow = static_cast<LinuxWindow*>(owner_native);
+        XRaiseWindow(ow->dpy, ow->win);
+        XSetInputFocus(ow->dpy, ow->win, RevertToParent, CurrentTime);
+      }
+    }
     auto* backend = platform_get_backend();
-    auto* wd = s ? s->get_widget(lw->widget_index) : nullptr;
     if (wd && wd->render_ctx && backend) {
-      s->_asset_manager.release_context(wd->render_ctx, backend);
+      if (s) s->_asset_manager.release_context(wd->render_ctx, backend);
       backend->destroy_context(wd->render_ctx);
       wd->render_ctx = nullptr;
     }
-    bool was_app = lw->is_appwindow && lw->counted;
+    const bool was_app = lw->is_appwindow && lw->counted;
     if (wd) wd->native_handle = nullptr;
     destroy_native(lw);
-    if (was_app && --g_appwindow_count <= 0) g_quit = true;
+    if (was_app && g_appwindow_count > 0 && --g_appwindow_count <= 0)
+      g_quit = true;
+  }
+
+  // Mirror of macOS windowWillClose: client gets APP_QUIT (and may veto), then
+  // the window is torn down. `gone`: another client destroyed the X window
+  // (DestroyNotify), so the client still hears APP_QUIT but cannot keep it.
+  void handle_close(LinuxWindow* lw, bool gone = false)
+  {
+    Session* s = lw->session;
+    const Window win = lw->win;
+    if (gone) lw->x_gone = true;
+    neui_event_t ev = {};
+    ev.type = NEUI_EVENT_APP_QUIT;
+    if (auto* fw = s ? s->get_widget(lw->widget_index) : nullptr)
+      ev.data.mouse.widget.id = fw->widget_id;  // the frame closing
+    const bool allow = !s || s->dispatch_event(&ev);
+    // The handler may have destroyed the frame itself (widgets->destroy), in
+    // which case the window is torn down and lw freed already.
+    lw = find_window(win);
+    if (!lw || (!allow && !gone)) return;   // gone, or the client vetoed
+    teardown_window(lw, s ? s->get_widget(lw->widget_index) : nullptr);
   }
 
   // ---- Input dispatch -------------------------------------------------------
@@ -735,6 +824,10 @@ namespace
     float lx = static_cast<float>(be.x) / scale, ly = static_cast<float>(be.y) / scale;
 
     if (be.button == 1) {
+      // A new press: a release left to swallow from an earlier press never
+      // came (a menu pick that opened a modal dialog released while the
+      // frame was blocked) and must not eat this press's release.
+      lw->swallow_release = false;
       // Overlay pre-checks (mirror macOS mouseDown: order).
       // Standalone tree popup first, and BEFORE the double-click detection
       // below, so a double-click inside an open menu picks the row it lands on
@@ -990,6 +1083,10 @@ namespace
     // KEYCHAR tail below, which is what keeps a swallowed press from still
     // inserting its character underneath.
     if (s->popup_gate_key(NEUI_EVENT_KEYDOWN, keycode, mods)) return;
+    // The popup_menu overlay takes Esc / Enter / Space / Up / Down (as on
+    // win32). popup_menu is the tree popup here (Session::open_popup_menu), so
+    // this only matters if the overlay is ever used.
+    if (s->_popup_active && s->handle_popup_key(keycode)) return;
 
     // Tab cycles logical focus (hand-rolled traversal, like win32/macOS).
     if (keycode == NEUI_KEY_TAB) {
@@ -1004,7 +1101,7 @@ namespace
     // Menubar accelerators (Ctrl+S etc.) - matched here on Linux since the
     // Win32 HACCEL path is MSG-based. On a hit the key is consumed (routed
     // through dispatch_menu_event, which tries the focused widget first).
-    if (keycode != 0 && s->try_menubar_accel(keycode, mods)) return;
+    if (keycode != 0 && s->try_menubar_accel(keycode, mods, lw->widget_index)) return;
 
     // KEYDOWN: client first (focused widget), then the widget's on_keydown.
     if (keycode != 0) {
@@ -1503,7 +1600,7 @@ namespace
       if (has_v && dv != 0.0 && section_scroll_step_px(*st, *L, dv, false)) changed = true;
       if (has_h && dh != 0.0 && section_scroll_step_px(*st, *L, dh, true))  changed = true;
     }
-    if (changed) { lw->needs_paint = true; sw->notify_scroll_changed(); }
+    if (changed) { lw->session->invalidate_widget_rect(sec_idx); sw->notify_scroll_changed(); }
     if (start_bounce) { lw->bouncing_section_index = sec_idx; arm_timer(true); }
   }
 
@@ -1547,7 +1644,7 @@ namespace
         in.precise  = true;
         in.delta_px = dv * (double)LINUX_WHEEL_LINES * (double)cfg.row_h;
         GridWheelAction act = grid_scroll_wheel(*model, vp, cfg.row_h, in);
-        if (act.changed) lw->needs_paint = true;
+        if (act.changed) s->invalidate_widget_rect(hit);
         if (act.start_bounce) { lw->bouncing_grid_index = hit; arm_timer(true); }
         return;
       }
@@ -1827,7 +1924,14 @@ namespace
 
       case FocusIn:
         if (!is_real_focus_change(ev.xfocus)) break;
-        s->_os_focused = true;  lw->needs_paint = true; break;
+        s->_os_focused = true;
+        // Logical focus moves into this frame. set_focus dispatches into client
+        // code that may destroy this frame (freeing lw), so re-resolve it.
+        s->frame_activated(lw->widget_index);
+        lw = find_window(ev.xany.window);
+        if (!lw) return;
+        lw->needs_paint = true;
+        break;
       case FocusOut: {
         // A grab-induced or pointer-induced pseudo event is not a deactivation.
         if (!is_real_focus_change(ev.xfocus)) break;
@@ -1863,6 +1967,16 @@ namespace
         if (ev.xclient.message_type == g_wm_protocols &&
             static_cast<Atom>(ev.xclient.data.l[0]) == g_wm_delete)
           handle_close(lw);
+        break;
+
+      case DestroyNotify:
+        // Another client destroyed the window (xdotool windowclose, a killed
+        // WM frame). Our own destroys leave g_windows first, so they never
+        // get here. Close it as on WM_DELETE, without the veto. An embedded
+        // window is left to the plugin's own close: tearing it down here
+        // would close the Display the DAW's pump is reading.
+        if (ev.xdestroywindow.window == lw->win && !lw->owns_display)
+          handle_close(lw, /*gone=*/true);
         break;
 
       default: break;
@@ -2032,8 +2146,6 @@ namespace
     auto* backend = platform_get_backend();
     if (!backend) return 0;
 
-    neui_detail::MsgBoxSpec spec = neui_detail::msgbox_parse(flags);
-
     int     scr   = DefaultScreen(d);
     Window  root  = RootWindow(d, scr);
     Visual* vis   = DefaultVisual(d, scr);
@@ -2044,77 +2156,11 @@ namespace
     // Scope the palette to the owner's session so dark/light + accent match.
     neui_detail::ScopedPaletteOverride scope(
       (owner && owner->session) ? owner->session->effective_palette_ptr() : nullptr);
-    auto C = [](neui_detail::ColorRole r) {
-      return neui_detail::current_palette().colors[(size_t)r];
-    };
-    using neui_detail::shade;   // shared ARGB channel shade (theme_palette.h)
 
-    // Offscreen ctx for text measurement during layout (logical px).
-    neui_render_ctx_t mctx = backend->create_offscreen_context(8, 8, 1.0f);
-    auto meas = [&](const char* s, float sz, int weight) -> int {
-      if (!mctx || !s || !*s) return 0;
-      if (weight) backend->push_font(mctx, "", weight);
-      int w = (int)backend->measure_text(mctx, s, -1, sz);
-      if (weight) backend->pop_font(mctx);
-      return w;
-    };
-
-    // Word-wrap UTF-8 `s` to maxw logical px (honours embedded '\n').
-    const float SZ_TXT = 13.0f, SZ_CAP = 14.0f;
-    const int   LH = 18, LH_CAP = 20, WRAP = 360;
-    auto wrap = [&](const char* s, float sz, int weight, int maxw,
-                    std::vector<std::string>& out) {
-      if (!s || !*s) return;
-      std::string cur, word;
-      auto flush_word = [&]() {
-        if (word.empty()) return;
-        std::string trial = cur.empty() ? word : cur + " " + word;
-        if (cur.empty() || meas(trial.c_str(), sz, weight) <= maxw) cur = trial;
-        else { out.push_back(cur); cur = word; }
-        word.clear();
-      };
-      for (const char* p = s;; ++p) {
-        char c = *p;
-        if (c == '\n' || c == 0) { flush_word(); out.push_back(cur); cur.clear();
-                                   if (c == 0) break; }
-        else if (c == ' ') flush_word();
-        else word += c;
-      }
-    };
-
-    std::vector<std::string> cap_lines, txt_lines;
-    wrap(caption, SZ_CAP, 700, WRAP, cap_lines);
-    wrap(text,    SZ_TXT, 0,   WRAP, txt_lines);
-
-    // Layout (logical px).
-    const int PAD = 18, GAP = 12, BTN_H = 28, BTN_GAP = 8, BTN_MINW = 84, ICON = 32;
-    int text_w = 0;
-    for (auto& l : cap_lines) text_w = std::max(text_w, meas(l.c_str(), SZ_CAP, 700));
-    for (auto& l : txt_lines) text_w = std::max(text_w, meas(l.c_str(), SZ_TXT, 0));
-    int content_h = (int)cap_lines.size() * LH_CAP + (int)txt_lines.size() * LH;
-    if (!cap_lines.empty() && !txt_lines.empty()) content_h += 6;
-
-    int bw[3] = {0,0,0}, total_b = 0;
-    for (int i = 0; i < spec.count; ++i) {
-      bw[i] = std::max(BTN_MINW, meas(spec.btn[i].label, SZ_TXT, 0) + 24);
-      total_b += bw[i] + (i ? BTN_GAP : 0);
-    }
-    int icon_w   = spec.icon ? ICON + GAP : 0;
-    int left_h   = std::max(content_h, spec.icon ? ICON : 0);
-    int win_w = PAD * 2 + std::max(icon_w + text_w, total_b);
-    int win_h = PAD * 2 + left_h + GAP + BTN_H;
-    backend->destroy_context(mctx); mctx = nullptr;
-
-    int btn_y  = win_h - PAD - BTN_H;
-    int btn_x0 = win_w - PAD - total_b;
-    int bx[3] = {0,0,0};
-    for (int i = 0, cx = btn_x0; i < spec.count; ++i) { bx[i] = cx; cx += bw[i] + BTN_GAP; }
-    auto hit_button = [&](int lx, int ly) -> int {
-      if (ly < btn_y || ly >= btn_y + BTN_H) return -1;
-      for (int i = 0; i < spec.count; ++i)
-        if (lx >= bx[i] && lx < bx[i] + bw[i]) return i;
-      return -1;
-    };
+    // Layout, paint and hit-test are shared with the web host.
+    neui_detail::MsgBoxPainted box;
+    if (!box.layout(backend, text, caption, flags)) return 0;
+    const int win_w = box.win_w, win_h = box.win_h;
 
     // Centre over the owner (or the screen).
     int ox = 0, oy = 0;
@@ -2160,63 +2206,12 @@ namespace
     if (!ctx) { XDestroyWindow(d, win); return 0; }
     backend->update_dpi(ctx, dpi);
 
-    int  hover = -1, pressed = -1, result = 0;
+    int  result = 0;
     bool done = false, need_paint = true, focused = false;
     // Swallow transient X errors (e.g. focusing a not-yet-viewable window).
     int (*old_err)(Display*, XErrorEvent*) = XSetErrorHandler(drag_xerror);
 
-    auto render = [&]() {
-      backend->begin_frame(ctx, C(neui_detail::ColorRole::frame_bg));
-      if (spec.icon) {
-        uint32_t icol; const char* glyph;
-        switch (spec.icon) {
-          case NEUI_MB_ICONERROR:       icol = 0xFFD13438; glyph = "\xC3\x97"; break; // ×
-          case NEUI_MB_ICONWARNING:     icol = 0xFFF7630C; glyph = "!";        break;
-          case NEUI_MB_ICONQUESTION:    icol = 0xFF0078D4; glyph = "?";        break;
-          default: /* INFORMATION */    icol = 0xFF0078D4; glyph = "i";        break;
-        }
-        int cx = PAD + ICON / 2, cy = PAD + ICON / 2, rr = ICON / 2;
-        backend->begin_path(ctx);
-        backend->arc(ctx, (float)cx, (float)cy, (float)rr, 0.0f, 6.2831853f);
-        backend->close_path(ctx);
-        backend->fill_path(ctx, icol);
-        backend->push_font(ctx, "", 700);
-        int gw = (int)backend->measure_text(ctx, glyph, -1, 18.0f);
-        backend->draw_text(ctx, (float)(cx - gw / 2), (float)PAD, (float)(gw + 4), (float)ICON, glyph, 18.0f, 0xFFFFFFFF);
-        backend->pop_font(ctx);
-      }
-      int tx = PAD + (spec.icon ? ICON + GAP : 0);
-      int ty = PAD;
-      backend->push_font(ctx, "", 700);
-      for (auto& l : cap_lines) {
-        backend->draw_text(ctx, (float)tx, (float)ty, (float)(win_w - tx - PAD), (float)LH_CAP, l.c_str(), SZ_CAP,
-                           C(neui_detail::ColorRole::text_primary));
-        ty += LH_CAP;
-      }
-      backend->pop_font(ctx);
-      if (!cap_lines.empty() && !txt_lines.empty()) ty += 6;
-      for (auto& l : txt_lines) {
-        backend->draw_text(ctx, (float)tx, (float)ty, (float)(win_w - tx - PAD), (float)LH, l.c_str(), SZ_TXT,
-                           C(neui_detail::ColorRole::text_primary));
-        ty += LH;
-      }
-      for (int i = 0; i < spec.count; ++i) {
-        uint32_t fill = C(neui_detail::ColorRole::control_bg);
-        if (pressed == i)     fill = shade(fill, -18);
-        else if (hover == i)  fill = shade(fill, +14);
-        backend->fill_rect(ctx, (float)bx[i], (float)btn_y, (float)bw[i], (float)BTN_H, fill);
-        bool def = (i == spec.def_index);
-        backend->draw_rect(ctx, (float)bx[i], (float)btn_y, (float)bw[i], (float)BTN_H,
-                           def ? 2.0f : 1.0f,
-                           def ? C(neui_detail::ColorRole::accent)
-                               : C(neui_detail::ColorRole::border));
-        int lw = (int)backend->measure_text(ctx, spec.btn[i].label, -1, SZ_TXT);
-        backend->draw_text(ctx, (float)(bx[i] + (bw[i] - lw) / 2), (float)btn_y, (float)(lw + 4), (float)BTN_H,
-                           spec.btn[i].label, SZ_TXT,
-                           C(neui_detail::ColorRole::text_primary));
-      }
-      backend->end_frame(ctx);
-    };
+    auto render = [&]() { box.render(backend, ctx); };
 
     XMapRaised(d, win);
 
@@ -2247,36 +2242,36 @@ namespace
           backend->resize(ctx, static_cast<uint32_t>(e.xconfigure.width), static_cast<uint32_t>(e.xconfigure.height));
           need_paint = true; break;
         case MotionNotify: {
-          int h = hit_button((int)(static_cast<float>(e.xmotion.x) / scale), (int)(static_cast<float>(e.xmotion.y) / scale));
-          if (h != hover) { hover = h; need_paint = true; }
+          int h = box.hit_button((int)(static_cast<float>(e.xmotion.x) / scale), (int)(static_cast<float>(e.xmotion.y) / scale));
+          if (h != box.hover) { box.hover = h; need_paint = true; }
           break;
         }
         case ButtonPress:
           if (e.xbutton.button == Button1) {
-            pressed = hit_button((int)(static_cast<float>(e.xbutton.x) / scale), (int)(static_cast<float>(e.xbutton.y) / scale));
+            box.pressed = box.hit_button((int)(static_cast<float>(e.xbutton.x) / scale), (int)(static_cast<float>(e.xbutton.y) / scale));
             need_paint = true;
           }
           break;
         case ButtonRelease:
           if (e.xbutton.button == Button1) {
-            int h = hit_button((int)(static_cast<float>(e.xbutton.x) / scale), (int)(static_cast<float>(e.xbutton.y) / scale));
-            if (h >= 0 && h == pressed) { result = spec.btn[h].id; done = true; }
-            pressed = -1; need_paint = true;
+            int h = box.hit_button((int)(static_cast<float>(e.xbutton.x) / scale), (int)(static_cast<float>(e.xbutton.y) / scale));
+            if (h >= 0 && h == box.pressed) { result = box.spec.btn[h].id; done = true; }
+            box.pressed = -1; need_paint = true;
           }
           break;
         case KeyPress: {
           KeySym ks = XLookupKeysym(&e.xkey, 0);
           if (ks == XK_Return || ks == XK_KP_Enter) {
-            result = spec.btn[spec.def_index].id; done = true;
-          } else if (ks == XK_Escape && spec.cancel_index >= 0) {
-            result = spec.btn[spec.cancel_index].id; done = true;
+            result = box.default_result(); done = true;
+          } else if (ks == XK_Escape && box.spec.cancel_index >= 0) {
+            result = box.cancel_result(); done = true;
           }
           break;
         }
         case ClientMessage:
           if (e.xclient.message_type == g_wm_protocols &&
               (Atom)e.xclient.data.l[0] == g_wm_delete) {
-            result = spec.cancel_index >= 0 ? spec.btn[spec.cancel_index].id : 0;
+            result = box.cancel_result();
             done = true;
           }
           break;
@@ -3194,6 +3189,7 @@ namespace
       lw->last_tick_ms = now;
       if (lw->toast_anim) lw->needs_paint = true;
       step_scroll_bounce(lw);   // advance any GRID/SECTION spring-back
+      tick_clock(lw);
       neui_detail::theme_dbus_dispatch();   // pick up system dark/light changes
     }
     // Client timers (NEUI_API_TIMER) are NOT gated by the 16 ms animation
@@ -3218,41 +3214,9 @@ namespace
   void platform_destroy_window(WidgetData& wd)
   {
     if (!wd.native_handle) return;
-    auto* lw = static_cast<LinuxWindow*>(wd.native_handle);
-    Session* s = lw->session;
-
-    // Modal dialog teardown (mirror platform_win32's WM_DESTROY path): clear
-    // the pump flag so platform_run_modal_until in widget_show unwinds, and
-    // re-enable + raise the owner so input returns there. Must run BEFORE the
-    // widget is freed (destroy_recursive removes it right after this), while
-    // owner_index + the FrameWidget are still valid.
-    if (s && wd.is_dialog() && wd.owner_index != 0 &&
-        s->_widgets.exists(wd.owner_index)) {
-      // Session::end_modal, not a bare flag clear: it also restores the focus the
-      // dialog took from its owner, so a user-driven close and a client destroy
-      // end the same way on all three platforms.
-      if (dynamic_cast<FrameWidget*>(&wd))
-        s->end_modal(wd.index);
-      auto& owner = s->_widgets[wd.owner_index];
-      if (owner.native_handle) {
-        platform_set_window_enabled(owner.native_handle, true);
-        auto* ow = static_cast<LinuxWindow*>(owner.native_handle);
-        XRaiseWindow(ow->dpy, ow->win);
-        XSetInputFocus(ow->dpy, ow->win, RevertToParent, CurrentTime);
-      }
-    }
-
-    auto* backend = platform_get_backend();
-    if (wd.render_ctx && backend) {
-      if (s) s->_asset_manager.release_context(wd.render_ctx, backend);
-      backend->destroy_context(wd.render_ctx);
-      wd.render_ctx = nullptr;
-    }
-    bool was_app = lw->is_appwindow && lw->counted;
-    destroy_native(lw);
-    wd.native_handle = nullptr;
-    if (was_app && g_appwindow_count > 0 && --g_appwindow_count <= 0)
-      g_quit = true;
+    // Runs BEFORE the widget is freed (destroy_recursive removes it right
+    // after this), while owner_index + the FrameWidget are still valid.
+    teardown_window(static_cast<LinuxWindow*>(wd.native_handle), &wd);
   }
 
   void platform_show_window(void* native_handle)
@@ -3365,6 +3329,14 @@ namespace
     paint_window(static_cast<LinuxWindow*>(native_handle));
   }
 
+  void platform_invalidate_rect(void* native_handle, int x, int y, int w, int h)
+  {
+    if (!native_handle) return;
+    auto* lw = static_cast<LinuxWindow*>(native_handle);
+    if (lw->needs_paint) return;   // a full repaint is already pending
+    lw->damage.add({ x, y, w, h });
+  }
+
   bool platform_run()
   {
     if (!g_display) return true;
@@ -3382,7 +3354,14 @@ namespace
       if (g_timerfd >= 0) { FD_SET(g_timerfd, &rfds); if (g_timerfd > maxfd) maxfd = g_timerfd; }
       int dfd = neui_detail::theme_dbus_fd();   // -1 without libdbus / no bus
       if (dfd >= 0) { FD_SET(dfd, &rfds); if (dfd > maxfd) maxfd = dfd; }
-      int r = select(maxfd + 1, &rfds, nullptr, nullptr, nullptr);
+      // Poll instead of sleeping when there is work select() cannot see:
+      // a paint that invalidated again (a paint handler setting a label's
+      // text), or events Xlib already read into its queue after
+      // drain_events (during the paints or XFlush) - the socket is empty
+      // then, so a sleep would hold them until an unrelated wakeup.
+      const bool poll_now = XQLength(g_display) > 0 || any_paint_pending();
+      timeval poll = { 0, 0 };
+      int r = select(maxfd + 1, &rfds, nullptr, nullptr, poll_now ? &poll : nullptr);
       if (r < 0) { if (errno == EINTR) continue; break; }
       if (g_timerfd >= 0 && FD_ISSET(g_timerfd, &rfds)) {
         uint64_t exp = 0; ssize_t rd = read(g_timerfd, &exp, sizeof(exp)); (void)rd;
@@ -3430,7 +3409,9 @@ namespace
       fd_set rfds; FD_ZERO(&rfds); FD_SET(xfd, &rfds);
       int maxfd = xfd;
       if (g_timerfd >= 0) { FD_SET(g_timerfd, &rfds); if (g_timerfd > maxfd) maxfd = g_timerfd; }
-      struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 16000;
+      // As in platform_run: queued events and pending paints don't wait.
+      const bool poll_now = XQLength(g_display) > 0 || any_paint_pending();
+      struct timeval tv; tv.tv_sec = 0; tv.tv_usec = poll_now ? 0 : 16000;
       int r = select(maxfd + 1, &rfds, nullptr, nullptr, &tv);
       if (r < 0) { if (errno == EINTR) continue; break; }
       if (r > 0 && g_timerfd >= 0 && FD_ISSET(g_timerfd, &rfds)) {
@@ -4161,6 +4142,24 @@ namespace
     static_cast<LinuxWindow*>(native_handle)->toast_anim = false;
     if (!any_window_animating()) arm_timer(false);   // back to idle: no wakeups
   }
+
+  void platform_set_animation_timer(void* native_handle, uint32_t interval_ms)
+  {
+    if (!native_handle) return;
+    auto* lw = static_cast<LinuxWindow*>(native_handle);
+    if (lw->clock_anim == (interval_ms != 0)) return;  // re-arming would reset it
+    lw->clock_anim = interval_ms != 0;
+    if (lw->clock_anim) {
+      ensure_timerfd();
+      arm_timer(true);
+    } else if (!any_window_animating()) {
+      arm_timer(false);
+    }
+  }
+
+  // No reduced-motion source is read on Linux yet (the desktop portal only
+  // carries it on recent versions); animation always runs.
+  bool platform_reduced_motion() { return false; }
 
   uint64_t platform_now_ms()
   {

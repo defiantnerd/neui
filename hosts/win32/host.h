@@ -11,6 +11,7 @@
 #include "../shared/widget_section_scroll.h"
 #include "../shared/widget_tabview.h"
 #include "asset_manager_w32.h"
+#include "../shared/win32/paint_pacer_win32.h"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -26,6 +27,9 @@
 #define NEUI_HOST_WIN32 "neui.host.win32"
 
 namespace win32_host {
+
+  // WM_TIMER id of a frame's animation clock heartbeat (Session::animation_tick).
+  constexpr UINT_PTR k_anim_timer_id = 0x6E77616E;  // 'nwan'
 
   using neui_detail::Tree;
 
@@ -122,6 +126,10 @@ namespace win32_host {
     bool has_subclass = false;
     wchar_t pending_surrogate = 0;  // high surrogate waiting for its low pair in WM_CHAR
     uint32_t widget_id = 0;    // stored as uint32_t for packing math; wrap as neui_widget_t when returning to public API
+    uint32_t anim_timer_ms = 0;  // frames: interval of the animation clock's WM_TIMER, 0 = off
+    // Painted widgets: D2D presents without vsync; paints are paced to the
+    // refresh rate (paint_pacer_win32.h).
+    neui_detail::PaintPacerWin32 pacer;
     std::string text;          // copy of the last set_text value; applied on HWND creation if set before show
     struct PendingItem { std::string text; void* userdata; };
     std::vector<PendingItem> pending_items;     // items queued before HWND exists
@@ -407,6 +415,15 @@ namespace win32_host {
     // Climbs the parent chain to the nearest frame.
     bool frame_follows_theme(WidgetData* wd);
 
+    // ---- Animation clock (hosts/shared/anim_clock.h) ----
+    // A CUSTOMDRAW paint that reads the clock marks its widget with its frame
+    // (animation_after_paint, after a begin_widget before the paint). The
+    // frame's HWND runs a WM_TIMER (k_anim_timer_id) at the interval the
+    // clock asks for; each tick repaints the animating widgets.
+    void animation_after_paint(WidgetData& wd);
+    void animation_tick(WidgetData& frame);
+    void animation_set_timer(WidgetData& frame, uint32_t ms);
+
     // Invalidate every CUSTOMDRAW widget in this session whose
     // compound_asset.id matches `asset_id`. Called from the compound API
     // mutators so visible widgets repaint when their backing compound
@@ -561,5 +578,10 @@ namespace win32_host {
     uint32_t _session_id = 0;   // stored as uint32_t for packing math; wrap as neui_session_t when returning to public API
     std::vector<uint32_t> _menubars;  // widget indices of MENUBAR widgets, for WM_COMMAND routing
   };
+
+  // Every painter's resolve_shader thunk (painter.h), defined with the
+  // shader API in widgets.cpp / .mm; null in a NEUI_NO_SHADERS build, where
+  // shader layers paint their fallback.
+  extern const neui_detail::resolve_shader_thunk_t w32_resolve_shader;
 
 }

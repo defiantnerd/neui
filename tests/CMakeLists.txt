@@ -29,6 +29,7 @@ add_executable(neui_tests
   test_image_filter.cpp
   test_filter_graph.cpp
   test_backend_util.cpp
+  test_damage.cpp
   test_tabview.cpp
   test_mujson.cpp
   test_component_loader.cpp
@@ -38,6 +39,15 @@ add_executable(neui_tests
   test_popup_nav.cpp
   test_metrics.cpp
   test_ios_api.cpp
+  test_shader_lang.cpp
+  test_shader_exec.cpp
+  test_shader_asset.cpp
+  test_shader_layer.cpp
+  test_shader_gpu.cpp
+  test_shader_texture.cpp
+  test_anim_clock.cpp
+  test_paint_pacer.cpp
+  test_keys_web.cpp
   # mujson lives in the core lib, but the suite links no library, so its TU is
   # compiled directly into the test executable (same pattern as the *.cpp above).
   ${PROJECT_SOURCE_DIR}/src/mujson.cpp)
@@ -48,6 +58,12 @@ target_include_directories(neui_tests PRIVATE
   ${PROJECT_SOURCE_DIR}/src)
 
 target_compile_features(neui_tests PRIVATE cxx_std_17)
+
+# The .nsl shader compiler + executor is a library of its own (its compile
+# flags must not leak into or come from the test TUs), so the suite links it.
+# The QR encoder comes along because the compound paint walk
+# (widget_paint_compound.h, test_shader_layer.cpp) has a QR layer.
+target_link_libraries(neui_tests PRIVATE neui-shader neui-qrcodegen)
 
 # iOS: the suite is a console-style program, but iOS only installs/launches app
 # bundles - give it a deterministic bundle id so CI can install it on a booted
@@ -73,6 +89,12 @@ if(NEUI_IOS)
 endif()
 
 add_test(NAME neui_tests COMMAND neui_tests)
+
+# Shader executor benchmark (report only). Not on iOS (a plain console
+# program; iOS only launches app bundles).
+if(NOT NEUI_IOS)
+  add_subdirectory(shader_bench)
+endif()
 
 # macOS-only: DAW-embedding harness (fake host NSWindow + NSView slot,
 # embeds a PLUGWINDOW via NEUI_API_EMBED). Needs a GUI session, so it is
@@ -372,10 +394,38 @@ if(WIN32)
     neui neui-xplhost neui-win32host)
 endif()
 
+# Windows-only: .nsl programs on the GPU through the real D2D backend, held
+# against the CPU executor with the fidelity contract. Runs on WARP where
+# there is no GPU (CI), and reports SKIP without d3dcompiler_47.dll or a
+# feature level 10_0 device.
+if(WIN32 AND TARGET neui-backend-d2d)
+  add_executable(neui_shader_gpu_smoke shader_gpu_smoke.cpp)
+  target_include_directories(neui_shader_gpu_smoke PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/backends/d2d)
+  target_compile_features(neui_shader_gpu_smoke PRIVATE cxx_std_17)
+  target_link_libraries(neui_shader_gpu_smoke PRIVATE neui-shader neui-backend-d2d)
+  add_test(NAME neui_shader_gpu_smoke COMMAND neui_shader_gpu_smoke)
+endif()
+
+# Web-only: the Canvas 2D backend's smoke test (the twin of neui_cairo_smoke
+# below). Canvas 2D is a DOM API, so it is a page, not a ctest test: CI runs
+# it headless with `node tests/web/run_page.mjs <build-dir>/tests
+# neui_canvas2d_smoke.html` (Playwright + Chromium).
+if(EMSCRIPTEN)
+  add_executable(neui_canvas2d_smoke canvas2d_backend_smoke.cpp)
+  set_target_properties(neui_canvas2d_smoke PROPERTIES SUFFIX ".html")
+  target_include_directories(neui_canvas2d_smoke PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_canvas2d_smoke PRIVATE cxx_std_17)
+  target_link_libraries(neui_canvas2d_smoke PRIVATE neui-backend-canvas2d)
+endif()
+
 # Linux-only: Cairo software backend offscreen smoke test. Unlike neui_tests
 # this links a real backend (neui-backend-cairo), so it is gated to the
-# platforms where that backend is built.
-if(UNIX AND NOT APPLE)
+# platforms where that backend is built (Emscripten sets UNIX too, but has
+# neither Cairo nor X11).
+if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
   add_executable(neui_cairo_smoke cairo_backend_smoke.cpp)
   target_include_directories(neui_cairo_smoke PRIVATE ${PROJECT_SOURCE_DIR}/include)
   target_compile_features(neui_cairo_smoke PRIVATE cxx_std_17)

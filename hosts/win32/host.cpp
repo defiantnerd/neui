@@ -32,6 +32,9 @@ namespace win32_host
   extern neui_compound_api_t  compound_api;
   extern neui_behavior_api_t  behavior_api;
   extern neui_filter_api_t    filter_api;
+#if !defined(NEUI_NO_SHADERS)
+  extern neui_shader_api_t    shader_api;
+#endif
   extern neui_grid_api_t      grid_api;
   extern neui_dnd_api_t       dnd_api;
   extern neui_scroll_api_t    scroll_api;
@@ -78,6 +81,9 @@ namespace win32_host
     if (!strcmp(iface, NEUI_API_COMPOUND))  return &win32_host::compound_api;
     if (!strcmp(iface, NEUI_API_BEHAVIOR))  return &win32_host::behavior_api;
     if (!strcmp(iface, NEUI_API_FILTER))    return &win32_host::filter_api;
+#if !defined(NEUI_NO_SHADERS)
+    if (!strcmp(iface, NEUI_API_SHADER))    return &win32_host::shader_api;
+#endif
     if (!strcmp(iface, NEUI_API_GRID))      return &win32_host::grid_api;
     if (!strcmp(iface, NEUI_API_DND))       return &win32_host::dnd_api;
     if (!strcmp(iface, NEUI_API_SCROLL))    return &win32_host::scroll_api;
@@ -224,6 +230,45 @@ namespace win32_host
         && (!strcmp(wd.type, NEUI_W_APPWINDOW)
          || !strcmp(wd.type, NEUI_W_PLUGWINDOW)
          || !strcmp(wd.type, NEUI_W_DIALOG));
+  }
+
+  // "Show animations in Windows" (Settings > Accessibility > Visual effects).
+  static bool os_reduced_motion()
+  {
+    BOOL on = TRUE;
+    return SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &on, 0) && !on;
+  }
+
+  void Session::animation_set_timer(WidgetData& frame, uint32_t ms)
+  {
+    if (!frame.hwnd || frame.anim_timer_ms == ms) return;  // SetTimer would restart it
+    frame.anim_timer_ms = ms;
+    if (ms) SetTimer(frame.hwnd, k_anim_timer_id, ms, nullptr);
+    else    KillTimer(frame.hwnd, k_anim_timer_id);
+  }
+
+  void Session::animation_after_paint(WidgetData& wd)
+  {
+    neui_detail::AnimClock& clock = _asset_manager.shader_cache().clock();
+    if (!clock.end_widget()) return;
+    uint32_t f = wd.index;
+    while (f != 0 && _widgets.exists(f) && !widget_is_frame(_widgets[f]))
+      f = _widgets.get_parent(f);
+    if (f == 0 || !_widgets.exists(f)) return;
+    clock.mark(wd.widget_id, f);
+    clock.set_reduced_motion(os_reduced_motion());
+    animation_set_timer(_widgets[f], clock.heartbeat_ms(f));
+  }
+
+  void Session::animation_tick(WidgetData& frame)
+  {
+    neui_detail::AnimClock& clock = _asset_manager.shader_cache().clock();
+    clock.set_reduced_motion(os_reduced_motion());
+    clock.tick([this](uint32_t widget, uint32_t) {
+      const uint32_t i = widget & 0xffff;
+      if (_widgets.exists(i) && _widgets[i].hwnd) InvalidateRect(_widgets[i].hwnd, nullptr, FALSE);
+    });
+    animation_set_timer(frame, clock.heartbeat_ms(frame.index));
   }
 
   bool Session::frame_follows_theme(WidgetData* wd)

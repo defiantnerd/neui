@@ -411,6 +411,7 @@ handler had already destroyed.
 | win32 (xpl) | **yes** | not yet | verified 2026-08-14: `tests/popup_surface_smoke_win32.cpp` (one defect found, below) |
 | Linux (xpl) | **yes** | not yet | verified 2026-08-14: `tests/popup_surface_smoke_linux.cpp` (one defect found, below) |
 | iOS / null | never | not yet | an AUv3 view has no top-level window to escape into |
+| web (xpl) | never | not yet | a canvas cannot leave its page box; `open()` fails as on iOS / null |
 | native win32 / macOS hosts | n/a | n/a | `NEUI_API_POPUP` is xpl-only, like `_EMBED` / `_TIMER` / `_POINTER` / `_A11Y` |
 
 **Linux has now been built and run too** (2026-08-14, X.Org 24.1 under WSLg /

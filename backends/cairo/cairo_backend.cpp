@@ -76,6 +76,19 @@ namespace neui_cairo_backend
 
     bool is_offscreen = false;            // backs NEUI_ASSET_KIND_SURFACE
     bool eo_fill      = false;            // even-odd fill rule (reset on begin_path)
+
+    // Partial repaint (set_frame_damage). pending_damage is what the host
+    // queued for the next frame (logical x,y,w,h quadruples); frame_damage_px
+    // is what that frame actually clipped to (device px) and end_frame blits.
+    // has_content / content_scale guard the partial path: the surface is
+    // reallocated (contents lost) on create / resize, and a DPI change
+    // invalidates every pixel, so until one full frame has been drawn at the
+    // current scale every frame is full regardless of the queued damage.
+    std::vector<float> pending_damage;
+    std::vector<int>   frame_damage_px;
+    bool  frame_partial = false;
+    bool  has_content   = false;
+    float content_scale = 0.0f;
   };
 
   // --------------------------------------------------------------------------
@@ -301,6 +314,7 @@ namespace neui_cairo_backend
   static void alloc_window_surface(CairoCtx* st)
   {
     const int stride = cairo_stride(st->w_px);
+    st->has_content = false;   // fresh buffer - the next frame must be full
 
     // --- Try MIT-SHM (zero-copy: cairo renders straight into the shm buffer).
     if (st->dpy && XShmQueryExtension(st->dpy)) {
@@ -433,14 +447,44 @@ namespace neui_cairo_backend
     st->alpha_stack.clear();
     st->font_stack.clear();
 
+    // Partial frame: clip to the queued damage in DEVICE space (the CTM is
+    // still identity here), snapped outward to whole pixels so fractional
+    // DPI leaves no seam. Every later push_clip intersects with this, and the
+    // clear below only touches the damage - the rest of the surface keeps the
+    // previous frame. pending_damage is only ever non-empty when
+    // set_frame_damage accepted it (surface complete at this scale).
+    st->frame_damage_px.clear();
+    st->frame_partial = false;
+    if (!st->pending_damage.empty()) {
+      const auto& pd = st->pending_damage;
+      for (size_t i = 0; i + 3 < pd.size(); i += 4) {
+        int r[4];
+        if (neui_detail::damage_rect_to_device(pd[i], pd[i + 1], pd[i + 2], pd[i + 3],
+                                               st->scale,
+                                               static_cast<int>(st->w_px),
+                                               static_cast<int>(st->h_px), r))
+          st->frame_damage_px.insert(st->frame_damage_px.end(), r, r + 4);
+      }
+      // An all-off-surface damage list leaves an empty clip: nothing paints,
+      // nothing blits - correct, since nothing visible changed.
+      cairo_new_path(st->cr);
+      for (size_t i = 0; i + 3 < st->frame_damage_px.size(); i += 4)
+        cairo_rectangle(st->cr, st->frame_damage_px[i],     st->frame_damage_px[i + 1],
+                                st->frame_damage_px[i + 2], st->frame_damage_px[i + 3]);
+      cairo_clip(st->cr);
+      st->frame_partial = true;
+    }
+    st->pending_damage.clear();
+
     // Baseline scale: a logical-px draw maps to (scale) device px. Applied
     // here (not at create) so update_dpi takes effect on the next frame.
     if (st->scale != 1.0f)
       cairo_scale(st->cr, st->scale, st->scale);
 
-    // Clear the whole surface. cairo_paint fills the entire clip region with
-    // the source regardless of the CTM (a solid colour pattern is
-    // CTM-independent), so this covers all physical pixels.
+    // Clear the surface - all of it, or just the damage on a partial frame.
+    // cairo_paint fills the entire clip region with the source regardless of
+    // the CTM (a solid colour pattern is CTM-independent), so this covers all
+    // physical pixels inside the clip.
     double rgba[4]; argb_to_rgba(clear_argb, rgba);
     cairo_set_source_rgba(st->cr, rgba[0], rgba[1], rgba[2], rgba[3]);
     cairo_set_operator(st->cr, CAIRO_OPERATOR_SOURCE);
@@ -455,8 +499,18 @@ namespace neui_cairo_backend
     cairo_restore(st->cr);
     cairo_surface_flush(st->surface);
 
+    // The surface now holds a complete frame at this scale - later frames
+    // may be partial. Snapshot the blit list before resetting the frame state.
+    st->has_content   = true;
+    st->content_scale = st->scale;
+    const bool partial = st->frame_partial;
+    st->frame_partial = false;
+
     // Offscreen ctxs have nothing to present.
-    if (st->is_offscreen || !st->dpy || !st->ximage) return;
+    if (st->is_offscreen || !st->dpy || !st->ximage) {
+      st->frame_damage_px.clear();
+      return;
+    }
 
     if (st->use_shm) {
       // XShmPutImage is asynchronous: the server reads our shared buffer
@@ -467,26 +521,93 @@ namespace neui_cairo_backend
       // guarantees the server has executed the put (incl. the shm read)
       // before we return. (A completion-event handshake would avoid the
       // round-trip, but at neui's redraw rates the sync cost is negligible.)
-      XShmPutImage(st->dpy, st->win, st->gc, st->ximage,
-                   0, 0, 0, 0, st->w_px, st->h_px, False);
+      // A partial frame blits only its damage rects (same src + dst origin:
+      // the window and the surface share one pixel grid).
+      if (partial) {
+        const auto& d = st->frame_damage_px;
+        for (size_t i = 0; i + 3 < d.size(); i += 4)
+          XShmPutImage(st->dpy, st->win, st->gc, st->ximage,
+                       d[i], d[i + 1], d[i], d[i + 1],
+                       static_cast<unsigned>(d[i + 2]),
+                       static_cast<unsigned>(d[i + 3]), False);
+      } else {
+        XShmPutImage(st->dpy, st->win, st->gc, st->ximage,
+                     0, 0, 0, 0, st->w_px, st->h_px, False);
+      }
       XSync(st->dpy, False);
     } else {
       // XPutImage copies the pixels into the protocol request, so the buffer
       // is free to reuse as soon as the request is flushed.
-      XPutImage(st->dpy, st->win, st->gc, st->ximage,
-                0, 0, 0, 0, st->w_px, st->h_px);
+      if (partial) {
+        const auto& d = st->frame_damage_px;
+        for (size_t i = 0; i + 3 < d.size(); i += 4)
+          XPutImage(st->dpy, st->win, st->gc, st->ximage,
+                    d[i], d[i + 1], d[i], d[i + 1],
+                    static_cast<unsigned>(d[i + 2]),
+                    static_cast<unsigned>(d[i + 3]));
+      } else {
+        XPutImage(st->dpy, st->win, st->gc, st->ximage,
+                  0, 0, 0, 0, st->w_px, st->h_px);
+      }
       XFlush(st->dpy);
     }
+    st->frame_damage_px.clear();
+  }
+
+  // Queue damage for the NEXT frame only (begin_frame consumes it). An empty
+  // list (or count 0) means that frame is full. Accepted only when the
+  // surface holds a complete frame at the current scale (see has_content);
+  // the host culls only on a true return, so begin_frame applies whatever was
+  // accepted here without re-checking.
+  static bool cairo_set_frame_damage(neui_render_ctx_t raw,
+                                     const float* rects_xywh, int count)
+  {
+    auto* st = static_cast<CairoCtx*>(raw);
+    if (!st) return false;
+    st->pending_damage.clear();
+    if (!rects_xywh || count <= 0) return false;
+    if (!st->has_content || st->content_scale != st->scale) return false;
+    st->pending_damage.assign(rects_xywh, rects_xywh + static_cast<size_t>(count) * 4);
+    return true;
   }
 
   // --------------------------------------------------------------------------
   // Primitive draws
+
+  // The path API builds on the cr's current path and keeps it after a fill or
+  // stroke (renderer.h: valid until the next begin_path), but cairo_fill and
+  // cairo_clip take the whole current path. A primitive that makes its own
+  // geometry (a rect to fill, stroke or clip to, a text position) would draw
+  // or clip that path as well and then lose it; CG and D2D keep the path apart
+  // from the context. This sets the path aside for the primitive and puts it
+  // back, at the same CTM.
+  struct PathAside
+  {
+    explicit PathAside(cairo_t* c) : cr(c)
+    {
+      if (cairo_has_current_point(cr)) saved = cairo_copy_path(cr);
+      cairo_new_path(cr);
+    }
+    ~PathAside()
+    {
+      cairo_new_path(cr);
+      if (!saved) return;
+      if (saved->status == CAIRO_STATUS_SUCCESS) cairo_append_path(cr, saved);
+      cairo_path_destroy(saved);
+    }
+    PathAside(const PathAside&) = delete;
+    PathAside& operator=(const PathAside&) = delete;
+
+    cairo_t*      cr;
+    cairo_path_t* saved = nullptr;
+  };
 
   static void cairo_fill_rect(neui_render_ctx_t raw,
                               float x, float y, float w, float h, uint32_t argb)
   {
     auto* st = static_cast<CairoCtx*>(raw);
     if (!st || !st->cr) return;
+    PathAside aside(st->cr);
     double rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     cairo_set_source_rgba(st->cr, rgba[0], rgba[1], rgba[2], rgba[3]);
     cairo_rectangle(st->cr, x, y, w, h);
@@ -499,6 +620,7 @@ namespace neui_cairo_backend
   {
     auto* st = static_cast<CairoCtx*>(raw);
     if (!st || !st->cr) return;
+    PathAside aside(st->cr);
     double rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     cairo_set_source_rgba(st->cr, rgba[0], rgba[1], rgba[2], rgba[3]);
     cairo_set_line_width(st->cr, stroke_width);
@@ -533,6 +655,7 @@ namespace neui_cairo_backend
     auto* st = static_cast<CairoCtx*>(raw);
     if (!st || !st->cr || !text || !*text || font_size <= 0.0f) return;
 
+    PathAside aside(st->cr);
     cairo_save(st->cr);
     cairo_rectangle(st->cr, x, y, w, h);
     cairo_clip(st->cr);
@@ -623,6 +746,7 @@ namespace neui_cairo_backend
   {
     auto* st = static_cast<CairoCtx*>(raw);
     if (!st || !st->cr) return;
+    PathAside aside(st->cr);
     cairo_save(st->cr);
     cairo_rectangle(st->cr, x, y, w, h);
     cairo_clip(st->cr);
@@ -705,6 +829,7 @@ namespace neui_cairo_backend
     double shp = (src_h > 0.0f) ? src_h * h->scale : static_cast<double>(h->height_px);
     if (swp <= 0.0 || shp <= 0.0) return;
 
+    PathAside aside(st->cr);
     cairo_save(st->cr);
     // Map the source physical-px region onto the dst logical rect.
     cairo_translate(st->cr, dst_x, dst_y);
@@ -907,6 +1032,7 @@ namespace neui_cairo_backend
     if (!st || !st->cr) return;
     cairo_pattern_t* pat = cairo_make_gradient(st, g);
     if (!pat) return;
+    PathAside aside(st->cr);
     cairo_set_source(st->cr, pat);
     cairo_rectangle(st->cr, x, y, w, h);
     cairo_fill(st->cr);
@@ -986,6 +1112,19 @@ namespace neui_cairo_backend
   {
     auto* st = static_cast<CairoCtx*>(raw);
     if (st && st->cr) cairo_scale(st->cr, sx, sy);
+  }
+
+  // The CTM already maps to the surface's device pixels (begin_frame applies
+  // the display scale), so it is the answer as is.
+  static void cairo_get_device_transform(neui_render_ctx_t raw, float m[6])
+  {
+    auto* st = static_cast<CairoCtx*>(raw);
+    cairo_matrix_t t;
+    if (st && st->cr) cairo_get_matrix(st->cr, &t);
+    else cairo_matrix_init_scale(&t, st ? st->scale : 1.0, st ? st->scale : 1.0);
+    m[0] = static_cast<float>(t.xx); m[1] = static_cast<float>(t.yx);
+    m[2] = static_cast<float>(t.xy); m[3] = static_cast<float>(t.yy);
+    m[4] = static_cast<float>(t.x0); m[5] = static_cast<float>(t.y0);
   }
 
   // Software backend never device-loses.
@@ -1251,6 +1390,8 @@ namespace neui_cairo_backend
     cairo_stroke_path_gradient,
     cairo_font_metrics,
     cairo_push_font_styled,
+    cairo_set_frame_damage,
+    cairo_get_device_transform,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

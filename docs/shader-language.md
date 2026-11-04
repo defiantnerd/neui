@@ -1,0 +1,673 @@
+<!-- neui reference. The .nsl language specification. -->
+
+# The neui shading language (`.nsl`), version 1
+
+**Status: implemented by the compiler and CPU executor in `src/shader/`**
+(the `neui-shader` library, API `src/shader/nsl.h`). Clients compile shaders
+through the optional `NEUI_API_SHADER` (`include/neui/d/shader.h`) and run
+them in a compound SHADER layer, with `draw` from a CUSTOMDRAW paint, or baked
+into bitmaps (phases 2 and 3 of `plans/shader-effects.md`); sampling bitmaps
+is phase 9. Tests: `tests/test_shader_lang.cpp`, `tests/test_shader_exec.cpp`,
+`tests/test_shader_texture.cpp`, `tests/test_shader_asset.cpp` and
+`tests/test_shader_layer.cpp`.
+
+**New to `.nsl`?** Start with the guide, `docs/shader-guide.md`: it teaches
+the language by example and shows how a client puts a shader on screen.
+
+**What is normative:** this document for syntax, types and semantics. The
+exact polynomial behind each approximated built-in (§9.2) is defined by the
+reference implementation (`src/shader/nsl_math.h`) and pinned by checksums. Its accuracy bounds are
+given here.
+
+## 1. Overview
+
+A `.nsl` shader is an **image generator**: a pure function from a position
+inside a layer to a colour. neui runs it once per device pixel of the layer and
+draws the result like a bitmap, inside the normal paint order. A shader has no
+inputs except the position, its uniforms and the bitmaps bound to its samplers
+(§6.1). It has no state that survives between pixels or frames, and no side
+effects.
+
+```glsl
+// ring_glow.nsl - a value-driven glow ring for a knob
+uniform float value = 0.5;              // 0..1, bound to neui.param.value
+uniform vec4  accent = vec4(0.2, 0.7, 1.0, 1.0);
+
+vec4 main(vec2 p) {
+  vec2  c    = neui_size * 0.5;
+  float r    = min(c.x, c.y) * 0.8;
+  float d    = abs(length(p - c) - r);  // distance to the ring centreline
+  float ring = 1.0 - smoothstep(0.0, 1.5 * neui_px, d - 2.0);
+  float glow = exp(-d * mix(0.6, 0.15, value));
+  float a    = saturate(ring + glow * value);
+  return vec4(accent.rgb, a * accent.a);
+}
+```
+
+The language is a small subset of GLSL ES 1.00 with a few deliberate
+differences (summarised in §14). Every program is fully unrolled and inlined
+at compile time, so its cost is known before it runs and it always
+terminates.
+
+## 2. Source text
+
+- **Encoding:** UTF-8. A leading byte-order mark is skipped. Non-ASCII bytes
+  are allowed only inside comments.
+- **Line breaks:** LF, CRLF and CR each count as one line break.
+- **Comments:** `// ...` to the end of the line, and `/* ... */`, which do not
+  nest. An unterminated `/*` is an error.
+- **Identifiers:** `[A-Za-z_][A-Za-z0-9_]*`, at most 63 characters. Reserved
+  and therefore errors: the prefixes `neui_` and `gl_`, any identifier
+  containing `__`, every keyword (§13), and every built-in function name (§9).
+- **Integer literals:** decimal digits only (`0`, `42`). No hex, no octal, no
+  suffix. The value must fit in a signed 32-bit int.
+- **Float literals:** `1.0`, `1.`, `.5`, `1e3`, `1.5e-3`, with an optional
+  `f` / `F` suffix. Conversion gives the nearest binary32 value
+  (round-half-to-even) and is **independent of the C locale**. A literal that
+  overflows to infinity is an error. One that underflows becomes 0 or a
+  denormal, per IEEE.
+- **Directives:** the only directive is `#pragma neui ...` on a line of its
+  own (§11). Any other line starting with `#` is an error ("the preprocessor
+  is not supported"), and so are `#define`, `#include` and `#version`.
+
+## 3. Program structure
+
+A program is a sequence of global declarations:
+
+- `uniform` declarations (§6);
+- `const` declarations with constant initialisers;
+- function definitions (§8), including exactly one `vec4 main(vec2 p)`, whose
+  parameter can have any name;
+- `precision` statements (`precision highp float;`), accepted and ignored.
+
+Everything is **declared before use**, and there are no prototypes. A
+function can only call functions defined above it, and a call to itself is an
+error, so there is no recursion. A local variable cannot take the name of a
+function. Mutable globals do not exist: a global is `uniform` or `const`.
+
+## 4. Types and values
+
+| Type | Values | Notes |
+|---|---|---|
+| `float` | IEEE-754 binary32 | the only runtime numeric type |
+| `vec2`, `vec3`, `vec4` | 2-4 floats | component-wise arithmetic |
+| `bool` | `true`, `false` | from comparisons and logic |
+| `int` | signed 32-bit | **compile-time only**: literals, `const int`, loop counters |
+| `sampler2D` | a bitmap | uniforms and `in` parameters only; read with `texture2D` (§6.1, §9.4) |
+| `void` | none | function return type only |
+
+**Every `int` value is known at compile time,** because loops are unrolled.
+Int arithmetic (`+`, `-`, `*`, unary `-`) is evaluated by the compiler, and
+an overflow is an error. **Int division (`/`) is an error**: GLSL's
+`1/2 == 0` is a classic porting trap. Write `1.0 / 2.0`.
+
+**Implicit conversion:** int → float only, wherever a float is expected (an
+operand next to a float, an argument, an initialiser, a return value, a
+constructor argument). Nothing else converts implicitly: bool never becomes a
+number, and float never becomes int.
+
+**Constructors:**
+- `float(x)` for int, bool (`0.0` / `1.0`) and float;
+- `vecN(s)` splats a scalar to every component;
+- `vecN(a, b, ...)` consumes the components of its arguments in order, and
+  their total must be exactly N;
+- `vecN(v)` with a single longer vector argument keeps the first N
+  components;
+- `bool(...)` and `int(...)` do not exist.
+
+**Swizzles:** `.xyzw`, `.rgba` or `.stpq` (one set per swizzle, no mixing),
+1-4 components, on vectors only. A swizzle used as an assignment target may
+not repeat a component.
+
+**Uninitialised locals and `out` parameters are zero** (GLSL leaves them
+undefined).
+
+## 5. Variables and scope
+
+- Block scoping as in GLSL. A `for` init variable is scoped to its loop.
+  Function parameters live in the function's outermost block.
+- Redeclaring a name in the same scope is an error. Shadowing a name from an
+  enclosing scope (including a uniform or const) is allowed.
+- `const` locals and globals need a constant initialiser: literals, other
+  consts, constructors, and built-ins applied to constants. Uniforms are not
+  constant.
+
+## 6. Uniforms
+
+```glsl
+uniform float value;                    // default 0.0
+uniform float radius = 0.4;             // default value (extension over GLSL)
+uniform vec4  accent = vec4(1.0, 0.5, 0.0, 1.0);
+```
+
+- **Types:** `float`, `vec2`, `vec3`, `vec4`. The default must be a constant
+  expression. Without one, the uniform starts at zero.
+- **Values come from neui**, through the compound layer's `u.<name>`
+  properties and bindings, `shader_api->draw`, or the bake API. A float
+  attribute sets a `float` uniform, or one component through `u.<name>.x`.
+- **Colours:** an int ARGB value set on a `vec4` uniform arrives as
+  **straight RGBA**, each component computed as `float(byte) / 255.0`
+  (IEEE division, exact rule). A colour never travels through a float
+  attribute, so all 32 bits survive.
+- **Reserved uniforms** are implicitly declared and read-only:
+
+| Name | Type | Value |
+|---|---|---|
+| `neui_size` | `vec2` | layer size in logical px |
+| `neui_scale` | `float` | device px per logical px (display scale × layer `resolution`) |
+| `neui_px` | `float` | `1.0 / neui_scale`: one device pixel in logical px, for anti-aliased edges |
+| `neui_time` | `float` | seconds on the layer's animation clock, wrapped to `[0, 3600)` |
+
+**Time** is wrapped because DAW sessions run for hours and a float loses
+precision as it grows. 3600 has many divisors, so loops whose period divides
+it stay seamless: `sin(neui_time * 6.2831853 / 4.0)` repeats exactly every 4
+s. A program that reads `neui_time` is time-dependent: on a compound SHADER
+layer that neither sets nor binds `"time"` it runs on the session's animation
+clock (seconds of running time; it stands while paused or while the OS asks
+for reduced motion) and is re-run every frame of the clock, at 30 fps by
+default. A program that does not read it is re-run only when its inputs
+change. The wrap jumps once an hour; a loop whose period divides 3600 does
+not show it.
+
+### 6.1 Samplers
+
+```glsl
+#pragma neui sampler noise repeat         // edge mode and filter, per sampler
+uniform sampler2D albedo;                 // clamp, linear: the defaults
+uniform sampler2D noise;
+```
+
+- **A `sampler2D` uniform** reads a bitmap: a BITMAP or SURFACE asset that
+  neui binds by the sampler's name (the compound layer's `u.<name>` asset,
+  `shader_api->draw` / the bake API's `textures`). At most **4** per
+  program; they count toward the 32 uniform declarations, not toward the 64
+  scalar components. A sampler has no default.
+- **Unbound** (nothing bound, a released or foreign handle, an asset that is
+  not a bitmap), a sampler reads as transparent: `texture2D` returns
+  `vec4(0.0)`, and `neui_texture_size` and `neui_texel` return `vec2(0.0)`.
+- **Where a sampler may appear:** as a uniform, and as an `in` parameter of
+  a user function (an alias, since calls are inlined). It cannot be a local
+  variable, be assigned, be an `out` / `inout` parameter or a return type,
+  or be compared, selected with `?:`, or used in arithmetic.
+- **Modes**, fixed at compile time: `#pragma neui sampler <name>
+  [clamp|repeat|border] [linear|nearest]`, the words in either order, each at
+  most once, at most one line per sampler, before or after the declaration.
+  The default is `clamp linear`. The mode applies to both axes.
+  - `clamp`: outside the bitmap, the nearest edge texel continues.
+  - `repeat`: the bitmap tiles.
+  - `border`: outside the bitmap is transparent.
+  - `linear` filters between the 4 nearest texels, `nearest` reads one (§9.4).
+- **No mipmaps:** a bitmap drawn much smaller than its size aliases. Supply
+  bitmaps near the size they are drawn at, or bake a smaller one.
+
+## 7. Expressions
+
+Operators, from highest to lowest precedence:
+
+| Precedence | Operators | Operands |
+|---|---|---|
+| postfix | `f(...)`, `T(...)`, `.swizzle`, `( )` | |
+| unary | `+`, `-`, `!` | `-` on float / vec / int; `!` on bool |
+| multiplicative | `*`, `/` | float / vec, component-wise; vec op float and float op vec broadcast |
+| additive | `+`, `-` | as multiplicative |
+| relational | `<`, `>`, `<=`, `>=` | **scalars only**, result bool |
+| equality | `==`, `!=` | any two values of the same type, result bool (vectors: all components) |
+| logical | `&&`, then `^^`, then `\|\|` | bool |
+| conditional | `c ? a : b` | `c` bool; `a`, `b` the same type |
+
+**Evaluation order and exactness:**
+- Operands are evaluated left to right, and **every operation is performed
+  exactly as written**: no reassociation, no FMA contraction, no algebraic
+  rewriting that could change a bit (`x / c` never becomes `x * (1/c)`). The
+  only rewrites allowed are exact ones (`x * 1.0` → `x`, constant folding with
+  the executor's own arithmetic).
+- `&&`, `||` and `?:` may evaluate both sides. Expressions have no side
+  effects, so the result is the same.
+
+**Assignment is a statement, not an expression**: `=`, `+=`, `-=`, `*=`,
+`/=`, optionally to a swizzle (`c.rg = ...`). `++` and `--` exist only in a
+`for` update. There is no `%` (use `mod`), and there are no bitwise operators.
+
+## 8. Statements and functions
+
+**Statements:** block `{ }`, declaration, assignment, function call (for
+`out` / `inout` results), `if` / `else`, `for`, `break`, `continue`,
+`return`, and the empty statement `;`. `if`, `?:` and loop conditions need a
+`bool`.
+
+**`for` loops have a compile-time trip count:**
+
+```
+for (int i = A; i OP B; UPDATE) body
+```
+
+- `A`, `B` and the step `C` are constant int expressions;
+- `OP` is one of `<` `<=` `>` `>=` `!=`;
+- `UPDATE` is `i++`, `++i`, `i--`, `--i`, `i += C` or `i -= C`, with `C > 0`;
+- the trip count must be between 0 and 64, and a loop that would not
+  terminate is an error;
+- the body may read `i` (an int, so `float(i)` or implicit conversion in float
+  context) but may not assign it;
+- `break` and `continue` are allowed. The loop is still unrolled to its full
+  trip count, and pixels that have left it are masked.
+
+`while`, `do` and `switch` are not in v1.
+
+**Functions:**
+
+```glsl
+float ring(vec2 p, vec2 c, float r) { return abs(length(p - c) - r); }
+void  polar(vec2 v, out float radius, out float angle) { radius = length(v); angle = atan(v.y, v.x); }
+```
+
+- Return type: `float`, `vecN`, `bool` or `void`. Parameters: `float`, `vecN`,
+  `bool` or `int`, with the qualifier `in` (default), `out` or `inout`.
+- Every path of a non-void function must end in `return`; otherwise it is an
+  error.
+- Calls are **inlined**. Arguments are evaluated left to right, then copied in.
+  `out` / `inout` results are copied back in parameter order after the body,
+  which is GLSL semantics.
+- User functions **cannot be overloaded**, and their names cannot be those of
+  built-ins.
+- `main` is the entry point. It cannot be called.
+
+## 9. Built-in functions
+
+`genType` means `float`, `vec2`, `vec3` or `vec4`, applied component-wise.
+Where a parameter is written `float` next to `genType`, a scalar is broadcast.
+
+### 9.1 Exact built-ins
+
+These are composites of IEEE operations (each correctly rounded), evaluated
+in exactly the order given, so every executor produces the same bits.
+
+| Function | Definition |
+|---|---|
+| `abs(x)` | clear the sign bit |
+| `sign(x)` | `x > 0 ? 1 : (x < 0 ? -1 : 0)`; NaN → 0 |
+| `floor(x)` | exact; `floor(-0.0)` is `-0.0` |
+| `ceil(x)` | `-floor(-x)` |
+| `fract(x)` | `x - floor(x)`; can round to `1.0` for tiny negative `x` |
+| `mod(x, y)` | `x - y * floor(x / y)`, **floored** (never HLSL `fmod`); `mod(x, 0)` is NaN |
+| `min(x, y)` | `y < x ? y : x` |
+| `max(x, y)` | `x < y ? y : x` |
+| `clamp(x, lo, hi)` | `min(max(x, lo), hi)`; `lo > hi` gives `hi` |
+| `saturate(x)` | `clamp(x, 0.0, 1.0)` |
+| `mix(x, y, a)` | `x * (1 - a) + y * a` (exact at `a = 0` and `a = 1`) |
+| `step(e, x)` | `x < e ? 0 : 1` |
+| `smoothstep(e0, e1, x)` | `e0 == e1`: `step(e0, x)`; else `t = clamp((x - e0) / (e1 - e0), 0, 1)`, then `(t * t) * (3 - 2 * t)` |
+| `sqrt(x)` | IEEE; `x < 0` → NaN |
+| `inversesqrt(x)` | `1 / sqrt(x)` |
+| `dot(a, b)` | `((a.x*b.x + a.y*b.y) + a.z*b.z) + a.w*b.w`, left to right |
+| `length(v)` | `sqrt(dot(v, v))` |
+| `distance(a, b)` | `length(a - b)` |
+| `normalize(v)` | `dot(v, v) == 0` → zero vector; else `v * inversesqrt(dot(v, v))` |
+| `cross(a, b)` | `vec3(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x)` |
+| `reflect(i, n)` | `i - (2 * dot(n, i)) * n` |
+| `radians(x)`, `degrees(x)` | `x * 0.017453292`, `x * 57.29578` |
+
+### 9.2 Approximated built-ins
+
+neui ships its own polynomials instead of libm or GPU intrinsics. They use
+only the operations from §9.1 and float↔int conversions of in-range values,
+so they are bit-identical on every CPU executor. The GPU emitters write the
+same polynomials (§12).
+
+| Function | Definition | Accuracy (measured in phase 0) |
+|---|---|---|
+| `sin(x)`, `cos(x)` | Cody-Waite reduction by π/2 (three-part constant), Cephes polynomials on [-π/4, π/4] | abs ≤ 1e-7 for \|x\| ≤ 64, degrading for larger \|x\| |
+| `tan(x)` | `sin(x) / cos(x)` | from sin / cos |
+| `exp2(x)` | reduction to [-0.5, 0.5) + degree-6 polynomial; `x < -126` → 0 (never a denormal); `x ≥ 128` → +inf | rel ≤ 1.5e-7 |
+| `log2(x)` | exponent + atanh series on [√½, √2]; denormals exact; `x < 0` → NaN; `0` → -inf | abs ≤ 1.5e-7 for \|result\| ≤ 1, rel beyond |
+| `exp(x)` | `exp2(x * 1.4426950)` | from exp2 |
+| `log(x)` | `log2(x) * 0.6931472` | from log2 |
+| `pow(x, y)` | `x > 0`: `exp2(y * log2(x))`; `x == 0`: `y > 0` → 0, `y == 0` → 1, `y < 0` → +inf; `x < 0` → NaN | from exp2 / log2 |
+| `atan(y, x)` | reduction to [0, 1] and [-tan(π/8), tan(π/8)], Cephes polynomial; `atan(0, 0)` = 0; a NaN argument, or both arguments infinite, gives NaN | abs ≤ 3e-7 |
+| `atan(t)` | `atan(t, 1.0)` | |
+| `asin(x)` | `atan(x, sqrt(1 - x*x))`; \|x\| > 1 → NaN | |
+| `acos(x)` | `atan(sqrt(1 - x*x), x)`; \|x\| > 1 → NaN | |
+
+### 9.3 Noise
+
+The usual `fract(sin(x) * 43758.5)` hash works, but `sin` of a large argument
+amplifies the last bit, so its result is identical on every CPU executor and
+only close on a GPU. The noise built-ins are **integer-exact**, so they match
+on every executor, GPU included (SM4 has integer operations).
+
+**`float neui_hash(vec2 p)`** → [0, 1):
+
+```
+coord(v): v = (v != v) ? 0 : v; v = floor(v); v = clamp(v, -16777216, 16777216);
+          return uint(int(v))                                   // two's complement
+h  = coord(p.x) * 0x8DA6B343u  ^  coord(p.y) * 0xD8163841u      // 32-bit wrapping
+h ^= h >> 16;  h *= 0x7FEB352Du;
+h ^= h >> 15;  h *= 0x846CA68Bu;
+h ^= h >> 16;
+return float(h >> 8) * (1.0 / 16777216.0)
+```
+
+**`float neui_noise(vec2 p)`** → [0, 1), value noise:
+
+```
+i = floor(p);  f = p - i;  u = f * f * (3 - 2 * f);
+a = neui_hash(i);              b = neui_hash(i + vec2(1, 0));
+c = neui_hash(i + vec2(0, 1)); d = neui_hash(i + vec2(1, 1));
+return mix(mix(a, b, u.x), mix(c, d, u.x), u.y)
+```
+
+### 9.4 Sampling
+
+| Function | Result |
+|---|---|
+| `vec4 texture2D(sampler2D s, vec2 uv)` | the bitmap at `uv`, **straight** RGBA (like `main`'s result) |
+| `vec4 texture(sampler2D s, vec2 uv)` | the same (the Shadertoy spelling) |
+| `vec2 neui_texture_size(sampler2D s)` | the bitmap's logical size: its pixel size / its own HiDPI factor |
+| `vec2 neui_texel(sampler2D s)` | one texel in `uv` units: `1 / width_px`, `1 / height_px` |
+
+`uv` is normalised: `(0, 0)` is the bitmap's **top-left** corner and
+`(1, 1)` its bottom-right, y-down like `p`. A bitmap that fills the layer is
+`texture2D(s, p / neui_size)`.
+
+**Exact definition.** With `W`, `H` the bitmap's size in texels and texel
+`(i, j)` its premultiplied 8-bit `(r, g, b, a)`:
+
+```
+texel(x, y):  x, y floats holding whole numbers (from floor)
+              x = (x != x) ? 0 : clamp(x, -2^30, 2^30) as int, likewise y
+              clamp:  x = clamp(x, 0, W - 1)
+              repeat: x = x - W * floor(x / W)   (exact integer arithmetic)
+              border: outside [0, W) x [0, H) -> (0, 0, 0, 0)
+nearest:  C = texel(floor(u * W), floor(v * H)),  scale 255
+linear:   t = u * W - 0.5;  x0 = floor(t);  fx = floor((t - x0) * 256 + 0.5)
+          likewise y0, fy;  x1 = x0 + 1, y1 = y0 + 1
+          C = texel(x0, y0) * (256 - fx) * (256 - fy) + texel(x1, y0) * fx * (256 - fy)
+            + texel(x0, y1) * (256 - fx) * fy         + texel(x1, y1) * fx * fy
+          per channel, scale 255 * 256 * 256 = 16711680
+result:   rgb = C.a == 0 ? 0 : C.rgb / C.a;   a = C.a / scale
+```
+
+Every product and sum is an integer below 2^24, so it is exact in float in
+any order; the final division is the only rounding. Consequences:
+
+- filtering happens on premultiplied colour, so colour does not bleed out of
+  transparent texels;
+- the fraction between texels is quantised to 1/256, as GPU filtering
+  hardware does;
+- **a bitmap drawn 1:1** (layer size = the bitmap's logical size, at the
+  bitmap's own scale, `texture2D(s, p / neui_size)`) **comes back byte for
+  byte**: float noise beside a texel centre quantises to a weight of 0 or
+  256;
+- there is no sRGB linearisation, as in the rest of neui.
+
+## 10. Arithmetic model
+
+- **IEEE-754 binary32**, round-to-nearest-even, **gradual underflow**
+  (denormals are kept). No FMA contraction.
+- **The CPU executor pins this environment** for the duration of a draw, then
+  restores the caller's. A DAW may run its UI thread with flush-to-zero or
+  denormals-are-zero set, and phase 0 showed that this changes results
+  (`log2` of a denormal) unless the environment is pinned.
+- **NaN and infinity** follow IEEE through arithmetic. Comparisons with NaN
+  are false, and `!=` is true. A NaN's sign and payload are **not
+  observable**: no operation reads float bits, and the output rule maps NaN to
+  0. This matters because x86 and ARM generate NaNs with different bits.
+- **Division by zero** is IEEE: `x / 0` is ±inf, and `0 / 0` is NaN.
+
+## 11. Entry point, pixel grid and output
+
+**Pixel grid.** A layer at logical rect `(x, y, w, h)`, drawn under the
+current translation `(tx, ty)` at effective scale `s` (`neui_scale`), covers
+the device rect
+
+```
+X0 = (x + tx) * s    X1 = X0 + w * s    (and Y0, Y1 likewise)
+```
+
+The executor evaluates every device pixel column `i` from `floor(X0)` to
+`ceil(X1) - 1`, and every row `j` likewise, at
+
+```
+p = ( ((i - floor(X0)) + 0.5 - (X0 - floor(X0))) / s ,
+      ((j - floor(Y0)) + 0.5 - (Y0 - floor(Y0))) / s )
+```
+
+In words: `p` is the **centre of the device pixel**, in **layer-local
+logical px**, **y-down**. The result covers whole device pixels and is never
+resampled. The phase-0 D2D spike confirmed that a GPU executor reproduces
+this grid exactly (approach B: draw at the floored device origin and pass the
+sub-pixel remainder `X0 - floor(X0)` as a constant).
+
+The live paths (the compound layer and `draw`) read `(tx, ty)` and `s` from
+the backend's current device transform. They snap the remainder
+`X0 - floor(X0)` to a multiple of 1/256 device px before shading, so float
+noise in a transform cannot change the pixels or split the image cache; a
+layer on whole logical px has an exact remainder at 100%, 150% and 200% anyway.
+Under a rotation, skew, mirror or uneven scale there is no device grid to
+match: the layer is shaded in its own space at the transform's average scale
+(`sqrt(|det|)`) and the result is drawn through the transform.
+
+With a `resolution` below 1 on the device grid (quantised to 1/65536), the
+grid above at `s = neui_scale` is anchored at the floored device origin: with
+`D0` the layer's device origin at the display scale, shader pixel 0 starts at
+`floor(D0)` and `X0 = (D0 - floor(D0)) * resolution`, the remainder snapped
+as above. neui scales the result up to device pixels itself, with
+`texture2D`'s linear arithmetic (§9.4: weights in 1/256, edge texels
+clamped), and the backend draws it 1:1, so every backend shows the same
+pixels. Above 1, under a rotation or skew, or for a layer too large to scale
+up, the backend scales the image.
+
+**Output.** `main` returns **straight** (non-premultiplied) RGBA. Each device
+pixel becomes premultiplied 8-bit BGRA:
+
+```
+a  = clamp01(ret.a) * coverage(i, j)
+c  = clamp01(ret.c) * a                        for c in r, g, b
+a8 = floor(a * 255 + 0.5)
+c8 = min(floor(c * 255 + d(i, j)), a8)         d = 0.5 unless dithering
+```
+
+- `clamp01(v)` is `v > 0 ? (v < 1 ? v : 1) : 0`, so NaN maps to 0, +inf to 1
+  and -inf to 0.
+- `coverage(i, j) = cx(i) * cy(j)`, where `cx(i)` is the overlap of
+  `[i, i + 1)` with `[X0, X1)`. It is 1 inside the layer and fractional only
+  on the edge pixels of a layer that does not sit on whole device pixels, so
+  shader layers get the same anti-aliased edge as vector drawing.
+- A premultiplied channel never exceeds alpha.
+
+**Dithering** (`#pragma neui dither`) replaces `d` with an ordered 4×4 Bayer
+offset, which hides banding in large, slow gradients:
+
+```
+B = [ 0  8  2 10
+     12  4 14  6
+      3 11  1  9
+     15  7 13  5 ]
+d(i, j) = (B[(j - floor(Y0)) & 3][(i - floor(X0)) & 3] + 0.5) / 16
+```
+
+The pattern is anchored to the layer, so it does not crawl when the layer
+moves.
+
+**Pragmas:**
+
+| Pragma | Effect |
+|---|---|
+| `#pragma neui dither` | ordered dithering on output |
+| `#pragma neui cpu_only` | never use a GPU executor for this shader (exact pixels everywhere, at CPU speed) |
+| `#pragma neui sampler <name> [clamp\|repeat\|border] [linear\|nearest]` | a sampler's edge mode and filter (§6.1) |
+
+## 12. Determinism and fidelity
+
+- **CPU executor:** bit-identical on every platform, for every program.
+  Phase 0 confirmed this for AppleClang arm64, MSVC x64, GCC 13 x64 and
+  Clang 18 x64, over the built-in sweeps (including denormals and specials)
+  and four test programs at 1×, 1.5×, 2× and a fractional, dithered origin.
+  CI pins it on every platform (`neui_tests`, `test_shader_exec.cpp`).
+  Implementation rules:
+  - shader arithmetic, including the compiler's constant folding, is
+    compiled in **one** library (`src/shader/`, `neui-shader`) with
+    `-ffp-contract=off` (MSVC: `/fp:precise`), optimised in every build type;
+  - no libm;
+  - the FP environment is pinned per draw and per compile.
+- **GPU executor (D2D):** emits neui's own polynomials and the same pixel
+  grid, coverage, rounding and dithering (`src/shader/nsl_gpu.cpp`); the
+  draw-time part of a program (work on constants and uniforms) still runs on
+  the CPU, bit-exactly. Every shader variable is `precise`, so no
+  multiply-add is fused, but GPUs flush denormals and round division and
+  square root differently. Contract: within 2/255 per channel on ≥ 99.9% of
+  pixels, and within 8/255 on all pixels except those on a discontinuity of
+  the shader (`step`, a comparison, `floor` / `fract` / `mod` crossing an
+  integer): there a last-bit difference can put a pixel on the other side of
+  the jump, and it takes the other side's colour. Measured on a desktop GPU and
+  on WARP: at most 1/255 for continuous shaders
+  (`tests/shader_gpu_smoke.cpp`); a hard-edged ring knob showed 3 such pixels
+  out of about 120 000.
+  `#pragma neui cpu_only` and `shader_api->set_gpu(session, false)` force the
+  CPU path when exact pixels matter more than speed. Bakes always run on the
+  CPU.
+  Sampling on the GPU reads texels with `Load` and runs the same integer
+  filter as the CPU (not the hardware's filtering, whose sub-texel precision
+  varies): at most 1/255 from the CPU on a desktop GPU and on WARP, and a 1:1
+  copy is exact there too.
+
+## 13. Limits
+
+A program that exceeds a limit does not compile, and the diagnostic points at
+the construct that crossed it. Limits keep the cost of a shader bounded and
+known at compile time, which protects against untrusted skins and against a
+GPU timeout (TDR on Windows).
+
+| Limit | Value |
+|---|---|
+| source size | 64 KiB |
+| identifier length | 63 |
+| nesting depth (statements, blocks and expressions) | 128 |
+| nesting depth after inlining | 512 |
+| user functions | 64 |
+| uniforms | 32 declarations (samplers included), 64 scalar components |
+| `sampler2D` uniforms | 4 |
+| `for` trip count | 64 |
+| `for` nesting depth | 4 |
+| product of nested trip counts | 1024 |
+| scalar operations after inlining, unrolling and folding | 8192 |
+| simultaneously live scalar values | 256 |
+| compile work: statements and expressions lowered after inlining and unrolling | 1,048,576 |
+
+Nesting after inlining and compile work bound the compiler itself, its stack
+and its running time. Inlining multiplies work (a
+function that calls another twice, which calls another twice, ...), and the
+optimiser can fold the result down to a few operations, so neither the source
+limits nor the operation limit would catch it.
+
+## 14. Keywords and differences from GLSL ES 1.00
+
+**Keywords:** `uniform const float int bool vec2 vec3 vec4 sampler2D void
+true false if else for break continue return in out inout precision lowp
+mediump highp`. `texture2D`, `texture`, `neui_texture_size` and `neui_texel`
+are built-ins.
+
+**Reserved, an error with a "not supported in .nsl v1" message:** `while do
+switch case default discard struct attribute varying layout centroid flat
+smooth invariant mat2 mat3 mat4 mat2x2 mat2x3 mat2x4 mat3x2 mat3x3 mat3x4
+mat4x2 mat4x3 mat4x4 ivec2 ivec3 ivec4 bvec2 bvec3 bvec4 uvec2 uvec3 uvec4
+uint double dvec2 dvec3 dvec4 half sampler3D samplerCube textureCube asm class
+union enum typedef template this goto inline noinline volatile public static
+extern interface long short unsigned sizeof cast namespace using`.
+
+**Differences from GLSL ES 1.00, in one place:**
+- Entry point `vec4 main(vec2 p)` returns the colour; there is no
+  `gl_FragColor` / `gl_FragCoord`.
+- Uniform defaults; reserved `neui_*` uniforms and built-ins.
+- `int` is compile-time only, and int `/` is an error. Implicit int → float.
+- Uninitialised values are zero. Every edge case is defined (§9, §10, §11).
+- No preprocessor except `#pragma neui`. No arrays, structs, matrices,
+  derivatives, `while`, `discard`, mutable globals or user overloading.
+- Samplers: `sampler2D` only, with neui's exact filtering (§9.4); no
+  mipmaps / LOD, no sampler state in source except the pragma, and `uv`
+  is y-down.
+- Assignment is a statement. Loops have a constant trip count.
+- Added: `saturate`.
+
+## 15. Diagnostics
+
+```
+knob.nsl:12:17: error: 'value' is not declared
+knob.nsl:3:1: error: int division; write 1.0 / 2.0
+knob.nsl:20:5: error: loop runs 128 times; the limit is 64
+```
+
+- Format: `<name>:<line>:<col>: error: <message>`. `<name>` is the shader's
+  file or resource name, or `<source>` for inline source.
+- Lines and columns are 1-based, and columns count bytes (a tab is 1).
+- v1 reports the first error only.
+
+## 16. Porting notes
+
+**From Shadertoy / GLSL:**
+
+| Shadertoy | `.nsl` |
+|---|---|
+| `void mainImage(out vec4 o, in vec2 fragCoord)` | `vec4 main(vec2 p)` returning the colour |
+| `fragCoord` (device px, **y-up**) | `p` (logical px, **y-down**); flip with `neui_size.y - p.y` |
+| `iResolution.xy` | `neui_size` (logical) or `neui_size * neui_scale` (device) |
+| `iTime` | `neui_time` (wrapped to an hour) |
+| `iChannel0` | a `uniform sampler2D` the client binds a bitmap to |
+| `texture(iChannel0, uv)` (uv **y-up**) | `texture(img, vec2(uv.x, 1.0 - uv.y))`; `texture` works as is |
+| `iChannelResolution[0].xy` | `1.0 / neui_texel(img)` (texels) |
+| a channel's wrap / filter setting | `#pragma neui sampler img repeat nearest` |
+| `while (...)`, data-dependent loops | a `for` with a constant bound + `break` |
+| colour output | straight alpha; neui premultiplies |
+
+**From HLSL:** `float4` → `vec4`, `lerp` → `mix`, `frac` → `fract`,
+`atan2(y, x)` → `atan(y, x)`, `rsqrt` → `inversesqrt`; `saturate` is the
+same. **`fmod` is not `mod`**: HLSL truncates, and `.nsl` floors (they differ
+for negative operands). No `mul`, because there are no matrices.
+
+**From bgfx:** see "bgfx source compatibility" in `plans/shader-effects.md`.
+bgfx shader bodies are GLSL, so porting is mechanical.
+
+## 17. Grammar
+
+```ebnf
+program        = { global } ;
+global         = uniform_decl | const_decl | function | precision_stmt ;
+uniform_decl   = "uniform" [ precision ] ( value_type IDENT [ "=" expr ] | "sampler2D" IDENT ) ";" ;
+const_decl     = "const" [ precision ] type IDENT "=" expr { "," IDENT "=" expr } ";" ;
+precision_stmt = "precision" precision "float" ";" ;
+precision      = "lowp" | "mediump" | "highp" ;
+function       = ( type | "void" ) IDENT "(" [ param { "," param } ] ")" block ;
+param          = [ "in" | "out" | "inout" ] [ precision ] ( type | "sampler2D" ) IDENT ;
+type           = value_type | "bool" | "int" ;
+value_type     = "float" | "vec2" | "vec3" | "vec4" ;
+
+block          = "{" { statement } "}" ;
+statement      = block | var_decl | assign | call_stmt | if_stmt | for_stmt
+               | "break" ";" | "continue" ";" | "return" [ expr ] ";" | ";" ;
+var_decl       = [ "const" ] [ precision ] type IDENT [ "=" expr ]
+                 { "," IDENT [ "=" expr ] } ";" ;
+assign         = lvalue ( "=" | "+=" | "-=" | "*=" | "/=" ) expr ";" ;
+lvalue         = IDENT [ "." SWIZZLE ] ;
+call_stmt      = call ";" ;
+if_stmt        = "if" "(" expr ")" statement [ "else" statement ] ;
+for_stmt       = "for" "(" "int" IDENT "=" expr ";" IDENT relop expr ";" update ")" statement ;
+update         = IDENT ( "++" | "--" ) | ( "++" | "--" ) IDENT
+               | IDENT ( "+=" | "-=" ) expr ;
+
+expr           = logical_or [ "?" expr ":" expr ] ;
+logical_or     = logical_xor { "||" logical_xor } ;
+logical_xor    = logical_and { "^^" logical_and } ;
+logical_and    = equality { "&&" equality } ;
+equality       = relational { ( "==" | "!=" ) relational } ;
+relational     = additive [ relop additive ] ;
+relop          = "<" | ">" | "<=" | ">=" | "!=" ;
+additive       = multiplicative { ( "+" | "-" ) multiplicative } ;
+multiplicative = unary { ( "*" | "/" ) unary } ;
+unary          = [ "+" | "-" | "!" ] unary | postfix ;
+postfix        = primary { "." SWIZZLE } ;
+primary        = INT_LITERAL | FLOAT_LITERAL | "true" | "false" | IDENT
+               | call | "(" expr ")" ;
+call           = ( IDENT | type ) "(" [ expr { "," expr } ] ")" ;
+```
+
+`relop` includes `!=` only in a `for` condition. In expressions, `!=` is
+parsed by `equality`. A `sampler2D` parameter must be `in` (the default).

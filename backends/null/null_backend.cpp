@@ -107,6 +107,7 @@ namespace neui_null_backend
     null_stroke_path_gradient,
     null_font_metrics,
     null_push_font_styled,
+    nullptr,  // set_frame_damage: full frames only
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

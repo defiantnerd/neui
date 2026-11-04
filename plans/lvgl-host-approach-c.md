@@ -60,7 +60,7 @@ invent a new host-registry id.
   `lv_conf.h` (via `LV_CONF_PATH` or `LV_CONF_INCLUDE_SIMPLE`) enabling: a scalable font engine
   (see Open questions), `LV_USE_PERF_MONITOR`, and the Windows display driver.
 - **Configuration must FAIL (`message(FATAL_ERROR ...)`) if the LVGL host cannot run on the build
-  platform** - no silent fallback. On this Windows machine it must succeed.
+  platform** - no silent fallback. On Windows it must succeed.
 - Windows display + input: prefer LVGL's native Windows backend (`LV_USE_WINDOWS`) to avoid an SDL
   dependency (SDL2 is the fallback - ask if you'd rather). Drive `lv_tick` + `lv_timer_handler`.
 - Add a prototype example target `neui_lvgl_example` that builds a representative measurement

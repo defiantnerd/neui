@@ -156,6 +156,81 @@ int main()
     check(off[0] == 0,  "dash: pixel in a gap is background");
   }
 
+  // --- Partial repaint (set_frame_damage). ------------------------------------
+  // The surface now holds a complete frame (Frame C), so damage is accepted:
+  // the next frame clears + paints only inside it, and every pixel outside
+  // keeps Frame C's content (the blue dash at (6,40)).
+  {
+    const float dmg[4] = { 0.0f, 0.0f, 16.0f, 16.0f };
+    check(be->set_frame_damage && be->set_frame_damage(ctx, dmg, 1),
+          "damage: accepted once the surface holds a frame");
+    be->begin_frame(ctx, 0xFFFF0000u);                 // red clear - damage only
+    be->fill_rect(ctx, 4, 4, 56, 56, 0xFF00FF00u);     // green - clipped to damage
+    be->end_frame(ctx);
+    be->read_pixels_bgra(ctx, out.data());
+    const uint8_t* inside  = px(out, W, 8, 8);
+    const uint8_t* edge    = px(out, W, 1, 1);         // in damage, outside the fill
+    const uint8_t* kept    = px(out, W, 6, 40);        // Frame C dash
+    const uint8_t* beyond  = px(out, W, 30, 30);       // under the fill, outside damage
+    check(inside[1] > 200 && inside[2] == 0, "damage: inside is repainted");
+    check(edge[2] > 200 && edge[1] == 0,     "damage: clear is clipped to the damage");
+    check(kept[0] > 200 && kept[1] == 0,     "damage: outside keeps the previous frame");
+    check(beyond[1] == 0,                    "damage: draws outside the damage are clipped");
+
+    // The damage is consumed by that one frame - the next frame is full.
+    be->begin_frame(ctx, 0xFF000000u);
+    be->end_frame(ctx);
+    be->read_pixels_bgra(ctx, out.data());
+    check(px(out, W, 6, 40)[0] == 0, "damage: consumed by one frame (next is full)");
+
+    // count 0 = full frame, and reports false (nothing partial to cull for).
+    check(!be->set_frame_damage(ctx, nullptr, 0), "damage: count 0 reports a full frame");
+  }
+  {
+    // A fresh surface has no previous frame to keep - damage is refused, so
+    // the host knows not to cull.
+    neui_render_ctx_t fresh = be->create_offscreen_context(W, H, 1.0f);
+    const float dmg[4] = { 0.0f, 0.0f, 8.0f, 8.0f };
+    check(fresh && be->set_frame_damage && !be->set_frame_damage(fresh, dmg, 1),
+          "damage: refused before the surface holds a frame");
+    if (fresh) be->destroy_context(fresh);
+  }
+
+  // --- The path survives other draws (renderer.h: valid until begin_path). --
+  // fill_rect, push_clip and the like make their own geometry; they must not
+  // fill or clip to the path, nor drop it.
+  be->begin_frame(ctx, 0xFF000000u);
+  be->begin_path(ctx);
+  be->move_to(ctx, 8, 8);
+  be->line_to(ctx, 40, 8);
+  be->line_to(ctx, 8, 40);                             // an open triangle
+  be->stroke_path(ctx, 2.0f, 0xFF0000FFu);             // blue, stroked only
+  be->fill_rect(ctx, 48, 48, 8, 8, 0xFF00FF00u);       // green, elsewhere
+  be->end_frame(ctx);
+  be->read_pixels_bgra(ctx, out.data());
+  check(px(out, W, 16, 16)[1] == 0, "path: a later fill_rect does not fill the path");
+  check(px(out, W, 52, 52)[1] > 200, "path: the fill_rect itself draws");
+
+  be->begin_frame(ctx, 0xFF000000u);
+  be->begin_path(ctx);
+  be->move_to(ctx, 8, 8);
+  be->line_to(ctx, 40, 8);
+  be->line_to(ctx, 8, 40);
+  be->stroke_path(ctx, 2.0f, 0xFF0000FFu);
+  be->push_clip(ctx, 48, 48, 8, 8);
+  be->fill_rect(ctx, 0, 0, 64, 64, 0xFF00FF00u);       // green, clipped
+  be->pop_clip(ctx);
+  be->fill_path(ctx, 0xFFFF0000u);                     // red: the path is still there
+  be->end_frame(ctx);
+  be->read_pixels_bgra(ctx, out.data());
+  {
+    const uint8_t* in_path = px(out, W, 16, 16);
+    check(in_path[2] > 200 && in_path[1] == 0, "path: kept across push_clip, then filled");
+    check(px(out, W, 52, 52)[1] > 200, "path: the clip is the rect");
+    check(px(out, W, 30, 30)[1] == 0 && px(out, W, 30, 30)[2] == 0,
+          "path: the clip does not take in the path");
+  }
+
   be->destroy_context(ctx);
 
   std::printf(g_failures ? "\nSMOKE FAILED (%d)\n" : "\nSMOKE OK\n", g_failures);

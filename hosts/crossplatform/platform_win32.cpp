@@ -6,7 +6,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <imm.h>
+#include <cmath>
 #include <string>
+#include <vector>
 
 #include "host.h"
 #include "platform.h"
@@ -29,6 +31,7 @@
 #include "../shared/win32/cursor_win32.h"
 #include "../shared/win32/file_dialog_win32.h"
 #include "../shared/relative_pointer.h"
+#include "../shared/win32/paint_pacer_win32.h"
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
 
@@ -68,6 +71,10 @@ namespace xpl_host
     // Same pattern for the scrolling SECTION's spring-back (kinetics live
     // in the section's SectionScrollState.kin_v/_h).
     uint32_t bouncing_section_index = 0;
+    // Interval of the shader animation timer (anim_clock.h), 0 = off.
+    uint32_t anim_timer_ms = 0;
+    // D2D presents without vsync; paints are paced to the refresh rate.
+    neui_detail::PaintPacerWin32 pacer;
   };
 
   // Timer ID for the grid spring-back animation on the frame's HWND.
@@ -76,6 +83,8 @@ namespace xpl_host
   static constexpr UINT_PTR XPL_SECTION_BOUNCE_TIMER_ID = 0x6E787363;  // 'nxsc'
   // Timer ID for the toast animation heartbeat (16 ms tick).
   static constexpr UINT_PTR XPL_TOAST_TIMER_ID = 0x6E78746F;  // 'nxto'
+  // Timer ID for the animation clock's heartbeat (Session::animation_tick).
+  static constexpr UINT_PTR XPL_ANIM_TIMER_ID = 0x6E78616E;  // 'nxan'
 
   // UTF-8 -> UTF-16 helper used by menubar platform functions.
   static std::wstring to_wide(const char* utf8)
@@ -522,6 +531,8 @@ namespace xpl_host
       if (wud) {
         neui_event_t ev = {};
         ev.type = NEUI_EVENT_APP_QUIT;
+        if (auto* fw = wud->session->get_widget(wud->widget_index))
+          ev.data.mouse.widget.id = fw->widget_id;  // the frame closing
         bool allow = wud->session->dispatch_event(&ev);
         if (allow)
           DestroyWindow(hwnd);
@@ -533,6 +544,7 @@ namespace xpl_host
       auto* wud = get_wud(hwnd);
       if (wud) {
         const uint32_t self_idx = wud->widget_index;
+        neui_detail::pace_release(wud->pacer, hwnd);
         // Release the D2D render context before the HWND is gone.
         auto* wd = wud->session->get_widget(self_idx);
         if (wd) {
@@ -645,14 +657,47 @@ namespace xpl_host
     }
 
     case WM_PAINT: {
+      // Partial repaint: read the update region (client px) BEFORE
+      // BeginPaint validates it. Windows keeps a true region - one rect per
+      // platform_invalidate_rect - so it maps straight onto the frame's
+      // damage; a whole-client InvalidateRect becomes a full frame by
+      // coverage in paint_frame. A paint that comes too soon after the last
+      // present is held back with its update region (paint_pacer_win32.h).
+      auto* wud = get_wud(hwnd);
+      if (wud && neui_detail::pace_hold(wud->pacer, hwnd)) return 0;
+      auto* wd  = wud ? wud->session->get_widget(wud->widget_index) : nullptr;
+      neui_detail::DamageRegion damage;
+      if (wd && wd->render_ctx) {
+        if (HRGN rgn = CreateRectRgn(0, 0, 0, 0)) {
+          const int kind = GetUpdateRgn(hwnd, rgn, FALSE);
+          if (kind == SIMPLEREGION || kind == COMPLEXREGION) {
+            const DWORD bytes = GetRegionData(rgn, 0, nullptr);
+            std::vector<unsigned char> buf(bytes);
+            if (bytes >= sizeof(RGNDATAHEADER) &&
+                GetRegionData(rgn, bytes, reinterpret_cast<RGNDATA*>(buf.data())) == bytes) {
+              const auto* rd = reinterpret_cast<const RGNDATA*>(buf.data());
+              const auto* rs = reinterpret_cast<const RECT*>(rd->Buffer);
+              const double s = static_cast<double>(wd->dpi ? wd->dpi : 96u) / 96.0;
+              for (DWORD i = 0; i < rd->rdh.nCount; ++i) {
+                // Device px -> logical px, outward.
+                const int x0 = static_cast<int>(std::floor(rs[i].left   / s));
+                const int y0 = static_cast<int>(std::floor(rs[i].top    / s));
+                const int x1 = static_cast<int>(std::ceil (rs[i].right  / s));
+                const int y1 = static_cast<int>(std::ceil (rs[i].bottom / s));
+                damage.add({ x0, y0, x1 - x0, y1 - y0 });
+              }
+            }
+          }
+          DeleteObject(rgn);
+        }
+      }
       PAINTSTRUCT ps;
       BeginPaint(hwnd, &ps);
       EndPaint(hwnd, &ps);
-      auto* wud = get_wud(hwnd);
-      if (wud) {
-        auto* wd = wud->session->get_widget(wud->widget_index);
-        if (wd && wd->render_ctx)
-          wud->session->paint_frame(wd->render_ctx, wud->widget_index);
+      if (wd && wd->render_ctx) {
+        wud->session->paint_frame(wd->render_ctx, wud->widget_index,
+                                  damage.empty() ? nullptr : &damage);
+        neui_detail::pace_presented(wud->pacer);
       }
       return 0;
     }
@@ -752,6 +797,7 @@ namespace xpl_host
 
       auto* wud = get_wud(hwnd);
       if (wud) {
+        neui_detail::pace_force(wud->pacer);  // show the new size at once
         UINT w_phys = LOWORD(lParam);
         UINT h_phys = HIWORD(lParam);
         wud->session->resize_render_ctx(wud->widget_index, w_phys, h_phys);
@@ -792,6 +838,7 @@ namespace xpl_host
       // lParam: RECT* suggesting the new window position/size at the new DPI.
       auto* wud = get_wud(hwnd);
       if (wud) {
+        neui_detail::pace_force(wud->pacer);
         uint32_t new_dpi = static_cast<uint32_t>(LOWORD(wParam));
         wud->session->on_dpi_changed(wud->widget_index, new_dpi);
 
@@ -854,7 +901,10 @@ namespace xpl_host
       if (wud && wud->session) {
         auto* s = wud->session;
         s->_os_focused = true;
-        if (s->_focused_widget != 0 && s->_widgets.exists(s->_focused_widget)) {
+        // Focus moves into this frame; if it changed, set_focus already
+        // told the client.
+        const bool moved = s->frame_activated(wud->widget_index);
+        if (!moved && s->_focused_widget != 0 && s->_widgets.exists(s->_focused_widget)) {
           auto& wd = s->_widgets[s->_focused_widget];
           if (wd.emit_events) {
             neui_event_t ev = {};
@@ -1449,6 +1499,19 @@ namespace xpl_host
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
+      if (wParam == neui_detail::k_paint_pace_timer_id) {
+        if (auto* pwud = get_wud(hwnd)) neui_detail::pace_timer(pwud->pacer, hwnd, wParam);
+        else KillTimer(hwnd, wParam);
+        return 0;
+      }
+      if (wParam == XPL_ANIM_TIMER_ID) {
+        auto* awud = get_wud(hwnd);
+        if (awud && awud->session)  // continue at the interval it asks for; 0 stops
+          platform_set_animation_timer(hwnd, awud->session->animation_tick(awud->widget_index));
+        else
+          KillTimer(hwnd, XPL_ANIM_TIMER_ID);
+        return 0;
+      }
       // Scrolling-SECTION spring-back tick - same shape as the grid timer
       // below; both axes step in one tick (a "both" section can overscroll
       // vertically and horizontally in the same gesture).
@@ -2023,6 +2086,8 @@ namespace xpl_host
 
   void platform_show_window(void* native_handle)
   {
+    if (auto* wud = get_wud(static_cast<HWND>(native_handle)))
+      neui_detail::pace_force(wud->pacer);  // UpdateWindow below must paint
     ShowWindow(static_cast<HWND>(native_handle), SW_SHOW);
     UpdateWindow(static_cast<HWND>(native_handle));
   }
@@ -2123,6 +2188,23 @@ namespace xpl_host
     // by the OS - the documented best-effort case.
     RedrawWindow(static_cast<HWND>(native_handle), nullptr, nullptr,
                  RDW_INVALIDATE | RDW_UPDATENOW);
+  }
+
+  // Partial repaint: invalidate just the logical rect, mapped outward to
+  // client px. Windows accumulates a true update region (a whole-client
+  // InvalidateRect absorbs it); WM_PAINT hands it to paint_frame.
+  void platform_invalidate_rect(void* native_handle, int x, int y, int w, int h)
+  {
+    if (!native_handle || w <= 0 || h <= 0) return;
+    HWND hwnd = static_cast<HWND>(native_handle);
+    UINT dpi  = GetDpiForWindow(hwnd);
+    const double s = static_cast<double>(dpi ? dpi : 96u) / 96.0;
+    RECT rc;
+    rc.left   = static_cast<LONG>(std::floor(x * s));
+    rc.top    = static_cast<LONG>(std::floor(y * s));
+    rc.right  = static_cast<LONG>(std::ceil((x + w) * s));
+    rc.bottom = static_cast<LONG>(std::ceil((y + h) * s));
+    InvalidateRect(hwnd, &rc, FALSE);
   }
 
   static void dispatch_one(MSG& msg)
@@ -2656,6 +2738,9 @@ namespace xpl_host
     const int phys_w = static_cast<int>(MulDiv(w, static_cast<int>(dpi), 96) * zoom + 0.5f);
     const int phys_h = static_cast<int>(MulDiv(h, static_cast<int>(dpi), 96) * zoom + 0.5f);
 
+    // The first paint after a show is never held back by the present pacer
+    // (as in platform_show_window).
+    if (auto* wud = get_wud(hwnd)) neui_detail::pace_force(wud->pacer);
     // SWP_NOACTIVATE + SW_SHOWNOACTIVATE, never ShowWindow(SW_SHOW): taking
     // activation is the one thing this window must never do.
     SetWindowPos(hwnd, HWND_TOP, phys_x, phys_y, phys_w, phys_h,
@@ -2793,6 +2878,23 @@ namespace xpl_host
   {
     if (!native_handle) return;
     KillTimer(static_cast<HWND>(native_handle), XPL_TOAST_TIMER_ID);
+  }
+
+  void platform_set_animation_timer(void* native_handle, uint32_t interval_ms)
+  {
+    HWND hwnd = static_cast<HWND>(native_handle);
+    auto* wud = hwnd ? get_wud(hwnd) : nullptr;
+    if (!wud || wud->anim_timer_ms == interval_ms) return;  // SetTimer would restart it
+    wud->anim_timer_ms = interval_ms;
+    if (interval_ms) SetTimer(hwnd, XPL_ANIM_TIMER_ID, interval_ms, nullptr);
+    else             KillTimer(hwnd, XPL_ANIM_TIMER_ID);
+  }
+
+  bool platform_reduced_motion()
+  {
+    // "Show animations in Windows" (Settings > Accessibility > Visual effects).
+    BOOL on = TRUE;
+    return SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &on, 0) && !on;
   }
 
   uint64_t platform_now_ms()

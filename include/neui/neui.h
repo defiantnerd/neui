@@ -13,6 +13,7 @@
 #include "d/compound.h"
 #include "d/behavior.h"
 #include "d/filter.h"
+#include "d/shader.h"
 #include "d/painter.h"
 #include "d/events.h"
 #include "d/items.h"
@@ -36,6 +37,7 @@
 #include "d/popup.h"
 #include "d/a11y.h"
 #include "d/ios.h"
+#include "d/web.h"
 
 #ifdef __cplusplus
 extern "C" {

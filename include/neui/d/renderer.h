@@ -3,6 +3,7 @@
 #include "api.h"
 #include "gradient.h"
 #include "path_style.h"
+#include <stddef.h>   // size_t
 
 #ifdef __cplusplus
 extern "C" {
@@ -11,6 +12,17 @@ extern "C" {
 // Opaque render context - one per native frame window (APPWINDOW or PLUGWINDOW).
 // Created by the backend on window creation; owned and destroyed by the host.
 typedef void* neui_render_ctx_t;
+
+// A bitmap a textured shader program samples (draw_shader_program_textured):
+// premultiplied BGRA8 rows of `stride` bytes. Equal `content_id`s mean equal
+// pixels, so a backend may keep one upload per id; 0 = do not keep it. No
+// pixels or an empty size is an unbound sampler, which reads as transparent.
+typedef struct neui_shader_texture_desc_t {
+  const uint8_t* bgra;
+  uint32_t width_px, height_px;
+  size_t stride;
+  uint64_t content_id;
+} neui_shader_texture_desc_t;
 
 // Rendering backend interface.
 // Backends implement this struct and register with the crossplatform host at link time.
@@ -224,9 +236,8 @@ typedef struct neui_render_backend {
   // reset to empty (effective default) at every begin_frame so a
   // missing pop in one frame can't bleed across.
   //
-  // Backends that don't implement font selection (cg, null) provide
-  // no-op stubs to keep the vtable shape; text continues to render
-  // in their system default until they wire it up.
+  // D2D, CG and Cairo implement font selection; the null backend has
+  // no-op stubs to keep the vtable shape.
   void (NEUI_ABI *push_font)(neui_render_ctx_t ctx,
                               const char* family_utf8,
                               int          weight);
@@ -368,7 +379,85 @@ typedef struct neui_render_backend {
                                     const char* family_utf8,
                                     int weight, bool italic);
 
+  // --- Partial repaint (vtable-appended; NULL = full frames only) ---------
+  //
+  // Restrict the NEXT begin_frame / end_frame pair to `count` damage rects
+  // (x, y, w, h quadruples in logical pixels, frame-local): begin_frame
+  // clips to them and clears only there, end_frame presents only them, and
+  // every pixel outside keeps the previous frame's content. count == 0 (or
+  // rects == NULL) means a full frame. Consumed by that one frame - each
+  // frame without a call is full.
+  //
+  // Returns true only when that frame WILL be partial. A backend may refuse
+  // (false = full frame) whenever it can't vouch for the pixels outside the
+  // damage - a freshly (re)allocated surface, a DPI change since the last
+  // frame. The host must cull widgets only after a true return, otherwise a
+  // full clear would wipe what it skipped. A backend that can never keep the
+  // previous frame (e.g. a flip-model swap chain without a persistent
+  // canvas) leaves this NULL.
+  bool (NEUI_ABI *set_frame_damage)(neui_render_ctx_t ctx,
+                                    const float* rects_xywh, int count);
+
+  // --- Device mapping (vtable-appended; NULL = untransformed) -------------
+  //
+  // The current mapping from logical user space to the target's device
+  // pixels (y-down, origin at the target's top-left) as an affine matrix:
+  //   device_x = m[0] * x + m[2] * y + m[4]
+  //   device_y = m[1] * x + m[3] * y + m[5]
+  // It includes the display scale and every transform pushed since
+  // begin_frame. The host uses it to draw a bitmap 1:1 onto whole device
+  // pixels (shader layers). A backend without it is treated as
+  // m = { s, 0, 0, s, 0, 0 } with s = get_scale_factor.
+  void (NEUI_ABI *get_device_transform)(neui_render_ctx_t ctx, float m[6]);
+
+  // --- GPU shader programs (vtable-appended; NULL = CPU only) ------------
+  //
+  // Programs are the GPU form of a .nsl shader (the host emits them; the
+  // backend only compiles and draws). Without these slots, or when
+  // create_shader_program fails, the host renders shaders on the CPU.
+  //
+  // Compile `src` (`len` bytes) written in `lang` (NEUI_SHADER_LANG_*).
+  // Returns an opaque program usable with every ctx of this backend, or NULL
+  // when the backend cannot run it (no compiler, a GPU too old). The host
+  // calls it once per shader, during a paint, so it must not block: a
+  // backend may compile in the background and decline draws (return false)
+  // until the program is ready, or for good if it fails to compile.
+  void* (NEUI_ABI *create_shader_program)(int lang, const char* src, size_t len);
+
+  // Release a program and everything the backend holds for it in any ctx.
+  void  (NEUI_ABI *destroy_shader_program)(void* program);
+
+  // Draw `program` over the device pixels [x, x + w) x [y, y + h) of the
+  // ctx's target. The position is in device pixels and ignores the current
+  // transform; the clip and the alpha stack apply. `constants` (`count`
+  // floats, a multiple of 4) is the program's constant buffer; the backend
+  // multiplies its current opacity into constants[NEUI_SHADER_OPACITY_INDEX]
+  // (on a copy). Returns false when nothing was drawn, and the host then
+  // draws the CPU result instead.
+  bool  (NEUI_ABI *draw_shader_program)(neui_render_ctx_t ctx, void* program,
+                                        int32_t x, int32_t y, uint32_t w, uint32_t h,
+                                        const float* constants, uint32_t count);
+
+  // draw_shader_program for a program that samples bitmaps: tex[i] is the
+  // program's sampler i (texture register t<i> in HLSL_D2D), `tex_count` of
+  // them. NULL = programs that sample run on the CPU.
+  bool  (NEUI_ABI *draw_shader_program_textured)(neui_render_ctx_t ctx, void* program,
+                                                 int32_t x, int32_t y, uint32_t w, uint32_t h,
+                                                 const float* constants, uint32_t count,
+                                                 const neui_shader_texture_desc_t* tex, uint32_t tex_count);
+
 } neui_render_backend_t;
+
+// Languages for create_shader_program. HLSL_D2D: an HLSL ps_4_0 pixel shader
+// for a zero-input Direct2D custom effect, entry `main(float4 pos :
+// SV_POSITION, float4 scene : SCENE_POSITION) : SV_Target`, constant buffer
+// b0; SCENE_POSITION is 0 at the drawn rect's top-left, in device pixels. A
+// program that samples reads `Texture2D t<i> : register(t<i>)` with Load,
+// one per sampler, bound by draw_shader_program_textured.
+#define NEUI_SHADER_LANG_HLSL_D2D 1
+
+// The constant the backend multiplies its opacity into.
+#define NEUI_SHADER_OPACITY_INDEX 6
 
 #ifdef __cplusplus
 }

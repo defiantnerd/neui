@@ -2,7 +2,10 @@
 #include <memory>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 
 #include "host.h"
 #include "platform.h"
@@ -114,6 +117,9 @@ namespace xpl_host
   extern neui_compound_api_t  compound_api;
   extern neui_behavior_api_t  behavior_api;
   extern neui_filter_api_t    filter_api;
+#if !defined(NEUI_NO_SHADERS)
+  extern neui_shader_api_t    shader_api;
+#endif
   extern neui_grid_api_t      grid_api;
   extern neui_dnd_api_t       dnd_api;
   extern neui_scroll_api_t    scroll_api;
@@ -176,6 +182,9 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_COMPOUND))  return &compound_api;
     if (!strcmp(iface, NEUI_API_BEHAVIOR))  return &behavior_api;
     if (!strcmp(iface, NEUI_API_FILTER))    return &filter_api;
+#if !defined(NEUI_NO_SHADERS)
+    if (!strcmp(iface, NEUI_API_SHADER))    return &shader_api;
+#endif
     if (!strcmp(iface, NEUI_API_GRID))      return &grid_api;
     if (!strcmp(iface, NEUI_API_DND))       return &dnd_api;
     if (!strcmp(iface, NEUI_API_SCROLL))    return &scroll_api;
@@ -192,6 +201,10 @@ namespace xpl_host
     // platform layer; every other build returns NULL, which is the contract
     // d/ios.h asks clients to feature-detect on.
     if (!strcmp(iface, NEUI_API_IOS))       return platform_ios_api();
+#endif
+#if defined(NEUI_PLATFORM_WEB)
+    // Web page interop (d/web.h); NULL on every other build.
+    if (!strcmp(iface, NEUI_API_WEB))       return platform_web_api();
 #endif
     return nullptr;
   }
@@ -643,6 +656,73 @@ namespace xpl_host
     return nullptr;
   }
 
+  // Partial repaint: a widget's damage footprint - its frame-local rect
+  // grown by a margin covering what paints just outside it (the 1.5 px
+  // focus-ring stroke straddles the edge; anti-aliasing bleeds a pixel). Used
+  // both to queue damage (Session::invalidate_widget_rect) and to cull, so
+  // the two always agree.
+  static constexpr int k_damage_margin = 4;
+  // Above this damage coverage a partial frame saves too little to beat the
+  // per-rect clip + blit overhead; paint the whole frame instead.
+  static constexpr float k_partial_max_coverage = 0.6f;
+
+  static neui_detail::DamageRect widget_damage_rect(const WidgetData& wd)
+  {
+    const neui_detail::DamageRect b = wd.paint_bounds();
+    return { wd.abs_x + b.x - k_damage_margin, wd.abs_y + b.y - k_damage_margin,
+             b.w + 2 * k_damage_margin, b.h + 2 * k_damage_margin };
+  }
+
+  // Debug switches (read once): NEUI_DEBUG_FULL_REPAINT=1 ignores damage
+  // (bisects a partial-repaint artefact); NEUI_DEBUG_DAMAGE=1 tints every
+  // partial frame's damage rects so over- / under-invalidation is visible;
+  // NEUI_DEBUG_PAINT_STATS=1 prints, once a second, how many frames painted
+  // (how many partial) and their average / worst paint_frame time.
+  static bool env_flag(const char* name)
+  {
+#if defined(_MSC_VER)
+    char   buf[8] = {};
+    size_t n      = 0;
+    return getenv_s(&n, buf, sizeof(buf), name) == 0 && n > 1 && buf[0] != '0';
+#else
+    const char* v = std::getenv(name);
+    return v && *v && *v != '0';
+#endif
+  }
+
+  void Session::invalidate_widget_rect(uint32_t widget_index)
+  {
+    void* frame = find_parent_native_handle(widget_index);
+    if (!frame) return;
+    WidgetData* wd = get_widget(widget_index);
+    if (!wd || !wd->abs_valid || wd->is_frame() || wd->is_menu_model() ||
+        wd->native_handle || widget_index == _open_combo ||
+        wd->width <= 0 || wd->height <= 0) {
+      platform_invalidate(frame);
+      return;
+    }
+    const neui_detail::DamageRect r = widget_damage_rect(*wd);
+    platform_invalidate_rect(frame, r.x, r.y, r.w, r.h);
+  }
+
+  uint32_t Session::animation_interval(uint32_t frame_index)
+  {
+    neui_detail::AnimClock& clock = anim_clock();
+    if (!clock.has_owner(frame_index)) return 0;
+    clock.set_reduced_motion(platform_reduced_motion());
+    return clock.heartbeat_ms(frame_index);
+  }
+
+  uint32_t Session::animation_tick(uint32_t frame_index)
+  {
+    WidgetData* fw = get_widget(frame_index);
+    if (!fw || !fw->native_handle) return 0;  // the frame went away
+    neui_detail::AnimClock& clock = anim_clock();
+    clock.set_reduced_motion(platform_reduced_motion());
+    clock.tick([this](uint32_t widget, uint32_t) { invalidate_widget_rect(widget & 0xffff); });
+    return clock.heartbeat_ms(frame_index);
+  }
+
   int Session::frame_client_height(uint32_t widget_index)
   {
     auto parents = _widgets.get_all_parents(widget_index);
@@ -979,16 +1059,12 @@ namespace xpl_host
     // destroy path, reachable in one call from here.
     if (new_idx != 0 && !_widgets.exists(new_idx)) return;
 
-    // The frame that is LOSING the focus ring, captured before _focused_widget
-    // is overwritten. Without this the clear path (new_idx == 0) invalidated
-    // nothing: it read _focused_widget after the assignment, which is 0 by then.
-    void* old_frame = (_focused_widget != 0)
-                        ? find_parent_native_handle(_focused_widget) : nullptr;
-#ifdef NEUI_PLATFORM_LVGL
-    // The widget LOSING focus, for the LVGL host's per-widget repaint below
-    // (captured before the assignment, for the same reason).
+    // The widget LOSING focus, captured before _focused_widget is overwritten -
+    // both repaint paths below need it (set_hovered / set_pressed keep old_idx
+    // for the same reason). Reading _focused_widget after the store made
+    // clearing focus (new_idx == 0) repaint nothing, leaving a stale caret /
+    // focus ring on screen until an unrelated repaint.
     const uint32_t prev_focus = _focused_widget;
-#endif
 
     // If the open combo is losing focus, close its overlay.
     if (_open_combo != 0 && _open_combo == _focused_widget && new_idx != _focused_widget)
@@ -1028,15 +1104,14 @@ namespace xpl_host
     // only (whole-frame fallback happens inside the hook when needed).
     platform_retained_widget_invalidate(this, new_idx);
     platform_retained_widget_invalidate(this, prev_focus);
-    void* frame = (new_idx != 0) ? find_parent_native_handle(new_idx) : nullptr;
-    (void)old_frame;
 #else
-    void* frame = (new_idx != 0) ? find_parent_native_handle(new_idx) : nullptr;
-    if (frame) platform_invalidate(frame);
-    // Repaint the old frame too when it is a different one (or the only one, on
-    // a clear): it has a focus ring to erase.
-    if (old_frame && old_frame != frame) platform_invalidate(old_frame);
+    // Focus decorations (ring, caret) paint inside each widget's damage
+    // footprint: repaint the losing + gaining widgets only, each in its own
+    // frame (so a focus move between windows repaints both).
+    if (new_idx    != 0) invalidate_widget_rect(new_idx);
+    if (prev_focus != 0) invalidate_widget_rect(prev_focus);
 #endif
+    void* frame = (new_idx != 0) ? find_parent_native_handle(new_idx) : nullptr;
 
     // Tell an attached AT where focus went. Bump first: the provider resolves
     // the widget against a freshly built tree, and the FOCUSED bit it needs to
@@ -1091,17 +1166,14 @@ namespace xpl_host
     drop_cursor_override_on_hover_change(new_idx);
     refresh_cursor();
 
-    // Repaint the frame so widgets whose paint reacts to .hovered (BUTTON, ...)
-    // swap visuals. Hover transitions happen at human pointer speed - cheap.
+    // Repaint the widgets whose paint reacts to .hovered (BUTTON, ...) - the
+    // one losing hover and the one gaining it.
 #ifdef NEUI_PLATFORM_LVGL
     platform_retained_widget_invalidate(this, old_idx);
     platform_retained_widget_invalidate(this, new_idx);
 #else
-    uint32_t ref = (new_idx != 0) ? new_idx : old_idx;
-    if (ref != 0) {
-      if (void* frame = find_parent_native_handle(ref))
-        platform_invalidate(frame);
-    }
+    if (old_idx != 0) invalidate_widget_rect(old_idx);
+    if (new_idx != 0) invalidate_widget_rect(new_idx);
 #endif
   }
 
@@ -1383,17 +1455,14 @@ namespace xpl_host
     if (new_idx == 0) drop_cursor_override_on_hover_change(_hovered_widget);
     refresh_cursor();
 
-    // Same rationale as set_hovered: frame repaint so .pressed-aware widgets
-    // (BUTTON) flip to their pressed visual immediately.
+    // Same rationale as set_hovered: repaint the .pressed-aware widgets
+    // (BUTTON) on both sides of the transition.
 #ifdef NEUI_PLATFORM_LVGL
     platform_retained_widget_invalidate(this, old_idx);
     platform_retained_widget_invalidate(this, new_idx);
 #else
-    uint32_t ref = (new_idx != 0) ? new_idx : old_idx;
-    if (ref != 0) {
-      if (void* frame = find_parent_native_handle(ref))
-        platform_invalidate(frame);
-    }
+    if (old_idx != 0) invalidate_widget_rect(old_idx);
+    if (new_idx != 0) invalidate_widget_rect(new_idx);
 #endif
   }
 
@@ -2009,14 +2078,19 @@ namespace xpl_host
     return false;
   }
 
+  // A widget repaints itself after its own visual state changed (hover,
+  // press, caret, value, scroll offset of its own content, ...). Off LVGL
+  // that is just its damage footprint - a container (SECTION, TABVIEW, GRID)
+  // repainting after a scroll / page switch covers its children too, since
+  // they are clipped to it. Anything reaching outside the widget (combo drop
+  // list, popups, menubar, toast) invalidates the whole frame on its own path.
   void WidgetData::repaint()
   {
     if (session) {
 #ifdef NEUI_PLATFORM_LVGL
       platform_retained_widget_invalidate(session, index);
 #else
-      void* frame = session->find_parent_native_handle(index);
-      if (frame) platform_invalidate(frame);
+      session->invalidate_widget_rect(index);
 #endif
     }
   }
@@ -2350,10 +2424,7 @@ namespace xpl_host
     int  n = te_encode_utf8(codepoint, buf);
     te_insert_utf8(text, cursor_pos, sel_anchor, overwrite_mode, buf, n,
                    &history);
-    if (session) {
-      void* frame = session->find_parent_native_handle(index);
-      if (frame) platform_invalidate(frame);
-    }
+    repaint();
     return true;
   }
 
@@ -2590,6 +2661,21 @@ namespace xpl_host
     if (rotated) backend->pop_transform(ctx);
   }
 
+  // NEUI_ATTR_ROTATION spins the image (or its placeholder fill) about the
+  // fitted centre without a clip, so it can reach out to the widget's half-
+  // diagonal on any side. Report that enclosing square whenever the attribute
+  // exists at all - including after it went back to 0, so the repaint that
+  // un-rotates still clears the old overflow.
+  neui_detail::DamageRect ImageWidget::paint_bounds() const
+  {
+    if (!attrs || !attrs->has(NEUI_ATTR_ROTATION))
+      return WidgetData::paint_bounds();
+    const int r = static_cast<int>(std::ceil(std::hypot(static_cast<double>(width),
+                                                        static_cast<double>(height)) * 0.5));
+    const int cx = width / 2, cy = height / 2;
+    return { cx - r, cy - r, 2 * r + (width & 1), 2 * r + (height & 1) };
+  }
+
   // -------------------------------------------------------------------------
   // MenubarWidget cleanup
 
@@ -2671,12 +2757,18 @@ namespace xpl_host
     return o;
   }
 
+  // `cull` != nullptr only on a partial frame the backend accepted: widgets
+  // whose damage footprint misses it are skipped (no PREUPDATE, no paint).
+  // The backend clips to the damage regardless, so culling is purely a
+  // saving - and abs_x / abs_y are refreshed for every widget either way,
+  // because hit-testing reads them.
   static void paint_widgets_recursive(neui_render_backend_t* backend,
                                       neui_render_ctx_t ctx,
                                       neui_detail::Tree<WidgetData>& widgets,
                                       uint32_t parent_index,
                                       int parent_abs_x, int parent_abs_y,
-                                      uint32_t focused_widget)
+                                      uint32_t focused_widget,
+                                      const neui_detail::DamageRegion* cull)
   {
     uint32_t idx = widgets.child(parent_index);
     while (idx != 0) {
@@ -2684,14 +2776,16 @@ namespace xpl_host
         auto& wd = widgets[idx];
         wd.abs_x = parent_abs_x + wd.x;
         wd.abs_y = parent_abs_y + wd.y;
-        if (!wd.native_handle && !wd.is_menu_model() && wd.visible && wd.width > 0 && wd.height > 0) {
+        wd.abs_valid = true;
+        const bool culled = cull && !cull->intersects(widget_damage_rect(wd));
+        if (!culled && !wd.native_handle && !wd.is_menu_model() && wd.visible && wd.width > 0 && wd.height > 0) {
           // Fire WIDGET_PREUPDATE to opted-in widgets so the client can
           // refresh attribute-driven state (e.g. NEUI_PARAM_VALUE) before
           // we read it during paint.
           if (wd.emit_events && wd.session) {
             neui_event_t pre{};
             pre.type = NEUI_EVENT_WIDGET_PREUPDATE;
-            pre.data.preupdate.widget.id = idx;
+            pre.data.preupdate.widget.id = wd.widget_id;
             wd.session->dispatch_event(&pre);
           }
           // Dim disabled widgets uniformly via the backend's alpha stack.
@@ -2740,12 +2834,12 @@ namespace xpl_host
           backend->translate(ctx, static_cast<float>(child_origin_x),
                                   static_cast<float>(child_origin_y));
         paint_widgets_recursive(backend, ctx, widgets, idx,
-                                abs_origin_x, abs_origin_y, focused_widget);
+                                abs_origin_x, abs_origin_y, focused_widget, cull);
         // After-children hook: widget-local coords are active here (we
         // translated by (wd.x, wd.y) above and have not popped yet).
         // Used by CUSTOMDRAW + compound to paint z>=0 layers above the
         // child-widget pass; default implementation is a no-op.
-        if (!wd.native_handle && !wd.is_menu_model() && wd.visible && wd.width > 0 && wd.height > 0) {
+        if (!culled && !wd.native_handle && !wd.is_menu_model() && wd.visible && wd.width > 0 && wd.height > 0) {
           wd.paint_after_children(backend, ctx, idx == focused_widget);
         }
         if (backend->pop_transform) backend->pop_transform(ctx);
@@ -2782,7 +2876,36 @@ namespace xpl_host
     return clear;
   }
 
-  void Session::paint_frame(neui_render_ctx_t ctx, uint32_t parent_index)
+  // NEUI_DEBUG_PAINT_STATS accumulator: one line per second to stderr. Times
+  // the whole paint_frame (palette, walk, overlays, present) - on CG the
+  // rasterisation into the view's backing store happens inside it too.
+  struct PaintStats
+  {
+    using clock = std::chrono::steady_clock;
+    clock::time_point window_start = clock::now();
+    int    frames  = 0;
+    int    partial = 0;
+    double total_ms = 0.0;
+    double max_ms   = 0.0;
+
+    void add(double ms, bool was_partial)
+    {
+      ++frames;
+      if (was_partial) ++partial;
+      total_ms += ms;
+      if (ms > max_ms) max_ms = ms;
+      const auto now = clock::now();
+      if (now - window_start >= std::chrono::seconds(1)) {
+        std::fprintf(stderr, "neui paint: %d frames (%d partial), avg %.2f ms, max %.2f ms\n",
+                     frames, partial, total_ms / frames, max_ms);
+        *this = PaintStats{};
+        window_start = now;
+      }
+    }
+  };
+
+  void Session::paint_frame(neui_render_ctx_t ctx, uint32_t parent_index,
+                            const neui_detail::DamageRegion* damage)
   {
     if (!_backend || !ctx) return;
     // In-paint guard + accessibility cache key, both for the WHOLE paint
@@ -2800,6 +2923,10 @@ namespace xpl_host
       ~PaintScope() { --depth; }
     } paint_scope(_in_paint);
     bump_a11y_revision();
+    _anim_frame = parent_index;
+    static const bool paint_stats = env_flag("NEUI_DEBUG_PAINT_STATS");
+    const auto paint_t0 = paint_stats ? PaintStats::clock::now()
+                                      : PaintStats::clock::time_point{};
     // Choose the palette for this frame BEFORE reading any colour: the
     // begin_frame clear, the widget paints, the combo / popup overlays,
     // and the focus outline all flow through current_palette(). Frames
@@ -2829,6 +2956,36 @@ namespace xpl_host
                                                  : nullptr;
     if (fw && fw->attrs && fw->attrs->has(NEUI_ATTR_BACKGROUND))
       clear = static_cast<uint32_t>(fw->attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
+    // Partial frame? Only for real damage (not EMPTY / FULL), below the
+    // coverage threshold, and only once the backend has ACCEPTED it - it may
+    // refuse (fresh surface, DPI change) and then clears everything, so
+    // culling must not happen. Every other frame tells the backend "full"
+    // explicitly, so no damage can leak into a later frame.
+    static const bool force_full  = env_flag("NEUI_DEBUG_FULL_REPAINT");
+    static const bool flash_damage = env_flag("NEUI_DEBUG_DAMAGE");
+    const neui_detail::DamageRegion* cull = nullptr;
+    if (_backend->set_frame_damage) {
+      bool want_partial = damage && !damage->empty() && !damage->full() && !force_full;
+      if (want_partial) {
+        if (!fw || damage->coverage(fw->width, fw->height) >= k_partial_max_coverage)
+          want_partial = false;
+      }
+      if (want_partial) {
+        std::vector<float> rects;
+        rects.reserve(damage->rects().size() * 4);
+        for (const auto& d : damage->rects()) {
+          rects.push_back(static_cast<float>(d.x));
+          rects.push_back(static_cast<float>(d.y));
+          rects.push_back(static_cast<float>(d.w));
+          rects.push_back(static_cast<float>(d.h));
+        }
+        if (_backend->set_frame_damage(ctx, rects.data(),
+                                       static_cast<int>(damage->rects().size())))
+          cull = damage;
+      } else {
+        _backend->set_frame_damage(ctx, nullptr, 0);
+      }
+    }
     _backend->begin_frame(ctx, clear);
 
     // User zoom (NEUI_ATTR_UI_SCALE). One CTM scale wrapping the entire frame
@@ -2883,10 +3040,10 @@ namespace xpl_host
     if (inset > 0 && _backend->push_transform && _backend->translate) {
       _backend->push_transform(ctx);
       _backend->translate(ctx, 0.0f, (float)inset);
-      paint_widgets_recursive(_backend, ctx, _widgets, parent_index, 0, inset, focus_for_paint);
+      paint_widgets_recursive(_backend, ctx, _widgets, parent_index, 0, inset, focus_for_paint, cull);
       _backend->pop_transform(ctx);
     } else {
-      paint_widgets_recursive(_backend, ctx, _widgets, parent_index, 0, 0, focus_for_paint);
+      paint_widgets_recursive(_backend, ctx, _widgets, parent_index, 0, 0, focus_for_paint, cull);
     }
     // Draw the open combo overlay on top of all other widgets.
     if (_open_combo != 0 && _widgets.exists(_open_combo)) {
@@ -2903,7 +3060,7 @@ namespace xpl_host
     // top strip. No-op when the frame has no menubar / native-menu platforms.
     paint_menubar(ctx, parent_index);
     // Popup-menu overlay sits on top of the combo overlay.
-    paint_popup_menu(ctx);
+    paint_popup_menu(ctx, parent_index);
     // Standalone tree popup (widgets->popup_tree_menu) - above the menubar's own
     // cascade, since it is the thing the user just opened.
     paint_tree_popup(ctx, parent_index);
@@ -2912,12 +3069,31 @@ namespace xpl_host
 
     if (zooming) _backend->pop_transform(ctx);
     _paint_zoom = 1.0f;
+    // The overlays above are not culled: the backend clips them to the
+    // damage, which is all a partial frame needs. The flash is drawn after the
+    // zoom is popped, in the backend's space.
+    if (cull && flash_damage && _backend->fill_rect) {
+      static uint32_t flash_phase = 0;
+      const uint32_t tint = (++flash_phase & 1u) ? 0x40FF00FFu : 0x4000FFFFu;
+      for (const auto& d : cull->rects())
+        _backend->fill_rect(ctx, static_cast<float>(d.x), static_cast<float>(d.y),
+                            static_cast<float>(d.w), static_cast<float>(d.h), tint);
+    }
     _backend->end_frame(ctx);
+    if (paint_stats) {
+      static PaintStats stats;
+      stats.add(std::chrono::duration<double, std::milli>(
+                  PaintStats::clock::now() - paint_t0).count(), cull != nullptr);
+    }
 
     // Restore the previous override so non-paint callers (event
     // handlers, theme provider, other frames painted in the same pump
     // iteration) see the session's default tracking palette again.
     neui_detail::set_active_palette_override(prev_override);
+
+    // Widgets that read the animation clock keep the frame's timer running.
+    if (WidgetData* fw = get_widget(parent_index); fw && fw->native_handle)
+      platform_set_animation_timer(fw->native_handle, animation_interval(parent_index));
   }
 
 #ifdef NEUI_PLATFORM_LVGL
@@ -2973,7 +3149,7 @@ namespace xpl_host
       if (wd.emit_events) {
         neui_event_t pre{};
         pre.type = NEUI_EVENT_WIDGET_PREUPDATE;
-        pre.data.preupdate.widget.id = widget_index;
+        pre.data.preupdate.widget.id = wd.widget_id;
         dispatch_event(&pre);
       }
       bool dim = !wd.enabled && _backend->push_alpha && _backend->pop_alpha;
@@ -3012,7 +3188,7 @@ namespace xpl_host
         if (cb) cb->paint_overlay(_backend, ctx);
       }
     }
-    paint_popup_menu(ctx);
+    paint_popup_menu(ctx, frame_index);
     paint_toast(ctx, frame_index);
   }
 #endif // NEUI_PLATFORM_LVGL
@@ -3037,6 +3213,7 @@ namespace xpl_host
         auto& wd = widgets[idx];
         wd.abs_x = parent_abs_x + wd.x;
         wd.abs_y = parent_abs_y + wd.y;
+        wd.abs_valid = true;
         // Descend only into visible containers, matching the paint walk - an
         // invisible parent hides its whole subtree, so its descendants' cached
         // positions are meaningless either way.
@@ -3211,6 +3388,44 @@ namespace xpl_host
     }
   }
 
+  bool Session::frame_activated(uint32_t frame_index)
+  {
+    if (frame_index == 0 || !_widgets.exists(frame_index)) return false;
+    // A popup surface never takes OS keyboard focus (its keys arrive at the
+    // owner and the popup gate retargets them); a platform reporting its window
+    // focused anyway must not pull logical focus away from the owner.
+    if (dynamic_cast<PopupSurfaceWidget*>(&_widgets[frame_index])) return false;
+    // A frame a modal DIALOG is blocking keeps focus out: the dialog took it in
+    // widget_show and gives it back in end_modal. Its window can still be
+    // reported focused (X11 has no per-window input disable).
+    for (uint32_t rc = _widgets.child(0); rc != 0; rc = _widgets.next(rc)) {
+      if (!_widgets.exists(rc)) continue;
+      auto& cand = _widgets[rc];
+      if (!cand.is_dialog() || cand.owner_index != frame_index) continue;
+      auto* dlg = dynamic_cast<FrameWidget*>(&cand);
+      if (dlg && dlg->modal_pump_active()) return false;
+    }
+    _active_frame = frame_index;
+    if (_focused_widget != 0 && _widgets.exists(_focused_widget)) {
+      const uint32_t from = frame_of(_focused_widget);
+      if (from == frame_index) return false;  // focus is already in it
+      // Focus inside an open popup surface stays there: a popup never takes
+      // OS keyboard focus, so its owner (re)gaining it - a grab taken and
+      // released, the owner clicked into the stack - is not the user leaving
+      // the popup (the surface's own dismissal rules decide that).
+      if (popup_surface_depth(from) >= 0) return false;
+      _frame_focus[from] = _focused_widget;
+    }
+    uint32_t want = 0;
+    auto it = _frame_focus.find(frame_index);
+    if (it != _frame_focus.end() && _widgets.exists(it->second) &&
+        frame_of(it->second) == frame_index && _widgets[it->second].enabled)
+      want = it->second;
+    if (want == _focused_widget) return false;
+    set_focus(want);
+    return true;
+  }
+
   void Session::focus_next(bool forward, uint32_t frame_hint)
   {
     // Traversal is PER FRAME. Collecting across every root child would let TAB
@@ -3242,6 +3457,10 @@ namespace xpl_host
         _widgets[frame_hint].is_frame())
       frame = frame_hint;
     if (frame == 0) frame = frame_of(_focused_widget);
+    // Nothing focused and no hint: the frame whose window last took OS focus.
+    if (frame == 0 && _active_frame != 0 && _widgets.exists(_active_frame) &&
+        _widgets[_active_frame].native_handle)
+      frame = _active_frame;
     if (frame == 0) {
       // Last resort (no hint, nothing focused): the first root child that is
       // actually a REALIZED frame. Testing `visible` here would be useless -
@@ -3941,6 +4160,9 @@ namespace xpl_host
     // Under a device-pixel callback the zoom is no longer in the CTM, so the
     // backend's own get_scale_factor is already the whole truth.
     painter.extra_scale      = unzoom ? 1.0f : zoom;
+    painter.resolve_shader   = xpl_resolve_shader;
+    neui_detail::AnimClock& clock = session->anim_clock();
+    clock.begin_widget();
 
     if (auto* ca = resolve_widget_compound(session, compound_asset)) {
       // Compound mode: paint z<0 layers here; z>=0 layers come from
@@ -3963,6 +4185,7 @@ namespace xpl_host
       ev.data.paint.scale       = dev_scale;
       session->dispatch_event(&ev);
     }
+    if (clock.end_widget()) clock.mark(widget_id, session->_anim_frame);
 
     if (backend->pop_clip) backend->pop_clip(ctx);
     if (backend->pop_transform) backend->pop_transform(ctx);
@@ -3991,13 +4214,17 @@ namespace xpl_host
     painter.host_token       = session;
     painter.draw_asset_thunk = &xpl_painter_draw_asset_thunk;
     painter.extra_scale      = session->paint_zoom();
+    painter.resolve_shader   = xpl_resolve_shader;
 
     bool selected = neui_detail::attr_as_float(
                       neui_detail::attrs_readonly(attrs), NEUI_ATTR_SELECTED, 0.0f) != 0.0f;
     uint32_t state_mask = neui_detail::compose_widget_state(enabled, hovered, pressed, selected);
+    neui_detail::AnimClock& clock = session->anim_clock();
+    clock.begin_widget();
     neui_detail::paint_compound_above(&painter, *ca, fw, fh,
                                         neui_detail::attrs_readonly(attrs),
                                         state_mask);
+    if (clock.end_widget()) clock.mark(widget_id, session->_anim_frame);
 
     if (backend->pop_clip) backend->pop_clip(ctx);
   }
@@ -4023,8 +4250,7 @@ namespace xpl_host
     if (!wd || !wd->session) return;
     // Mirrors WidgetData::repaint() but that method is protected, so
     // duplicate its body (single line) rather than friend the dispatch.
-    void* frame = wd->session->find_parent_native_handle(wd->index);
-    if (frame) platform_invalidate(frame);
+    wd->session->invalidate_widget_rect(wd->index);
   }
 
   static void xpl_behavior_emit_attr_changed(void* host_data,
@@ -4984,39 +5210,26 @@ namespace xpl_host
         ly < static_cast<float>(_popup_y_abs) || ly >= static_cast<float>(_popup_y_abs + height)) {
       if (_popup_hover != -1) {
         _popup_hover = -1;
-        void* frame = nullptr;
-        uint32_t f = _widgets.child(0);
-        while (f != 0 && _widgets.exists(f)) {
-          if (_widgets[f].native_handle) { frame = _widgets[f].native_handle; break; }
-          f = _widgets.next(f);
-        }
-        if (frame) platform_invalidate(frame);
+        invalidate_popup_frame();
       }
       return false;
     }
     int rel_y = (int)ly - _popup_y_abs - POPUP_PAD_Y;
-    int idx = 0;
+    int idx = 0;       // 1-based, like the click, the keys and the paint
     int run_y = 0;
     int new_hover = -1;
     for (auto& s : _popup_items) {
+      ++idx;
       int h = popup_item_height(s);
       if (rel_y >= run_y && rel_y < run_y + h) {
         if (!popup_item_is_separator(s)) new_hover = idx;
         break;
       }
       run_y += h;
-      ++idx;
     }
     if (new_hover != _popup_hover) {
       _popup_hover = new_hover;
-      uint32_t f = _widgets.child(0);
-      while (f != 0 && _widgets.exists(f)) {
-        if (_widgets[f].native_handle) {
-          platform_invalidate(_widgets[f].native_handle);
-          break;
-        }
-        f = _widgets.next(f);
-      }
+      invalidate_popup_frame();
     }
     return true;
   }
@@ -5052,22 +5265,24 @@ namespace xpl_host
         next += dir;
       }
       _popup_hover = next;
-      uint32_t f = _widgets.child(0);
-      while (f != 0 && _widgets.exists(f)) {
-        if (_widgets[f].native_handle) {
-          platform_invalidate(_widgets[f].native_handle);
-          break;
-        }
-        f = _widgets.next(f);
-      }
+      invalidate_popup_frame();
       return true;
     }
     return false;
   }
 
-  void Session::paint_popup_menu(neui_render_ctx_t ctx)
+  // The popup is painted (and repainted) on the frame it was opened in only;
+  // a session with several frames would otherwise draw it on each of them.
+  void Session::invalidate_popup_frame()
   {
-    if (!_popup_active || !_backend) return;
+    if (_popup_frame != 0 && _widgets.exists(_popup_frame) &&
+        _widgets[_popup_frame].native_handle)
+      platform_invalidate(_widgets[_popup_frame].native_handle);
+  }
+
+  void Session::paint_popup_menu(neui_render_ctx_t ctx, uint32_t frame_index)
+  {
+    if (!_popup_active || !_backend || frame_index != _popup_frame) return;
     using neui_detail::ColorRole;
     int w = popup_total_width(_backend, ctx, _popup_items);
     int h = popup_total_height(_popup_items);
@@ -5121,20 +5336,28 @@ namespace xpl_host
 
     auto& anchor = _widgets[anchor_idx];
 
-    // Convert anchor-local logical to absolute frame-local logical by
-    // walking up the tree summing x/y offsets. Frames have native_handle
-    // set; their x/y is screen-relative so we stop there.
+    // Convert anchor-local logical to absolute frame-local logical. The
+    // paint walk caches abs_x / abs_y in the space the popup is painted and
+    // hit-tested in (in-frame menubar band, section chip band and scroll
+    // included); before the anchor's first paint, walk up the tree summing
+    // x/y offsets. Frames have native_handle set; their x/y is
+    // screen-relative so we stop there.
     int abs_x = lx;
     int abs_y = ly;
     auto parents = _widgets.get_all_parents(anchor_idx);
-    abs_x += anchor.x;
-    abs_y += anchor.y;
-    for (auto p : parents) {
-      if (p == 0 || !_widgets.exists(p)) continue;
-      auto& pw = _widgets[p];
-      if (pw.native_handle) break;  // stop at the frame
-      abs_x += pw.x;
-      abs_y += pw.y;
+    if (anchor.abs_valid && !anchor.native_handle) {
+      abs_x += anchor.abs_x;
+      abs_y += anchor.abs_y;
+    } else {
+      abs_x += anchor.x;
+      abs_y += anchor.y;
+      for (auto p : parents) {
+        if (p == 0 || !_widgets.exists(p)) continue;
+        auto& pw = _widgets[p];
+        if (pw.native_handle) break;  // stop at the frame
+        abs_x += pw.x;
+        abs_y += pw.y;
+      }
     }
 
     _popup_items     = items;
@@ -5147,7 +5370,14 @@ namespace xpl_host
 
     // Find the owning frame and invalidate so the overlay paints on the
     // very next pump iteration (before the user moves the mouse).
-    void* frame = find_parent_native_handle(anchor_idx);
+    _popup_frame = 0;
+    if (anchor.native_handle) {
+      _popup_frame = anchor_idx;
+    } else {
+      for (uint32_t p : parents)
+        if (p != 0 && _widgets.exists(p) && _widgets[p].native_handle) { _popup_frame = p; break; }
+    }
+    void* frame = _popup_frame ? _widgets[_popup_frame].native_handle : nullptr;
     if (frame) platform_invalidate(frame);
 
     // Nested message loop until the user picks or dismisses.
@@ -5159,7 +5389,9 @@ namespace xpl_host
     _popup_hover  = -1;
     _popup_picked = 0;
 
-    if (frame) platform_invalidate(frame);
+    // The frame may have closed while the popup was up.
+    invalidate_popup_frame();
+    _popup_frame = 0;
     return picked;
   }
 
@@ -6991,7 +7223,7 @@ namespace xpl_host
     return true;  // capture all keys while a menu is open
   }
 
-  bool Session::try_menubar_accel(uint32_t keycode, uint32_t modifiers)
+  bool Session::try_menubar_accel(uint32_t keycode, uint32_t modifiers, uint32_t frame_index)
   {
     if (keycode == 0 || keycode == NEUI_KEY_NONE) return false;
     const uint32_t mask = NEUI_KMOD_CTRL | NEUI_KMOD_SHIFT |
@@ -6999,6 +7231,7 @@ namespace xpl_host
     uint32_t mods = modifiers & mask;
     for (uint32_t mb_idx : _menubars) {
       if (!_widgets.exists(mb_idx)) continue;
+      if (frame_index != 0 && frame_of(mb_idx) != frame_index) continue;
       auto* mbp = dynamic_cast<MenubarWidget*>(&_widgets[mb_idx]);
       if (!mbp) continue;
       for (uint32_t id : mbp->menu_item_ids_ordered) {
