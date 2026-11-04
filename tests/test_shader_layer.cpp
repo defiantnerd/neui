@@ -13,6 +13,7 @@
 #include "widget_paint_compound.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>

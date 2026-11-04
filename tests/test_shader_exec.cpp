@@ -5,7 +5,9 @@
 // output rule, and control flow against hand-written C++ equivalents.
 #include "shader/nsl.h"
 
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <string>

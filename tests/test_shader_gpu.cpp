@@ -12,6 +12,7 @@
 #include "shader_layer.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>

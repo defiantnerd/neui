@@ -11,6 +11,7 @@
 #include "shader_api.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <string>
