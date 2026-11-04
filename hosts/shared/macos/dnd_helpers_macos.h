@@ -7,6 +7,7 @@
 
 #include "../dnd_modifier_suggest.h"
 #include "../../../include/neui/d/dnd.h"
+#include "keys_macos.h"
 
 // Drop-target-side NSDragOperation <-> NEUI_DND_ACTION_* translation,
 // shared by the two macOS <NSDraggingDestination> implementations
@@ -26,6 +27,16 @@ namespace neui_detail
     if (action & NEUI_DND_ACTION_MOVE) mask |= NSDragOperationMove;
     if (action & NEUI_DND_ACTION_LINK) mask |= NSDragOperationLink;
     return mask;
+  }
+
+  // The NEUI_MK_* bits a DnD event carries in buttonmap: the live mouse buttons
+  // and modifier keys, from the same shared translation as every mouse event.
+  // AppKit hands a dragging destination no event, so this reads the class-level
+  // state ([NSEvent modifierFlags], like dnd_suggested_from_nsop below) - which
+  // is what lets a client tell Option-drag from a plain drag, or Command-drag.
+  inline uint32_t dnd_buttonmap_macos()
+  {
+    return mac_buttonmap(NSEvent.pressedMouseButtons, NSEvent.modifierFlags);
   }
 
   // Source operation mask -> suggested NEUI_DND_ACTION_* for the client,

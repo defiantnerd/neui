@@ -937,6 +937,11 @@ namespace
       ev.data.mouse.widget = { hw->widget_id };
       ev.data.mouse.x      = static_cast<int>(lx);
       ev.data.mouse.y      = static_cast<int>(ly);
+      // The modifier / button state of the release. X reports the state from
+      // BEFORE it, so the button that just came up is still set: clear it, as
+      // win32 and macOS report an UP with its button already released.
+      ev.data.mouse.buttonmap =
+        neui_detail::x11_buttonmap(be.state & ~static_cast<unsigned int>(Button1Mask));
       ev.type = NEUI_EVENT_MOUSE_BUTTON_UP;
       s->dispatch_mouse_event(hit, &ev);
       if (hit == pressed) {  // CLICK only when up lands on the pressed widget
@@ -963,6 +968,10 @@ namespace
       ev.data.mouse.widget = { hw->widget_id };
       ev.data.mouse.x      = static_cast<int>(lx);
       ev.data.mouse.y      = static_cast<int>(ly);
+      // As for the left button: the state from before the release, with the
+      // button that came up cleared.
+      ev.data.mouse.buttonmap =
+        neui_detail::x11_buttonmap(be.state & ~static_cast<unsigned int>(Button3Mask));
       s->dispatch_mouse_event(hit, &ev);
     }
   }
@@ -1075,6 +1084,20 @@ namespace
     uint32_t mods    = neui_detail::x11_modifiers_to_neui(ke.state);
     uint32_t keycode = neui_detail::x11_keysym_to_neui(ks);
 
+    // A modifier pressed on its own: report it as the key it is
+    // (NEUI_KEY_SHIFT / _CONTROL / _ALT / _COMMAND). With an input method the
+    // lookup above can come back without a keysym for it - nothing to compose -
+    // so ask the keycode directly, for the modifiers only: doing that for every
+    // key would turn an IME's intermediate keystrokes into KEYDOWNs.
+    if (keycode == 0)
+      keycode = neui_detail::x11_keysym_to_modifier_key(XLookupKeysym(&ke, 0));
+    const bool modifier_key =
+      neui_detail::kmod_bit_for_modifier_key(keycode, /*mac=*/false) != 0;
+    // XKeyEvent.state is the state from BEFORE the press; the contract is the
+    // state after it (see hosts/shared/modifier_keys.h).
+    if (modifier_key)
+      mods = neui_detail::x11_modifiers_after_key(ke.state, keycode, /*down=*/true);
+
     // Esc dismisses an open tree popup, before anything else claims the key.
     if (s->handle_tree_popup_key(keycode)) return;
     // ...and an open popup-surface stack. The key arrives at the OWNER: a popup
@@ -1120,6 +1143,10 @@ namespace
       }
     }
 
+    // A modifier has no text. (Auto-repeat is not a concern: X does not repeat
+    // modifier keys by default, so a held modifier is one press.)
+    if (modifier_key) return;
+
     // KEYCHAR for printable input. Skip when Ctrl is held (command shortcuts
     // were already routed via on_keydown above), matching macOS.
     if (mods & NEUI_KMOD_CTRL) return;
@@ -1162,6 +1189,10 @@ namespace
     uint32_t keycode = neui_detail::x11_keysym_to_neui(ks);
     if (keycode == 0) return;
     uint32_t mods = neui_detail::x11_modifiers_to_neui(ke.state);
+    // A modifier released on its own: the state is from BEFORE the release, the
+    // contract is the state after it (see hosts/shared/modifier_keys.h).
+    if (neui_detail::kmod_bit_for_modifier_key(keycode, /*mac=*/false) != 0)
+      mods = neui_detail::x11_modifiers_after_key(ke.state, keycode, /*down=*/false);
     // The release peer of the KEYDOWN gate: a press the popup swallowed must not
     // have its release land on the widget underneath.
     if (s->popup_gate_key(NEUI_EVENT_KEYUP, keycode, mods)) return;
@@ -1283,6 +1314,18 @@ namespace
     XFlush(dpy);
   }
 
+  // The live NEUI_MK_* bits for an XDND event we RECEIVE. XDND carries no key
+  // state of its own (the source folds it into the action it proposes), so ask
+  // the server for the pointer / modifier mask. That is a query of the server's
+  // state, not an event read, so it works while another client holds the pointer
+  // grab - which is the whole length of the drag.
+  uint32_t xdnd_buttonmap(Display* dpy)
+  {
+    Window rr, ch; int rx, ry, wx, wy; unsigned int mask = 0;
+    XQueryPointer(dpy, DefaultRootWindow(dpy), &rr, &ch, &rx, &ry, &wx, &wy, &mask);
+    return neui_detail::x11_buttonmap(mask);
+  }
+
   // Returns true if the message was an XDND target message (and was handled).
   bool xdnd_handle_client_message(XClientMessageEvent& e)
   {
@@ -1351,11 +1394,11 @@ namespace
       uint32_t accepted;
       if (!g_xdrag.entered) {
         accepted = s->dispatch_dnd_enter(frame_idx, g_xdrag.last_lx, g_xdrag.last_ly,
-                                         fmts, count, suggested, 0);
+                                         fmts, count, suggested, xdnd_buttonmap(dpy));
         g_xdrag.entered = true;
       } else {
         accepted = s->dispatch_dnd_move(frame_idx, g_xdrag.last_lx, g_xdrag.last_ly,
-                                        fmts, count, suggested, 0);
+                                        fmts, count, suggested, xdnd_buttonmap(dpy));
       }
       xdnd_send_status(dpy, src, e.window, accepted != 0,
                        neui_detail::xdnd_neui_to_action(g_xa, accepted));
@@ -1388,7 +1431,8 @@ namespace
     const char* const* fmts = g_xdrag.ptrs.empty() ? nullptr : g_xdrag.ptrs.data();
     uint32_t count = (uint32_t)g_xdrag.ptrs.size();
     uint32_t accepted = s->dispatch_dnd_drop(frame_idx, g_xdrag.last_lx, g_xdrag.last_ly,
-                                             fmts, count, g_xdrag.last_action, 0, &item);
+                                             fmts, count, g_xdrag.last_action,
+                                             xdnd_buttonmap(dpy), &item);
     xdnd_send_finished(dpy, src, e.window, accepted != 0,
                        neui_detail::xdnd_neui_to_action(g_xa, accepted));
     xdnd_reset_drag();
@@ -3691,6 +3735,7 @@ namespace
           int rx = e.xmotion.x_root, ry = e.xmotion.y_root;
           uint32_t proposed = neui_detail::dnd_suggest_action(
             allowed_actions, e.xmotion.state & ControlMask, e.xmotion.state & ShiftMask);
+          const uint32_t dnd_mk = neui_detail::x11_buttonmap(e.xmotion.state);
           put_preview(rx, ry);
           if (waiting_finish) continue;
 
@@ -3727,8 +3772,8 @@ namespace
             float sc = static_cast<float>(cdpi) / 96.0f; if (sc <= 0.0f) sc = 1.0f;
             int llx = (int)(static_cast<float>(lx) / sc), lly = (int)(static_cast<float>(ly) / sc);
             uint32_t a = cur_entered
-              ? cs->dispatch_dnd_move (cframe, llx, lly, fmts, fcount, proposed, 0)
-              : cs->dispatch_dnd_enter(cframe, llx, lly, fmts, fcount, proposed, 0);
+              ? cs->dispatch_dnd_move (cframe, llx, lly, fmts, fcount, proposed, dnd_mk)
+              : cs->dispatch_dnd_enter(cframe, llx, lly, fmts, fcount, proposed, dnd_mk);
             cur_entered = true; accept = a != 0; neg_action = a;
           } else if (cur != None) {
             xdnd_send(cur, g_xa.position, (long)src, 0,
@@ -3743,8 +3788,12 @@ namespace
           if (cur_internal && cs && accept) {
             int lx, ly; Window ch; XTranslateCoordinates(d, root, cur, rx, ry, &lx, &ly, &ch);
             float sc = static_cast<float>(cdpi) / 96.0f; if (sc <= 0.0f) sc = 1.0f;
+            // The drag button is released by now - the same state a win32
+            // IDropTarget::Drop reports.
             result = cs->dispatch_dnd_drop(cframe, (int)(static_cast<float>(lx) / sc), (int)(static_cast<float>(ly) / sc),
-                                           fmts, fcount, proposed, 0, item);
+                                           fmts, fcount, proposed,
+                                           neui_detail::x11_buttonmap(e.xbutton.state & ~static_cast<unsigned int>(Button1Mask)),
+                                           item);
             finished = true;
           } else if (cur != None && !cur_internal && accept) {
             xdnd_send(cur, g_xa.drop, (long)src, 0, CurrentTime, 0, 0);

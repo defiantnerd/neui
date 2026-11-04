@@ -36,6 +36,7 @@ add_executable(neui_tests
   test_a11y_tree.cpp
   test_a11y_uia_map.cpp
   test_wheel_direction.cpp
+  test_mouse_modifiers.cpp
   test_popup_nav.cpp
   test_metrics.cpp
   test_ios_api.cpp
@@ -198,6 +199,19 @@ if(APPLE AND NOT NEUI_IOS)
     ${PROJECT_SOURCE_DIR}/include)
   target_compile_features(neui_focus_smoke_macos PRIVATE cxx_std_17)
   target_link_libraries(neui_focus_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
+  # Modifier-key harness, both macOS hosts: Option / Command in the buttonmap of
+  # real NSEvent mouse events, and the modifier keys reaching a focused widget as
+  # KEYDOWN / KEYUP from real flagsChanged: events - the previous-flags diff that
+  # AppKit forces on us, end to end. The portable translations are covered by
+  # test_mouse_modifiers.cpp; this is the part that needs AppKit. Realizes real
+  # NSWindows, so built but NOT ctest-registered.
+  add_executable(neui_modifier_keys_smoke_macos modifier_keys_smoke_macos.mm)
+  target_include_directories(neui_modifier_keys_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_modifier_keys_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_modifier_keys_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
   # Modal-dialog LIFETIME harness, both macOS hosts. A blocking modal show polls

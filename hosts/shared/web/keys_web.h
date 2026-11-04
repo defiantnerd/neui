@@ -10,10 +10,14 @@
 // macos/keys_macos.h, but pure C++ over the strings a KeyboardEvent carries,
 // so it is unit-tested (tests/test_keys_web.cpp) and compiles everywhere.
 //
-//   - web_key_to_neui:      (KeyboardEvent.code, .key) -> neui_key_t.
+//   - web_key_to_neui:      (KeyboardEvent.code, .key) -> neui_key_t, the
+//     modifier keys themselves included (NEUI_KEY_SHIFT / _CONTROL / _ALT /
+//     _COMMAND; left and right share a code, AltGr is none of them).
 //   - web_modifiers_to_neui: physical modifier bits -> NEUI_KMOD_*, with the
 //     Apple convention (Cmd is the primary modifier, NEUI_KMOD_CTRL).
 //   - web_key_char:         the codepoint a key press types, if any.
+//   - web_buttonmap:        PointerEvent buttons + physical modifiers ->
+//     NEUI_MK_* (Alt -> NEUI_MK_ALT, Meta -> NEUI_MK_COMMAND).
 //
 // Letters come from `key`, not `code`: `code` names the physical position
 // (KeyZ is the key labelled Y on a German keyboard), but neui keys follow the
@@ -61,6 +65,10 @@ inline uint32_t web_key_to_neui(const char* code, const char* key)
   if (k >= 'A' && k <= 'Z') return NEUI_KEY_A + (k - 'A');
   if (!code) return 0;
 
+  // AltGr (code AltRight, key AltGraph) selects characters; it is not the Alt
+  // modifier, and web_modifiers_to_neui drops it the same way.
+  if (key && std::strcmp(key, "AltGraph") == 0) return 0;
+
   // Physical letters for non-Latin layouts; top-row and numpad digits.
   if (std::strncmp(code, "Key", 3) == 0 && code[3] >= 'A' && code[3] <= 'Z' && !code[4])
     return NEUI_KEY_A + static_cast<uint32_t>(code[3] - 'A');
@@ -94,6 +102,13 @@ inline uint32_t web_key_to_neui(const char* code, const char* key)
     { "Insert",      NEUI_KEY_INSERT },
     { "Delete",      NEUI_KEY_DELETE },
     { "NumpadDecimal", 0 },   // types a character; no key of its own
+    // The modifier keys, pressed or released on their own. Either side is one
+    // code; "OS" is what Firefox before 118 called the Meta keys.
+    { "ShiftLeft",    NEUI_KEY_SHIFT },   { "ShiftRight",   NEUI_KEY_SHIFT },
+    { "ControlLeft",  NEUI_KEY_CONTROL }, { "ControlRight", NEUI_KEY_CONTROL },
+    { "AltLeft",      NEUI_KEY_ALT },     { "AltRight",     NEUI_KEY_ALT },
+    { "MetaLeft",     NEUI_KEY_COMMAND }, { "MetaRight",    NEUI_KEY_COMMAND },
+    { "OSLeft",       NEUI_KEY_COMMAND }, { "OSRight",      NEUI_KEY_COMMAND },
   };
   for (const Named& n : k_named)
     if (std::strcmp(code, n.code) == 0) return n.key;
@@ -132,17 +147,36 @@ inline uint32_t web_key_char(const char* key, uint32_t neui_mods)
   return cp;
 }
 
-// Win32 MK_* bits for neui_event_mouse_t::buttonmap from PointerEvent.buttons
-// (1 primary, 2 secondary, 4 middle) and the physical modifiers.
+// NEUI_MK_* bits for neui_event_mouse_t::buttonmap from PointerEvent.buttons
+// (1 primary, 2 secondary, 4 middle) and the physical modifiers. The MK_* bits
+// name PHYSICAL keys (see <neui/d/events.h>), so Meta - Cmd on Apple, the Windows
+// key / Super elsewhere - is NEUI_MK_COMMAND whatever the platform, and Ctrl is
+// NEUI_MK_CONTROL even on Apple. AltGr (Windows reports it as Ctrl + Alt) is no
+// modifier, as in web_modifiers_to_neui.
 inline uint32_t web_buttonmap(uint32_t buttons, uint32_t web_mods)
 {
+  if (web_mods & WEB_MOD_ALTGRAPH) web_mods &= ~(WEB_MOD_CTRL | WEB_MOD_ALT);
   uint32_t m = 0;
-  if (buttons & 1) m |= 0x0001;              // MK_LBUTTON
-  if (buttons & 2) m |= 0x0002;              // MK_RBUTTON
-  if (buttons & 4) m |= 0x0010;              // MK_MBUTTON
-  if (web_mods & WEB_MOD_SHIFT) m |= 0x0004; // MK_SHIFT
-  if (web_mods & WEB_MOD_CTRL)  m |= 0x0008; // MK_CONTROL
+  if (buttons & 1) m |= NEUI_MK_LBUTTON;
+  if (buttons & 2) m |= NEUI_MK_RBUTTON;
+  if (buttons & 4) m |= NEUI_MK_MBUTTON;
+  if (web_mods & WEB_MOD_SHIFT) m |= NEUI_MK_SHIFT;
+  if (web_mods & WEB_MOD_CTRL)  m |= NEUI_MK_CONTROL;
+  if (web_mods & WEB_MOD_ALT)   m |= NEUI_MK_ALT;
+  if (web_mods & WEB_MOD_META)  m |= NEUI_MK_COMMAND;
   return m;
+}
+
+// The buttonmap of a WHEEL event: the modifiers, but never Shift. The desktop
+// platform layers turn Shift + vertical wheel into a horizontal notch and negate
+// it, and consumers undo exactly that when a horizontal notch arrives with
+// NEUI_MK_SHIFT (hosts/shared/wheel_direction.h). A browser does not negate: some
+// convert the gesture to deltaX themselves, some leave deltaY and scroll on their
+// own. Reporting Shift here would have that rule reverse a notch that was never
+// negated, so the bit is withheld.
+inline uint32_t web_wheel_buttonmap(uint32_t web_mods)
+{
+  return web_buttonmap(0, web_mods) & ~static_cast<uint32_t>(NEUI_MK_SHIFT);
 }
 
 } // namespace neui_detail

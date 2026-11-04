@@ -26,7 +26,14 @@ namespace neui_detail { class DataItem; }
 // the bit NEUI_MK_ALT reserves, so forwarding would report a phantom Alt on
 // any mouse with side buttons. Each OS has a translation helper for this -
 // hosts/shared/{win32/keys_win32.h,macos/keys_macos.h,linux/keys_linux.h}
-// (win32_buttonmap / mac_buttonmap / x11_buttonmap). Use them.
+// (win32_buttonmap / mac_buttonmap / x11_buttonmap). Use them: they also add
+// the bits no OS puts in a mouse event's own state word - NEUI_MK_ALT and
+// NEUI_MK_COMMAND on Win32 (read from GetKeyState), Option / Command on macOS.
+// The modifier keys as KEYDOWN / KEYUP (NEUI_KEY_SHIFT / _CONTROL / _ALT /
+// _COMMAND) are the other half of that contract: a platform layer delivers a
+// modifier pressed or released on its own to the focused widget, once (no
+// repeat), with NEUI_KMOD_* modifiers as they stand AFTER the change and no
+// KEYCHAR. hosts/shared/modifier_keys.h is the portable core.
 
 namespace xpl_host
 {

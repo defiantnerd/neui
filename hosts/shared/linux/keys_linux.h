@@ -12,21 +12,56 @@
 
 #include <cstdint>
 
+#include "../mouse_modifiers.h"
+#include "../modifier_keys.h"
+
 // X11 input-event translation primitives for the crossplatform host's Linux
 // platform layer. Mirror of hosts/shared/macos/keys_macos.h:
 //   - x11_keysym_to_neui:  KeySym -> neui_key_t (matches Win32 VK_* values).
 //   - x11_modifiers_to_neui: XKeyEvent.state -> NEUI_KMOD_* bitmask. Per neui's
 //     convention NEUI_KMOD_CTRL is the platform PRIMARY modifier, which on
 //     Linux is the physical Control key; Super (Mod4) -> NEUI_KMOD_META.
-//   - x11_buttonmap: button/motion event state -> Win32 MK_* bitmask carried
-//     in neui_event_mouse_t::buttonmap.
+//   - x11_buttonmap: button/motion event state -> NEUI_MK_* bitmask carried
+//     in neui_event_mouse_t::buttonmap (Mod1 -> NEUI_MK_ALT, Mod4 ->
+//     NEUI_MK_COMMAND). The decoding is the portable
+//     hosts/shared/mouse_modifiers.h::mk_from_x11.
+//   - x11_modifiers_after_key: the modifier keys as KEYS (Shift_L .. Super_R ->
+//     NEUI_KEY_SHIFT .. _COMMAND, via x11_keysym_to_neui) and the NEUI_KMOD_*
+//     state AFTER one of them changed - X11 reports the state from before.
 //   - is_printable_codepoint: gates which decoded codepoints fire KEYCHAR.
 
 namespace neui_detail
 {
 
+// The raw values hosts/shared/mouse_modifiers.h and modifier_keys.h decode (so
+// that they need no X11 headers) are Xlib's own. Checked here, where Xlib is on
+// hand.
+static_assert(static_cast<unsigned int>(ShiftMask)   == x11_state::kShift
+           && static_cast<unsigned int>(ControlMask) == x11_state::kControl
+           && static_cast<unsigned int>(Mod1Mask)    == x11_state::kMod1
+           && static_cast<unsigned int>(Mod4Mask)    == x11_state::kMod4
+           && static_cast<unsigned int>(Button1Mask) == x11_state::kButton1
+           && static_cast<unsigned int>(Button2Mask) == x11_state::kButton2
+           && static_cast<unsigned int>(Button3Mask) == x11_state::kButton3,
+              "x11_state values no longer match <X11/X.h>");
+static_assert(static_cast<unsigned long>(XK_Shift_L)   == x11_keysym::kShiftL
+           && static_cast<unsigned long>(XK_Shift_R)   == x11_keysym::kShiftR
+           && static_cast<unsigned long>(XK_Control_L) == x11_keysym::kControlL
+           && static_cast<unsigned long>(XK_Control_R) == x11_keysym::kControlR
+           && static_cast<unsigned long>(XK_Meta_L)    == x11_keysym::kMetaL
+           && static_cast<unsigned long>(XK_Meta_R)    == x11_keysym::kMetaR
+           && static_cast<unsigned long>(XK_Alt_L)     == x11_keysym::kAltL
+           && static_cast<unsigned long>(XK_Alt_R)     == x11_keysym::kAltR
+           && static_cast<unsigned long>(XK_Super_L)   == x11_keysym::kSuperL
+           && static_cast<unsigned long>(XK_Super_R)   == x11_keysym::kSuperR,
+              "x11_keysym values no longer match <X11/keysymdef.h>");
+
 inline uint32_t x11_keysym_to_neui(KeySym ks)
 {
+  // The modifier keys, as keys. Either side maps to one code; Alt and Meta are
+  // both Mod1 (see modifier_keys.h).
+  if (const uint32_t mod = x11_keysym_to_modifier_key(ks)) return mod;
+
   // Letters: X gives lower- or upper-case depending on Shift/Lock; neui keys
   // are the uppercase ASCII value (== Win32 VK_A..VK_Z), so fold to upper.
   if (ks >= XK_a && ks <= XK_z) return NEUI_KEY_A + (uint32_t)(ks - XK_a);
@@ -67,17 +102,21 @@ inline uint32_t x11_modifiers_to_neui(unsigned int state)
   return m;
 }
 
-// Win32 MK_* bits the host's mouse events carry in buttonmap. The numeric
-// values match Win32 MK_LBUTTON / MK_RBUTTON / MK_SHIFT / MK_CONTROL.
+// NEUI_MK_* bits the host's mouse events carry in buttonmap.
 inline uint32_t x11_buttonmap(unsigned int state)
 {
-  uint32_t m = 0;
-  if (state & Button1Mask) m |= 0x0001;  // MK_LBUTTON
-  if (state & Button3Mask) m |= 0x0002;  // MK_RBUTTON
-  if (state & Button2Mask) m |= 0x0010;  // MK_MBUTTON
-  if (state & ShiftMask)   m |= 0x0004;  // MK_SHIFT
-  if (state & ControlMask) m |= 0x0008;  // MK_CONTROL
-  return m;
+  return mk_from_x11(state);
+}
+
+// The NEUI_KMOD_* state a KeyPress / KeyRelease of the modifier key `keycode`
+// (an NEUI_KEY_SHIFT / _CONTROL / _ALT / _COMMAND from x11_keysym_to_neui)
+// leaves behind. XKeyEvent.state is the state from BEFORE the event: a Shift
+// press arrives with the Shift bit clear, its release with the bit still set.
+inline uint32_t x11_modifiers_after_key(unsigned int state, uint32_t keycode,
+                                        bool down)
+{
+  return kmod_after_modifier_key(x11_modifiers_to_neui(state), keycode, down,
+                                 /*mac=*/false);
 }
 
 inline bool is_printable_codepoint(uint32_t cp)

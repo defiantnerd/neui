@@ -1164,7 +1164,7 @@ NSWindowStyleMask styles_for_appwindow()
                                                        (int)p.x, (int)p.y,
                                                        ml.ptrs.data(),
                                                        (uint32_t)ml.ptrs.size(),
-                                                       suggested, 0);
+                                                       suggested, neui_detail::dnd_buttonmap_macos());
   return neui_detail::dnd_nsop_from_action(accepted);
 }
 
@@ -1181,7 +1181,7 @@ NSWindowStyleMask styles_for_appwindow()
                                                       (int)p.x, (int)p.y,
                                                       ml.ptrs.data(),
                                                       (uint32_t)ml.ptrs.size(),
-                                                      suggested, 0);
+                                                      suggested, neui_detail::dnd_buttonmap_macos());
   return neui_detail::dnd_nsop_from_action(accepted);
 }
 
@@ -1207,7 +1207,7 @@ NSWindowStyleMask styles_for_appwindow()
                                                       (int)p.x, (int)p.y,
                                                       ml.ptrs.data(),
                                                       (uint32_t)ml.ptrs.size(),
-                                                      suggested, 0, &item);
+                                                      suggested, neui_detail::dnd_buttonmap_macos(), &item);
   return accepted ? YES : NO;
 }
 
@@ -1235,6 +1235,12 @@ NSWindowStyleMask styles_for_appwindow()
   // otherwise) so trackpad / Magic Mouse swipes emit one tick per unit
   // rather than one tick per AppKit event. Used by KNOB / CUSTOMDRAW.
   CGFloat           wheel_accum_y;
+  // Modifier flags (mac_modifier_flags) as of the last flagsChanged:, diffed
+  // against the next to find which modifier KEY moved. Re-read from the OS
+  // (syncModifierFlags) when the view becomes first responder and when its
+  // window becomes key, so a modifier held or released while the window was not
+  // receiving keys is not diffed against a stale value.
+  NSEventModifierFlags mod_flags;
 
   // GRID smooth-scroll: the kinetics state (raw px integral, last-commit, and
   // momentum-suppression flag) lives in the widget's GridModel.scroll_kin so
@@ -1348,6 +1354,18 @@ static float neui_snap_to_steps(float v, int steps)
   return !strcmp(wd->type, NEUI_W_CUSTOMDRAW) ||
          !strcmp(wd->type, NEUI_W_GRID)       ||
          !strcmp(wd->type, NEUI_W_TABVIEW);
+}
+
+// Re-read the modifier flags from the OS without reporting a change.
+- (void)syncModifierFlags
+{
+  mod_flags = neui_detail::mac_modifier_flags(NSEvent.modifierFlags);
+}
+
+- (BOOL)becomeFirstResponder
+{
+  [self syncModifierFlags];
+  return [super becomeFirstResponder];
 }
 
 // GRID commits an open in-place cell editor on focus loss so Tab /
@@ -1472,6 +1490,37 @@ static float neui_snap_to_steps(float v, int steps)
   ku.data.key.keycode   = neui_detail::mac_keycode_to_neui(event.keyCode);
   ku.data.key.modifiers = neui_detail::mac_modifiers_to_neui(event.modifierFlags);
   sess->dispatch_event(&ku);
+}
+
+// A modifier pressed or released on its own reaches AppKit as flagsChanged:,
+// never keyDown: / keyUp:, and carries only the NEW combined flags. Diff them
+// against the flags seen last and deliver each modifier KEY that moved as a
+// KEYDOWN / KEYUP of NEUI_KEY_SHIFT / _CONTROL / _ALT / _COMMAND to a focused
+// CUSTOMDRAW, like every other key here. `modifiers` is the state after the
+// change - what event.modifierFlags holds. Never a KEYCHAR.
+- (void)flagsChanged:(NSEvent*)event
+{
+  macos_host::Session* sess = nullptr;
+  auto* wd = macos_host::widget_for_id(widget_id, &sess);
+  bool cd = wd && sess && wd->emit_events && wd->type
+            && !strcmp(wd->type, NEUI_W_CUSTOMDRAW);
+  const NSEventModifierFlags now = neui_detail::mac_modifier_flags(event.modifierFlags);
+  neui_detail::ModifierKeyChange changes[4];
+  const int n = neui_detail::mac_modifier_key_changes(mod_flags, now, changes);
+  mod_flags = now;
+  if (cd) {
+    const uint32_t mods = neui_detail::mac_modifiers_to_neui(event.modifierFlags);
+    const uint32_t id   = wd->widget_id;
+    for (int i = 0; i < n; ++i) {
+      neui_event_t ev = {};
+      ev.type               = changes[i].down ? NEUI_EVENT_KEYDOWN : NEUI_EVENT_KEYUP;
+      ev.data.key.widget    = { id };
+      ev.data.key.keycode   = changes[i].keycode;
+      ev.data.key.modifiers = mods;
+      sess->dispatch_event(&ev);
+    }
+  }
+  [super flagsChanged:event];
 }
 
 - (void)dealloc
@@ -2633,7 +2682,14 @@ static float neui_snap_to_steps(float v, int steps)
   session->dispatch_event(&ev);
 }
 
-- (void)windowDidBecomeKey:(NSNotification*)note { (void)note; [self dispatchFrameFocus:true];  }
+- (void)windowDidBecomeKey:(NSNotification*)note
+{
+  // The first responder stays put across a switch away and back, so
+  // becomeFirstResponder does not run again: re-read the modifier flags here.
+  NSResponder* r = [(NSWindow*)note.object firstResponder];
+  if ([r isKindOfClass:[NEUINativePaintedView class]]) [(NEUINativePaintedView*)r syncModifierFlags];
+  [self dispatchFrameFocus:true];
+}
 - (void)windowDidResignKey:(NSNotification*)note { (void)note; [self dispatchFrameFocus:false]; }
 
 // Frame resize -> NEUI_EVENT_RESIZE with the new content size in logical

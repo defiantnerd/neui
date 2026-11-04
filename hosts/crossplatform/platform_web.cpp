@@ -115,7 +115,8 @@
 //
 // Record types (neui_web_push): 1 resize, 2 focus, 3 blur, 4 close button,
 // 5 press on a blocked frame's backdrop, 10 pointer down, 11 pointer up,
-// 12 pointer move, 13 pointer leave, 14 context menu, 15 wheel, 16 touch
+// 12 pointer move, 13 pointer leave, 14 context menu, 15 wheel (its deltaMode
+// slot also carries the modifier bits: deltaMode | mods << 2), 16 touch
 // long-press (the right click of a touch screen), 20 key down,
 // 21 key up, 30 colour scheme (frame 0), 40 composition start, 41
 // composition update, 42 composition end, 43 text without a key, 50 drag
@@ -560,7 +561,7 @@ EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h, con
   });
   cv.addEventListener('wheel', function(e) {
     var p = at(e);
-    W.push(15, id, p[0], p[1], e.deltaX, e.deltaY, e.deltaMode, W.keep(e));
+    W.push(15, id, p[0], p[1], e.deltaX, e.deltaY, e.deltaMode | (W.mods(e) << 2), W.keep(e));
   }, { passive: false });
   // A drag from the desktop or the page (once the host registered the frame
   // as a drop target). The browser's default never runs over the canvas (a
@@ -624,6 +625,9 @@ EM_JS(void, web_frame_create, (int id, int kind, int x, int y, int w, int h, con
   // ("Process" / 229) are left to it: the composition events follow.
   var key = function(type, e) {
     if (e.isComposing || e.key === 'Process' || e.keyCode === 229) return;
+    // A held modifier may repeat keydown (Windows, Linux); neui reports a
+    // modifier key once, down and up, so the repeats never leave the page.
+    if (type === 20 && e.repeat && /^(Shift|Control|Alt|Meta|OS)(Left|Right)$/.test(e.code || "")) return;
     var k = { code: e.code || "", key: e.key || "", mods: W.mods(e) };
     if (type === 20) {
       // The textarea's beforeinput for this key (same task) is then known
@@ -1564,9 +1568,13 @@ namespace
     // Middle button: no PRIMARY selection in a browser - nothing to paste.
   }
 
-  void pointer_up(WebFrame* f, float lx, float ly, int button)
+  // `buttons` is the PointerEvent's state AFTER the release (the button that came
+  // up is already clear), as on every other platform.
+  void pointer_up(WebFrame* f, float lx, float ly, int button, uint32_t buttons,
+                  uint32_t mods)
   {
     Session* s = f->session;
+    const uint32_t bm = neui_detail::web_buttonmap(buttons, mods);
     if (button == 0) {
       if (f->swallow_release) { f->swallow_release = false; return; }
       if (s->_combo_sb_dragging) { s->_combo_sb_dragging = false; return; }
@@ -1580,6 +1588,7 @@ namespace
       ev.data.mouse.widget = { hw->widget_id };
       ev.data.mouse.x      = static_cast<int>(lx);
       ev.data.mouse.y      = static_cast<int>(ly);
+      ev.data.mouse.buttonmap = bm;
       ev.type = NEUI_EVENT_MOUSE_BUTTON_UP;
       s->dispatch_mouse_event(hit, &ev);
       if (hit == pressed) {   // CLICK only when up lands on the pressed widget
@@ -1598,6 +1607,7 @@ namespace
       ev.data.mouse.widget = { hw->widget_id };
       ev.data.mouse.x      = static_cast<int>(lx);
       ev.data.mouse.y      = static_cast<int>(ly);
+      ev.data.mouse.buttonmap = bm;
       s->dispatch_mouse_event(hit, &ev);
     }
   }
@@ -1721,8 +1731,9 @@ namespace
   // ph the same scroll in logical px when the browser reported pixels (the
   // precise paths use them as they are), else 0 and the notches decide.
   // Returns whether neui consumed it (else the page may scroll).
+  // buttonmap: the wheel's NEUI_MK_* modifiers (web_wheel_buttonmap).
   bool feed_scroll(WebFrame* f, float lx, float ly, double dv, double dh,
-                   double pv, double ph, bool have_px)
+                   double pv, double ph, bool have_px, uint32_t buttonmap)
   {
     using namespace neui_detail;
     Session* s = f->session;
@@ -1781,6 +1792,7 @@ namespace
         ev.type         = NEUI_EVENT_MOUSE_WHEEL;
         ev.data.wheel.x = static_cast<int>(lx);
         ev.data.wheel.y = static_cast<int>(ly);
+        ev.data.wheel.buttonmap = buttonmap;
         if (vline != 0) {
           ev.data.wheel.delta = vline; ev.data.wheel.is_horizontal = 0;
           if (s->dispatch_wheel_event(hit, &ev, sec_idx)) { f->wheel_sink = hit; return true; }
@@ -1803,6 +1815,7 @@ namespace
       neui_event_t ev = {};
       ev.type = NEUI_EVENT_MOUSE_WHEEL;
       ev.data.wheel.x = static_cast<int>(lx); ev.data.wheel.y = static_cast<int>(ly);
+      ev.data.wheel.buttonmap = buttonmap;
       ev.data.wheel.delta = vline; ev.data.wheel.is_horizontal = 0;
       consumed |= s->dispatch_wheel_event(hit, &ev);
     }
@@ -1810,6 +1823,7 @@ namespace
       neui_event_t ev = {};
       ev.type = NEUI_EVENT_MOUSE_WHEEL;
       ev.data.wheel.x = static_cast<int>(lx); ev.data.wheel.y = static_cast<int>(ly);
+      ev.data.wheel.buttonmap = buttonmap;
       ev.data.wheel.delta = hline; ev.data.wheel.is_horizontal = 1;
       consumed |= s->dispatch_wheel_event(hit, &ev);
     }
@@ -1819,7 +1833,9 @@ namespace
 
   // A WheelEvent: deltaMode 0 = pixels, 1 = lines, 2 = pages; positive
   // deltaY = down, positive deltaX = right (neui's notches run the other way).
-  bool handle_wheel(WebFrame* f, float lx, float ly, double dx, double dy, int mode)
+  // buttonmap: the modifiers, without Shift - see web_wheel_buttonmap.
+  bool handle_wheel(WebFrame* f, float lx, float ly, double dx, double dy, int mode,
+                    uint32_t buttonmap)
   {
     double dv = 0.0, dh = 0.0, pv = 0.0, ph = 0.0;
     bool have_px = false;
@@ -1833,7 +1849,7 @@ namespace
       dh = -dx * lines_per / WEB_WHEEL_LINES;
     }
     if (dv == 0.0 && dh == 0.0) return false;
-    return feed_scroll(f, lx, ly, dv, dh, pv, ph, have_px);
+    return feed_scroll(f, lx, ly, dv, dh, pv, ph, have_px, buttonmap);
   }
 
   // ---- Keyboard (mirrors platform_linux.cpp dispatch_key_press) -------------
@@ -2110,8 +2126,10 @@ namespace
 
   // The drag is over frame f (nullptr = none) at frame-local (x, y). Enter
   // when it comes from elsewhere, else move. Returns the accepted action.
+  // buttonmap: the modifier keys held (a browser reports no pointer buttons
+  // during a drag, so none are claimed).
   uint32_t dnd_over(WebFrame* f, float x, float y, const std::vector<const char*>& fmts,
-                    uint32_t suggested)
+                    uint32_t suggested, uint32_t buttonmap)
   {
     if (!f || !f->session || f->input_disabled) { dnd_out(); return 0; }
     const int lx = static_cast<int>(x), ly = static_cast<int>(y);
@@ -2120,21 +2138,21 @@ namespace
     if (g_dnd_over != f->id) {
       dnd_out();
       g_dnd_over = f->id;
-      return f->session->dispatch_dnd_enter(f->widget_index, lx, ly, p, n, suggested, 0);
+      return f->session->dispatch_dnd_enter(f->widget_index, lx, ly, p, n, suggested, buttonmap);
     }
-    return f->session->dispatch_dnd_move(f->widget_index, lx, ly, p, n, suggested, 0);
+    return f->session->dispatch_dnd_move(f->widget_index, lx, ly, p, n, suggested, buttonmap);
   }
 
   // Drop on frame f: a last move at the drop point (as XDND's position
   // before drop), then the drop if the target still accepts.
   uint32_t dnd_drop(WebFrame* f, float x, float y, const std::vector<const char*>& fmts,
-                    uint32_t suggested, neui_detail::DataItem* item)
+                    uint32_t suggested, uint32_t buttonmap, neui_detail::DataItem* item)
   {
-    if (dnd_over(f, x, y, fmts, suggested) == 0) { dnd_out(); return 0; }
+    if (dnd_over(f, x, y, fmts, suggested, buttonmap) == 0) { dnd_out(); return 0; }
     g_dnd_over = 0;
     return f->session->dispatch_dnd_drop(f->widget_index, static_cast<int>(x), static_cast<int>(y),
                                          fmts.empty() ? nullptr : fmts.data(),
-                                         static_cast<uint32_t>(fmts.size()), suggested, 0, item);
+                                         static_cast<uint32_t>(fmts.size()), suggested, buttonmap, item);
   }
 
   // The page's modifier bits (1 shift, 2 ctrl) -> the shared convention.
@@ -2167,9 +2185,10 @@ namespace
     split_formats(e.key, mimes, fmts);
     const auto allowed   = static_cast<uint32_t>(e.d);
     const uint32_t sugg  = dnd_suggest(allowed, static_cast<uint32_t>(e.c));
+    const uint32_t bm    = neui_detail::web_buttonmap(0, static_cast<uint32_t>(e.c));
     const float x = static_cast<float>(e.a), y = static_cast<float>(e.b);
     if (e.type == EV_DND_OVER) {
-      const uint32_t act = dnd_over(f, x, y, fmts, sugg) & allowed;
+      const uint32_t act = dnd_over(f, x, y, fmts, sugg, bm) & allowed;
       web_dnd_verdict(e.frame, static_cast<int>(e.e), static_cast<int>(act));
     } else if (e.type == EV_DND_LEAVE) {
       if (g_dnd_over == e.frame) dnd_out();
@@ -2186,7 +2205,7 @@ namespace
         list += g_drop_uris;
         g_drop.set_format(NEUI_MIME_URI_LIST, list.data(), static_cast<uint32_t>(list.size()));
       }
-      dnd_drop(f, x, y, fmts, sugg, &g_drop);
+      dnd_drop(f, x, y, fmts, sugg, bm, &g_drop);
       g_drop = neui_detail::DataItem();
       g_drop_uris.clear();
     }
@@ -2200,13 +2219,14 @@ namespace
     WebFrame* f = find_frame(e.frame);
     const float x = static_cast<float>(e.a), y = static_cast<float>(e.b);
     const uint32_t sugg = dnd_suggest(d->allowed, static_cast<uint32_t>(e.c));
+    const uint32_t bm   = neui_detail::web_buttonmap(0, static_cast<uint32_t>(e.c));
     if (e.type == EV_DRAG_MOVE) {
-      d->accepted = dnd_over(f, x, y, d->fmts, sugg) & d->allowed;
+      d->accepted = dnd_over(f, x, y, d->fmts, sugg, bm) & d->allowed;
       web_drag_cursor(static_cast<int>(d->accepted));
       return;
     }
     if (e.type == EV_DRAG_UP && f)
-      d->result = dnd_drop(f, x, y, d->fmts, sugg, d->item) & d->allowed;
+      d->result = dnd_drop(f, x, y, d->fmts, sugg, bm, d->item) & d->allowed;
     else
       dnd_out();
     d->running = false;
@@ -2338,7 +2358,8 @@ namespace
                            static_cast<uint32_t>(e.e), e.f);
             break;
           case EV_PUP:
-            if (!blocked) pointer_up(f, x, y, static_cast<int>(e.c));
+            if (!blocked) pointer_up(f, x, y, static_cast<int>(e.c), static_cast<uint32_t>(e.d),
+                                     static_cast<uint32_t>(e.e));
             break;
           case EV_PMOVE:
             if (!blocked && !(s->_popup_active && s->_popup_frame != f->widget_index))
@@ -2356,8 +2377,14 @@ namespace
             consumed = blocked || s->_popup_active || s->widget_at(x, y, f->widget_index) != 0;
             break;
           case EV_WHEEL:
-            consumed = blocked ? true
-                               : handle_wheel(f, x, y, e.c, e.d, static_cast<int>(e.e));
+            {
+              // deltaMode in the low two bits, the modifier bits above them.
+              const int packed = static_cast<int>(e.e);
+              consumed = blocked ? true
+                                 : handle_wheel(f, x, y, e.c, e.d, packed & 3,
+                                                neui_detail::web_wheel_buttonmap(
+                                                  static_cast<uint32_t>(packed >> 2)));
+            }
             break;
           case EV_KEYDOWN:
             if (!blocked) consumed = key_down(f, e.code, e.key, static_cast<uint32_t>(e.b));

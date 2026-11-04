@@ -8,6 +8,9 @@
 
 #include <cstdint>
 
+#include "../mouse_modifiers.h"
+#include "../modifier_keys.h"
+
 // macOS input-event translation primitives. Header-only / `inline` so the
 // crossplatform host (`hosts/crossplatform/platform_macos.mm`) and the native
 // macOS host (`hosts/macos/`) can both include without ODR violations.
@@ -21,8 +24,13 @@
 //   neui's convention NEUI_KMOD_CTRL is the platform's *primary* command
 //   modifier, so on macOS Cmd -> NEUI_KMOD_CTRL and the physical Control key
 //   -> NEUI_KMOD_META.
-// - mac_buttonmap: NSEvent.pressedMouseButtons + modifier flags -> Win32
-//   MK_* bitmask the host's mouse events carry in buttonmap.
+// - mac_buttonmap: NSEvent.pressedMouseButtons + modifier flags -> the
+//   NEUI_MK_* bitmask the host's mouse events carry in buttonmap (Shift,
+//   Control, Option -> NEUI_MK_ALT, Command -> NEUI_MK_COMMAND). The decoding is
+//   the portable hosts/shared/mouse_modifiers.h::mk_from_mac.
+// - mac_modifier_flags: the four modifier flags neui reports, as a mask - what a
+//   view keeps between flagsChanged: events to find which modifier moved
+//   (modifier_keys.h::mac_modifier_key_changes does the diff).
 // - is_printable_codepoint: gates which codepoints from
 //   [NSEvent characters] should fire NEUI_EVENT_KEYCHAR (skips control
 //   chars and AppKit's 0xF700..0xF8FF private-use range).
@@ -106,15 +114,24 @@ inline uint32_t mac_modifiers_to_neui(NSEventModifierFlags flags)
   return m;
 }
 
+// The raw flag values hosts/shared/mouse_modifiers.h decodes (so that it needs no
+// AppKit) are AppKit's own. Checked here, where AppKit is on hand.
+static_assert(static_cast<uint64_t>(NSEventModifierFlagShift)   == ns_input::kShift
+           && static_cast<uint64_t>(NSEventModifierFlagControl) == ns_input::kControl
+           && static_cast<uint64_t>(NSEventModifierFlagOption)  == ns_input::kOption
+           && static_cast<uint64_t>(NSEventModifierFlagCommand) == ns_input::kCommand,
+              "ns_input flag values no longer match NSEventModifierFlags");
+
 inline uint32_t mac_buttonmap(NSUInteger pressed_buttons,
                                NSEventModifierFlags flags)
 {
-  uint32_t m = 0;
-  if (pressed_buttons & 0x1) m |= 0x0001;                 // MK_LBUTTON
-  if (pressed_buttons & 0x2) m |= 0x0002;                 // MK_RBUTTON
-  if (flags & NSEventModifierFlagShift)   m |= 0x0004;     // MK_SHIFT
-  if (flags & NSEventModifierFlagControl) m |= 0x0008;     // MK_CONTROL
-  return m;
+  return mk_from_mac(pressed_buttons, flags);
+}
+
+inline NSEventModifierFlags mac_modifier_flags(NSEventModifierFlags flags)
+{
+  return flags & (NSEventModifierFlagShift | NSEventModifierFlagControl
+                  | NSEventModifierFlagOption | NSEventModifierFlagCommand);
 }
 
 inline bool is_printable_codepoint(uint32_t cp)
