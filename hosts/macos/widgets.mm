@@ -17,6 +17,9 @@
 #include "../shared/macos/dnd_source_macos.h"
 #include "../shared/macos/menubar_macos.h"
 #include "../shared/compound.h"
+#if !defined(NEUI_NO_SHADERS)
+#include "../shared/shader_api.h"
+#endif
 #include "../../backends/cg/cg_backend.h"
 
 // One TU emits the @implementation NeuiToastMacOS body. Other TUs that
@@ -71,6 +74,38 @@ namespace macos_host
     if (!widget_belongs_to_session(widget, s->session_id())) return nullptr;
     return s;
   }
+
+#if !defined(NEUI_NO_SHADERS)
+  // -------------------------------------------------------------------------
+  // Shader API (NEUI_API_SHADER) - shared implementation in shader_api.h.
+
+  void mark_widget_dirty_for_paint(WidgetData& wd);  // window.mm
+
+  struct MacShaderHost {
+    static MacOSAssetManager* store(neui_session_t session, uint32_t& session_id)
+    {
+      return store_from_token(get_session(session), session_id);
+    }
+    static MacOSAssetManager* store_from_token(void* host_token, uint32_t& session_id)
+    {
+      auto* s = static_cast<Session*>(host_token);
+      if (!s) return nullptr;
+      session_id = s->session_id();
+      return &s->_asset_manager;
+    }
+    static void invalidate_widget(neui_session_t session, uint32_t widget_id)
+    {
+      auto* s = get_session_for_widget(session, neui_widget_t{ widget_id });
+      if (s && s->_widgets.exists(widget_id & 0xffff))
+        mark_widget_dirty_for_paint(s->_widgets[widget_id & 0xffff]);
+    }
+  };
+  neui_shader_api_t shader_api = neui_detail::shader_api_table<MacShaderHost>();
+  const neui_detail::resolve_shader_thunk_t macos_resolve_shader =
+    &neui_detail::ShaderApi<MacShaderHost>::painter_resolve;
+#else
+  const neui_detail::resolve_shader_thunk_t macos_resolve_shader = nullptr;
+#endif
 
   // Defined in window.mm. Realizes a widget's NSView immediately if its
   // containing frame is already shown (post-show dynamic creation); no-op
@@ -2366,7 +2401,8 @@ namespace macos_host
     s->_asset_manager.paint_surface(surface.id & 0xffff, clear_argb, fn, user,
                                      neui_cg_backend::get_backend(),
                                      /*host_token*/ s,
-                                     &macos_painter_draw_asset_thunk);
+                                     &macos_painter_draw_asset_thunk,
+                                     macos_resolve_shader);
   }
 
   static void NEUI_ABI a_surface_blur(neui_session_t session, neui_asset_t surface,
@@ -2493,6 +2529,9 @@ namespace macos_host
     apis.compound = &compound_api;
     apis.behavior = &behavior_api;
     apis.bitmap_from_name = component_bitmap_from_name;
+#if !defined(NEUI_NO_SHADERS)
+    apis.shader_from      = neui_detail::ShaderApi<MacShaderHost>::component_shader;
+#endif
     apis.user             = s;
     neui_detail::BuiltComponent built =
         neui_detail::build_component(session, json, len, env, apis);
@@ -2572,6 +2611,8 @@ namespace macos_host
     in.asset_names = &e->comp_asset_names;
     in.asset_handle_names = &e->comp_asset_handle_names;
     in.asset_frame_layouts = &e->comp_asset_frame_layouts;
+    in.shader_sources      = &e->comp_shader_sources;
+    in.shader_handle_names = &e->comp_shader_handle_names;
     auto* cce = s->_asset_manager.get_slot(e->comp_compound.id & 0xffff);
     auto* bbe = s->_asset_manager.get_slot(e->comp_behavior.id & 0xffff);
     in.compound = (cce && cce->compound) ? cce->compound.get() : nullptr;
@@ -2734,7 +2775,8 @@ namespace macos_host
     auto* ca = resolve_compound_macos(session, asset, s);
     if (!ca) return;
     if (neui_detail::compound_layer_asset_slot(layer) != (asset.id & 0xffff)) return;
-    neui_detail::compound_remove_layer(*ca, neui_detail::compound_layer_slot(layer));
+    neui_detail::compound_remove_layer(*ca, neui_detail::compound_layer_slot(layer),
+                                       neui_cg_backend::get_backend());
     s->invalidate_widgets_with_compound(asset.id);
   }
 
@@ -2743,7 +2785,7 @@ namespace macos_host
     Session* s = nullptr;
     auto* ca = resolve_compound_macos(session, asset, s);
     if (!ca) return;
-    neui_detail::compound_clear(*ca);
+    neui_detail::compound_clear(*ca, neui_cg_backend::get_backend());
     s->invalidate_widgets_with_compound(asset.id);
   }
 

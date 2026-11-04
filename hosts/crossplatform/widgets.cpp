@@ -7,6 +7,9 @@
 #include "host.h"
 #include "platform.h"
 #include "../shared/shortcut_format.h"
+#if !defined(NEUI_NO_SHADERS)
+#include "../shared/shader_api.h"
+#endif
 #ifdef _WIN32
 // Win32-specific helpers used directly from the host's API entry points
 // (icon application, accel-table build/translate). The macOS port replaces
@@ -67,6 +70,35 @@ namespace xpl_host
     return s;
   }
 
+#if !defined(NEUI_NO_SHADERS)
+  // -------------------------------------------------------------------------
+  // Shader API (NEUI_API_SHADER) - shared implementation in shader_api.h.
+
+  struct XplShaderHost {
+    static neui_detail::AssetManager* store(neui_session_t session, uint32_t& session_id)
+    {
+      return store_from_token(get_session(session), session_id);
+    }
+    static neui_detail::AssetManager* store_from_token(void* host_token, uint32_t& session_id)
+    {
+      auto* s = static_cast<Session*>(host_token);
+      if (!s) return nullptr;
+      session_id = s->_session_id;
+      return &s->_asset_manager;
+    }
+    static void invalidate_widget(neui_session_t session, uint32_t widget_id)
+    {
+      auto* s = get_session_for_widget(session, neui_widget_t{ widget_id });
+      if (s && s->_widgets.exists(widget_id & 0xffff)) s->invalidate_widget_rect(widget_id & 0xffff);
+    }
+  };
+  neui_shader_api_t shader_api = neui_detail::shader_api_table<XplShaderHost>();
+  const neui_detail::resolve_shader_thunk_t xpl_resolve_shader =
+    &neui_detail::ShaderApi<XplShaderHost>::painter_resolve;
+#else
+  const neui_detail::resolve_shader_thunk_t xpl_resolve_shader = nullptr;
+#endif
+
   // -------------------------------------------------------------------------
   // Recursive helpers
 
@@ -101,6 +133,7 @@ namespace xpl_host
       platform_dnd_unregister_window(wd->native_handle);
       platform_destroy_window(*wd);
       wd->native_handle = nullptr;
+      s->anim_clock().forget_owner(idx);  // the frame's animating widgets
     }
 
     // Let the widget class clean up its own resources (e.g. MenubarWidget tears
@@ -109,6 +142,16 @@ namespace xpl_host
 
     if (client_api && client_api->ondestroy)
       client_api->ondestroy(token, IndexToWidget(s->_session_id, idx), wd->userdata);
+
+    // Forget it as focus, so a later widget in the same slot is not focused
+    // by accident.
+    if (s->_focused_widget == idx) s->_focused_widget = 0;
+    if (s->_active_frame == idx) s->_active_frame = 0;
+    s->_frame_focus.erase(idx);
+    for (auto it = s->_frame_focus.begin(); it != s->_frame_focus.end();) {
+      if (it->second == idx) it = s->_frame_focus.erase(it);
+      else ++it;
+    }
 
     s->_widgets.remove(idx);
   }
@@ -121,24 +164,43 @@ namespace xpl_host
   // frame containing it. find_parent_native_handle alone walks parents only, so
   // a frame invalidating itself resolved to nullptr and repainted nothing.
 
+  // The funnel for client-driven visual changes (attribute writes, set_text,
+  // set_asset, set_enabled, the public invalidate, GRID content). None of
+  // them changes geometry, so only the widget's own area needs repainting -
+  // a partial frame where the platform supports it (Session::
+  // invalidate_widget_rect falls back to the whole frame when it can't
+  // vouch for the rect).
   static void invalidate_widget_visual(Session* s, uint32_t idx)
   {
 #ifdef NEUI_PLATFORM_LVGL
     platform_retained_widget_invalidate(s, idx);
 #else
     if (!s || !s->_widgets.exists(idx)) return;
-    void* target = s->_widgets[idx].native_handle;
-    if (!target) target = s->find_parent_native_handle(idx);
-    if (target) platform_invalidate(target);
+    // A widget with its OWN native handle (a frame) repaints whole:
+    // invalidate_widget_rect resolves the window through
+    // find_parent_native_handle, which walks parents only, so a frame
+    // invalidating itself would otherwise repaint nothing.
+    if (void* own = s->_widgets[idx].native_handle) {
+      platform_invalidate(own);
+      return;
+    }
+    s->invalidate_widget_rect(idx);
 #endif
   }
 
+  // Geometry / structure changed for idx (create, destroy, show, hide,
+  // set_pos, set_size). Called BEFORE a destroyed subtree is removed so the
+  // owning frame still resolves. Off LVGL this repaints the WHOLE frame - the
+  // invariant partial repaint relies on: a rect queued from a widget's cached
+  // abs_x / abs_y is only safe because every geometry change also requests a
+  // full repaint, which absorbs it (see Session::invalidate_widget_rect).
   static void notify_tree_changed(Session* s, uint32_t idx)
   {
 #ifdef NEUI_PLATFORM_LVGL
     platform_retained_tree_changed(s, idx);
 #else
-    (void)s; (void)idx;
+    if (void* frame = s->find_parent_native_handle(idx))
+      platform_invalidate(frame);
 #endif
   }
 
@@ -422,6 +484,24 @@ namespace xpl_host
       // a borderless window in the corner of the display. NEUI_API_POPUP::open is
       // the entry point; ignoring this call is the honest answer.
       if (dynamic_cast<PopupSurfaceWidget*>(&wd)) return;
+      // A modal DIALOG remembers the focus to give back on close BEFORE its
+      // window is created and shown. Both can activate the window at once -
+      // AppKit sends becomeFirstResponder when the window is built and makes it
+      // key on show, win32 sends WM_SETFOCUS inside ShowWindow - and activation
+      // moves logical focus into the dialog's frame (Session::frame_activated),
+      // so saving afterwards remembered the dialog's own focus (or none) and
+      // closing the dialog gave nothing back. Not on a re-entrant show: the
+      // saved value would become the focus INSIDE the dialog and the owner's
+      // would be lost.
+      if (wd.is_dialog() && wd.owner_index != 0 && s->_widgets.exists(wd.owner_index) &&
+          (!wd.attrs || wd.attrs->get_int(NEUI_ATTR_MODAL, 1) != 0)) {
+        if (auto* fw = dynamic_cast<FrameWidget*>(&wd)) {
+          if (!fw->modal_pump_active()) {
+            fw->prev_focus     = s->_focused_widget;
+            fw->prev_focus_gen = s->a11y_generation(s->_focused_widget);
+          }
+        }
+      }
       if (!wd.native_handle) {
         if (wd.is_dialog()) {
           // Resolve owner HWND (if any) before creating the dialog HWND so
@@ -471,9 +551,11 @@ namespace xpl_host
             platform_set_window_enabled(owner_native, false);
         }
         // Native blocking modal: spin a nested OS pump until the dialog
-        // is destroyed. The destroy path (platform_win32.cpp WM_NCDESTROY /
-        // platform_macos.mm windowWillClose) clears modal_pump_active so
-        // the pump exits and widget_show returns to the caller.
+        // is destroyed. The destroy path (platform_win32.cpp WM_DESTROY /
+        // platform_macos.mm windowWillClose / platform_linux.cpp
+        // teardown_window / platform_web.cpp) ends it through
+        // Session::end_modal, so the pump exits and widget_show returns to the
+        // caller.
         if (is_modal_dialog) {
           auto* fw = dynamic_cast<FrameWidget*>(&wd);
           if (fw) {
@@ -481,13 +563,8 @@ namespace xpl_host
             // session-global and key routing goes by it, not by which window the
             // key arrived at - so leaving focus in the owner meant typing into
             // the dialog edited a field in the window the dialog had just
-            // blocked. Remember where focus was so closing can give it back.
-            // Do not overwrite on a re-entrant show: the saved value would
-            // become the focus INSIDE the dialog and the owner's would be lost.
-            if (!fw->modal_pump_active()) {
-              fw->prev_focus     = s->_focused_widget;
-              fw->prev_focus_gen = s->a11y_generation(s->_focused_widget);
-            }
+            // blocked. Where focus was is already saved (above, before the
+            // window existed), so closing can give it back.
             s->focus_next(true, idx);
             // focus_next does nothing when the frame has NO tab stops - a
             // message-style dialog of plain LABELs, say. Focus would then still
@@ -902,9 +979,9 @@ namespace xpl_host
     if (!s) return;
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
-    // Map any widget invalidation to a frame-level repaint - on the xpl
-    // host the entire frame paints in one pass, so per-widget invalidation
-    // would have to invalidate the frame anyway.
+    // Repaint just this widget's area (a partial frame; the whole frame when
+    // the host can't vouch for the widget's rect, see
+    // Session::invalidate_widget_rect).
     //
     // The widget's OWN handle counts: invalidating a top-level APPWINDOW /
     // PLUGWINDOW - the obvious way for a client to ask for "repaint everything" -
@@ -1811,6 +1888,11 @@ namespace xpl_host
       if (it == mb.menu_items.end()) return;
       it->second.shortcut_mods = modifiers;
       it->second.shortcut_key  = key;
+#if defined(NEUI_PLATFORM_WEB)
+      it->second.shortcut      = platform_web_apple()
+        ? neui_detail::format_shortcut_label_mac(modifiers, key)
+        : neui_detail::format_shortcut_label_win(modifiers, key);
+#else
       it->second.shortcut      =
         // Platform-appropriate glyphs. This string is only ever DRAWN by us -
         // the Linux in-frame band and the POPUPMENU cascade - because the native
@@ -1818,6 +1900,7 @@ namespace xpl_host
         // The popup is the first macOS surface that draws it, so "Win+Z" on a
         // Mac would have been newly visible.
         neui_detail::format_shortcut_label(modifiers, key);
+#endif
       if (mb.uses_native_menu() && !it->second.submenu && !it->second.is_separator) {
         std::string dt = make_menu_text(it->second.text.c_str(),
                                         it->second.shortcut.c_str());
@@ -2910,7 +2993,8 @@ namespace xpl_host
     s->_asset_manager.paint_surface(surface.id & 0xffff, clear_argb, fn, user,
                                      s->_backend,
                                      /*host_token*/ s,
-                                     &xpl_painter_draw_asset_thunk);
+                                     &xpl_painter_draw_asset_thunk,
+                                     xpl_resolve_shader);
   }
 
   static void NEUI_ABI as_surface_blur(neui_session_t session, neui_asset_t surface,
@@ -3035,6 +3119,9 @@ namespace xpl_host
     apis.behavior = &behavior_api;
     apis.bitmap_from_name = component_bitmap_from_name;
     apis.user             = s;
+#if !defined(NEUI_NO_SHADERS)
+    apis.shader_from      = neui_detail::ShaderApi<XplShaderHost>::component_shader;
+#endif
     neui_detail::BuiltComponent built =
         neui_detail::build_component(session, json, len, env, apis);
     if (!built.ok) { release_built_component(session, built); return asset_none; }
@@ -3124,6 +3211,8 @@ namespace xpl_host
     in.asset_names        = &e->comp_asset_names;
     in.asset_handle_names = &e->comp_asset_handle_names;
     in.asset_frame_layouts = &e->comp_asset_frame_layouts;
+    in.shader_sources      = &e->comp_shader_sources;
+    in.shader_handle_names = &e->comp_shader_handle_names;
     auto* ce = s->_asset_manager.get_slot(e->comp_compound.id & 0xffff);
     auto* be = s->_asset_manager.get_slot(e->comp_behavior.id & 0xffff);
     in.compound = (ce && ce->compound) ? ce->compound.get() : nullptr;
@@ -3349,7 +3438,8 @@ namespace xpl_host
     auto* ca = resolve_compound(session, asset, s);
     if (!ca) return;
     if (neui_detail::compound_layer_asset_slot(layer) != (asset.id & 0xffff)) return;
-    neui_detail::compound_remove_layer(*ca, neui_detail::compound_layer_slot(layer));
+    neui_detail::compound_remove_layer(*ca, neui_detail::compound_layer_slot(layer),
+                                       s->_backend);
     invalidate_widgets_using(s, asset.id & 0xffff);
   }
 
@@ -3358,7 +3448,7 @@ namespace xpl_host
     Session* s = nullptr;
     auto* ca = resolve_compound(session, asset, s);
     if (!ca) return;
-    neui_detail::compound_clear(*ca);
+    neui_detail::compound_clear(*ca, s->_backend);
     invalidate_widgets_using(s, asset.id & 0xffff);
   }
 

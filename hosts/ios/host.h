@@ -290,9 +290,24 @@ namespace ios_host
     // bytes before this host tries the bundle / disk. The live binding used by
     // the load paths is _asset_manager.resource_provider().
     neui_resource_client_t* _resource_client = nullptr;
+
+    // Animation clock heartbeat (hosts/shared/anim_clock.h): one NSTimer per
+    // session (retained, window.mm set_animation_timer), ticking every
+    // _anim_ms. CUSTOMDRAW paints that read the clock mark their widget with
+    // owner 0.
+    void*    _anim_timer = nullptr;
+    uint32_t _anim_ms    = 0;
   };
 
   // Process-wide session registry (defined in host.mm).
   extern std::vector<std::unique_ptr<Session>> sessions;
+
+  // Every painter's resolve_shader thunk (painter.h), defined with the
+  // shader API in widgets.cpp / .mm; null in a NEUI_NO_SHADERS build, where
+  // shader layers paint their fallback.
+  extern const neui_detail::resolve_shader_thunk_t ios_resolve_shader;
+
+  // Run the session's animation timer at `ms`, or stop it (0). window.mm.
+  void set_animation_timer(Session* s, uint32_t ms);
 
 } // namespace ios_host

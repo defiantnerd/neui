@@ -19,6 +19,7 @@
 #include "image_filter.h"  // image_gaussian_blur_bgra
 #include "filter_graph.h"  // FilterAsset + evaluate_filter (SVG fe* engine)
 #include "resource_provider.h"  // ResourceProvider (NEUI_API_RESOURCE_CLIENT)
+#include "shader_asset.h"  // ShaderAsset (NEUI_ASSET_KIND_SHADER)
 
 // Session-scoped asset slot table shared by all three hosts. Each host
 // previously carried a near-identical manager (xpl AssetManager, win32
@@ -87,6 +88,11 @@ namespace neui_detail
     uint32_t             height_px   = 0;
     float                scale       = 1.0f; // HiDPI factor loaded (1, 2, or 3)
     std::vector<uint8_t> pixels;             // BGRA8 premultiplied, width_px*height_px*4
+    // Names these pixels: process-unique, set when the slot is allocated and
+    // renewed whenever the pixels change (a SURFACE repaint or filter), never
+    // reused even when the slot is. Caches of what was made from the pixels
+    // (shader images that sample them) key on it.
+    uint64_t             content_id  = 0;
 
     // Backend bitmap cache: one GPU resource per render context. Tinted
     // draws of the same asset reuse the same upload - the backend's
@@ -106,6 +112,9 @@ namespace neui_detail
 
     // Populated for NEUI_ASSET_KIND_FILTER entries; null otherwise.
     std::unique_ptr<FilterAsset> filter;
+
+    // Populated for NEUI_ASSET_KIND_SHADER entries; null otherwise.
+    std::unique_ptr<ShaderAsset> shader;
 
     // Populated for NEUI_ASSET_KIND_SURFACE entries; null otherwise.
     // Owns the off-screen render context for the surface's lifetime.
@@ -144,7 +153,20 @@ namespace neui_detail
     std::vector<std::pair<std::string, std::string>> comp_asset_names;
     std::vector<std::pair<uint32_t, std::string>>    comp_asset_handle_names;
     std::vector<std::pair<uint32_t, FilmstripLayout>> comp_asset_frame_layouts;
+    std::vector<ComponentShaderSource>               comp_shader_sources;
+    std::vector<std::pair<uint32_t, std::string>>    comp_shader_handle_names;
   };
+
+  // AssetEntry::content_id's source. A plain inline function, so there is one
+  // counter in the process: two AssetStore<Loader> instantiations (the native
+  // win32 host's and the xpl host's, linked together) must never hand out the
+  // same id, because D2D shares resource textures by content id across every
+  // device context of the process.
+  inline uint64_t next_asset_content_id()
+  {
+    static uint64_t n = 0;
+    return ++n;
+  }
 
   template <typename Loader>
   class AssetStore
@@ -167,6 +189,24 @@ namespace neui_detail
       entry->scale     = scale;
       entry->pixels.assign(bgra_premul,
                             bgra_premul + static_cast<size_t>(width_px) * height_px * 4);
+      return alloc_slot(std::move(entry));
+    }
+
+    // Same, taking the pixel buffer over instead of copying it.
+    uint32_t allocate_bitmap(std::vector<uint8_t>&& bgra_premul, uint32_t width_px,
+                             uint32_t height_px, float scale)
+    {
+      if (width_px == 0 || height_px == 0 ||
+          bgra_premul.size() != static_cast<size_t>(width_px) * height_px * 4)
+        return 0;
+      if (scale <= 0.0f) scale = 1.0f;
+
+      auto entry = std::make_unique<AssetEntry>();
+      entry->kind      = NEUI_ASSET_KIND_BITMAP;
+      entry->width_px  = width_px;
+      entry->height_px = height_px;
+      entry->scale     = scale;
+      entry->pixels    = std::move(bgra_premul);
       return alloc_slot(std::move(entry));
     }
 
@@ -377,9 +417,11 @@ namespace neui_detail
     // zero-size bitmap, or a grid that can't fit at least 1 px per cell - so a
     // mis-tag can never produce an out-of-bounds source rect. Re-tagging
     // overwrites a prior layout; cols == rows == 1 leaves a single-frame
-    // entry (frame_count 1), still drawable via the frame path.
+    // entry (frame_count 1), still drawable via the frame path. A non-zero
+    // frame_count below cols * rows leaves the trailing cells unused (a baked
+    // shader strip whose frame count does not fill its grid).
     bool set_frame_layout(uint32_t slot, uint32_t cols, uint32_t rows,
-                          uint32_t gutter_px)
+                          uint32_t gutter_px, uint32_t frame_count = 0)
     {
       AssetEntry* e = get_slot(slot);
       if (!e) return false;
@@ -399,6 +441,7 @@ namespace neui_detail
       // promises a mis-tag never yields an out-of-bounds source rect).
       const uint64_t fc = static_cast<uint64_t>(cols) * rows;
       if (fc > 0xFFFFFFFFull) return false;
+      if (frame_count > fc) return false;
 
       auto fs = std::make_unique<FilmstripInfo>();
       fs->cols        = cols;
@@ -406,7 +449,7 @@ namespace neui_detail
       fs->gutter_px   = gutter_px;
       fs->frame_w_px  = fw;
       fs->frame_h_px  = fh;
-      fs->frame_count = static_cast<uint32_t>(fc);
+      fs->frame_count = frame_count ? frame_count : static_cast<uint32_t>(fc);
       e->filmstrip = std::move(fs);
       return true;
     }
@@ -517,6 +560,19 @@ namespace neui_detail
       return alloc_slot(std::move(entry));
     }
 
+    // Allocate a slot holding a compiled shader (NEUI_ASSET_KIND_SHADER).
+    // Returns 0 for a null program.
+    uint32_t allocate_shader(std::shared_ptr<const neui::nsl::Program> program)
+    {
+      if (!program) return 0;
+      auto entry = std::make_unique<AssetEntry>();
+      entry->kind           = NEUI_ASSET_KIND_SHADER;
+      entry->shader         = std::make_unique<ShaderAsset>();
+      entry->shader->program = std::move(program);
+      entry->shader->uid     = next_shader_uid();
+      return alloc_slot(std::move(entry));
+    }
+
     // Allocate a NEUI_ASSET_KIND_COMPONENT slot wrapping a built component
     // (the compound + behavior + defaults + params + default size produced by
     // build_component). The component takes ownership of the sub-assets and
@@ -538,6 +594,8 @@ namespace neui_detail
       entry->comp_asset_names       = built.asset_names;
       entry->comp_asset_handle_names = built.asset_handle_names;
       entry->comp_asset_frame_layouts = built.asset_frame_layouts;
+      entry->comp_shader_sources      = built.shader_sources;
+      entry->comp_shader_handle_names = built.shader_handle_names;
       return alloc_slot(std::move(entry));
     }
 
@@ -663,7 +721,8 @@ namespace neui_detail
                        void* user,
                        neui_render_backend_t* backend,
                        void* host_token,
-                       draw_asset_thunk_t draw_asset_thunk)
+                       draw_asset_thunk_t draw_asset_thunk,
+                       resolve_shader_thunk_t resolve_shader = nullptr)
     {
       if (slot == 0 || slot >= _handles.size() || !backend) return;
       auto& entry = _handles[slot];
@@ -691,6 +750,7 @@ namespace neui_detail
       painter.ctx              = ctx;
       painter.host_token       = host_token;
       painter.draw_asset_thunk = draw_asset_thunk;
+      painter.resolve_shader   = resolve_shader;
       fn(&painter, &k_painter_api,
          static_cast<float>(entry->width_px)  / entry->scale,
          static_cast<float>(entry->height_px) / entry->scale,
@@ -720,6 +780,9 @@ namespace neui_detail
           if (cached.bmp) backend->destroy_bitmap(other_ctx, cached.bmp);
       }
       entry.bitmaps.clear();
+      // New pixels, new content: shader images made from the old ones go.
+      _shader_cache.release_texture(entry.content_id, backend);
+      entry.content_id = next_content_id();
     }
 
     // Evaluate a built FilterAsset in place over a SURFACE slot's pixels at the
@@ -790,7 +853,17 @@ namespace neui_detail
         for (auto& [ctx, cached] : entry->bitmaps)
           if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
       }
+      entry->bitmaps.clear();
+      // A COMPOUND's QR layers hold uploads of their own symbol bitmaps.
+      if (entry->compound) compound_release_bitmaps(*entry->compound, backend);
+      // A SHADER's rendered images (and their uploads) go with it.
+      if (entry->shader) _shader_cache.release_uid(entry->shader->uid, backend);
+      _shader_cache.release_texture(entry->content_id, backend);
       if (entry->surface_ctx && backend && backend->destroy_context) {
+        // Whatever was uploaded while painting into the surface (other
+        // assets' bitmaps, QR symbols, shader images) goes with its ctx; a
+        // later ctx at the same address must not be served those handles.
+        release_context(entry->surface_ctx, backend);
         backend->destroy_context(entry->surface_ctx);
         entry->surface_ctx = nullptr;
       }
@@ -819,6 +892,10 @@ namespace neui_detail
       entry.reset();
       _free_slots.push_back(slot);
     }
+
+    // The session's cache of rendered shader images (shader_asset.h), which
+    // the live shader paths draw from.
+    ShaderCache& shader_cache() { return _shader_cache; }
 
     // Look up an asset by slot. Returns nullptr if the slot is unused or
     // out of range. Caller must not retain the pointer past the next
@@ -881,6 +958,7 @@ namespace neui_detail
             *entry->compound, ctx,
             [&](void* bmp) { backend->destroy_bitmap(ctx, bmp); });
       }
+      _shader_cache.release_ctx(ctx, backend);
     }
 
     void clear(neui_render_backend_t* backend)
@@ -891,19 +969,10 @@ namespace neui_detail
           for (auto& [ctx, cached] : entry->bitmaps)
             if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
           // Free QR compound layers' per-(ctx) symbol uploads across all ctxs.
-          if (entry->compound) {
-            for (auto& layer : entry->compound->layers) {
-              if (!layer) continue;
-              for (auto& sym : layer->qr_cache) {
-                if (!sym) continue;
-                for (auto& [ctx, cached] : sym->bitmaps)
-                  if (cached.bmp) backend->destroy_bitmap(ctx, cached.bmp);
-                sym->bitmaps.clear();
-              }
-            }
-          }
+          if (entry->compound) compound_release_bitmaps(*entry->compound, backend);
         }
       }
+      _shader_cache.clear(backend);
       // Release any SURFACE entries' off-screen ctxs before dropping the
       // table; destroy_bitmap above only walks cached window-ctx uploads.
       if (backend && backend->destroy_context) {
@@ -1022,7 +1091,7 @@ namespace neui_detail
 
   protected:
     // One resolution attempt for a (name, scale bucket) pair. Client first
-    // (decision 1 in plans/client-resource-provider.md): for a client whose
+    // (docs/design-notes.md, "Client resource provider"): for a client whose
     // assets live in a container the filesystem ladder below is a guaranteed
     // miss - up to three failed decodes on paths that will never exist - and on
     // an embedded target there may be no filesystem at all.
@@ -1151,9 +1220,13 @@ namespace neui_detail
     // _handles[0] is intentionally unused so slot 0 maps to "invalid".
     std::vector<std::unique_ptr<AssetEntry>> _handles;
     std::vector<uint32_t>                    _free_slots;
+    ShaderCache                              _shader_cache;
+
+    static uint64_t next_content_id() { return next_asset_content_id(); }
 
     uint32_t alloc_slot(std::unique_ptr<AssetEntry> entry)
     {
+      entry->content_id = next_content_id();
       if (_handles.empty()) _handles.emplace_back(nullptr);
       uint32_t slot;
       if (!_free_slots.empty()) {

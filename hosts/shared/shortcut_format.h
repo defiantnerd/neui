@@ -8,9 +8,13 @@
 // Format a (modifiers, key) shortcut into a Win/Linux-style display label
 // like "Ctrl+S", "Ctrl+Shift+Z", "F11", "Alt+F4". The label is what gets
 // appended to a menu item's text (after a tab) so the OS can right-align
-// it in the popup menu.
+// it in the popup menu. format_shortcut_label_mac gives the Apple form
+// (the modifier symbols, then the key; UTF-8) for a neui-painted menu on
+// an Apple device (the macOS popup menu cascade, the web host in Safari),
+// where NEUI_KMOD_CTRL is Cmd. format_shortcut_label picks the one the
+// build platform's users expect.
 //
-// Returns an empty string if `key` is NEUI_KEY_NONE.
+// All return an empty string if `key` is NEUI_KEY_NONE.
 
 namespace neui_detail
 {
@@ -74,37 +78,41 @@ namespace neui_detail
     return out;
   }
 
-  // macOS-style label: the Cocoa modifier GLYPHS, in Apple's fixed order
-  // (Control, Option, Shift, Command - HIG "Modifier Keys"), no separators,
-  // then the key. "Ctrl+Shift+Z" becomes "^⇧⌘Z" when bound as META|SHIFT.
+  // Apple-style label: the modifier GLYPHS in Apple's fixed order (Control,
+  // Option, Shift, Command - HIG "Modifier Keys"), no separators, then the key.
+  //
+  // neui's convention is that NEUI_KMOD_CTRL is the platform's PRIMARY command
+  // modifier, so on Apple NEUI_KMOD_CTRL is Command and NEUI_KMOD_META the
+  // physical Control key - the same mapping as mac_modifiers_to_neui (input)
+  // and the native NSMenu keyEquivalent mask (menubar_macos.h). A shortcut
+  // bound NEUI_KMOD_CTRL | NEUI_KEY_Z fires on Cmd+Z and reads "⌘Z" here, as it
+  // does in the native menu bar.
   //
   // Why this exists: format_shortcut_label_win's output was never visible on
   // macOS before, because the native NSMenu path strips the "\tShortcut" suffix
-  // (macos_menu_title_only) and shows keyEquivalent instead. NEUI_W_POPUPMENU is
-  // the first macOS surface that DRAWS the label itself, and drawing "Win+Z" on
-  // a Mac is simply wrong.
-  //
-  // NEUI_KMOD_META is Command; NEUI_KMOD_CTRL stays Control (the caret), which
-  // is what a Mac client binding NEUI_KMOD_META means. Named keys keep their
-  // words rather than the more obscure glyphs (⌫ ⎋ ⇥ ...) except for the arrows
-  // and the two Apple always renders as symbols in menus.
+  // (macos_menu_title_only) and shows keyEquivalent instead. Surfaces that DRAW
+  // the label themselves - the NEUI_W_POPUPMENU cascade on macOS, a neui-painted
+  // menu on an Apple device in the web host - must not read "Win+Z" there.
   inline std::string format_shortcut_label_mac(uint32_t mods, uint32_t key)
   {
     if (key == NEUI_KEY_NONE) return {};
 
     std::string out;
-    if (mods & NEUI_KMOD_CTRL)  out += "\xE2\x8C\x83";   // U+2303 UP ARROWHEAD
-    if (mods & NEUI_KMOD_ALT)   out += "\xE2\x8C\xA5";   // U+2325 OPTION KEY
-    if (mods & NEUI_KMOD_SHIFT) out += "\xE2\x87\xA7";   // U+21E7 UPWARDS WHITE ARROW
-    if (mods & NEUI_KMOD_META)  out += "\xE2\x8C\x98";   // U+2318 PLACE OF INTEREST
+    if (mods & NEUI_KMOD_META)  out += "\xE2\x8C\x83";   // Control  U+2303
+    if (mods & NEUI_KMOD_ALT)   out += "\xE2\x8C\xA5";   // Option   U+2325
+    if (mods & NEUI_KMOD_SHIFT) out += "\xE2\x87\xA7";   // Shift    U+21E7
+    if (mods & NEUI_KMOD_CTRL)  out += "\xE2\x8C\x98";   // Command  U+2318
 
     switch (key) {
+    case NEUI_KEY_BACK:   out += "\xE2\x8C\xAB"; return out;   // U+232B
+    case NEUI_KEY_DELETE: out += "\xE2\x8C\xA6"; return out;   // U+2326
+    case NEUI_KEY_TAB:    out += "\xE2\x87\xA5"; return out;   // U+21E5
+    case NEUI_KEY_RETURN: out += "\xE2\x86\xA9"; return out;   // U+21A9
+    case NEUI_KEY_ESCAPE: out += "\xE2\x8E\x8B"; return out;   // U+238B
     case NEUI_KEY_LEFT:   out += "\xE2\x86\x90"; return out;   // U+2190
     case NEUI_KEY_UP:     out += "\xE2\x86\x91"; return out;   // U+2191
     case NEUI_KEY_RIGHT:  out += "\xE2\x86\x92"; return out;   // U+2192
     case NEUI_KEY_DOWN:   out += "\xE2\x86\x93"; return out;   // U+2193
-    case NEUI_KEY_RETURN: out += "\xE2\x86\xA9"; return out;   // U+21A9
-    case NEUI_KEY_BACK:   out += "\xE2\x8C\xAB"; return out;   // U+232B
     default: break;
     }
 
@@ -124,7 +132,8 @@ namespace neui_detail
 
   // Pick the label style the running platform's users expect. Callers that must
   // have one specific style (a test, a cross-platform serialisation) should call
-  // the concrete function instead.
+  // the concrete function instead. The web host decides at run time (the page
+  // may be on an Apple device) and calls the concrete functions itself.
   inline std::string format_shortcut_label(uint32_t mods, uint32_t key)
   {
 #if defined(__APPLE__)

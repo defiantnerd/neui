@@ -1228,8 +1228,11 @@ namespace xpl_host
         platform_activate_window(owner_native);
       }
     }
-    if (auto* fw = dynamic_cast<FrameWidget*>(wd))
-      fw->modal_pump_active = false;
+    // Session::end_modal: the nested pump unwinds and the focus the dialog took
+    // from its owner goes back, as on the other platforms. Last here: it
+    // dispatches focus events into client code.
+    if (dynamic_cast<FrameWidget*>(wd))
+      s->end_modal(w->widget_index);
   }
 
   static void handle_close_request(WindowData* w)
@@ -1242,6 +1245,7 @@ namespace xpl_host
     if (wd->type && !strcmp(wd->type, NEUI_W_APPWINDOW)) {
       neui_event_t ev = {};
       ev.type = NEUI_EVENT_APP_QUIT;
+      ev.data.mouse.widget.id = wd->widget_id;  // the frame closing
       if (!s->dispatch_event(&ev)) return;   // client vetoed the close
     }
     close_window_silently(w);
@@ -1555,6 +1559,13 @@ namespace xpl_host
     invalidate_window(find_window(native_handle));
   }
 
+  // LVGL narrows invalidation per widget through its retained mirror
+  // (platform_retained_widget_invalidate), not through damage rects.
+  void platform_invalidate_rect(void* native_handle, int, int, int, int)
+  {
+    platform_invalidate(native_handle);
+  }
+
   // Toast heartbeat: a 16 ms lv_timer that invalidates the frame; the paint
   // pass advances the toast phase exactly like the other platforms.
   static void toast_timer_cb(lv_timer_t* t)
@@ -1582,6 +1593,11 @@ namespace xpl_host
     lv_timer_delete(w->toast_timer);
     w->toast_timer = nullptr;
   }
+
+  // Shaders are compiled out of the LVGL build (NEUI_NO_SHADERS), so nothing
+  // reads the animation clock.
+  void platform_set_animation_timer(void*, uint32_t) {}
+  bool platform_reduced_motion() { return false; }
 
   uint64_t platform_now_ms()
   {

@@ -14,6 +14,9 @@
 #include "../shared/win32/dark_menubar_win32.h"
 #include "../shared/win32/keys_win32.h"
 
+#include <string>
+#include <vector>
+
 #include <winrt/windows.foundation.h>
 #include <winrt/Windows.UI.ViewManagement.h>
 
@@ -265,6 +268,7 @@ namespace win32_host
       return 0;
     }
     case WM_SIZE: {
+      if (wd) neui_detail::pace_force(wd->pacer);  // show the new size at once
       if (wd && backend && wd->paint_ctx) {
         backend->resize(wd->paint_ctx,
                         static_cast<uint32_t>(LOWORD(lParam)),
@@ -295,6 +299,9 @@ namespace win32_host
     case WM_ERASEBKGND:
       return 1;  // background handled by paint_fn
     case WM_PAINT: {
+      // A paint that comes too soon after the last present is held back
+      // (paint_pacer_win32.h); the D2D swap chain presents without vsync.
+      if (wd && wd->paint_ctx && neui_detail::pace_hold(wd->pacer, hwnd)) return 0;
       PAINTSTRUCT ps;
       BeginPaint(hwnd, &ps);
       EndPaint(hwnd, &ps);
@@ -342,6 +349,7 @@ namespace win32_host
         backend->begin_frame(wd->paint_ctx, clear_argb);
         wd->paint_fn(backend, wd->paint_ctx, lw, lh, *wd, focused);
         backend->end_frame(wd->paint_ctx);
+        neui_detail::pace_presented(wd->pacer);
       }
       return 0;
     }
@@ -413,6 +421,11 @@ namespace win32_host
       if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
       return 0;
     case WM_TIMER:
+      if (wParam == neui_detail::k_paint_pace_timer_id) {
+        if (wd) neui_detail::pace_timer(wd->pacer, hwnd, wParam);
+        else KillTimer(hwnd, wParam);
+        return 0;
+      }
       // Grid uses this to drive the 60 Hz spring-back animation when smooth
       // scroll is active. Forward so the widget's painted_msg_fn can step
       // the animation and decide whether to kill the timer.
@@ -499,6 +512,7 @@ namespace win32_host
       // Give the grid (or any other painted widget) a chance to clean up
       // timers / transient state before the HWND goes away.
       if (wd && wd->painted_msg_fn) wd->painted_msg_fn(*wd, msg, wParam, lParam);
+      if (wd) neui_detail::pace_release(wd->pacer, hwnd);
       if (wd && backend && wd->paint_ctx) {
         // Drop any asset-manager GPU bitmaps keyed on this ctx before
         // tearing it down (CUSTOMDRAW assets create per-ctx uploads on
@@ -1095,8 +1109,18 @@ namespace win32_host
         }
       }
       return 0;
+    case WM_TIMER:
+      if (wParam == k_anim_timer_id) {
+        if (wd && wd->session) wd->session->animation_tick(*wd);
+        else KillTimer(hwnd, k_anim_timer_id);
+        return 0;
+      }
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
     case WM_DESTROY:
       {
+        if (wd) wd->anim_timer_ms = 0;  // the timer dies with the HWND
+        if (wd && wd->session)            // and the frame's animating widgets go
+          wd->session->_asset_manager.shader_cache().clock().forget_owner(wd->index);
         if (wd && wd->type && !strcmp(wd->type, NEUI_W_APPWINDOW)) {
           --g_appwindow_count;
           if (g_appwindow_count <= 0) {

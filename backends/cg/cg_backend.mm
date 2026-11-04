@@ -78,6 +78,18 @@ namespace neui_cg_backend
     uint8_t* surface_pixels = nullptr;
     uint32_t surface_w_px   = 0;
     uint32_t surface_h_px   = 0;
+
+    // Partial repaint (set_frame_damage): logical-point rects the next
+    // begin_frame clips to. For window ctxs the pixels outside belong to the
+    // view's layer backing store, which AppKit / UIKit keep across a partial
+    // drawRect: - the platform forwards damage only from such a draw. Off-
+    // screen ctxs keep their own buffer, valid once one frame has been drawn.
+    std::vector<CGRect> pending_damage;
+    bool                has_frame = false;   // off-screen: buffer holds a complete frame
+
+    // The CTM at begin_frame: logical user space, y-down, before any
+    // push_transform. get_device_transform reports the CTM relative to it.
+    CGAffineTransform   base_ctm = CGAffineTransformIdentity;
   };
 
   // ---------------------------------------------------------------------------
@@ -369,8 +381,18 @@ namespace neui_cg_backend
     // Pair with cg_end_frame's restore - keeps clip / transform changes from
     // leaking past one frame even if a widget forgot a pop.
     CGContextSaveGState(st->cg_ctx);
+    st->base_ctm = CGContextGetCTM(st->cg_ctx);
     st->alpha_stack.clear();
     st->font_stack.clear();
+    // Partial frame: clip to the accepted damage. AppKit / UIKit already clip
+    // a partial drawRect: to its dirty rects; ours is the same set (or a
+    // merged superset), so this only matters for off-screen ctxs - and keeps
+    // the clear below honest if a platform ever forgets.
+    if (!st->pending_damage.empty()) {
+      CGContextClipToRects(st->cg_ctx, st->pending_damage.data(),
+                           st->pending_damage.size());
+      st->pending_damage.clear();
+    }
     CGFloat rgba[4];
     argb_to_rgba(clear_argb, rgba);
     CGContextSetRGBFillColor(st->cg_ctx, rgba[0], rgba[1], rgba[2], rgba[3]);
@@ -382,6 +404,7 @@ namespace neui_cg_backend
     auto* st = static_cast<CGContextState*>(raw);
     if (!st || !st->cg_ctx) return;
     CGContextRestoreGState(st->cg_ctx);
+    st->has_frame = true;
     // For window ctxs the CGContextRef only lives for the duration of
     // AppKit's drawRect:; drop the pointer so no later call draws into a
     // freed context. Off-screen ctxs own their CGContextRef for life -
@@ -389,6 +412,25 @@ namespace neui_cg_backend
     // begin_frame for re-render) work.
     if (!st->surface_pixels)
       st->cg_ctx = nullptr;
+  }
+
+  // Queue damage for the next frame only. Window ctxs accept whenever there
+  // is damage: the platform only passes it from a partial drawRect:, where
+  // the OS keeps every pixel outside. Off-screen ctxs accept once their
+  // buffer holds a complete frame. count 0 = full frame (false).
+  static bool cg_set_frame_damage(neui_render_ctx_t raw,
+                                  const float* rects_xywh, int count)
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    if (!st) return false;
+    st->pending_damage.clear();
+    if (!rects_xywh || count <= 0) return false;
+    if (st->surface_pixels && !st->has_frame) return false;
+    st->pending_damage.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i)
+      st->pending_damage.push_back(CGRectMake(rects_xywh[i * 4],     rects_xywh[i * 4 + 1],
+                                              rects_xywh[i * 4 + 2], rects_xywh[i * 4 + 3]));
+    return true;
   }
 
   static void cg_fill_rect(neui_render_ctx_t raw,
@@ -438,6 +480,10 @@ namespace neui_cg_backend
   // glyphs draw upward from the baseline in user space, which would render
   // upside-down under an inverted CTM. We counter-flip locally around the
   // baseline so glyphs come out the right way up.
+  //
+  // Embedded '\n' (CRLF tolerated) starts a new line, as in the d2d / cairo /
+  // canvas2d backends: the line block is centred vertically as a whole, so
+  // one line behaves as before. CTLineDraw itself does not break lines.
   static void cg_draw_text(neui_render_ctx_t raw,
                             float x, float y, float w, float h,
                             const char* text, float font_size,
@@ -446,15 +492,35 @@ namespace neui_cg_backend
     auto* st = static_cast<CGContextState*>(raw);
     if (!st || !st->cg_ctx || !text || !*text || font_size <= 0.0f) return;
 
-    CTLineRef line = make_ctline(st, text, -1, font_size);
-    if (!line) return;
+    // One CTLine per text line (nullptr for an empty line); every line
+    // advances by the tallest line's height.
+    std::vector<CTLineRef> lines;
+    for (const char* start = text, *p = text;; ++p) {
+      if (*p == '\n' || *p == '\0') {
+        int len = static_cast<int>(p - start);
+        if (len && start[len - 1] == '\r') --len;   // strip CR of a CRLF
+        lines.push_back(len ? make_ctline(st, start, len, font_size) : nullptr);
+        if (*p == '\0') break;
+        start = p + 1;
+      }
+    }
+    CGFloat ascent = 0, line_height = 0;
+    for (CTLineRef line : lines) {
+      if (!line) continue;
+      CGFloat a = 0, d = 0, l = 0;
+      CTLineGetTypographicBounds(line, &a, &d, &l);
+      if (a > ascent) ascent = a;
+      if (a + d + l > line_height) line_height = a + d + l;
+    }
+    if (line_height <= 0) {
+      for (CTLineRef line : lines) if (line) CFRelease(line);
+      return;
+    }
 
-    CGFloat ascent = 0, descent = 0, leading = 0;
-    CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
-    CGFloat line_height = ascent + descent + leading;
-    CGFloat text_y_top  = y + (h - line_height) * 0.5f;
+    CGFloat block_height = line_height * static_cast<CGFloat>(lines.size());
+    CGFloat text_y_top   = y + (h - block_height) * 0.5f;
     if (text_y_top < y) text_y_top = y;
-    CGFloat baseline_y  = text_y_top + ascent;
+    CGFloat baseline_y   = text_y_top + ascent;
 
     CGContextRef cg = st->cg_ctx;
     CGContextSaveGState(cg);
@@ -466,14 +532,21 @@ namespace neui_cg_backend
     CGFloat rgba[4]; argb_to_rgba(argb, rgba, current_alpha(st));
     CGContextSetRGBFillColor(cg, rgba[0], rgba[1], rgba[2], rgba[3]);
 
-    // Origin -> baseline; counter-flip Y so glyphs draw upright.
-    CGContextTranslateCTM(cg, x, baseline_y);
-    CGContextScaleCTM(cg, 1.0, -1.0);
-    CGContextSetTextPosition(cg, 0, 0);
-    CTLineDraw(line, cg);
+    for (CTLineRef line : lines) {
+      if (line) {
+        // Origin -> baseline; counter-flip Y so glyphs draw upright.
+        CGContextSaveGState(cg);
+        CGContextTranslateCTM(cg, x, baseline_y);
+        CGContextScaleCTM(cg, 1.0, -1.0);
+        CGContextSetTextPosition(cg, 0, 0);
+        CTLineDraw(line, cg);
+        CGContextRestoreGState(cg);
+        CFRelease(line);
+      }
+      baseline_y += line_height;
+    }
 
     CGContextRestoreGState(cg);
-    CFRelease(line);
   }
 
   // Vertical metrics of the active font. line_height must match what
@@ -967,6 +1040,22 @@ namespace neui_cg_backend
     CGContextScaleCTM(st->cg_ctx, sx, sy);
   }
 
+  // The CTM's device space is the backing store (y-up for a flipped view), so
+  // report the transforms pushed since begin_frame instead: CTM * base^-1 is
+  // the logical transform, and the backing scale maps it to device pixels.
+  static void cg_get_device_transform(neui_render_ctx_t raw, float m[6])
+  {
+    auto* st = static_cast<CGContextState*>(raw);
+    const CGFloat s = st ? st->backing_scale : 1.0;
+    CGAffineTransform t = CGAffineTransformIdentity;
+    if (st && st->cg_ctx)
+      t = CGAffineTransformConcat(CGContextGetCTM(st->cg_ctx),
+                                  CGAffineTransformInvert(st->base_ctm));
+    m[0] = static_cast<float>(t.a * s);  m[1] = static_cast<float>(t.b * s);
+    m[2] = static_cast<float>(t.c * s);  m[3] = static_cast<float>(t.d * s);
+    m[4] = static_cast<float>(t.tx * s); m[5] = static_cast<float>(t.ty * s);
+  }
+
   // CoreGraphics contexts are recreated per draw cycle via set_current_frame
   // and never silently invalidate the way a D3D-backed D2D target can, so
   // there's no generation to advance. Cached target-bound resources are
@@ -1322,6 +1411,8 @@ namespace neui_cg_backend
     cg_stroke_path_gradient,
     cg_font_metrics,
     cg_push_font_styled,
+    cg_set_frame_damage,
+    cg_get_device_transform,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

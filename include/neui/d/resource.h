@@ -36,8 +36,9 @@
 //     IMAGE widget resolves its source on every paint, and a client that declines
 //     is not asked again. (Negative outcomes are sticky in v0; an explicit
 //     create_from_file re-probes one, a repaint does not.)
-//   * FONT / COMPONENT / SIDECAR: not cached - each create_font_from_file /
-//     create_component_from_file / filmstrip discovery asks again, exactly as it
+//   * FONT / COMPONENT / SIDECAR / SHADER: not cached - each create_font_from_file /
+//     create_component_from_file / filmstrip discovery / shader
+//     create_from_file asks again, exactly as it
 //     would re-read the file. So N component widgets built from one document cost
 //     N calls, and sidecar discovery asks for two different candidate names
 //     ("<path>.json", then "<base>.json"). Keep provide() cheap; do not treat it
@@ -89,6 +90,9 @@ extern "C" {
     // Reserved: do NOT renumber.
     // NEUI_RESOURCE_KIND_SVG   = 5,
     // NEUI_RESOURCE_KIND_AUDIO = 6,
+    // Shader source (UTF-8 .nsl text). Requested by
+    // neui_shader_api_t::create_from_file (<neui/d/shader.h>).
+    NEUI_RESOURCE_KIND_SHADER    = 7,
   } neui_resource_kind_t;
 
   // Bit for neui_resource_client_t::kinds_mask.
@@ -97,6 +101,7 @@ extern "C" {
 #define NEUI_RESOURCE_MASK_FONT      NEUI_RESOURCE_MASK(NEUI_RESOURCE_KIND_FONT)
 #define NEUI_RESOURCE_MASK_COMPONENT NEUI_RESOURCE_MASK(NEUI_RESOURCE_KIND_COMPONENT)
 #define NEUI_RESOURCE_MASK_SIDECAR   NEUI_RESOURCE_MASK(NEUI_RESOURCE_KIND_SIDECAR)
+#define NEUI_RESOURCE_MASK_SHADER    NEUI_RESOURCE_MASK(NEUI_RESOURCE_KIND_SHADER)
 
   // Host-allocated, passed by const pointer. Fields may be APPENDED in a future
   // version, so a client must never copy this struct by value or assume its

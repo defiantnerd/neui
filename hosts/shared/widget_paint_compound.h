@@ -10,6 +10,7 @@
 #include "painter.h"
 #include "theme_palette.h"
 #include "behavior_runtime.h"  // BEHAVIOR_PI / behavior_clamp (shared math)
+#include "shader_layer.h"      // paint_shader_layer / shader_fallback_hidden
 
 // Host-agnostic paint helper for compound drawables. Both the xpl host
 // (CustomDrawWidget::paint / paint_after_children) and the win32 native
@@ -306,9 +307,11 @@ namespace neui_detail
   // the freshly-built symbol failed to rasterise (empty / too-long text).
   // Because the cache is keyed by the full key (incl. the resolved text), one
   // shared layer serves many widgets each showing a different QR code.
+  // An evicted symbol's uploads are destroyed through `backend`.
   inline CompoundLayer::QrSymbol* qr_get_symbol(
       const CompoundLayer& L, const std::string& text, uint32_t side_px,
-      uint32_t dark, uint32_t bg, int ecc, int quiet, float scale)
+      uint32_t dark, uint32_t bg, int ecc, int quiet, float scale,
+      neui_render_backend_t* backend)
   {
     for (auto& sym : L.qr_cache) {
       if (sym && sym->text == text && sym->side_px == side_px &&
@@ -321,8 +324,10 @@ namespace neui_detail
     sym->ecc = ecc;   sym->quiet = quiet;
     qr_rasterize(*sym, scale);
     if (sym->pixels.empty()) return nullptr;
-    if (L.qr_cache.size() >= k_qr_cache_max)
-      L.qr_cache.erase(L.qr_cache.begin());  // FIFO evict oldest
+    if (L.qr_cache.size() >= k_qr_cache_max) {  // FIFO evict oldest
+      if (L.qr_cache.front()) compound_release_symbol_bitmaps(*L.qr_cache.front(), backend);
+      L.qr_cache.erase(L.qr_cache.begin());
+    }
     L.qr_cache.push_back(std::move(sym));
     return L.qr_cache.back().get();
   }
@@ -367,6 +372,8 @@ namespace neui_detail
     // AND-filter: every bit set in show_when must be present in state_mask.
     // show_when == 0 (default) always passes.
     if ((L.show_when & ~state_mask) != 0u) return;
+    // A SHADER layer's fallback stands in only where that layer cannot render.
+    if (shader_fallback_hidden(p, ca, self_slot, bag)) return;
     float a = effective_float(L, "alpha", L.alpha, bag);
     if (a <= 0.0f) return;
     if (a > 1.0f)  a = 1.0f;
@@ -391,8 +398,7 @@ namespace neui_detail
           uint32_t color;
           auto bit = L.bindings.find("color");
           if (bit != L.bindings.end()) {
-            color = static_cast<uint32_t>(
-              round_to_int(eval_binding_float(bit->second, bag)));
+            color = eval_binding_color(bit->second, bag);
           } else if (L.text_color_set) {
             color = L.text_color;
           } else {
@@ -435,8 +441,7 @@ namespace neui_detail
         neui_asset_t asset = effective_asset(L, "asset", L.asset, bag);
         if (asset.id == asset_none.id) break;
         float rot = effective_float(L, "rotation", L.rotation, bag);
-        uint32_t tint = static_cast<uint32_t>(
-          effective_int(L, "tint", static_cast<int>(L.tint), bag));
+        uint32_t tint = effective_color(L, "tint", L.tint, bag);
         // Filmstrip cell. Default 0; commonly bound to a value attr. On an
         // ordinary (untagged) asset the frame is ignored and the whole bitmap
         // draws, so routing every asset layer through the frame-aware helper
@@ -467,10 +472,8 @@ namespace neui_detail
       }
       case NEUI_COMPOUND_LAYER_PATH: {
         if (L.path_cmds.empty()) break;
-        uint32_t fill   = static_cast<uint32_t>(
-          effective_int  (L, "fill_color",   static_cast<int>(L.fill_color),   bag));
-        uint32_t stroke = static_cast<uint32_t>(
-          effective_int  (L, "stroke_color", static_cast<int>(L.stroke_color), bag));
+        uint32_t fill   = effective_color(L, "fill_color",   L.fill_color,   bag);
+        uint32_t stroke = effective_color(L, "stroke_color", L.stroke_color, bag);
         float    sw     = effective_float(L, "stroke_width",  L.stroke_width,  bag);
         if (sw < 0.0f) sw = 0.0f;
 
@@ -581,10 +584,8 @@ namespace neui_detail
         break;
       }
       case NEUI_COMPOUND_LAYER_RECT: {
-        uint32_t fill   = static_cast<uint32_t>(
-          effective_int  (L, "fill_color",   static_cast<int>(L.fill_color),   bag));
-        uint32_t stroke = static_cast<uint32_t>(
-          effective_int  (L, "stroke_color", static_cast<int>(L.stroke_color), bag));
+        uint32_t fill   = effective_color(L, "fill_color",   L.fill_color,   bag);
+        uint32_t stroke = effective_color(L, "stroke_color", L.stroke_color, bag);
         float    sw     = effective_float(L, "stroke_width",  L.stroke_width,  bag);
         float    radius = effective_float(L, "corner_radius", L.corner_radius, bag);
         if (sw < 0.0f) sw = 0.0f;
@@ -651,10 +652,8 @@ namespace neui_detail
         break;
       }
       case NEUI_COMPOUND_LAYER_ARC: {
-        uint32_t fill   = static_cast<uint32_t>(
-          effective_int  (L, "fill_color",   static_cast<int>(L.fill_color),   bag));
-        uint32_t stroke = static_cast<uint32_t>(
-          effective_int  (L, "stroke_color", static_cast<int>(L.stroke_color), bag));
+        uint32_t fill   = effective_color(L, "fill_color",   L.fill_color,   bag);
+        uint32_t stroke = effective_color(L, "stroke_color", L.stroke_color, bag);
         float    sw     = effective_float(L, "stroke_width", L.stroke_width, bag);
         if (sw < 0.0f) sw = 0.0f;
         bool has_fill   = ((fill   >> 24) & 0xffu) != 0u;
@@ -760,7 +759,8 @@ namespace neui_detail
         // layer with different NEUI_ATTR_QRCODE values each get their own
         // symbol rather than fighting over one held bitmap.
         CompoundLayer::QrSymbol* sym =
-          qr_get_symbol(L, text, side_px, dark, bg, ecc, quiet, scale);
+          qr_get_symbol(L, text, side_px, dark, bg, ecc, quiet, scale,
+                        p ? p->backend : nullptr);
         if (!sym) break;  // empty / un-encodable text - draw nothing
 
         void* bmp = qr_upload(p, *sym);
@@ -789,6 +789,9 @@ namespace neui_detail
         }
         break;
       }
+      case NEUI_COMPOUND_LAYER_SHADER:
+        paint_shader_layer(p, L, r.x, r.y, r.w, r.h, bag);
+        break;
       case NEUI_COMPOUND_LAYER_GROUP: {
         // Container: establish a local coordinate frame at the group rect and
         // clip children to it, then paint every direct child sorted by its own

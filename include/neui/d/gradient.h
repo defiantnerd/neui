@@ -32,9 +32,9 @@ typedef enum neui_gradient_kind {
 } neui_gradient_kind_t;
 
 // How the pattern behaves OUTSIDE the [0, 1] stop range along its axis.
-// CLAMP is the universal default; the Cairo and D2D backends honour all
-// three, while the CoreGraphics backend supports CLAMP only and treats
-// REPEAT / MIRROR as CLAMP.
+// CLAMP is the universal default; the Cairo, D2D and Canvas 2D (web)
+// backends honour all three, while the CoreGraphics backend supports CLAMP
+// only and treats REPEAT / MIRROR as CLAMP.
 typedef enum neui_gradient_extend {
   NEUI_GRADIENT_EXTEND_CLAMP  = 0,  // hold the end stops (default)
   NEUI_GRADIENT_EXTEND_REPEAT = 1,  // tile the pattern

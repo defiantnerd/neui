@@ -304,6 +304,9 @@ API_AVAILABLE(ios(13.4))
   // animation invalidates it (which paint_toast itself triggers when the toast
   // finishes its lifetime, so the link doesn't spin forever).
   CADisplayLink*     _toast_link;
+  // Animation clock heartbeat (Session::animation_tick); _anim_ms its interval.
+  NSTimer*           _anim_timer;
+  uint32_t           _anim_ms;
   // iPad pointer hover (MILESTONE 6). A UIHoverGestureRecognizer fires only for
   // a pointing device (trackpad / mouse), never for a finger, so it drives
   // wd.hovered without breaking the "no hover on touch" divergence. nil until
@@ -319,6 +322,7 @@ API_AVAILABLE(ios(13.4))
 // rather than stacking a second one; toastStop is a silent no-op if none runs.
 - (void)toastStart;
 - (void)toastStop;
+- (void)animSetInterval:(uint32_t)ms;
 // Attach the iPad pointer hover gesture + pointer interaction. Idempotent; a
 // no-op on iOS < 13.4 (the UIKey / hover machinery doesn't exist there).
 - (void)installEnhancedInput;
@@ -346,7 +350,6 @@ API_AVAILABLE(ios(13.4))
 
 - (void)drawRect:(CGRect)rect
 {
-  (void)rect;
   if (!session) return;
   xpl_host::WidgetData* wd = session->get_widget(widget_index);
   if (!wd || !wd->render_ctx) return;
@@ -357,7 +360,21 @@ API_AVAILABLE(ios(13.4))
   CGSize sz = self.bounds.size;
   neui_cg_backend::set_current_frame(wd->render_ctx, (void*)cg,
                                       (float)sz.width, (float)sz.height);
-  session->paint_frame(wd->render_ctx, widget_index);
+
+  // Partial repaint: a setNeedsDisplayInRect: (platform_invalidate_rect)
+  // makes UIKit redraw only `rect` - the context is clipped to it and the
+  // layer keeps every pixel outside - so it is the frame's damage, already
+  // in frame-local y-down points. A draw covering the whole view stays full.
+  neui_detail::DamageRegion damage;
+  if (!CGRectContainsRect(rect, self.bounds)) {
+    const int x0 = (int)std::floor(CGRectGetMinX(rect));
+    const int y0 = (int)std::floor(CGRectGetMinY(rect));
+    const int x1 = (int)std::ceil(CGRectGetMaxX(rect));
+    const int y1 = (int)std::ceil(CGRectGetMaxY(rect));
+    damage.add({ x0, y0, x1 - x0, y1 - y0 });
+  }
+  session->paint_frame(wd->render_ctx, widget_index,
+                       damage.empty() ? nullptr : &damage);
 }
 
 // Live system dark/light tracking. iOS has no global appearance signal; each
@@ -1611,12 +1628,35 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer*)other
 
 // Stop the heartbeat when the view leaves the hierarchy so a stray link can't
 // outlive its frame (e.g. a frame destroyed mid-toast).
+// Animation clock heartbeat. An NSTimer rather than a display link: the clock
+// gates frames to its fps, and the interval it asks for is often longer.
+- (void)animSetInterval:(uint32_t)ms
+{
+  if (ms == _anim_ms) return;
+  if (_anim_timer) { [_anim_timer invalidate]; _anim_timer = nil; }
+  _anim_ms = ms;
+  if (!ms) return;
+  _anim_timer = [NSTimer timerWithTimeInterval:ms / 1000.0
+                                         target:self
+                                       selector:@selector(animTick:)
+                                       userInfo:nil
+                                        repeats:YES];
+  [[NSRunLoop mainRunLoop] addTimer:_anim_timer forMode:NSRunLoopCommonModes];
+}
+
+- (void)animTick:(NSTimer*)timer
+{
+  (void)timer;
+  [self animSetInterval:session ? session->animation_tick(widget_index) : 0];
+}
+
 - (void)willMoveToWindow:(UIWindow*)newWindow
 {
   [super willMoveToWindow:newWindow];
   if (!newWindow) {
     [self toastStop];
     [self scrollLinkStop];   // don't let a momentum glide outlive the frame
+    [self animSetInterval:0];
   }
 }
 
@@ -2330,6 +2370,8 @@ namespace xpl_host
     // recycled, and a new frame must not inherit the old one's status bar.
     neui_detail::ios_frame_forget(neui_widget_t{ wd.widget_id });
     if (!wd.native_handle) return;
+    // The timer retains the view, which would outlive the session.
+    [neui_view_for_window(wd.native_handle) animSetInterval:0];
 
     // Tear down the render context before the view goes away.
     auto* backend = xpl_host::platform_get_backend();
@@ -2428,6 +2470,16 @@ namespace xpl_host
     // degrades to marking dirty. Callers treat a no-op as "geometry stays as it
     // was", which is the documented best-effort contract.
     platform_invalidate(native_handle);
+  }
+
+  // Partial repaint: UIKit unions every rect marked before the next display
+  // pass (a whole-view setNeedsDisplay absorbs them) and passes the union to
+  // drawRect:. Frame-local logical rects are view points (y-down).
+  void platform_invalidate_rect(void* native_handle, int x, int y, int w, int h)
+  {
+    if (w <= 0 || h <= 0) return;
+    NEUIView* view = neui_view_for_window(native_handle);
+    [view setNeedsDisplayInRect:CGRectMake(x, y, w, h)];
   }
 
   // UIApplicationMain owns the run loop on iOS; neui never owns / stops it.
@@ -2728,6 +2780,16 @@ namespace xpl_host
     NEUIView* view = neui_view_for_window(native_handle);
     [view toastStop];
   }
+  void platform_set_animation_timer(void* native_handle, uint32_t interval_ms)
+  {
+    [neui_view_for_window(native_handle) animSetInterval:interval_ms];
+  }
+
+  bool platform_reduced_motion()
+  {
+    return UIAccessibilityIsReduceMotionEnabled();
+  }
+
   // Monotonic clock (ms) for the shared toast phase math. CACurrentMediaTime is
   // mach_absolute_time-backed (seconds since boot, unaffected by wall-clock
   // changes); the shared code only ever reads differences, so the absolute

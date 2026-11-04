@@ -13,6 +13,7 @@
 #include "../shared/grid_model.h"
 #include "../shared/widget_section_scroll.h"
 #include "../shared/widget_tabview.h"
+#include "../shared/damage.h"
 #include "asset_manager.h"
 
 #include <string>
@@ -63,6 +64,11 @@ namespace xpl_host
     // test happens to land on the frame's top-left, which is acceptable
     // because input cannot arrive before the window is first painted.
     int abs_x = 0, abs_y = 0;
+    // Set once the paint walk (or refresh_abs_positions, which runs the same
+    // arithmetic) has computed abs_x / abs_y. Partial repaint
+    // builds a widget's damage rect from them, so until then any
+    // invalidation of this widget repaints the whole frame.
+    bool abs_valid   = false;
     bool isroot      = false;
     bool visible     = false;
     bool emit_events = false;
@@ -222,6 +228,12 @@ namespace xpl_host
     // Splitting these two is not cosmetic: a POPUPMENU that answers yes to
     // is_menubar() replaces the frame's actual menu bar on show().
     virtual bool is_menu_model() const { return false; }
+    // Where paint() can put pixels, relative to the widget's own top-left.
+    // Partial repaint damages and culls with this, so a widget that paints
+    // outside (0, 0, width, height) must say so - or a change leaves stale
+    // overflow behind and a neighbour's repaint wipes it.
+    virtual neui_detail::DamageRect paint_bounds() const
+    { return { 0, 0, width, height }; }
     // Editable text surfaces (INPUTBOX / MULTILINE). Lets the platform layer
     // target X11 middle-click PRIMARY paste at the right widget. insert_text
     // inserts UTF-8 at the caret (replacing any selection); returns true if it
@@ -797,6 +809,7 @@ namespace xpl_host
     neui_asset_t asset = asset_none;
     void paint(neui_render_backend_t* backend, neui_render_ctx_t ctx,
                bool is_focused) override;
+    neui_detail::DamageRect paint_bounds() const override;
   };
 
   // CUSTOMDRAW - client-rendered surface. Emits NEUI_EVENT_WIDGET_PAINT
@@ -1124,6 +1137,16 @@ namespace xpl_host
     // is none. `widget_index` may itself be a frame.
     uint32_t frame_of(uint32_t widget_index) const;
 
+    // A frame's window became the OS focus window: logical focus moves into
+    // that frame, so keys, Tab and IME reach its widgets and not another
+    // window's. Each frame remembers its focused widget and gets it back.
+    // True when the focused widget changed (set_focus has then fired the focus
+    // events). A modal DIALOG takes focus in widget_show and gives it back in
+    // end_modal; this is the non-modal half - switching between windows - and
+    // is a no-op when focus is already in the frame or inside an open popup
+    // surface (which never takes OS focus).
+    bool frame_activated(uint32_t frame_index);
+
     // Handle an editing key for the currently focused widget.
     // Returns true if the key was consumed and should not be forwarded.
     bool handle_input_key(neui_event_type_t type, uint32_t keycode, uint32_t modifiers);
@@ -1149,7 +1172,35 @@ namespace xpl_host
                                uint32_t stop_before = 0);
 
     // Called by the platform layer when WM_PAINT / equivalent fires.
-    void paint_frame(neui_render_ctx_t ctx, uint32_t parent_index);
+    // `damage` (frame-local logical px) restricts the frame to those rects:
+    // widgets outside them are culled and the backend clips + presents only
+    // them. nullptr / FULL / EMPTY, a backend without set_frame_damage, or
+    // damage covering most of the frame all fall back to a full frame.
+    void paint_frame(neui_render_ctx_t ctx, uint32_t parent_index,
+                     const neui_detail::DamageRegion* damage = nullptr);
+
+    // Queue a repaint of just this widget's area (its cached frame-local
+    // rect plus a small margin for focus rings / anti-aliasing) on its
+    // frame. Falls back to a whole-frame repaint whenever that rect can't be
+    // trusted or the change can reach beyond it: never painted yet, the
+    // frame itself, an open combo (its drop list lies outside the rect).
+    // Correctness relies on one invariant: every geometry change (move,
+    // resize, show / hide, scroll) still requests a FULL repaint, and a
+    // pending full repaint absorbs any rects queued alongside it - so a
+    // rect computed from stale abs_x / abs_y is never the only repaint.
+    void invalidate_widget_rect(uint32_t widget_index);
+
+    // ---- Animation clock (hosts/shared/anim_clock.h) ----
+    // A CUSTOMDRAW paint that reads the session's animation clock (a SHADER
+    // layer on neui_time, shader_api->animation_time) marks its widget with
+    // the frame being painted (_anim_frame); after the frame, paint_frame
+    // runs the frame's timer (platform_set_animation_timer) while it has
+    // animating widgets. The timer calls animation_tick, which returns the
+    // interval to continue at (0 = stop).
+    uint32_t animation_tick(uint32_t frame_index);
+    uint32_t animation_interval(uint32_t frame_index);
+    neui_detail::AnimClock& anim_clock() { return _asset_manager.shader_cache().clock(); }
+    uint32_t _anim_frame = 0;
 
 #ifdef NEUI_PLATFORM_LVGL
     // Retained-mode paint entries (LVGL Option C prototype). The LVGL
@@ -1511,7 +1562,7 @@ namespace xpl_host
     uint32_t menu_surface();
     // Paint the popup menu overlay. Called from paint_frame after the
     // combo overlay so the popup sits on top of everything else.
-    void paint_popup_menu(neui_render_ctx_t ctx);
+    void paint_popup_menu(neui_render_ctx_t ctx, uint32_t frame_index);
     // Mouse + key hooks for the popup. Called before normal widget
     // dispatch when _popup_active. lx/ly are in frame-local logical px.
     bool handle_popup_click(float lx, float ly);
@@ -1591,7 +1642,9 @@ namespace xpl_host
     // then client TREE_ITEM_ACTIVATED). Returns true if a shortcut matched
     // (the key is then consumed). Mirrors the Win32 HACCEL path, which is
     // MSG-based and so does not run on Linux.
-    bool try_menubar_accel(uint32_t keycode, uint32_t modifiers);
+    // A non-zero frame_index limits the search to that frame's menubar, so a
+    // dialog's keys do not fire its owner's shortcuts.
+    bool try_menubar_accel(uint32_t keycode, uint32_t modifiers, uint32_t frame_index = 0);
 
     // ---- Accessibility support (consumed by a11y_adapter.cpp) ---------------
 
@@ -1763,6 +1816,8 @@ namespace xpl_host
     // (The re-entrancy guard lives in TimerTable::tick_and_dispatch, so the
     // dispatch walk and its guard stay together and stay testable.)
     bool     _os_focused     = true;  // frame currently has OS keyboard focus
+    uint32_t _active_frame   = 0;     // frame last activated (frame_activated)
+    std::unordered_map<uint32_t, uint32_t> _frame_focus;  // frame -> its focused widget
     uint32_t _open_combo     = 0;   // tree index of the currently open ComboBoxWidget, or 0
 
     // The zoom of the frame currently being painted (NEUI_ATTR_UI_SCALE), 1.0
@@ -1781,7 +1836,9 @@ namespace xpl_host
     int                      _popup_hover      = -1;
     int                      _popup_x_abs      = 0;     // logical px, frame-local
     int                      _popup_y_abs      = 0;
+    uint32_t                 _popup_frame      = 0;     // frame the popup belongs to
     std::vector<std::string> _popup_items;
+    void invalidate_popup_frame();
 
     // In-frame menubar overlay state (see the handle_menubar_* methods).
     // _menu_open gates the band/dropdown interaction; _menu_bar is the open
@@ -2024,5 +2081,10 @@ namespace xpl_host
 
   // -------------------------------------------------------------------------
   void register_host();
+
+  // Every painter's resolve_shader thunk (painter.h), defined with the
+  // shader API in widgets.cpp / .mm; null in a NEUI_NO_SHADERS build, where
+  // shader layers paint their fallback.
+  extern const neui_detail::resolve_shader_thunk_t xpl_resolve_shader;
 
 } // namespace xpl_host

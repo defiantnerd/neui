@@ -1,6 +1,10 @@
 # SVG adaption: rendering many composited knobs efficiently
 
-Status: design note / investigation. No implementation proposed yet.
+Status: design note / investigation. No implementation proposed yet. Since it
+was written, the gaps section 1 calls BLOCKED have closed: gradient fills,
+cubic / quadratic path commands, the SVG filter graph, filmstrip assets and
+`.nsl` shaders (a SHADER layer can draw a face procedurally,
+`plans/shader-effects.md`) all ship. See "Open dependencies" at the end.
 
 Context: a designer-supplied SVG (a 134x134 rotary knob: layered drop-shadows,
 gradient face, knurled bezel ring, ring highlights, rotating indicator line) was
@@ -164,12 +168,12 @@ knob it trades large memory for a benefit the GPU already gives for free.
   convenience wrappers over the same engine. NEUI_API_FILTER is an optional host
   extension (a host without off-screen surfaces returns nullptr). Verified by
   `neui_filter_knob_example` + `tests/test_filter_graph.cpp`.
-- Cubic/quadratic bezier `set_path` commands (compound roadmap, still deferred;
-  not needed for the shadows or the gradient face).
-- Remaining SVG filter primitives as general ops (feColorMatrix, feComposite,
-  feBlend, feMerge, feFlood, feTurbulence) and `feComposite operator="out"`
+- Cubic/quadratic bezier `set_path` commands - DONE (`NEUI_PATH_CMD_CUBIC_TO` /
+  `_QUAD_TO`, component-JSON ops `c` / `q`).
+- The remaining SVG filter primitives (`feMorphology`, `feTurbulence`,
+  `feComponentTransfer`, lighting, ...) and `feComposite operator="out"`
   semantics for *semi-transparent* shapes - deferred until a full `<filter>`
-  graph is needed.
+  graph needs them (`docs/deferred-issues.md`).
 - An SVG rasterization path (vendored engine) OR a painter-API reimplementation
   of the static art (preferred). The parsing location (fully in-core vs a helper
   lib outside the core) is an open decision; it is independent of the filter
