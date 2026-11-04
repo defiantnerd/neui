@@ -1300,9 +1300,49 @@ namespace
     }
   }
 
+  // Client timers (NEUI_API_TIMER): one native tick per session at the
+  // shortest live interval (the session's TimerTable owns each timer's own
+  // deadline and fires late ones once), waited for by the loop like the
+  // heartbeat. Immortal (leaked), as on Linux: ~Session calls
+  // platform_timer_stop, and static destruction order across TUs is
+  // unspecified.
+  struct ClientTick { uint32_t interval_ms; double next_ms; };
+  std::unordered_map<Session*, ClientTick>& client_timer_sessions()
+  {
+    static auto* m = new std::unordered_map<Session*, ClientTick>();
+    return *m;
+  }
+
+  void service_client_timers()
+  {
+    auto& m = client_timer_sessions();
+    if (m.empty()) return;
+    const double now = emscripten_get_now();
+    // Snapshot: a handler may add or remove timers (or whole sessions).
+    std::vector<Session*> due;
+    for (auto& kv : m)
+      if (now >= kv.second.next_ms) due.push_back(kv.first);
+    for (Session* s : due) {
+      auto it = m.find(s);
+      if (it == m.end()) continue;
+      it->second.next_ms = now + it->second.interval_ms;
+      s->tick_client_timers();
+    }
+  }
+
+  // The earliest client-timer tick, or 0 when none is live.
+  double next_client_tick_ms()
+  {
+    double best = 0.0;
+    for (auto& kv : client_timer_sessions())
+      if (best == 0.0 || kv.second.next_ms < best) best = kv.second.next_ms;
+    return best;
+  }
+
   // Run the heartbeat if it is due; disarm it once nothing animates.
   void service_timers()
   {
+    service_client_timers();
     if (g_next_tick_ms == 0.0) return;
     const double now = emscripten_get_now();
     if (now < g_next_tick_ms) return;
@@ -1310,12 +1350,15 @@ namespace
     g_next_tick_ms = any_window_animating() ? now + 16.0 : 0.0;
   }
 
-  // web_wait timeout: until the heartbeat is due, or none.
+  // web_wait timeout: until the heartbeat or a client timer is due, or none.
   int wait_timeout_ms(int cap_ms)
   {
     int t = -1;
-    if (g_next_tick_ms != 0.0) {
-      double d = g_next_tick_ms - emscripten_get_now();
+    double due = g_next_tick_ms;
+    const double client = next_client_tick_ms();
+    if (client != 0.0 && (due == 0.0 || client < due)) due = client;
+    if (due != 0.0) {
+      double d = due - emscripten_get_now();
       t = d <= 0.0 ? 0 : static_cast<int>(std::ceil(d));
     }
     if (cap_ms >= 0 && (t < 0 || t > cap_ms)) t = cap_ms;
@@ -2972,12 +3015,38 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
     return d.running ? 0 : d.result;
   }
 
+  // The neui_cursor_kind set as CSS cursors - every shape has one. DEFAULT
+  // clears the canvas's own cursor, so the page's applies.
+  static const char* css_cursor(int kind)
+  {
+    switch (kind) {
+      case NEUI_CURSOR_ARROW:       return "default";
+      case NEUI_CURSOR_IBEAM:       return "text";
+      case NEUI_CURSOR_CROSSHAIR:   return "crosshair";
+      case NEUI_CURSOR_HAND:        return "pointer";
+      case NEUI_CURSOR_OPEN_HAND:   return "grab";
+      case NEUI_CURSOR_CLOSED_HAND: return "grabbing";
+      case NEUI_CURSOR_EW_RESIZE:   return "ew-resize";
+      case NEUI_CURSOR_NS_RESIZE:   return "ns-resize";
+      case NEUI_CURSOR_NESW_RESIZE: return "nesw-resize";
+      case NEUI_CURSOR_NWSE_RESIZE: return "nwse-resize";
+      case NEUI_CURSOR_MOVE:        return "move";
+      case NEUI_CURSOR_WAIT:        return "wait";
+      case NEUI_CURSOR_PROGRESS:    return "progress";
+      case NEUI_CURSOR_HELP:        return "help";
+      case NEUI_CURSOR_NOT_ALLOWED: return "not-allowed";
+      case NEUI_CURSOR_NONE:        return "none";
+      case NEUI_CURSOR_DEFAULT:
+      default:                      return "";
+    }
+  }
+
   void platform_set_cursor(int kind)
   {
     static int current = NEUI_CURSOR_DEFAULT;
     if (kind == current) return;
     current = kind;
-    web_set_cursor(kind == NEUI_CURSOR_EW_RESIZE ? "ew-resize" : "");
+    web_set_cursor(css_cursor(kind));
   }
 
   void platform_start_toast_animation(void* native_handle)
@@ -3127,10 +3196,21 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
   // Each answers the way platform_null.cpp does, so the feature behind it fails
   // honestly (or stays inert) rather than half-working.
 
-  // Client timers (NEUI_API_TIMER): nothing drives a tick yet, so add_timer
-  // returns an id and the table stays consistent, but it never fires.
-  void platform_timer_start(Session*, uint32_t) {}
-  void platform_timer_stop(Session*)            {}
+  // Client timers (NEUI_API_TIMER) - see client_timer_sessions above.
+  void platform_timer_start(Session* session, uint32_t interval_ms)
+  {
+    if (!session || interval_ms == 0) return;
+    auto& t = client_timer_sessions()[session];
+    // Setting the interval it already runs at leaves the phase alone.
+    if (t.interval_ms == interval_ms && t.next_ms != 0.0) return;
+    t.interval_ms = interval_ms;
+    t.next_ms     = emscripten_get_now() + interval_ms;
+  }
+
+  void platform_timer_stop(Session* session)
+  {
+    if (session) client_timer_sessions().erase(session);
+  }
 
   // NEUI_ATTR_UI_SCALE: the pointer path does not divide by a zoom, so the
   // attribute stays inert here (WidgetData::ui_scale returns 1).
