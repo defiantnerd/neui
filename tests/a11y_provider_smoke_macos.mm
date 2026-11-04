@@ -847,7 +847,11 @@ int main()
     //     anything being wrong.
     g_probe2_view  = va;
     g_probe2_armed = true;
-    w->set_text(sess, btn, "Save.");         // force a repaint
+    w->set_text(sess, btn, "Save.");
+    // A FULL repaint, so the CUSTOMDRAW widgets whose WIDGET_PAINT runs the
+    // probe paint too: with partial repaint the text change alone repaints only
+    // the button, and the frame's other widgets are culled.
+    w->invalidate(sess, fa);
     pump(0.25);
     check(g_probe2_done, "12b the in-paint PROVIDER probe ran");
     check(g_probe2_count > 0,
