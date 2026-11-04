@@ -15,7 +15,19 @@ target_include_directories(neui-xplhost
 
 target_link_libraries(neui-xplhost PRIVATE neui neui-qrcodegen)
 
-if(WIN32)
+if(WIN32 AND NEUI_WITH_LVGL)
+  # LVGL host prototype (plans/lvgl-host-approach-c.md): the xpl host is
+  # built with the LVGL platform layer + backend instead of the native
+  # Win32/D2D pairing. The registered host id stays neui.host.crossplatform;
+  # backend + platform are paired per build, exactly like Linux.
+  target_sources(neui-xplhost PRIVATE platform_lvgl.cpp)
+  target_compile_definitions(neui-xplhost PRIVATE NEUI_PLATFORM_LVGL=1)
+  target_include_directories(neui-xplhost SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/stb)
+  # windowsapp.lib as in the native-Win32 branch below: host.cpp compiles the
+  # C++/WinRT theme provider on every _WIN32 build, LVGL or not.
+  target_link_libraries(neui-xplhost PRIVATE neui-backend-lvgl windowsapp)
+elseif(WIN32)
   # a11y_win32.cpp is the UI Automation provider (NEUI_API_A11Y); its own TU so
   # the COM machinery stays out of the platform layer, mirroring a11y_macos.mm.
   target_sources(neui-xplhost PRIVATE platform_win32.cpp a11y_win32.cpp)
@@ -34,6 +46,11 @@ elseif(NEUI_IOS)
   # platform layer instead of the AppKit one. This branch MUST come before the
   # generic APPLE branch since iOS also matches APPLE.
   target_sources(neui-xplhost PRIVATE platform_ios.mm)
+  # host.cpp is compiled on every platform, so the NEUI_API_IOS lines in its
+  # get_interface / ~Session need a gate. NEUI_IOS is a CMake variable only -
+  # there is no NEUI_IOS preprocessor define - so mint one here, mirroring
+  # NEUI_PLATFORM_LVGL above.
+  target_compile_definitions(neui-xplhost PRIVATE NEUI_PLATFORM_IOS=1)
   set_source_files_properties(platform_ios.mm PROPERTIES
     COMPILE_FLAGS "-fobjc-arc"
   )

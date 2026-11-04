@@ -37,6 +37,9 @@ struct App {
   neui_dnd_api_t*       dnd    = nullptr;
   neui_behavior_api_t*  behavior = nullptr;
   neui_asset_api_t*     assets = nullptr;
+  // NEUI_API_IOS (d/ios.h). Optional by contract: NULL on every host but the
+  // two iOS ones, so every use below is guarded.
+  neui_ios_api_t*       ios    = nullptr;
   neui_session_t        s      = {};
   neui_widget_t         win    = {};
   neui_widget_t         mb     = {};
@@ -279,6 +282,27 @@ bool onevent(void* token, neui_event_t* e)
     return false;
   }
 
+  // iOS environment moved: orientation, power, thermal, battery, one of the
+  // accessibility switches, or the keyboard. One event with a bitmask, so a
+  // client re-reads only what it cares about (d/ios.h).
+  if (e->type == NEUI_EVENT_IOS_ENVIRONMENT_CHANGED && a->ios) {
+    const uint32_t ch = e->data.ios_env.changed;
+    std::printf("[neui-ios] ENV_CHANGED 0x%02x%s%s%s%s%s%s\n", (unsigned)ch,
+                (ch & NEUI_IOS_ENV_ORIENTATION)   ? " orientation" : "",
+                (ch & NEUI_IOS_ENV_LOW_POWER)     ? " low-power"   : "",
+                (ch & NEUI_IOS_ENV_THERMAL)       ? " thermal"     : "",
+                (ch & NEUI_IOS_ENV_BATTERY)       ? " battery"     : "",
+                (ch & NEUI_IOS_ENV_ACCESSIBILITY) ? " a11y"        : "",
+                (ch & NEUI_IOS_ENV_KEYBOARD)      ? " keyboard"    : "");
+    char buf[160];
+    std::snprintf(buf, sizeof buf,
+                  "iOS env 0x%02x - orientation %d, keyboard %d px",
+                  (unsigned)ch, (int)a->ios->orientation(a->s, a->win),
+                  a->ios->keyboard_inset(a->s, a->win));
+    a->w->set_text(a->s, a->label, buf);
+    return false;
+  }
+
   // Menu activation: the hamburger UIMenu routes picks through
   // dispatch_menu_event, which fires TREE_ITEM_ACTIVATED for client items (and
   // invokes the focused widget for built-in commands like Copy first). React to
@@ -319,6 +343,9 @@ bool onevent(void* token, neui_event_t* e)
     a->w->get_text(a->s, a->input, in_buf, sizeof in_buf);
     std::snprintf(out_buf, sizeof out_buf, "You typed: %s", in_buf);
     a->w->set_text(a->s, a->label, out_buf);
+    // A haptic tick to go with it - the cheapest way to see NEUI_API_IOS do
+    // something physical. Silent in the simulator, by UIKit's own rules.
+    if (a->ios) a->ios->haptic(a->s, NEUI_IOS_HAPTIC_LIGHT);
     // Also surface a toast so the Submit button is a one-tap toast trigger.
     if (a->notify) {
       char toast_buf[360];
@@ -448,6 +475,28 @@ void build_ui()
   g_app.dnd      = (neui_dnd_api_t*)      api->get_interface(g_app.s, NEUI_API_DND);
   g_app.behavior = (neui_behavior_api_t*) api->get_interface(g_app.s, NEUI_API_BEHAVIOR);
   g_app.assets   = (neui_asset_api_t*)    api->get_interface(g_app.s, NEUI_API_ASSETS);
+  g_app.ios      = (neui_ios_api_t*)      api->get_interface(g_app.s, NEUI_API_IOS);
+  if (g_app.ios) {
+    // Everything an iOS-only client can ask that needs no window. On any other
+    // host this pointer is NULL and none of it runs - which is the whole
+    // feature-detect contract in d/ios.h.
+    int maj = 0, min = 0, pat = 0;
+    g_app.ios->os_version(g_app.s, &maj, &min, &pat);
+    std::printf("[neui-ios] NEUI_API_IOS present: %s iOS %d.%d.%d idiom=%d\n",
+                g_app.ios->device_model(g_app.s), maj, min, pat,
+                (int)g_app.ios->idiom(g_app.s));
+    std::printf("[neui-ios]   battery=%.2f state=%d lowpower=%d thermal=%d\n",
+                (double)g_app.ios->battery_level(g_app.s),
+                (int)g_app.ios->battery_state(g_app.s),
+                g_app.ios->low_power_mode(g_app.s),
+                (int)g_app.ios->thermal_state(g_app.s));
+    std::printf("[neui-ios]   content_size=%d a11y_flags=0x%02x brightness=%.2f\n",
+                (int)g_app.ios->content_size_category(g_app.s),
+                (unsigned)g_app.ios->accessibility_flags(g_app.s),
+                (double)g_app.ios->screen_brightness(g_app.s));
+  } else {
+    std::printf("[neui-ios] NEUI_API_IOS absent (not an iOS host)\n");
+  }
   if (g_app.metrics)
     std::printf("[neui-ios] metrics: ui_scale=%.3f control_h=%d margin=%d body_font=%d\n",
                 (double)g_app.metrics->ui_scale(g_app.s),
@@ -679,6 +728,31 @@ void build_ui()
   relayout(&g_app);
 
   g_app.w->show(g_app.s, g_app.win);
+
+  // Frame-scoped NEUI_API_IOS settings. These need the frame realized, so they
+  // come after show(): the view controller is built there, and each setter asks
+  // it to re-query. Between them they are what a full-screen control surface
+  // wants - the screen stays lit, a swipe near the bottom bezel takes two tries
+  // instead of backgrounding the app mid-gesture, and the home indicator fades.
+  if (g_app.ios) {
+    g_app.ios->set_idle_timer_disabled(g_app.s, 1);
+    g_app.ios->set_deferring_system_gestures(g_app.s, g_app.win, NEUI_IOS_EDGE_BOTTOM);
+    g_app.ios->set_home_indicator_auto_hidden(g_app.s, g_app.win, 1);
+    g_app.ios->set_status_bar(g_app.s, g_app.win, NEUI_IOS_STATUS_BAR_DEFAULT, 0);
+    std::printf("[neui-ios] stage settings applied: idle_hold=%d orientation=%d\n",
+                g_app.ios->idle_timer_disabled(g_app.s),
+                (int)g_app.ios->orientation(g_app.s, g_app.win));
+  }
+
+  // Safe-area insets are PORTABLE - they live in NEUI_API_METRICS, not in the
+  // iOS interface. Printed here because this example links both iOS hosts and
+  // drives the native one, which is exactly the case where an assigned (rather
+  // than added) metrics seam used to resolve no frame and report zeros.
+  if (g_app.metrics && g_app.metrics->safe_area_insets) {
+    int l = 0, t = 0, r = 0, b = 0;
+    g_app.metrics->safe_area_insets(g_app.s, g_app.win, &l, &t, &r, &b);
+    std::printf("[neui-ios] safe_area_insets: l=%d t=%d r=%d b=%d\n", l, t, r, b);
+  }
 
   // Smoke the clipboard seam now that the session is live.
   clipboard_smoke(&g_app);

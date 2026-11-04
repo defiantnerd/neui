@@ -42,6 +42,11 @@ namespace neui_detail
     std::string attr_key;
     float       scale    = 1.0f;
     float       offset   = 0.0f;
+    // Quantisation of the attribute value, applied BEFORE scale/offset: the
+    // value is snapped to the nearest multiple of `step`. 0 (default) = smooth.
+    // A stepped bar / arc / rotation is a display decision, not a data one, so
+    // it belongs here rather than in whatever writes the attr.
+    float       step     = 0.0f;
     bool        is_asset = false;
   };
 
@@ -250,6 +255,9 @@ namespace neui_detail
 
     // Bindings per property name.
     std::unordered_map<std::string, CompoundBinding> bindings;
+    // Quantisation per property name, kept apart from the binding so it can be
+    // set before one exists and survives a re-bind. Empty unless used.
+    std::unordered_map<std::string, float> bind_steps;
   };
 
   // The compound asset itself - a slot-reused vector of CompoundLayer.
@@ -534,6 +542,9 @@ namespace neui_detail
   {
     if (b.is_asset) return 0.0f;
     float x = attr_as_float(bag, b.attr_key, 0.0f);
+    // Snap first, then map: `step` is in attribute units, so one step is the
+    // same fraction of the range whatever the property it drives is measured in.
+    if (b.step > 0.0f) x = std::round(x / b.step) * b.step;
     return b.scale * x + b.offset;
   }
 
@@ -653,6 +664,19 @@ namespace neui_detail
 
   inline bool apply_set_float(CompoundLayer& L, const std::string& prop, float v)
   {
+    // "<prop>.step" is the quantisation of THAT prop's binding (see
+    // eval_binding_float). The compound API has no bind-with-step entry point
+    // and this needs no vtable change - the same route stroke_dasharray takes to
+    // travel as a string. Kept in `bind_steps` as well as on the binding, so it
+    // survives a later (re)bind and does not depend on call order.
+    if (prop.size() > 5 && prop.compare(prop.size() - 5, 5, ".step") == 0) {
+      std::string target = prop.substr(0, prop.size() - 5);
+      float step = (v > 0.0f) ? v : 0.0f;
+      L.bind_steps[target] = step;
+      auto it = L.bindings.find(target);
+      if (it != L.bindings.end()) it->second.step = step;
+      return true;
+    }
     if (prop == "alpha") {
       if (v < 0.0f) v = 0.0f;
       if (v > 1.0f) v = 1.0f;
@@ -744,6 +768,8 @@ namespace neui_detail
     b.scale    = scale;
     b.offset   = offset;
     b.is_asset = false;
+    auto s = L.bind_steps.find(prop);          // set before the bind, or by a re-bind
+    if (s != L.bind_steps.end()) b.step = s->second;
     L.bindings[prop] = std::move(b);
   }
 

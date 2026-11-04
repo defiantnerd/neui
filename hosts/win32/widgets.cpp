@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <string>
 #include <unordered_map>
-#include <fstream>
 #include "window.h"  // provides get_hinstance(), ChildSubclassProc
 #include "../../backends/d2d/d2d_backend.h"
 #include "../shared/win32/clipboard_win32.h"
@@ -2946,6 +2945,34 @@ namespace win32_host
       );
       // w.hwnd is set by AppWindowProc WM_NCCREATE; children created in WM_CREATE
       if (w.hwnd) {
+        // The outer size above came from GetDpiForSystem(), which is only an
+        // estimate of where the frame will land: it may open on a monitor at a
+        // different scale (a 150% primary with a 100% secondary, or a remote
+        // session whose desktop DPI differs from the console's). Read the real
+        // per-monitor DPI back now that the HWND exists and, if it disagrees,
+        // redo the client -> outer conversion at that DPI.
+        //
+        // Without this the client area is wrong by the ratio of the two: a
+        // 940x400 request lands as a 1416x617 client when the system DPI is 144
+        // and the monitor is 96. WM_DPICHANGED does not cover it - that fires
+        // when a window MOVES between monitors, not when it is born on one that
+        // disagrees with the system DPI. Before ShowWindow so the correction is
+        // not visible as a resize flash. The crossplatform host does the same
+        // read-back in create_native_window.
+        UINT actual_dpi = GetDpiForWindow(w.hwnd);
+        if (actual_dpi && actual_dpi != initial_dpi) {
+          bool menu_row = false;
+          for (uint32_t ci = _widgets.child(index); ci != 0; ci = _widgets.next(ci))
+            if (_widgets.exists(ci) && _widgets[ci].hmenu != nullptr) { menu_row = true; break; }
+          RECT fix = { 0, 0,
+                       LogicalToPhysical(w.width,  actual_dpi),
+                       LogicalToPhysical(w.height, actual_dpi) };
+          AdjustWindowRectExForDpi(&fix, style, menu_row ? TRUE : FALSE, ex_style, actual_dpi);
+          SetWindowPos(w.hwnd, nullptr, 0, 0,
+                       fix.right - fix.left, fix.bottom - fix.top,
+                       SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+
         if (!is_plug) ApplyText(w.hwnd, w.text);
         // Apply any icon attribute set before show.
         if (w.attrs) {
@@ -5613,6 +5640,22 @@ namespace win32_host
     for (auto a : built.owned_assets) as_destroy(session, a);
   }
 
+  // ComponentApis::bitmap_from_name - see component_loader.h. A layer asset named
+  // in a component document reaches the client resource provider as the raw
+  // "assets" entry plus that document's base_dir, which the public path-taking
+  // create_from_file cannot express; the store joins them for its own filesystem
+  // fallback.
+  static neui_asset_t component_bitmap_from_name(void* user, const char* name,
+                                                 const char* base_dir)
+  {
+    auto* s = static_cast<Session*>(user);
+    if (!s || !name) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_from_file(
+        name, best_asset_scale_w32(), base_dir);
+    if (slot == 0) return asset_none;
+    return pack_asset_w32(s->session_id(), slot);
+  }
+
   static neui_asset_t NEUI_ABI as_create_component_from_string(
       neui_session_t session, const char* json, uint32_t len,
       const neui_component_env_t* env)
@@ -5623,6 +5666,8 @@ namespace win32_host
     apis.asset    = &asset_api;
     apis.compound = &compound_api;
     apis.behavior = &behavior_api;
+    apis.bitmap_from_name = component_bitmap_from_name;
+    apis.user             = s;
     neui_detail::BuiltComponent built =
         neui_detail::build_component(session, json, len, env, apis);
     if (!built.ok) { release_built_component_w32(session, built); return asset_none; }
@@ -5637,10 +5682,11 @@ namespace win32_host
   {
     auto* s = get_session(session);
     if (!s || !path_utf8) return asset_none;
-    std::ifstream in(path_utf8, std::ios::binary);
-    if (!in) return asset_none;
-    std::string data((std::istreambuf_iterator<char>(in)),
-                     std::istreambuf_iterator<char>());
+    // Client resource provider first, then the file (shared read-or-ask helper).
+    std::string data;
+    if (!s->_asset_manager.resource_provider().read_bytes(
+            NEUI_RESOURCE_KIND_COMPONENT, path_utf8, data))
+      return asset_none;
     neui_component_env_t local{};
     const neui_component_env_t* use_env = env;
     static thread_local std::string base_keep;

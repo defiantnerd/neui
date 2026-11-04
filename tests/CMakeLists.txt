@@ -25,6 +25,7 @@ add_executable(neui_tests
   test_cursor_kind.cpp
   test_relative_pointer.cpp
   test_file_dialog_model.cpp
+  test_resource_provider.cpp
   test_image_filter.cpp
   test_filter_graph.cpp
   test_backend_util.cpp
@@ -35,6 +36,8 @@ add_executable(neui_tests
   test_a11y_uia_map.cpp
   test_wheel_direction.cpp
   test_popup_nav.cpp
+  test_metrics.cpp
+  test_ios_api.cpp
   # mujson lives in the core lib, but the suite links no library, so its TU is
   # compiled directly into the test executable (same pattern as the *.cpp above).
   ${PROJECT_SOURCE_DIR}/src/mujson.cpp)
@@ -54,6 +57,19 @@ if(NEUI_IOS)
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_GUI_IDENTIFIER "org.neui.tests"
     XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "org.neui.tests")
+
+  # NEUI_API_IOS (include/neui/d/ios.h) is UIKit, so its implementation can only
+  # be exercised on iOS. The suite has a plain main(), not UIApplicationMain, so
+  # these cover the process-global queries and the session/frame bookkeeping -
+  # everything that needs a window is exercised by examples/ios instead. This
+  # is the one Tier-1 TU that links a framework; the rest still link nothing.
+  target_sources(neui_tests PRIVATE test_ios_api_device.mm)
+  set_source_files_properties(test_ios_api_device.mm PROPERTIES
+    COMPILE_FLAGS "-fobjc-arc")
+  target_link_libraries(neui_tests PRIVATE
+    "-framework UIKit"
+    "-framework Foundation"
+    "-framework CoreGraphics")
 endif()
 
 add_test(NAME neui_tests COMMAND neui_tests)
@@ -324,6 +340,21 @@ if(WIN32)
   # neui.host.crossplatform explicitly (and asserts NEUI_API_POPUP is absent on
   # the native host, which is the documented feature-detect trap).
   target_link_libraries(neui_popup_surface_smoke_win32 PRIVATE
+    neui neui-xplhost neui-win32host)
+endif()
+
+# Windows-only: DAW-embedding harness (fake host HWND slot, embeds a
+# PLUGWINDOW via NEUI_API_EMBED and drives it from the fake DAW's own message
+# pump). Also guards issue #29 - the first NEUI_EVENT_RESIZE must be in
+# logical pixels. Needs a GUI session and only differs from an identity check
+# on a scaled display, so it is built but NOT registered with ctest; run
+# ./tests/<config>/neui_embed_smoke_win32 manually.
+if(WIN32)
+  add_executable(neui_embed_smoke_win32 embed_smoke_win32.cpp)
+  target_include_directories(neui_embed_smoke_win32 PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_embed_smoke_win32 PRIVATE cxx_std_17)
+  target_link_libraries(neui_embed_smoke_win32 PRIVATE
     neui neui-xplhost neui-win32host)
 endif()
 

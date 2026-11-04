@@ -1,6 +1,5 @@
 #include <cstring>
 #include <algorithm>
-#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -112,6 +111,35 @@ namespace xpl_host
       client_api->ondestroy(token, IndexToWidget(s->_session_id, idx), wd->userdata);
 
     s->_widgets.remove(idx);
+  }
+
+  // -------------------------------------------------------------------------
+  // Invalidation helpers. On the LVGL retained platform a content change
+  // invalidates only that widget's mirror object and a structural change
+  // re-syncs the mirror tree; every other platform keeps the historical
+  // whole-frame invalidate: the widget's OWN native handle (a frame), else the
+  // frame containing it. find_parent_native_handle alone walks parents only, so
+  // a frame invalidating itself resolved to nullptr and repainted nothing.
+
+  static void invalidate_widget_visual(Session* s, uint32_t idx)
+  {
+#ifdef NEUI_PLATFORM_LVGL
+    platform_retained_widget_invalidate(s, idx);
+#else
+    if (!s || !s->_widgets.exists(idx)) return;
+    void* target = s->_widgets[idx].native_handle;
+    if (!target) target = s->find_parent_native_handle(idx);
+    if (target) platform_invalidate(target);
+#endif
+  }
+
+  static void notify_tree_changed(Session* s, uint32_t idx)
+  {
+#ifdef NEUI_PLATFORM_LVGL
+    platform_retained_tree_changed(s, idx);
+#else
+    (void)s; (void)idx;
+#endif
   }
 
   // -------------------------------------------------------------------------
@@ -257,6 +285,7 @@ namespace xpl_host
     // extent) and certainly has no cached layout of its own, so the owning
     // frame's cached layout must not be trusted until it repaints.
     s->mark_layout_dirty(idx);
+    notify_tree_changed(s, idx);
 
     return IndexToWidget(s->_session_id, idx);
   }
@@ -351,6 +380,9 @@ namespace xpl_host
     // something local to popups.
     if (!s->_widgets.exists(idx)) return;
 
+    // Retained mirrors: mark BEFORE the subtree is removed so the hook can
+    // still resolve the owning frame through the ancestor chain.
+    notify_tree_changed(s, idx);
     destroy_recursive(s, idx, client_api, token);
 
     // Destroying the widget under the pointer leaves _hovered_widget (and any
@@ -476,6 +508,7 @@ namespace xpl_host
       }
     } else {
       wd.visible = true;
+      notify_tree_changed(s, idx);
     }
   }
 
@@ -513,10 +546,12 @@ namespace xpl_host
     const bool hiding_frame = s->_widgets[idx].is_frame();
     {
       auto& wd = s->_widgets[idx];
-      if (hiding_frame && wd.native_handle)
+      if (hiding_frame && wd.native_handle) {
         platform_hide_window(wd.native_handle);
-      else
+      } else {
         wd.visible = false;
+        notify_tree_changed(s, idx);
+      }
     }
 
     // Focus moves AFTER the widget is invisible, not before. collect_tab_stops
@@ -547,6 +582,8 @@ namespace xpl_host
 
     if (wd.is_frame() && wd.native_handle)
       platform_set_window_pos(wd.native_handle, x, y, width, height, wd.dpi);
+    else
+      notify_tree_changed(s, idx);
   }
 
   static void NEUI_ABI w_set_size(neui_session_t session, neui_widget_t widget,
@@ -563,6 +600,8 @@ namespace xpl_host
 
     if (wd.is_frame() && wd.native_handle)
       platform_set_window_pos(wd.native_handle, wd.x, wd.y, width, height, wd.dpi);
+    else
+      notify_tree_changed(s, idx);
   }
 
   static void NEUI_ABI w_set_emit_events(neui_session_t session,
@@ -606,8 +645,7 @@ namespace xpl_host
     // showing the old text until some unrelated event forces a paint. For a
     // top-level frame this returns nullptr (no parent HWND) and no-ops, which
     // is correct - the title bar was already updated above.
-    if (void* frame = s->find_parent_native_handle(idx))
-      platform_invalidate(frame);
+    invalidate_widget_visual(s, idx);
   }
 
   // Forward decls: COMPONENT attach helper + the one-call instantiate thunk.
@@ -667,8 +705,7 @@ namespace xpl_host
     }
 
     // Trigger a repaint via the owning frame.
-    if (void* frame = s->find_parent_native_handle(idx))
-      platform_invalidate(frame);
+    invalidate_widget_visual(s, idx);
   }
 
   static int NEUI_ABI w_get_text(neui_session_t session,
@@ -777,8 +814,7 @@ namespace xpl_host
     if (!enabled && s->_focused_widget == idx)
       s->focus_next(true);
     // Repaint so the dim alpha bracket picks up the new state.
-    if (void* frame = s->find_parent_native_handle(idx))
-      platform_invalidate(frame);
+    invalidate_widget_visual(s, idx);
   }
 
   static bool NEUI_ABI w_get_enabled(neui_session_t session,
@@ -870,18 +906,13 @@ namespace xpl_host
     // host the entire frame paints in one pass, so per-widget invalidation
     // would have to invalidate the frame anyway.
     //
-    // The widget's OWN handle first, then its ancestors'.
-    // find_parent_native_handle alone is not enough: it walks parents only, so
-    // invalidating a top-level APPWINDOW / PLUGWINDOW - the obvious way for a
-    // client to ask for "repaint everything" - resolved to nullptr and did
-    // nothing at all, silently. The documented contract only excuses a no-op
-    // before show() or for a widget that does not exist, and a shown frame is
-    // neither. Fixed here rather than in find_parent_native_handle because its
-    // other callers genuinely want the CONTAINING frame (a DIALOG asking that
-    // question means its owner, not itself).
-    void* target = s->_widgets[idx].native_handle;
-    if (!target) target = s->find_parent_native_handle(idx);
-    if (target) platform_invalidate(target);
+    // The widget's OWN handle counts: invalidating a top-level APPWINDOW /
+    // PLUGWINDOW - the obvious way for a client to ask for "repaint everything" -
+    // used to resolve through find_parent_native_handle, which walks parents
+    // only, to nullptr and did nothing at all, silently. invalidate_widget_visual
+    // tries the widget's own handle first. (The LVGL retained platform narrows
+    // this to the widget's mirror object.)
+    invalidate_widget_visual(s, idx);
   }
 
   neui_widget_api_t widgets_api = {
@@ -931,9 +962,7 @@ namespace xpl_host
   static void invalidate_owning_frame(Session* s, uint32_t idx)
   {
     if (!s || !s->_widgets.exists(idx)) return;
-    void* target = s->_widgets[idx].native_handle;
-    if (!target) target = s->find_parent_native_handle(idx);
-    if (target) platform_invalidate(target);
+    invalidate_widget_visual(s, idx);
   }
 
   // -------------------------------------------------------------------------
@@ -2978,6 +3007,22 @@ namespace xpl_host
     for (auto a : built.owned_assets) as_destroy(session, a);
   }
 
+  // ComponentApis::bitmap_from_name - see component_loader.h. A layer asset named
+  // in a component document reaches the client resource provider as the raw
+  // "assets" entry plus that document's base_dir, which the public path-taking
+  // create_from_file cannot express; the store joins them for its own filesystem
+  // fallback.
+  static neui_asset_t component_bitmap_from_name(void* user, const char* name,
+                                                 const char* base_dir)
+  {
+    auto* s = static_cast<Session*>(user);
+    if (!s || !name) return asset_none;
+    uint32_t slot = s->_asset_manager.allocate_from_file(
+        name, best_asset_scale(s), base_dir);
+    if (slot == 0) return asset_none;
+    return pack_asset(s->_session_id, slot);
+  }
+
   static neui_asset_t NEUI_ABI as_create_component_from_string(
       neui_session_t session, const char* json, uint32_t len,
       const neui_component_env_t* env)
@@ -2988,6 +3033,8 @@ namespace xpl_host
     apis.asset    = &asset_api;
     apis.compound = &compound_api;
     apis.behavior = &behavior_api;
+    apis.bitmap_from_name = component_bitmap_from_name;
+    apis.user             = s;
     neui_detail::BuiltComponent built =
         neui_detail::build_component(session, json, len, env, apis);
     if (!built.ok) { release_built_component(session, built); return asset_none; }
@@ -3003,11 +3050,11 @@ namespace xpl_host
     auto* s = get_session(session);
     if (!s || !path_utf8) return asset_none;
 
-    // Read the whole file (std::ifstream avoids the fopen /W4 deprecation).
-    std::ifstream in(path_utf8, std::ios::binary);
-    if (!in) return asset_none;
-    std::string data((std::istreambuf_iterator<char>(in)),
-                     std::istreambuf_iterator<char>());
+    // Client resource provider first, then the file (shared read-or-ask helper).
+    std::string data;
+    if (!s->_asset_manager.resource_provider().read_bytes(
+            NEUI_RESOURCE_KIND_COMPONENT, path_utf8, data))
+      return asset_none;
 
     // Default env.base_dir to the file's directory so relative asset paths
     // resolve next to the .json. A caller-supplied env wins.
@@ -3745,8 +3792,7 @@ namespace xpl_host
   static void grid_invalidate(Session* s, GridWidget* g)
   {
     if (!s || !g) return;
-    void* frame = s->find_parent_native_handle(g->index);
-    if (frame) platform_invalidate(frame);
+    invalidate_widget_visual(s, g->index);
   }
 
   static int NEUI_ABI gr_add_column(neui_session_t session, neui_widget_t widget,

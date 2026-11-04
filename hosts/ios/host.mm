@@ -15,6 +15,7 @@
 // static lives inside ensure_theme_provider_ios (which only window.mm calls), so
 // pulling this header in here just to set the scale is harmless.
 #include "../shared/ios/theme_provider_ios.h"
+#include "../shared/ios/ios_api.h"   // NEUI_API_IOS: shared vtable + per-host seams
 #include "../shared/metrics.h"
 #include "../shared/dnd_dispatch.h"  // dnd_formats_match + dnd_dispatch_* templates
 
@@ -54,10 +55,26 @@ namespace ios_host
         _client->get_interface(token, NEUI_API_WIDGETS));
       _grid_client = static_cast<neui_grid_client_t*>(
         _client->get_interface(token, NEUI_API_GRID_CLIENT));
+
+      // Opt-in client resource provider: asked for image / font / component /
+      // sidecar bytes before this host tries the bundle or the disk.
+      _resource_client = static_cast<neui_resource_client_t*>(
+        _client->get_interface(token, NEUI_API_RESOURCE_CLIENT));
+      if (_resource_client) {
+        neui_detail::ResourceProvider provider;
+        provider.client = _resource_client;
+        provider.token  = token;
+        _asset_manager.set_resource_provider(provider);
+      }
     }
   }
 
-  Session::~Session() = default;
+  Session::~Session()
+  {
+    // Drops this session's idle-timer hold and restores any brightness it
+    // changed - the promises d/ios.h makes about both are kept here.
+    neui_detail::ios_session_shutdown(neui_session_t{ _session_id });
+  }
 
   // UIApplicationMain owns the run loop on iOS; neui never owns / stops it, so
   // run() returns immediately and the client builds its UI from the scene
@@ -79,6 +96,11 @@ namespace ios_host
   // Defined in window.mm (UIKit): installs the iOS-real measure_text +
   // safe_area_insets seams into the shared NEUI_API_METRICS vtable.
   void install_metrics_seams_ios();
+
+  // Defined in window.mm (UIKit): installs this host's NEUI_API_IOS seams -
+  // frame -> UIViewController lookup, the environment-event broadcast, and the
+  // theme repaint used after an appearance override.
+  void install_ios_seams_ios();
 
   void Session::invalidate_widgets_with_compound(uint32_t asset_id)
   {
@@ -358,6 +380,7 @@ namespace ios_host
     if (!strcmp(iface, NEUI_API_TABS))      return &tabs_api;
     if (!strcmp(iface, NEUI_API_NOTIFY))    return &notify_api;
     if (!strcmp(iface, NEUI_API_METRICS))   return &neui_detail::k_metrics_api;
+    if (!strcmp(iface, NEUI_API_IOS))       return neui_detail::ios_api();
     return nullptr;
   }
 
@@ -391,6 +414,12 @@ namespace ios_host
     // frame view's safeAreaInsets) into the shared vtable. Desktop hosts leave
     // the shared desktop defaults in place.
     install_metrics_seams_ios();
+
+    // NEUI_API_IOS: the frame -> UIViewController lookup, the environment
+    // broadcast and the theme repaint. The interface itself is not built here -
+    // ios_api() installs its observers on the first get_interface hit, so a
+    // client that never asks for it pays nothing.
+    install_ios_seams_ios();
 
     static neui_api_t base_api = {
       NEUI_VERSION,

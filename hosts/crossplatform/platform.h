@@ -1,4 +1,7 @@
 #pragma once
+#include <cstddef>   // size_t - <cstdint> is NOT required to declare ::size_t
+                     // (libstdc++ does not; MSVC / libc++ happen to, which is why
+                     // platform_load_image_bytes below only broke on the GCC job)
 #include <cstdint>
 #include <neui/neui.h>
 
@@ -302,6 +305,13 @@ namespace xpl_host
   // physical pixel dimensions of the decoded image.
   uint8_t* platform_load_image(const char* path,
                                 uint32_t* width_out, uint32_t* height_out);
+
+  // Same, for encoded image bytes already in memory. Used by the client
+  // resource provider path (NEUI_API_RESOURCE_CLIENT), which hands over bytes
+  // rather than a path - a client may keep its assets in a container, or on a
+  // target with no filesystem at all. Release with platform_free_image.
+  uint8_t* platform_load_image_bytes(const uint8_t* data, size_t len,
+                                      uint32_t* width_out, uint32_t* height_out);
   void platform_free_image(uint8_t* pixels);
 
   // Run the platform message loop.
@@ -688,5 +698,42 @@ namespace xpl_host
   // is the only truthful answer and that is what the Session flag tracks. A
   // platform with no provider returns false, which is not conservative but exact.
   bool platform_a11y_is_listening();
+
+#ifdef NEUI_PLATFORM_LVGL
+  // -------------------------------------------------------------------------
+  // Retained-mode seams (LVGL Option C prototype - plans/lvgl-host-approach-c.md).
+  // Only compiled on the LVGL platform; the shared host calls them from
+  // #ifdef NEUI_PLATFORM_LVGL blocks so every other platform stays
+  // byte-for-byte unchanged.
+
+  // A single widget's pixels changed (text, attr, value, hover/press/focus
+  // state). The platform invalidates that widget's mirror lv_obj only -
+  // falling back to a whole-frame invalidate when no mirror exists yet or
+  // retained mode is disabled at runtime (NEUI_LVGL_RETAINED=0).
+  void platform_retained_widget_invalidate(Session* session, uint32_t widget_index);
+
+  // Structure or geometry changed under this widget's frame (create /
+  // destroy / show / hide / set_pos / set_size / tab-page reflow / section
+  // scroll). The platform re-syncs the mirror tree (positions, sizes,
+  // visibility, abs coords) before the next LVGL refresh.
+  void platform_retained_tree_changed(Session* session, uint32_t widget_index);
+#endif
+
+#if defined(NEUI_PLATFORM_IOS)
+  // -------------------------------------------------------------------------
+  // NEUI_API_IOS seams (include/neui/d/ios.h). Implemented in platform_ios.mm.
+  //
+  // host.cpp is compiled for every platform and is plain C++, so it can neither
+  // include the ObjC++ implementation header nor name its types. These three
+  // entry points are the whole surface it needs, and they exist only on iOS.
+
+  // The NEUI_API_IOS vtable, as an opaque pointer for get_interface to return.
+  // Installs the environment observers on the first call.
+  void* platform_ios_api();
+
+  // Drop a session's idle-timer hold and restore any brightness it changed.
+  // Called from ~Session.
+  void platform_ios_session_shutdown(uint32_t session_id);
+#endif
 
 } // namespace xpl_host
