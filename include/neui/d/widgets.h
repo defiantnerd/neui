@@ -1,7 +1,6 @@
 #pragma once
 
 #include <neui/neui.h>
-#include <stddef.h>
 #include "assets.h"
 #include "events.h"
 
@@ -19,20 +18,6 @@ typedef struct neui_widget_client {
   void (NEUI_ABI *ondestroy)(void* token, neui_widget_t widget, void* userdata);
   bool (NEUI_ABI *onevent)  (void* token, neui_event_t* event);
 } neui_widget_client_t;
-
-// One item of widgets->popup_menu_items. Fields may be appended to this
-// struct later: the caller passes sizeof(neui_popup_item_t) as item_size and
-// the host reads only the fields that fit in it, so a caller built against
-// an older header keeps working. NEUI_POPUP_ITEM_SIZE_MIN is the first
-// version's (text and flags): the smallest item_size a host accepts.
-typedef struct neui_popup_item {
-  const char* text;    // UTF-8
-  uint32_t    flags;   // NEUI_POPUP_ITEM_*
-} neui_popup_item_t;
-#define NEUI_POPUP_ITEM_SIZE_MIN   ((int)(offsetof(neui_popup_item_t, flags) + sizeof(uint32_t)))
-#define NEUI_POPUP_ITEM_CHECKED    0x1u  // a check mark beside it; any number of items may have one
-#define NEUI_POPUP_ITEM_DISABLED   0x2u  // greyed, can't be picked
-#define NEUI_POPUP_ITEM_SEPARATOR  0x4u  // a separator line (text ignored); it still counts in the result's index
 
 typedef struct neui_widget_api {
   // Create a widget under `parent`. (x, y) are logical pixels at 96 DPI,
@@ -165,23 +150,69 @@ typedef struct neui_widget_api {
   neui_widget_t      (NEUI_ABI *create_from_component)(neui_session_t session, neui_widget_t parent,
                                                        neui_asset_t component,
                                                        int x, int y, int width, int height);
-  // As popup_menu, with per-item flags (see neui_popup_item_t): any number of
-  // items may carry a check mark, be greyed out, or be a separator. `items` is
-  // an array of `count` items, `item_size` bytes apart (pass
-  // sizeof(neui_popup_item_t)); the host steps through them by item_size.
-  // Returns the 1-based index of the picked item (counting separators), or 0
-  // if dismissed without picking, if count <= 0 or if item_size is smaller
-  // than NEUI_POPUP_ITEM_SIZE_MIN. The call is BLOCKING, as popup_menu is.
-  // The host marks a checked item as its menus do (a check mark beside it);
-  // on the crossplatform host the arrow keys start from the first one. The
-  // host never changes the flags: a menu of several options toggles the
-  // picked item's state itself and can reopen the menu; a menu of one value's
-  // choices checks the current one. (Vtable-appended; check the api version /
-  // pointer before calling.)
-  int                (NEUI_ABI *popup_menu_items)(neui_session_t session, neui_widget_t anchor,
-                                                  int x, int y,
-                                                  const neui_popup_item_t* items, int count,
-                                                  int item_size);
+  // Show a NEUI_W_POPUPMENU as a context menu anchored to a widget. Everything a
+  // real context menu needs - submenus to arbitrary depth, per-item
+  // enable/disable, checkmarks, shortcut LABELS, built-in command routing via
+  // tree->set_menu_cmd, and NEUI_API_MENU_CLIENT::validate - is reachable,
+  // because the menu is described with the same NEUI_API_TREE calls that build a
+  // NEUI_W_MENUBAR. popup_menu's flat `const char* const*` can express none of
+  // that; this is the rich alternative, not a replacement (popup_menu still
+  // works everywhere and is unchanged).
+  //
+  // (x, y) are in the anchor's local logical coordinates, like popup_menu.
+  //
+  // ASYNCHRONOUS, unlike popup_menu, which blocks and returns the pick. This
+  // call returns true as soon as the menu is on screen; the pick arrives later
+  // as NEUI_EVENT_ITEM_SELECTED on the MENU widget, with .index carrying the
+  // neui_item_t id that tree->add returned. Returns false without showing
+  // anything for a non-POPUPMENU widget, a cross-session handle, an anchor with
+  // no frame, or an EMPTY menu (an empty box that swallows the next click is
+  // worse than doing nothing). Dismissal without a pick reports nothing at all.
+  // A blocking variant would need a nested pump, which suppresses
+  // NEUI_EVENT_TIMER for its duration and re-enters the client from inside its
+  // own event handler.
+  //
+  // Exactly ONE ITEM_SELECTED per pick, and no NEUI_EVENT_TREE_ITEM_ACTIVATED
+  // (which is the MENUBAR's pick event) - so a popup pick is never ambiguous
+  // with a menu-bar pick.
+  //
+  // A row bound with tree->set_menu_cmd to a BUILT-IN command (< NEUI_CMD_USER_BASE,
+  // e.g. NEUI_CMD_COPY) is offered to the focused widget first, exactly as the
+  // menu bar does, so a "Copy" row on a context menu just works with no client
+  // code. ITEM_SELECTED still fires afterwards either way. Binding a command in
+  // the USER range has no effect here - handle those from ITEM_SELECTED, which
+  // carries the item id you bound.
+  //
+  //   neui_widget_t m = widgets->create(sess, frame, NEUI_W_POPUPMENU, 0,0,0,0, NULL);
+  //   neui_item_t cut  = tree->add(sess, m, tree_item_root, "Cut",  NULL);
+  //   tree->set_menu_cmd(sess, m, cut, NEUI_CMD_CUT);
+  //   tree->add(sess, m, tree_item_root, "-", NULL);          /* separator */
+  //   neui_item_t more = tree->add(sess, m, tree_item_root, "More", NULL);
+  //   tree->add(sess, m, more, "Nested", NULL);               /* submenu */
+  //   widgets->popup_tree_menu(sess, knob, mx, my, m);        /* on RBUTTON_DOWN */
+  //
+  // Unlike a MENUBAR's, a POPUPMENU's per-item shortcut is a LABEL only - it is
+  // drawn in the row, but nothing translates it into an accelerator. Bind the
+  // real accelerator on the menu bar and use the label to show which key does
+  // the same thing.
+  //
+  // Create the menu widget as a child of the frame (or of the anchor); it has no
+  // size, position or visual presence of its own, and unlike NEUI_W_MENUBAR it
+  // is NOT the frame's menu bar - a frame can carry both. Build it once and
+  // re-show it, or rebuild per click with tree->clear.
+  //
+  // Unlike a MENUBAR's, a POPUPMENU's shortcut LABEL is drawn by neui itself, so
+  // it uses the running platform's convention: "Ctrl+Shift+Z" on Windows/Linux,
+  // the Cocoa glyphs on macOS ("^<shift-glyph><cmd-glyph>Z").
+  //
+  // XPL HOST ONLY, and only where that host routes input to the popup: win32,
+  // macOS and Linux do; iOS does NOT (its touch path has no tree-popup
+  // hit-test), so this returns false there rather than painting a menu that
+  // cannot be picked or dismissed. The native win32 / macOS / iOS hosts leave
+  // the slot NULL entirely - see the comment at each.
+  // (Vtable-appended; check the api version / pointer before calling.)
+  bool               (NEUI_ABI *popup_tree_menu)(neui_session_t session, neui_widget_t anchor,
+                                                 int x, int y, neui_widget_t menu);
 } neui_widget_api_t;
 
 #define NEUI_W_APPWINDOW  "neui.std.appwindow"
@@ -197,6 +228,19 @@ typedef struct neui_widget_api {
 #define NEUI_W_MULTILINE  "neui.std.multiline"
 #define NEUI_W_TREEVIEW   "neui.std.treeview"
 #define NEUI_W_MENUBAR    "neui.std.menubar"
+// Model for widgets->popup_tree_menu. Built with the same NEUI_API_TREE calls as
+// a MENUBAR, but it is NOT a menu bar: it is never attached to the frame, never
+// reserves an in-frame band, and a frame may carry both.
+#define NEUI_W_POPUPMENU  "neui.std.popupmenu"
+// A frameless overlay surface that may leave its owner frame - the third FRAME
+// kind, after APPWINDOW and PLUGWINDOW. Created with parent = widget_none like
+// any other frame, filled with ordinary child widgets, and shown with
+// NEUI_API_POPUP::open (NOT widgets->show, which cannot know where to place it).
+// Where the platform has owned top-level windows the host backs it with a real
+// borderless non-activating window, so a 1030x970 picker opened from a 700x500
+// plugin editor hangs over the DAW instead of being clamped; elsewhere it falls
+// back to an in-frame overlay. See <neui/d/popup.h>.
+#define NEUI_W_POPUPSURFACE "neui.std.popupsurface"
 #define NEUI_W_IMAGE      "neui.std.image"
 #define NEUI_W_SLIDER     "neui.std.slider"
 #define NEUI_W_KNOB       "neui.std.knob"

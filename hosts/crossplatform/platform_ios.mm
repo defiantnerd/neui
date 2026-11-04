@@ -717,7 +717,8 @@ API_AVAILABLE(ios(13.4))
       // KEYDOWN. (Menubar Command-accelerators never arrive here - UIKit matches
       // -keyCommands first - so there is no double-fire to guard against.)
       if (keycode == NEUI_KEY_TAB) {
-        session->focus_next(!(mods & NEUI_KMOD_SHIFT));
+        // Pass the frame that received the key (see Session::focus_next).
+        session->focus_next(!(mods & NEUI_KMOD_SHIFT), widget_index);
         handled_any = true;
         continue;
       }
@@ -2396,9 +2397,6 @@ namespace xpl_host
     // The view controller's bounds drive layout instead (see RESIZE handling).
   }
 
-  // NEUI_ATTR_ZOOM is not supported on iOS.
-  void platform_apply_zoom(WidgetData& /*wd*/) {}
-
   void platform_post_close(void* /*native_handle*/)
   {
     // No user-driven window close on iOS (the system manages scenes); the
@@ -2421,6 +2419,15 @@ namespace xpl_host
   {
     NEUIView* view = neui_view_for_window(native_handle);
     [view setNeedsDisplay];
+  }
+
+  void platform_force_paint(void* native_handle)
+  {
+    // UIKit has no synchronous -display equivalent that is safe to call
+    // out-of-band (CoreAnimation drives drawing on its own transaction), so this
+    // degrades to marking dirty. Callers treat a no-op as "geometry stays as it
+    // was", which is the documented best-effort contract.
+    platform_invalidate(native_handle);
   }
 
   // UIApplicationMain owns the run loop on iOS; neui never owns / stops it.
@@ -2603,6 +2610,109 @@ namespace xpl_host
   // No mouse cursor on touch (iPad pointer styles are a later milestone).
   void     platform_set_cursor(int /*kind*/)                                  {}
 
+  // No pointer warping: iOS (touch input) has no mouse cursor to pin, so relative
+  // (unbounded) pointer mode reports unsupported and NEUI_API_POINTER's
+  // begin_relative returns false. A client's drag then behaves as an ordinary
+  // bounded one rather than silently doing nothing.
+  bool platform_supports_relative_pointer()                                   { return false; }
+  bool platform_begin_relative_pointer(void*, int*, int*)                     { return false; }
+  void platform_end_relative_pointer(void*, int, int)                         {}
+
+  // Client timers (NEUI_API_TIMER). Same shape as the macOS seam: session-
+  // scoped, so it hangs off the main runloop rather than off a view, and it
+  // joins NSRunLoopCommonModes so the tick survives UIKit tracking loops
+  // (a scroll / drag in progress must not freeze a client animation).
+  static std::unordered_map<Session*, NSTimer*>& ios_session_timers()
+  {
+    // Immortal for the same reason as the macOS registry: ~Session runs during
+    // static teardown AFTER this TU's statics would have been destroyed.
+    static auto* m = new std::unordered_map<Session*, NSTimer*>();
+    return *m;
+  }
+
+  // iOS: touch coords come raw from locationInView: and the view sizing
+  // ignores the zoom, so scaling paint alone would hit-test in a different
+  // space than it draws. Inert here rather than broken - deferred, not denied.
+  bool platform_supports_ui_scale() { return false; }
+  // Not wired: the iOS touch path has no tree-popup hit-test, so the cascade
+  // would paint over the UI with taps falling through it and nothing able to
+  // dismiss it (there is no Esc). A UIMenu / UIContextMenuInteraction bridge is
+  // the right answer here, not a port of the pointer-shaped hit-testing.
+  bool platform_supports_tree_popup() { return false; }
+
+  // Popup surfaces: an AUv3 view lives inside the host app's own view hierarchy,
+  // so there is no owned top-level window to escape into - the in-frame backing
+  // is not a fallback here but the only correct answer. The type and
+  // NEUI_API_POPUP still exist, and get_clamp_size reports the frame, which is
+  // exactly the fact a client needs to lay out a browser instead of a wall of
+  // rows (docs/popup-surfaces.md).
+  bool platform_supports_popup_surface() { return false; }
+
+  void platform_get_work_area(void* /*near_native*/,
+                              int* x, int* y, int* w, int* h)
+  {
+    CGRect b = UIScreen.mainScreen.bounds;
+    if (x) *x = 0;
+    if (y) *y = 0;
+    if (w) *w = (int)b.size.width;
+    if (h) *h = (int)b.size.height;
+  }
+
+  void platform_client_to_screen(void* /*native_handle*/, int lx, int ly,
+                                 int* sx, int* sy)
+  {
+    if (sx) *sx = lx;
+    if (sy) *sy = ly;
+  }
+
+  void platform_get_pointer_pos(int* sx, int* sy)
+  {
+    // Touch, not a pointer - there is no position to report between taps, and
+    // NEUI_POPUP_AT_POINTER is meaningless here.
+    if (sx) *sx = 0;
+    if (sy) *sy = 0;
+  }
+
+  void platform_create_popup_surface(Session*, uint32_t, WidgetData&, void*) {}
+  void platform_show_popup_surface(void*, void*, int, int, int, int, float) {}
+  void platform_hide_popup_surface(void*, void*) {}
+  void platform_popup_grab_begin(Session*, void*) {}
+  void platform_popup_grab_end(Session*) {}
+
+  void platform_timer_start(Session* session, uint32_t interval_ms)
+  {
+    if (!session || interval_ms == 0) return;
+    platform_timer_stop(session);
+    NSTimer* t = [NSTimer timerWithTimeInterval:(double)interval_ms / 1000.0
+                                        repeats:YES
+                                          block:^(NSTimer*) {
+      auto& m = ios_session_timers();
+      if (m.find(session) == m.end()) return;   // torn down between fires
+      session->tick_client_timers();
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
+    ios_session_timers()[session] = t;
+  }
+
+  void platform_timer_stop(Session* session)
+  {
+    if (!session) return;
+    auto& m = ios_session_timers();
+    auto it = m.find(session);
+    if (it == m.end()) return;
+    [it->second invalidate];
+    m.erase(it);
+  }
+
+  // Accessibility: iOS would need a UIAccessibility provider (UIAccessibility-
+  // Container on the frame's UIView), which is not part of this wave. No-ops,
+  // so declarations are stored and unread rather than silently half-working.
+  void platform_a11y_notify(void* /*frame_native_handle*/,
+                            uint32_t /*widget_id*/, int /*change*/) {}
+  void platform_a11y_announce(void* /*frame_native_handle*/,
+                              const char* /*utf8*/, bool /*assertive*/) {}
+  bool platform_a11y_is_listening() { return false; }
+
   // Toast animation heartbeat. The toast is painted inside the frame's NEUIView
   // (shared Session::paint_toast, topmost in the paint pass), so we just kick
   // that view's CADisplayLink, which calls setNeedsDisplay each vsync until the
@@ -2646,6 +2756,25 @@ namespace xpl_host
       return neui_detail::message_box_ios(presenter, text, caption, flags);
     }
     return 0;
+  }
+
+  // File dialogs: UNSUPPORTED on iOS, reported honestly as -1.
+  //
+  // UIDocumentPickerViewController is the iOS equivalent, but it is
+  // *presented*, not run modally - the same asynchrony that forced the
+  // message_box divergence above, except here there is no sentinel that
+  // would help: the whole point of the call is the path list, and a client
+  // that got "pending" back could not proceed. Rather than return a
+  // meaningless 0 paths for a picker that is about to appear (and whose
+  // result would be dropped), the platform declines. Wiring a real async
+  // completion - a NEUI_EVENT for the picked paths, which would also fix
+  // message_box on iOS - is the deferred follow-up; see
+  // docs/deferred-issues.md.
+  int platform_file_dialog(void* /*native_handle*/, int /*save*/,
+                           const neui_file_dialog_t* /*desc*/,
+                           neui_file_path_cb /*cb*/, void* /*userdata*/)
+  {
+    return -1;
   }
 
 } // namespace xpl_host

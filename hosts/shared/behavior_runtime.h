@@ -9,6 +9,7 @@
 
 #include "attrs.h"
 #include "behavior.h"
+#include "wheel_direction.h"
 
 // Behavior runtime - per-widget input state + the host-agnostic dispatch
 // helpers. Both xpl + native hosts include this header and call the
@@ -516,20 +517,48 @@ namespace neui_detail
                                                 ctx.widget_w, ctx.widget_h,
                                                 local_x, local_y);
       if (!H) return false;
-      // Wheel up DECREASES, wheel down INCREASES (audio-plugin convention,
-      // matches the existing KNOB). Delta arrives in lines (Win32 converts
+      // Wheel up DECREASES, wheel down INCREASES - the audio-plugin convention,
+      // and since 2026-08-11 the built-in KNOB / SLIDER follow it too (they used
+      // to do the reverse, which is what the old version of this comment wrongly
+      // claimed to match). Delta arrives in lines (Win32 converts
       // WHEEL_DELTA notches via SPI_GETWHEELSCROLLLINES; macOS / xpl pass
       // +/-1 per notch). Multiply by |delta| so one notch advances by
       // `step * lines_per_notch` rather than a single `step`, otherwise
       // wheel feels imperceptible at typical step values (~0.01..0.05).
-      // The wheel event payload doesn't carry modifier bits today
-      // (neui_event_wheel_t has no buttonmap), so fine_modifier on WHEEL
-      // is a no-op in v1.
-      int   delta   = event->data.wheel.delta;
+      int delta = event->data.wheel.delta;
       if (delta == 0) return true;
-      float sign    = (delta > 0) ? -1.0f : 1.0f;
-      int   mag     = (delta > 0) ? delta : -delta;
-      float change  = sign * H->step * static_cast<float>(mag);
+      const uint32_t bmap = event->data.wheel.buttonmap;
+
+      // PHYSICAL direction. Two sign changes have to come off before a value
+      // handler can use this delta - the platform layer's Shift->horizontal flip,
+      // and the OS's natural-scrolling inversion (issue #21) - and both live in
+      // wheel_direction.h now, so this handler, the built-in KNOB and the built-in
+      // SLIDER cannot drift apart. The Shift half used to be open-coded here; the
+      // inversion half was simply missing, which made a trackpad swipe move a
+      // behavior-driven control the wrong way for anyone on the macOS default.
+      delta = wheel_physical_delta(delta, event->data.wheel.is_horizontal, bmap,
+                                   event->data.wheel.is_flipped);
+
+      // The shared convention (up decreases), now used by the built-in KNOB and
+      // SLIDER too - so this handler and a native knob finally agree.
+      float sign = wheel_value_sign(delta);
+      int   mag  = wheel_magnitude(delta);
+
+      // Per-notch magnitude. With detents configured the detent IS the
+      // quantisation, so one notch advances exactly one of them and
+      // fine_modifier is meaningless - matching the native KNOB
+      // (hosts/macos/window.mm, hosts/win32/widgets.cpp, which both use
+      // 1/(steps-1) per tick and ignore fine when stepped). This is also what
+      // keeps fine from starving: behavior_write_value_gesture snaps
+      // round-to-nearest and the wheel keeps no unsnapped accumulator (unlike
+      // DRAG's rt.drag_continuous), so a fine-scaled sub-quantum change would
+      // round straight back and the wheel would go permanently dead.
+      // Continuous mode has no snapping to starve against, so fine applies there.
+      const int steps = behavior_read_steps(*H, ctx.bag);
+      const float magnitude =
+        (steps >= 2) ? ((H->max - H->min) / static_cast<float>(steps - 1))
+                     : (H->step * behavior_fine_mul(*H, bmap));
+      float change = sign * magnitude * static_cast<float>(mag);
       float current = behavior_read_value(*H, ctx.bag);
       behavior_write_value_gesture(*H, ctx, H->target, current + change);
       return true;

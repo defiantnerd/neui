@@ -1544,9 +1544,6 @@ namespace xpl_host
                  SWP_NOZORDER | SWP_NOACTIVATE);
   }
 
-  // NEUI_ATTR_ZOOM is not supported on LVGL.
-  void platform_apply_zoom(WidgetData& /*wd*/) {}
-
   void platform_post_close(void* native_handle)
   {
     if (native_handle)
@@ -1718,5 +1715,56 @@ namespace xpl_host
   void platform_set_window_icon(WidgetData&, const char*) {}
   void platform_apply_size_constraints(void*, int, int, int, int) {}
   void platform_set_cursor(int) {}
+
+  // The seams the other platform layers gained with popup surfaces, relative
+  // pointer, timers, UI zoom, accessibility and file dialogs - inert here, as on
+  // the null platform (platform_null.cpp), until this experimental host gets
+  // them: no popup surface (the in-frame backing), no pointer warping, no
+  // timer tick (add_timer returns an id that never fires), no zoom, no
+  // accessibility provider, no file dialog.
+  void platform_force_paint(void*) {}
+  bool platform_supports_relative_pointer()                                   { return false; }
+  bool platform_begin_relative_pointer(void*, int*, int*)                     { return false; }
+  void platform_end_relative_pointer(void*, int, int)                         {}
+  bool platform_supports_ui_scale()                                           { return false; }
+  bool platform_supports_tree_popup()                                         { return false; }
+  bool platform_supports_popup_surface()                                      { return false; }
+
+  void platform_get_work_area(void*, int* x, int* y, int* w, int* h)
+  {
+    // a plausible box, never 0x0: popup clamping must not collapse
+    if (x) *x = 0;
+    if (y) *y = 0;
+    if (w) *w = 1024;
+    if (h) *h = 768;
+  }
+
+  void platform_client_to_screen(void*, int lx, int ly, int* sx, int* sy)
+  {
+    if (sx) *sx = lx;
+    if (sy) *sy = ly;
+  }
+
+  void platform_get_pointer_pos(int* sx, int* sy)
+  {
+    if (sx) *sx = 0;
+    if (sy) *sy = 0;
+  }
+
+  void platform_create_popup_surface(Session*, uint32_t, WidgetData&, void*) {}
+  void platform_show_popup_surface(void*, void*, int, int, int, int, float) {}
+  void platform_hide_popup_surface(void*, void*) {}
+  void platform_popup_grab_begin(Session*, void*) {}
+  void platform_popup_grab_end(Session*) {}
+
+  void platform_timer_start(Session*, uint32_t) {}
+  void platform_timer_stop(Session*) {}
+
+  void platform_a11y_notify(void*, uint32_t, int) {}
+  void platform_a11y_announce(void*, const char*, bool) {}
+  bool platform_a11y_is_listening() { return false; }
+
+  // -1, not 0: the client can tell it from a cancel and fall back to its own path entry
+  int platform_file_dialog(void*, int, const neui_file_dialog_t*, neui_file_path_cb, void*) { return -1; }
 
 } // namespace xpl_host

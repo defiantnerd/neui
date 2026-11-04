@@ -31,6 +31,10 @@
 #include "d/notify.h"
 #include "d/metrics.h"
 #include "d/embed.h"
+#include "d/timer.h"
+#include "d/pointer.h"
+#include "d/popup.h"
+#include "d/a11y.h"
 #include "d/ios.h"
 
 #ifdef __cplusplus

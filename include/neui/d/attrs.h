@@ -183,24 +183,62 @@ extern "C" {
 #define NEUI_ATTR_MAX_WIDTH  "neui.attr.max_width"
 #define NEUI_ATTR_MAX_HEIGHT "neui.attr.max_height"
 
-// float: zoom of a frame (APPWINDOW / PLUGWINDOW / DIALOG). Default 1.0.
-// The frame's content keeps its logical coordinates - widget positions,
-// sizes, fonts, the frame's own width / height and every event coordinate
-// stay as laid out - and the native window shows it scaled: a 1000 x 600
-// frame at zoom 0.5 is a 500 x 300 logical-px window (on a 2x display
-// 1000 x 600 device px). Clamped to 0.25 .. 4. Set before show() or any time
-// after: a change resizes the native window around the content (an embedded
-// PLUGWINDOW resizes its own view; asking the DAW for the new size is the
-// plugin's part). The popup menu and the toast stay unzoomed, at the size
-// they have in an unzoomed frame. Honoured by the crossplatform host on
-// Win32, macOS and Linux/X11; ignored elsewhere.
-#define NEUI_ATTR_ZOOM "neui.attr.zoom"
-
 // string: file path to an icon image for a frame window (APPWINDOW).
 // Accepted formats: .ico (preferred - multi-resolution), .png, .bmp, .jpg.
 // Empty string clears the icon back to the default. Set before show() for
 // initial paint, or any time after for a runtime change.
 #define NEUI_ATTR_ICON_PATH  "neui.attr.icon_path"
+
+// float: user UI zoom for a frame (APPWINDOW / PLUGWINDOW / DIALOG), on top
+// of the monitor's DPI scale. 1.0 / unset = no zoom; 1.5 = "150%". Clamped to
+// [NEUI_UI_SCALE_MIN, NEUI_UI_SCALE_MAX]. Live: setting it re-sizes the native
+// window so the frame's logical client area is preserved, repaints, and fires
+// NEUI_EVENT_METRICS_CHANGED carrying the new scale.
+//
+// The client's coordinate system does NOT change. Widget x/y/width/height,
+// get_client_rect, mouse coordinates and the painter all stay in logical
+// pixels at 96 DPI at every zoom level - the framework scales geometry, text
+// and images on the way to the screen and scales input back down. So a layout
+// written once is correct at every zoom, and a client that never touches this
+// attr is unaffected.
+//
+// A CUSTOMDRAW widget that needs to know the true device scale (to snap
+// hairlines, or to draw at native resolution) reads neui_event_paint_t::scale,
+// and can opt into device-pixel painting entirely with
+// NEUI_ATTR_PAINT_DEVICE_PIXELS below.
+//
+// Crossplatform host only; the native win32 / macOS hosts ignore it (their
+// child widgets are real HWND / NSView controls sized by the OS).
+#define NEUI_ATTR_UI_SCALE "neui.attr.ui_scale"
+
+// Bounds NEUI_ATTR_UI_SCALE is clamped to. Below ~0.5 hit-targets stop being
+// usable; above ~4 a frame stops fitting any real display.
+#define NEUI_UI_SCALE_MIN 0.25f
+#define NEUI_UI_SCALE_MAX 8.0f
+
+// int (bool): CUSTOMDRAW only. 0 / unset = the WIDGET_PAINT callback draws in
+// logical pixels and the framework scales the result (the default, and what
+// most clients want - one layout for every zoom / DPI). 1 = the callback is
+// handed ZOOM-EXPANDED pixels instead: neui_event_paint_t width/height arrive
+// pre-multiplied by the frame's ZOOM and the zoom transform is not applied
+// under the callback, so one drawn unit is one *unzoomed logical* pixel.
+//
+// It undoes the ZOOM, not the DPI. On a HiDPI display one unit is still
+// 1/backing_scale of a true physical pixel, and width/height are NOT
+// `logical * neui_event_paint_t::scale` (that value folds in the backing scale
+// as well). Read `scale` if you need the physical figure - e.g. to size an
+// offscreen buffer - and expect the two to coincide only at backing 1.0. The
+// zoom is what this mode exists to escape, because it is the factor a user
+// changes at runtime; the DPI transform is what keeps a widget crisp. Use
+// it for content that must be pixel-exact at native resolution - meters,
+// spectrum analysers, waveform and scope views - where a scaled-up logical
+// render would look soft.
+//
+// The widget's position, size and clip in the surrounding layout are
+// unaffected (still logical); only the coordinate space inside the callback
+// changes. Mouse coordinates delivered to the widget stay LOGICAL either way -
+// multiply by `scale` if you need to hit-test against what you drew.
+#define NEUI_ATTR_PAINT_DEVICE_PIXELS "neui.attr.paint_device_pixels"
 
 // float (radians): rotation applied around the centre of the widget.
 // Currently honoured by IMAGE; can be extended to other painted widgets
@@ -252,6 +290,62 @@ extern "C" {
 // string: "horizontal" (default) or "vertical". Applies to SLIDER. Read at
 // widget_show; not live-updateable in v1 (would require recreation).
 #define NEUI_ATTR_ORIENTATION "neui.attr.orientation"
+
+// string: the mouse cursor shape shown while the pointer is over this widget.
+// Applies to ANY widget; live (takes effect on the next hover / pointer move,
+// and immediately if the pointer is already inside).
+//
+// Values (CSS `cursor` names are accepted as aliases where CSS has an
+// equivalent, and '_' works wherever '-' does, so "ew_resize" == "ew-resize"):
+//   "default" / "inherit"    - INHERIT from the nearest ancestor that sets one,
+//                              falling back to the OS arrow at the root. This
+//                              is the default for every widget; setting "" or
+//                              clearing the attr restores inheritance.
+//   "arrow"                  - explicit arrow: stop inheriting
+//   "ibeam"       / "text"
+//   "crosshair"   / "cross"
+//   "hand"        / "pointer"      - pointing hand (a link / clickable)
+//   "open-hand"   / "grab"         - draggable, not yet grabbed
+//   "closed-hand" / "grabbing"     - grabbed, dragging
+//   "ew-resize"   / "col-resize"   - horizontal double arrow
+//   "ns-resize"   / "row-resize"   - vertical double arrow
+//   "nesw-resize" / "nwse-resize"  - the two diagonals
+//   "move"        / "all-scroll"
+//   "wait"        / "busy"         - busy, input blocked
+//   "progress"                     - busy, input still accepted
+//   "help"
+//   "not-allowed" / "no-drop" / "forbidden"
+//   "none"        / "hidden"       - hide the pointer entirely
+//
+// An UNRECOGNISED value means "inherit", not "arrow": a typo then leaves the
+// cursor alone instead of silently overriding an ancestor's shape. get_string
+// reads back the CANONICAL name (the first spelling above), not the alias that
+// was written, so a client that stores the value round-trips through the
+// canonical set.
+//
+// Not every shape exists on every OS. A platform maps what it has and falls
+// back to the nearest neighbour rather than to the arrow: on macOS the
+// diagonals are public only from macOS 15 (older systems use a guarded private
+// selector, else a same-axis double arrow), "move" / "help" have no public
+// equivalent at any version, and "wait" / "progress" cannot be honoured at all
+// (macOS has no app-settable busy cursor - the beachball belongs to the window
+// server - so draw progress instead of setting a cursor there). win32 has no
+// separate open/closed hand (both map to IDC_HAND). See docs/deferred-issues.md.
+//
+// Resolved by the CROSSPLATFORM host only. The native win32 / macOS hosts do
+// not read this attr - their widgets are real OS controls that manage their own
+// cursors - so a client that wants it selects "neui.host.crossplatform", the
+// same way it must for NEUI_API_TIMER and NEUI_API_EMBED.
+//
+// Applies to any widget THE POINTER CAN HOVER, which means a widget that takes
+// part in hit-testing: one with `emit_events` (BUTTON, INPUTBOX, CUSTOMDRAW,
+// GRID, a scrolling SECTION, ...). Setting it on a widget that never hit-tests
+// - a LABEL, an IMAGE, a non-scrolling SECTION's own background - has no
+// effect, because the pointer is logically interacting with whatever lies
+// beneath it, and that widget's cursor is the one that shows. Inheritance still
+// reaches through such a widget: a cursor on a plain SECTION applies over its
+// interactive children, just not over its bare background.
+#define NEUI_ATTR_CURSOR "neui.attr.cursor"
 
 // string: anchor end of the knob's active fill arc.
 //   "min"    - arc fills from sweep start (7 o'clock) toward the current value (default)
@@ -399,6 +493,44 @@ extern "C" {
 // the widget background / nothing shows there). Set it to paint a solid tab
 // band behind the chips. Live.
 #define NEUI_ATTR_TAB_STRIP_BG_COLOR "neui.attr.tab_strip_bg_color"
+
+// ---- Declared keyboard navigation (NEUI_W_POPUPSURFACE) -----------------
+//
+// A popup surface is usually painted by the client, so the host has no rows to
+// walk - it cannot know what a "menu item" is inside a NEUI_W_CUSTOMDRAW. These
+// four attributes are how a client DECLARES a list without handing over its
+// data: say how many items there are and which one is current, and the host owns
+// the arrow arithmetic while the client keeps painting from the index.
+//
+// Only the DEEPEST open surface navigates, only while focus is outside it (a
+// focused widget inside the popup keeps its own arrows - a text field must), and
+// the client always gets the key first: return true from onevent and the host
+// stays out of that keystroke entirely. See <neui/d/popup.h>.
+
+// int: how many navigable items the client is drawing in this surface.
+// Applies to POPUPSURFACE. 0 (default) = no host navigation at all; the surface
+// just receives the keys. Live - a filtered list may re-declare it per keystroke;
+// the host clamps NEUI_ATTR_NAV_INDEX into the new range on the next key.
+#define NEUI_ATTR_NAV_COUNT "neui.attr.nav_count"
+
+// int: the current item, [0, NEUI_ATTR_NAV_COUNT - 1], or -1 for "none"
+// (the default, so a freshly opened menu highlights nothing until the first
+// arrow). The host writes this as the user navigates and reports the change as
+// NEUI_EVENT_ATTR_CHANGED on the surface; the client may also set it directly
+// (to follow the mouse, or to restore a remembered row), which does NOT fire the
+// event. This is the one piece of state shared between the two, and the client
+// paints from it.
+#define NEUI_ATTR_NAV_INDEX "neui.attr.nav_index"
+
+// int: how far PageUp / PageDown move. Applies to POPUPSURFACE.
+// 0 / unset = 10. Paging always CLAMPS at the ends, even when wrapping is on -
+// a page step that wrapped would be disorienting rather than useful.
+#define NEUI_ATTR_NAV_PAGE "neui.attr.nav_page"
+
+// int: 1 (default) = Up from the first item goes to the last and Down from the
+// last goes to the first, the menu convention. 0 = clamp at both ends, which is
+// what a scrolling browser list usually wants. Applies to POPUPSURFACE.
+#define NEUI_ATTR_NAV_WRAP "neui.attr.nav_wrap"
 
 // ---- Live parameter slots (drive rendering of SLIDER, KNOB, future
 // value-bearing widgets). Float, normalized to [0..1]; out-of-range

@@ -117,15 +117,19 @@ namespace xpl_host
   // Invalidation helpers. On the LVGL retained platform a content change
   // invalidates only that widget's mirror object and a structural change
   // re-syncs the mirror tree; every other platform keeps the historical
-  // whole-frame invalidate.
+  // whole-frame invalidate: the widget's OWN native handle (a frame), else the
+  // frame containing it. find_parent_native_handle alone walks parents only, so
+  // a frame invalidating itself resolved to nullptr and repainted nothing.
 
   static void invalidate_widget_visual(Session* s, uint32_t idx)
   {
 #ifdef NEUI_PLATFORM_LVGL
     platform_retained_widget_invalidate(s, idx);
 #else
-    if (void* frame = s->find_parent_native_handle(idx))
-      platform_invalidate(frame);
+    if (!s || !s->_widgets.exists(idx)) return;
+    void* target = s->_widgets[idx].native_handle;
+    if (!target) target = s->find_parent_native_handle(idx);
+    if (target) platform_invalidate(target);
 #endif
   }
 
@@ -147,6 +151,8 @@ namespace xpl_host
         !strcmp(type, NEUI_W_PLUGWINDOW) ||
         !strcmp(type, NEUI_W_DIALOG))
       return std::make_unique<FrameWidget>();
+    if (!strcmp(type, NEUI_W_POPUPSURFACE))
+      return std::make_unique<PopupSurfaceWidget>();
     if (!strcmp(type, NEUI_W_LABEL))
       return std::make_unique<LabelWidget>();
     if (!strcmp(type, NEUI_W_SECTION))
@@ -167,6 +173,8 @@ namespace xpl_host
       return std::make_unique<TreeviewWidget>();
     if (!strcmp(type, NEUI_W_MENUBAR))
       return std::make_unique<MenubarWidget>();
+    if (!strcmp(type, NEUI_W_POPUPMENU))
+      return std::make_unique<PopupMenuWidget>();
     if (!strcmp(type, NEUI_W_IMAGE))
       return std::make_unique<ImageWidget>();
     if (!strcmp(type, NEUI_W_SLIDER))
@@ -213,7 +221,7 @@ namespace xpl_host
     obj->visible   = true;
     obj->session   = s;
     obj->session_id = session.session;
-    obj->isroot    = obj->is_frame() || obj->is_menubar();
+    obj->isroot    = obj->is_frame() || obj->is_menu_model();
 
     obj->tab_stop  = !strcmp(type, NEUI_W_BUTTON)    ||
                      !strcmp(type, NEUI_W_INPUTBOX)   ||
@@ -249,6 +257,14 @@ namespace xpl_host
     s->_widgets[idx].index     = idx;
     s->_widgets[idx].widget_id = IndexToWidget(s->_session_id, idx).id;
 
+    // Stamp the accessibility instance id. Doing it at CREATE rather than
+    // bumping at destroy means a freed slot cannot be handed on without being
+    // invalidated - the next occupant simply gets a value no AT has ever seen -
+    // and it covers the case a destroy-side bump could not: `destroy(session)`
+    // drops a whole Session without walking its widgets, and the session id is
+    // then reused. See Session::a11y_generation.
+    s->a11y_assign_generation(idx);
+
     // Map implicit type variants onto platform-neutral attributes so internal
     // behavior can be driven uniformly.
     if (!strcmp(type, NEUI_W_CHECKBOX3))
@@ -265,6 +281,10 @@ namespace xpl_host
       s->_menubars.push_back(idx);
     }
 
+    // A new widget can change a SECTION / TABVIEW body rect (auto content
+    // extent) and certainly has no cached layout of its own, so the owning
+    // frame's cached layout must not be trusted until it repaints.
+    s->mark_layout_dirty(idx);
     notify_tree_changed(s, idx);
 
     return IndexToWidget(s->_session_id, idx);
@@ -276,6 +296,27 @@ namespace xpl_host
     if (!s) return;
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
+
+    // Mark the owning frame BEFORE the slot is freed - afterwards frame_of()
+    // can no longer walk up from this index.
+    s->mark_layout_dirty(idx);
+
+    // Focus must not be left naming a slot that is about to be freed: keystrokes
+    // would go nowhere, and the next widget created into the recycled slot would
+    // silently inherit focus with no focus event ever fired. Also before the
+    // teardown, for the same reason mark_layout_dirty is.
+    s->focus_leave_subtree(idx, false);
+    // set_focus dispatched a WIDGET_FOCUS callback, so client code has run and
+    // the tree may have changed under us - a "field lost focus -> tear down the
+    // panel" handler is a perfectly ordinary thing to write. Everything below
+    // dereferences this slot, so re-validate before touching it again.
+    if (!s->_widgets.exists(idx)) return;
+
+    // A modal DIALOG being destroyed ends its blocking show and gives focus back
+    // to whatever held it. Same call the user-driven close path makes, so both
+    // routes out of a modal dialog behave identically.
+    if (s->_widgets[idx].is_frame()) s->end_modal(idx);
+    if (!s->_widgets.exists(idx)) return;   // end_modal dispatched focus events
 
     // A destroyed TABPAGE drops a tab: capture the parent TABVIEW so we can
     // re-flow its strip + page geometry after the slot is freed (the selected
@@ -303,10 +344,55 @@ namespace xpl_host
             client->get_interface(token, NEUI_API_WIDGETS));
       }
     }
+    // BEFORE the subtree goes away: if a relative-pointer drag is running on a
+    // widget inside it (or on the frame whose native handle we hold), end the
+    // mode now, while that handle is still valid. end_relative_pointer passes it
+    // to the platform, and X11 dereferences it to reach the Display - ending
+    // afterwards would be a use-after-free. Leaving the mode ON instead is worse
+    // than a crash on macOS: the cursor stays decoupled from the device AND
+    // hidden, machine-wide, with no event left to un-stick it.
+    s->end_relative_pointer_if_within(idx);
+
+    // Same shape, same reason: an open tree popup names a POPUPMENU widget and a
+    // frame. Destroy either (or an ancestor of either - closing the editor takes
+    // the whole tree) and _tree_popup_active would keep claiming input for a
+    // cascade that can no longer be built, i.e. an INVISIBLE modal grab
+    // swallowing every click and hover in that frame for the rest of its life.
+    s->close_tree_popup_if_within(idx);
+
+    // Same shape again for popup surfaces, but the reachability is the other way
+    // round: a surface is its own ROOT CHILD, so destroying the owner frame does
+    // NOT take it with it. Without this, closing a plugin editor while a picker
+    // is open leaves a live borderless window floating over the DAW - owned by a
+    // frame that no longer exists, with the outside-press watch still running.
+    s->close_popup_surfaces_if_within(idx);
+    // Both closes above dispatch into client code - POPUP_DISMISSED is documented
+    // as the place to drop the state a popup was opened with - so re-validate,
+    // the same guard the focus and end_modal steps earlier in this function
+    // already carry. A nested w_destroy for this same slot has already run its
+    // own forget_dead_hover / tab reflow, so returning here loses nothing.
+    //
+    // NOTE this does not make the slot-REUSE case safe: a handler that destroys
+    // this widget and creates another lands the new one in this very slot, where
+    // exists(idx) is true again and nothing distinguishes it. That needs a
+    // generation counter and is the project-wide deferred limitation in
+    // docs/deferred-issues.md ("stale-after-slot-reuse not detected"), not
+    // something local to popups.
+    if (!s->_widgets.exists(idx)) return;
+
     // Retained mirrors: mark BEFORE the subtree is removed so the hook can
     // still resolve the owning frame through the ancestor chain.
     notify_tree_changed(s, idx);
     destroy_recursive(s, idx, client_api, token);
+
+    // Destroying the widget under the pointer leaves _hovered_widget (and any
+    // cursor override owned by it) pointing at a freed slot. Nothing else
+    // notices: set_hovered(0) is only reached from a real pointer-leave
+    // (WM_MOUSELEAVE / LeaveNotify), which never arrives when a widget is
+    // destroyed out from under a stationary pointer - the DAW-closes-the-editor
+    // case. Left alone, a widget with cursor="none" would keep the pointer
+    // HIDDEN for the rest of the host process's life.
+    s->forget_dead_hover();
 
     // Re-clamp the selection + re-apply page visibility/geometry, then repaint
     // the strip so the now-correct tab count is reflected immediately (matching
@@ -318,6 +404,7 @@ namespace xpl_host
           platform_invalidate(frame);
       }
     }
+
   }
 
   static void NEUI_ABI w_show(neui_session_t session, neui_widget_t widget)
@@ -329,6 +416,12 @@ namespace xpl_host
     auto& wd = s->_widgets[idx];
 
     if (wd.is_frame()) {
+      // A popup surface is the one frame kind widget_show cannot realize: it has
+      // no position of its own until something anchors it, and showing it at
+      // wd.x/wd.y (which are SCREEN coordinates, and zero until placed) would put
+      // a borderless window in the corner of the display. NEUI_API_POPUP::open is
+      // the entry point; ignoring this call is the honest answer.
+      if (dynamic_cast<PopupSurfaceWidget*>(&wd)) return;
       if (!wd.native_handle) {
         if (wd.is_dialog()) {
           // Resolve owner HWND (if any) before creating the dialog HWND so
@@ -384,8 +477,32 @@ namespace xpl_host
         if (is_modal_dialog) {
           auto* fw = dynamic_cast<FrameWidget*>(&wd);
           if (fw) {
-            fw->modal_pump_active = true;
-            platform_run_modal_until(&fw->modal_pump_active);
+            // Take focus INTO the dialog before the pump starts. Focus is
+            // session-global and key routing goes by it, not by which window the
+            // key arrived at - so leaving focus in the owner meant typing into
+            // the dialog edited a field in the window the dialog had just
+            // blocked. Remember where focus was so closing can give it back.
+            // Do not overwrite on a re-entrant show: the saved value would
+            // become the focus INSIDE the dialog and the owner's would be lost.
+            if (!fw->modal_pump_active()) {
+              fw->prev_focus     = s->_focused_widget;
+              fw->prev_focus_gen = s->a11y_generation(s->_focused_widget);
+            }
+            s->focus_next(true, idx);
+            // focus_next does nothing when the frame has NO tab stops - a
+            // message-style dialog of plain LABELs, say. Focus would then still
+            // be on the blocked owner, and typing at the dialog would edit the
+            // window it just blocked, which is the whole defect. Clearing is the
+            // honest fallback: no control here can take it.
+            if (!s->is_in_subtree(s->_focused_widget, idx)) s->set_focus(0);
+            // Hold a share of the flag across the pump. The pump outlives the
+            // widget in the ordinary case - a client callback destroying the
+            // dialog is how a modal show is meant to end - so polling through
+            // `fw` would be polling freed memory. This local is what keeps the
+            // flag itself alive to be read.
+            auto keep_running = fw->modal_pump_flag;
+            *keep_running = true;
+            platform_run_modal_until(keep_running.get());
           }
         }
       }
@@ -401,14 +518,54 @@ namespace xpl_host
     if (!s) return;
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
-    auto& wd = s->_widgets[idx];
 
-    if (wd.is_frame() && wd.native_handle) {
-      platform_hide_window(wd.native_handle);
-    } else {
-      wd.visible = false;
-      notify_tree_changed(s, idx);
+    // Popup surfaces, in BOTH directions - w_show refuses them outright (it has
+    // no position to show one at), but hide can do the right thing and has to.
+    // The generic platform_hide_window below only unmaps the window: the level
+    // stays in _popup_surfaces with the input gate still swallowing every press
+    // and hover in the session, and on Linux with the XGrabPointer still held.
+    // One client call would otherwise leave the whole session unresponsive with
+    // nothing visible to explain it - the same invisible-modal-grab shape the
+    // tree-popup destroy path guards against above.
+    //
+    // Hiding the OWNER dismisses as well: <neui/d/popup.h> and
+    // docs/popup-surfaces.md both list "owner hidden" as a dismissal trigger,
+    // and close_popup_surfaces_if_within is what consults the recorded owner /
+    // anchor - the surface is its own root child, so the owner's subtree does
+    // not contain it and a plain subtree walk would miss it.
+    if (s->popup_surface_open()) {
+      if (s->popup_surface_depth(idx) >= 0)
+        s->close_popup_surface(idx, NEUI_POPUP_DISMISS_CLIENT);
+      else
+        s->close_popup_surfaces_if_within(idx);
+      // Both routes dispatch POPUP_DISMISSED synchronously, so client code has
+      // run and may have destroyed the very widget being hidden.
+      if (!s->_widgets.exists(idx)) return;
     }
+
+    const bool hiding_frame = s->_widgets[idx].is_frame();
+    {
+      auto& wd = s->_widgets[idx];
+      if (hiding_frame && wd.native_handle) {
+        platform_hide_window(wd.native_handle);
+      } else {
+        wd.visible = false;
+        notify_tree_changed(s, idx);
+      }
+    }
+
+    // Focus moves AFTER the widget is invisible, not before. collect_tab_stops
+    // skips an invisible subtree, so this is what stops focus_next from handing
+    // focus to a SIBLING INSIDE the container being hidden - which fired a
+    // focus-gained event (and an auto-scroll) for a control about to vanish,
+    // then cleared it again.
+    //
+    // A hidden FRAME keeps visible = true by design (the flag distinguishes
+    // client intent, not mapped-ness), so its subtree still looks traversable and
+    // try_next would just walk inside it. Clear outright there.
+    s->focus_leave_subtree(idx, !hiding_frame);
+    if (!s->_widgets.exists(idx)) return;   // focus events ran client code
+    s->mark_layout_dirty(idx);
   }
 
   static void NEUI_ABI w_set_pos(neui_session_t session, neui_widget_t widget,
@@ -421,6 +578,7 @@ namespace xpl_host
     auto& wd = s->_widgets[idx];
 
     wd.x = x; wd.y = y; wd.width = width; wd.height = height;
+    s->mark_layout_dirty(idx);
 
     if (wd.is_frame() && wd.native_handle)
       platform_set_window_pos(wd.native_handle, x, y, width, height, wd.dpi);
@@ -438,6 +596,7 @@ namespace xpl_host
     auto& wd = s->_widgets[idx];
 
     wd.width = width; wd.height = height;
+    s->mark_layout_dirty(idx);
 
     if (wd.is_frame() && wd.native_handle)
       platform_set_window_pos(wd.native_handle, wd.x, wd.y, width, height, wd.dpi);
@@ -709,24 +868,6 @@ namespace xpl_host
     s->widget_client_rect(WidgetToIndex(widget), x, y, width, height);
   }
 
-  static int NEUI_ABI w_popup_menu_items(neui_session_t session, neui_widget_t anchor,
-                                          int x, int y, const neui_popup_item_t* items,
-                                          int count, int item_size)
-  {
-    if (!items || count <= 0 || item_size < NEUI_POPUP_ITEM_SIZE_MIN) return 0;
-    auto* s = get_session_for_widget(session, anchor);
-    if (!s) return 0;
-    uint32_t aidx = WidgetToIndex(anchor);
-    if (!s->_widgets.exists(aidx)) return 0;
-    std::vector<PopupItem> v;
-    const char* p = reinterpret_cast<const char*>(items);
-    for (int i = 0; i < count; ++i, p += item_size) {
-      auto* it = reinterpret_cast<const neui_popup_item_t*>(p);
-      v.push_back({ it->text ? it->text : "", it->flags });
-    }
-    return s->open_popup_menu(aidx, x, y, v);
-  }
-
   static int NEUI_ABI w_popup_menu(neui_session_t session, neui_widget_t anchor,
                                     int x, int y, const char* const* items)
   {
@@ -735,7 +876,24 @@ namespace xpl_host
     uint32_t aidx = WidgetToIndex(anchor);
     if (!s->_widgets.exists(aidx)) return 0;
     if (!items) return 0;
-    return s->open_popup_menu(aidx, x, y, popup_items_from_strings(items));
+    std::vector<std::string> v;
+    for (int i = 0; items[i] != nullptr; ++i) v.emplace_back(items[i]);
+    return s->open_popup_menu(aidx, x, y, v);
+  }
+
+  // Tree-model context menu (NEUI_W_POPUPMENU + popup_tree_menu). Async by
+  // design - see <neui/d/widgets.h> for why, and Session::show_tree_popup for
+  // the machinery, which is the menubar's, reused.
+  static bool NEUI_ABI w_popup_tree_menu(neui_session_t session, neui_widget_t anchor,
+                                         int x, int y, neui_widget_t menu)
+  {
+    auto* s = get_session_for_widget(session, anchor);
+    if (!s) return false;
+    // The menu widget must belong to the same session as the anchor; a
+    // cross-session handle is dropped like everywhere else in the API.
+    auto* s2 = get_session_for_widget(session, menu);
+    if (s2 != s) return false;
+    return s->show_tree_popup(WidgetToIndex(anchor), x, y, WidgetToIndex(menu));
   }
 
   static void NEUI_ABI w_invalidate(neui_session_t session, neui_widget_t widget)
@@ -746,8 +904,14 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return;
     // Map any widget invalidation to a frame-level repaint - on the xpl
     // host the entire frame paints in one pass, so per-widget invalidation
-    // would have to invalidate the frame anyway. (The LVGL retained platform
-    // narrows this to the widget's mirror object.)
+    // would have to invalidate the frame anyway.
+    //
+    // The widget's OWN handle counts: invalidating a top-level APPWINDOW /
+    // PLUGWINDOW - the obvious way for a client to ask for "repaint everything" -
+    // used to resolve through find_parent_native_handle, which walks parents
+    // only, to nullptr and did nothing at all, silently. invalidate_widget_visual
+    // tries the widget's own handle first. (The LVGL retained platform narrows
+    // this to the widget's mirror object.)
     invalidate_widget_visual(s, idx);
   }
 
@@ -778,8 +942,28 @@ namespace xpl_host
     w_get_enabled,
     w_get_client_rect,
     w_create_from_component,
-    w_popup_menu_items,
+    w_popup_tree_menu,
   };
+
+  // Repaint the frame that owns `idx` after an attribute change.
+  //
+  // Self-painted widgets read their attrs during paint (NEUI_ATTR_BACKGROUND,
+  // NEUI_ATTR_STEPS, NEUI_ATTR_VALUE_TEXT, NEUI_ATTR_ALIGN_TEXT, a bound
+  // {token} ...), so a runtime write has to invalidate or the widget shows
+  // stale pixels until some unrelated repaint.
+  //
+  // The widget's OWN native handle counts. The four attr setters previously
+  // shared a `if (!wd.is_frame())` gate over find_parent_native_handle, on the
+  // reasoning that "frames handle their own side effects" - true of the size
+  // constraints and the window icon, but NOT of the frame's own paint-time
+  // attrs: Session::paint_frame reads NEUI_ATTR_BACKGROUND off the frame at
+  // clear time, so setting it at runtime left the window stale. Same
+  // parents-only blind spot as w_invalidate had.
+  static void invalidate_owning_frame(Session* s, uint32_t idx)
+  {
+    if (!s || !s->_widgets.exists(idx)) return;
+    invalidate_widget_visual(s, idx);
+  }
 
   // -------------------------------------------------------------------------
   // Attribute API
@@ -814,8 +998,7 @@ namespace xpl_host
     // NEUI_ATTR_TRISTATE, NEUI_ATTR_STEPS etc.), so a runtime change has
     // to invalidate the owning frame. Frames handle their own side
     // effects above (size constraints).
-    if (!wd.is_frame())
-      invalidate_widget_visual(s, idx);
+    invalidate_owning_frame(s, idx);
     return 1;
   }
 
@@ -839,7 +1022,21 @@ namespace xpl_host
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return 0;
     auto& wd = s->_widgets[idx];
-    neui_detail::ensure_attrs(wd.attrs).set_string(key, value);
+
+    // NEUI_ATTR_CURSOR is stored CANONICALISED, so get_string reads back one
+    // spelling no matter which accepted alias was written ("pointer" -> "hand",
+    // "col-resize" -> "ew-resize", "ew_resize" -> "ew-resize"), and an
+    // unrecognised name reads back as "default" - which is also what it MEANS,
+    // so a client can see that its value was not understood instead of getting
+    // its own typo echoed back. <neui/d/attrs.h> documents this round-trip; the
+    // claim was false until the normalisation moved here.
+    if (!strcmp(key, NEUI_ATTR_CURSOR)) {
+      const int kind = neui_detail::cursor_kind_from_name(value);
+      neui_detail::ensure_attrs(wd.attrs)
+        .set_string(key, neui_detail::cursor_kind_name(kind));
+    } else {
+      neui_detail::ensure_attrs(wd.attrs).set_string(key, value);
+    }
 
     // Live re-application for behavior-bearing keys. Each platform layer's
     // platform_set_window_icon does the right thing: Win32 manages the
@@ -849,13 +1046,20 @@ namespace xpl_host
     {
       platform_set_window_icon(wd, value);
     }
+    // NEUI_ATTR_CURSOR is live: if this widget (or a descendant of it, via
+    // inheritance) is the one under the pointer right now, the shape has to
+    // change without waiting for the next hover transition. refresh_cursor
+    // re-resolves and no-ops when the result is unchanged, so calling it
+    // unconditionally is cheaper than working out whether this widget is on the
+    // hovered widget's ancestor chain.
+    if (!strcmp(key, NEUI_ATTR_CURSOR)) s->refresh_cursor();
+
     // Self-painted widgets read string attrs (e.g. NEUI_ATTR_ALIGN_TEXT
     // on SECTION, NEUI_ATTR_VALUE_TEXT on KNOB) each paint, so a runtime
     // change has to invalidate the owning frame. Frames go through the
     // icon_path branch above for their one live-update key; everything
     // else just invalidates the parent frame.
-    if (!wd.is_frame())
-      invalidate_widget_visual(s, idx);
+    invalidate_owning_frame(s, idx);
     return 1;
   }
 
@@ -892,12 +1096,18 @@ namespace xpl_host
     auto& wd = s->_widgets[idx];
     if (!wd.attrs) return 0;
     if (!wd.attrs->remove(key)) return 0;
+
+    // <neui/d/attrs.h> documents that CLEARING NEUI_ATTR_CURSOR restores
+    // inheritance, and that the attr is live. Without this the shape stayed
+    // pinned until the next hover transition, so remove() disagreed with
+    // set_string(key, "") - which is the same operation to a client.
+    if (!strcmp(key, NEUI_ATTR_CURSOR)) s->refresh_cursor();
+
     // Removing a key can change what a self-painted widget draws (e.g.
     // clearing a bound {token} or a value on a compound widget), so
     // invalidate the owning frame - mirroring the a_set_* path above.
     // Without this the widget shows stale pixels until an unrelated repaint.
-    if (!wd.is_frame())
-      invalidate_widget_visual(s, idx);
+    invalidate_owning_frame(s, idx);
     return 1;
   }
 
@@ -924,24 +1134,48 @@ namespace xpl_host
         stored = static_cast<float>(sidx) / static_cast<float>(steps - 1);
       }
     }
-    if (!strcmp(key, NEUI_ATTR_ZOOM)) {
-      if (!wd.is_frame()) return 0;
-      if (!(stored >= 0.25f)) stored = 0.25f;   // NaN too
-      if (stored > 4.0f) stored = 4.0f;
-      neui_detail::ensure_attrs(wd.attrs).set_float(key, stored);
-      if (stored != wd.zoom) {
-        wd.zoom = stored;
-        if (wd.native_handle) platform_apply_zoom(wd);
+    neui_detail::ensure_attrs(wd.attrs).set_float(key, stored);
+
+    // NEUI_ATTR_UI_SCALE on a frame: the only float attr with native side
+    // effects. The logical client size (wd.width/height) is unchanged by
+    // design - the zoom lives in the native window size and the paint
+    // transform - so re-apply the native geometry with the new factor, then
+    // repaint. Also tell the client, since a layout that wants to adapt to
+    // zoom (rather than just be scaled) needs a signal; METRICS_CHANGED
+    // already carries a ui_scale and is exactly this event on iOS.
+    if (wd.is_frame() && !strcmp(key, NEUI_ATTR_UI_SCALE)) {
+      if (wd.native_handle) {
+        // Size only - NEUI_WINDOW_POS_KEEP leaves the window where the user
+        // dragged it. Passing wd.x/wd.y would teleport it back to the create
+        // position, since no xpl platform tracks moves into those fields.
+        platform_set_window_pos(wd.native_handle,
+                                 NEUI_WINDOW_POS_KEEP, NEUI_WINDOW_POS_KEEP,
+                                 wd.width, wd.height, wd.dpi);
+        // Min/max constraints are LOGICAL but bound the ZOOMED native window,
+        // so they go stale the moment the zoom changes - re-apply them.
+        if (wd.attrs) {
+          int mn_w = wd.attrs->get_int(NEUI_ATTR_MIN_WIDTH,  0);
+          int mn_h = wd.attrs->get_int(NEUI_ATTR_MIN_HEIGHT, 0);
+          int mx_w = wd.attrs->get_int(NEUI_ATTR_MAX_WIDTH,  0);
+          int mx_h = wd.attrs->get_int(NEUI_ATTR_MAX_HEIGHT, 0);
+          if (mn_w || mn_h || mx_w || mx_h)
+            platform_apply_size_constraints(wd.native_handle, mn_w, mn_h, mx_w, mx_h);
+        }
+        platform_invalidate(wd.native_handle);
       }
+      neui_event_t ev{};
+      ev.type                   = NEUI_EVENT_METRICS_CHANGED;
+      ev.data.metrics.widget.id = wd.widget_id;
+      ev.data.metrics.ui_scale  = wd.ui_scale();
+      s->dispatch_event(&ev);
       return 1;
     }
-    neui_detail::ensure_attrs(wd.attrs).set_float(key, stored);
+
     // Float attrs feed live paint state (NEUI_PARAM_VALUE on KNOB /
     // SLIDER, NEUI_ATTR_ROTATION on IMAGE, etc.). Invalidate the owning
-    // frame so the next paint pulls fresh values. Frames don't currently
-    // read any float attr in paint, but skip them for symmetry.
-    if (!wd.is_frame())
-      invalidate_widget_visual(s, idx);
+    // frame so the next paint pulls fresh values. Other frame float attrs
+    // aren't read in paint, so skip them for symmetry.
+    invalidate_owning_frame(s, idx);
     return 1;
   }
 
@@ -1148,10 +1382,11 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return { UINT32_MAX };
     auto& wd = s->_widgets[idx];
 
-    // ---- menubar ----
-    if (wd.is_menubar()) {
+    // ---- menubar / popup menu ----
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
-      if (!mb.hmenu) return { UINT32_MAX };
+      const bool native = mb.uses_native_menu();
+      if (native && !mb.hmenu) return { UINT32_MAX };
       uint32_t neui_id = mb.next_menu_item_id++;
       MenubarWidget::MenuItemData data;
       data.text           = text ? text : "";
@@ -1159,35 +1394,48 @@ namespace xpl_host
       data.userdata       = userdata;
       data.parent_item_id = parent.id;
 
-      if (parent.id == 0) {
+      // A menu BAR's root children are its top-level titles ("File", "Edit"):
+      // native popups, never selectable, no command id. A POPUPMENU has no such
+      // band - its root children ARE its first column of ordinary rows, so they
+      // must get a command id, honour "-" as a separator, and be pickable. This
+      // is the whole difference; every deeper level is identical.
+      if (native && parent.id == 0) {
         void* popup = platform_menubar_add_popup(mb.hmenu, data.text.c_str());
         data.parent_hmenu = mb.hmenu;
         data.submenu      = popup;
         data.cmd_id       = 0;
       } else {
-        auto pit = mb.menu_items.find(parent.id);
-        void* parent_popup = (pit != mb.menu_items.end() && pit->second.submenu)
-                             ? pit->second.submenu
-                             : mb.hmenu;
         uint32_t cmd_id = mb.next_menu_cmd_id++;
-        data.parent_hmenu = parent_popup;
-        data.submenu      = nullptr;
-        data.cmd_id       = cmd_id;
+        data.submenu     = nullptr;
+        data.cmd_id      = cmd_id;
+        data.is_separator = (data.text == "-");
+        if (!data.is_separator) mb.menu_cmd_map[cmd_id] = neui_id;
 
-        if (strcmp(data.text.c_str(), "-") == 0) {
-          data.is_separator = true;
-          platform_menubar_add_separator(parent_popup, cmd_id);
-        } else {
-          platform_menubar_add_item(parent_popup, cmd_id, data.text.c_str());
-          mb.menu_cmd_map[cmd_id] = neui_id;
+        if (native) {
+          auto pit = mb.menu_items.find(parent.id);
+          void* parent_popup = (pit != mb.menu_items.end() && pit->second.submenu)
+                               ? pit->second.submenu
+                               : mb.hmenu;
+          data.parent_hmenu = parent_popup;
+          if (data.is_separator)
+            platform_menubar_add_separator(parent_popup, cmd_id);
+          else
+            platform_menubar_add_item(parent_popup, cmd_id, data.text.c_str());
         }
+        // Non-native (POPUPMENU): the item model IS the whole representation.
+        // The xpl host paints the cascade from menu_items / parent_item_id, and
+        // menu_item_has_children drives submenu arrows, so arbitrary depth needs
+        // no native counterpart. Calling platform_menubar_* here would mutate a
+        // menu the user can actually see on macOS / win32.
       }
 
       mb.menu_items[neui_id] = std::move(data);
       mb.menu_item_ids_ordered.push_back(neui_id);
 
-      void* frame = s->find_parent_native_handle(idx);
-      if (frame) platform_menubar_refresh(frame);
+      if (native) {
+        void* frame = s->find_parent_native_handle(idx);
+        if (frame) platform_menubar_refresh(frame);
+      }
       return { neui_id };
     }
 
@@ -1215,15 +1463,16 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       if (it == mb.menu_items.end()) return;
       auto& data = it->second;
-      if (data.submenu) {
+      const bool native = mb.uses_native_menu();
+      if (native && data.submenu) {
         platform_menubar_remove_popup(data.parent_hmenu, data.submenu);
       } else {
-        platform_menubar_remove_item(data.parent_hmenu, data.cmd_id);
+        if (native) platform_menubar_remove_item(data.parent_hmenu, data.cmd_id);
         mb.menu_cmd_map.erase(data.cmd_id);
       }
       bool had_shortcut = (data.shortcut_key != NEUI_KEY_NONE);
@@ -1232,9 +1481,19 @@ namespace xpl_host
                     mb.menu_item_ids_ordered.end(), item.id),
         mb.menu_item_ids_ordered.end());
       mb.menu_items.erase(it);
-      if (had_shortcut) rebuild_menubar_accel(mb);
-      void* frame = s->find_parent_native_handle(idx);
-      if (frame) platform_menubar_refresh(frame);
+      if (had_shortcut && native) rebuild_menubar_accel(mb);
+      if (native) {
+        void* frame = s->find_parent_native_handle(idx);
+        if (frame) platform_menubar_refresh(frame);
+      }
+      // Removing the row that is currently open / hovered in a live popup would
+      // leave _menu_path pointing at a dead item id. tp_claim rebuilds the
+      // cascade from the model on the next input, and mb_build_columns skips ids
+      // it can't find, so a stale path degrades to an empty column rather than
+      // reading freed memory - but close it anyway: a menu that silently loses
+      // rows under the cursor is not something to leave on screen.
+      if (s->_tree_popup_active && s->_tree_popup_menu == idx)
+        s->close_tree_popup();
       return;
     }
 
@@ -1254,12 +1513,16 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
-      for (auto& kv : mb.menu_items) {
-        if (kv.second.submenu)
-          platform_menubar_destroy(kv.second.submenu);
-      }
+      // Do NOT release the submenus individually - same defect, same reason, as
+      // MenubarWidget::on_destroy (see the comment there): a submenu is owned by
+      // the menu it is attached to, so this was a double-free on win32 and an
+      // over-release on macOS that aborted the process with
+      // NSInternalInconsistencyException from -[NSMenu dealloc]. Worse here than
+      // in on_destroy, because it also walked STALE submenu pointers left by
+      // t_remove (which erases only the removed item, not its descendants), so it
+      // was a use-after-free as well. Destroying the root below frees the tree.
       mb.menu_items.clear();
       mb.menu_cmd_map.clear();
       mb.menu_item_ids_ordered.clear();
@@ -1276,10 +1539,19 @@ namespace xpl_host
       // to tear down here.
       mb.native_accel = nullptr;
 #endif
-      platform_menubar_destroy(mb.hmenu);
-      mb.hmenu = platform_menubar_create(IndexToWidget(s->_session_id, idx).id);
-      void* frame = s->find_parent_native_handle(idx);
-      if (frame) platform_menubar_attach(frame, mb.hmenu);
+      // A POPUPMENU owns no native menu, so there is nothing to destroy or
+      // re-attach - clearing the item model above already emptied it. Rebuilding
+      // a root here would also re-attach it to the frame on the native-menu
+      // platforms, i.e. replace the app's real menu bar with an empty one.
+      if (mb.uses_native_menu()) {
+        platform_menubar_destroy(mb.hmenu);
+        mb.hmenu = platform_menubar_create(IndexToWidget(s->_session_id, idx).id);
+        void* frame = s->find_parent_native_handle(idx);
+        if (frame) platform_menubar_attach(frame, mb.hmenu);
+      }
+      // The open cascade named items that no longer exist.
+      if (s->_tree_popup_active && s->_tree_popup_menu == idx)
+        s->close_tree_popup();
       return;
     }
 
@@ -1299,7 +1571,7 @@ namespace xpl_host
     auto& wd = s->_widgets[idx];
 
     const std::string* text = nullptr;
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       if (it == mb.menu_items.end()) return -1;
@@ -1329,12 +1601,12 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       if (it == mb.menu_items.end()) return;
       it->second.text = text ? text : "";
-      if (!it->second.submenu && !it->second.is_separator) {
+      if (mb.uses_native_menu() && !it->second.submenu && !it->second.is_separator) {
         std::string dt = make_menu_text(it->second.text.c_str(),
                                         it->second.shortcut.c_str());
         platform_menubar_set_item_text(it->second.parent_hmenu,
@@ -1342,6 +1614,8 @@ namespace xpl_host
         void* frame = s->find_parent_native_handle(idx);
         if (frame) platform_menubar_refresh(frame);
       }
+      // A POPUPMENU has no native item to relabel; the painter reads .text.
+      s->refresh_open_tree_popup(idx);
       return;
     }
 
@@ -1360,7 +1634,7 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return nullptr;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       return it != mb.menu_items.end() ? it->second.userdata : nullptr;
@@ -1380,20 +1654,23 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       if (it == mb.menu_items.end()) return;
       it->second.enabled = enabled;
-      if (it->second.submenu) {
-        platform_menubar_enable_popup(it->second.parent_hmenu,
-                                      it->second.submenu, enabled);
-      } else {
-        platform_menubar_enable_item(it->second.parent_hmenu,
-                                     it->second.cmd_id, enabled);
+      if (mb.uses_native_menu()) {
+        if (it->second.submenu) {
+          platform_menubar_enable_popup(it->second.parent_hmenu,
+                                        it->second.submenu, enabled);
+        } else {
+          platform_menubar_enable_item(it->second.parent_hmenu,
+                                       it->second.cmd_id, enabled);
+        }
+        void* frame = s->find_parent_native_handle(idx);
+        if (frame) platform_menubar_refresh(frame);
       }
-      void* frame = s->find_parent_native_handle(idx);
-      if (frame) platform_menubar_refresh(frame);
+      s->refresh_open_tree_popup(idx);
       return;
     }
 
@@ -1412,7 +1689,7 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return false;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       return it != mb.menu_items.end() && it->second.enabled;
@@ -1431,7 +1708,7 @@ namespace xpl_host
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
-    if (!wd.is_menubar()) return;   // treeview ignores
+    if (!wd.is_menu_model()) return;   // treeview ignores
 
     auto& mb = dynamic_cast<MenubarWidget&>(wd);
     auto it = mb.menu_items.find(item.id);
@@ -1439,11 +1716,14 @@ namespace xpl_host
     if (it == mb.menu_items.end() || it->second.is_separator || it->second.submenu) return;
     it->second.checked = checked;
     // Native menubars (win32 / macOS) apply the mark through the seam; the
-    // Linux in-frame menu reads MenuItemData::checked straight from the model
-    // when it paints, so the refresh below is enough there.
-    platform_menubar_check_item(it->second.parent_hmenu, it->second.cmd_id, checked);
-    void* frame = s->find_parent_native_handle(idx);
-    if (frame) platform_menubar_refresh(frame);
+    // Linux in-frame menu and the POPUPMENU cascade read MenuItemData::checked
+    // straight from the model when they paint, so a repaint is enough there.
+    if (mb.uses_native_menu()) {
+      platform_menubar_check_item(it->second.parent_hmenu, it->second.cmd_id, checked);
+      void* frame = s->find_parent_native_handle(idx);
+      if (frame) platform_menubar_refresh(frame);
+    }
+    s->refresh_open_tree_popup(idx);
   }
 
   static bool NEUI_ABI t_get_checked(neui_session_t session,
@@ -1454,7 +1734,7 @@ namespace xpl_host
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return false;
     auto& wd = s->_widgets[idx];
-    if (!wd.is_menubar()) return false;
+    if (!wd.is_menu_model()) return false;
     auto& mb = dynamic_cast<MenubarWidget&>(wd);
     auto it = mb.menu_items.find(item.id);
     return it != mb.menu_items.end() && it->second.checked;
@@ -1525,15 +1805,20 @@ namespace xpl_host
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
 
-    if (wd.is_menubar()) {
+    if (wd.is_menu_model()) {
       auto& mb = dynamic_cast<MenubarWidget&>(wd);
       auto it = mb.menu_items.find(item.id);
       if (it == mb.menu_items.end()) return;
       it->second.shortcut_mods = modifiers;
       it->second.shortcut_key  = key;
       it->second.shortcut      =
-        neui_detail::format_shortcut_label_win(modifiers, key);
-      if (!it->second.submenu && !it->second.is_separator) {
+        // Platform-appropriate glyphs. This string is only ever DRAWN by us -
+        // the Linux in-frame band and the POPUPMENU cascade - because the native
+        // NSMenu / HMENU paths strip it and use keyEquivalent / HACCEL instead.
+        // The popup is the first macOS surface that draws it, so "Win+Z" on a
+        // Mac would have been newly visible.
+        neui_detail::format_shortcut_label(modifiers, key);
+      if (mb.uses_native_menu() && !it->second.submenu && !it->second.is_separator) {
         std::string dt = make_menu_text(it->second.text.c_str(),
                                         it->second.shortcut.c_str());
         platform_menubar_set_item_text(it->second.parent_hmenu,
@@ -1548,7 +1833,14 @@ namespace xpl_host
         void* frame = s->find_parent_native_handle(idx);
         if (frame) platform_menubar_refresh(frame);
       }
-      rebuild_menubar_accel(mb);
+      // On a POPUPMENU a shortcut is a LABEL, not an accelerator: the widget is
+      // absent from Session::_menubars, so neither try_menubar_accel nor
+      // try_translate_accel can ever see it. Building an HACCEL nothing
+      // translates would just be an allocation to leak on the next rebuild.
+      // Bind the real accelerator on the menu bar; use this to show the user
+      // which key does the same thing.
+      if (mb.uses_native_menu()) rebuild_menubar_accel(mb);
+      s->refresh_open_tree_popup(idx);
       return;
     }
     // Treeview: shortcut is ignored (no accelerator semantics for tree items).
@@ -1629,7 +1921,7 @@ namespace xpl_host
     uint32_t idx = WidgetToIndex(widget);
     if (!s->_widgets.exists(idx)) return;
     auto& wd = s->_widgets[idx];
-    if (!wd.is_menubar()) return;   // treeview ignores menu_cmd
+    if (!wd.is_menu_model()) return;   // treeview ignores menu_cmd
     auto& mb = dynamic_cast<MenubarWidget&>(wd);
     auto it = mb.menu_items.find(item.id);
     if (it != mb.menu_items.end()) it->second.menu_cmd = command;
@@ -1988,10 +2280,51 @@ namespace xpl_host
                                  caption, flags);
   }
 
+  // open_file / save_file share every validation step; `save` is the only
+  // difference, so both public slots funnel through here. -1 (rather than
+  // message_box's 0) is the "no dialog happened" answer - the API promises
+  // the client can tell that apart from a cancel.
+  static int notify_run_file_dialog(neui_session_t session,
+                                    neui_widget_t parent_window,
+                                    const neui_file_dialog_t* desc,
+                                    neui_file_path_cb cb, void* userdata,
+                                    int save)
+  {
+    auto* s = get_session_for_widget(session, parent_window);
+    if (!s) return -1;
+    uint32_t idx = WidgetToIndex(parent_window);
+    if (!s->_widgets.exists(idx)) return -1;
+    auto& wd = s->_widgets[idx];
+    if (!wd.is_frame() || !wd.native_handle) return -1;
+    // A NULL desc is legal: it means "every default", which is exactly what
+    // a zero-initialised descriptor produces.
+    neui_file_dialog_t empty = {};
+    return platform_file_dialog(wd.native_handle, save,
+                                desc ? desc : &empty, cb, userdata);
+  }
+
+  static int NEUI_ABI notify_open_file(neui_session_t session,
+                                        neui_widget_t parent_window,
+                                        const neui_file_dialog_t* desc,
+                                        neui_file_path_cb cb, void* userdata)
+  {
+    return notify_run_file_dialog(session, parent_window, desc, cb, userdata, 0);
+  }
+
+  static int NEUI_ABI notify_save_file(neui_session_t session,
+                                        neui_widget_t parent_window,
+                                        const neui_file_dialog_t* desc,
+                                        neui_file_path_cb cb, void* userdata)
+  {
+    return notify_run_file_dialog(session, parent_window, desc, cb, userdata, 1);
+  }
+
   neui_notify_api_t notify_api = {
     NEUI_VERSION,
     notify_toast,
     notify_message_box,
+    notify_open_file,
+    notify_save_file,
   };
 
   // ---------------------------------------------------------------------------
@@ -2046,6 +2379,360 @@ namespace xpl_host
     embed_set_parent,
     embed_event_fd,
     embed_pump_and_tick,
+  };
+
+  // ---------------------------------------------------------------------------
+  // Timer API (NEUI_API_TIMER) - session-scoped periodic timers. Thin
+  // validation over Session::timer_*; the deadline math is portable
+  // (hosts/shared/timer_table.h) and the native tick is one platform seam.
+
+  static uint32_t NEUI_ABI timer_add(neui_session_t session, uint32_t interval_ms)
+  {
+    auto* s = get_session(session);
+    if (!s) return 0;
+    return s->timer_add(interval_ms);
+  }
+
+  static bool NEUI_ABI timer_remove(neui_session_t session, uint32_t timer_id)
+  {
+    auto* s = get_session(session);
+    if (!s) return false;
+    return s->timer_remove(timer_id);
+  }
+
+  static bool NEUI_ABI timer_set_interval(neui_session_t session,
+                                            uint32_t timer_id,
+                                            uint32_t interval_ms)
+  {
+    auto* s = get_session(session);
+    if (!s) return false;
+    return s->timer_set_interval(timer_id, interval_ms);
+  }
+
+  neui_timer_api_t timer_api = {
+    NEUI_VERSION,
+    timer_add,
+    timer_remove,
+    timer_set_interval,
+  };
+
+  // ---------------------------------------------------------------------------
+  // Pointer API (NEUI_API_POINTER) - relative (unbounded) pointer mode, so a
+  // knob drag doesn't die at the screen edge. Thin validation over
+  // Session::begin/end_relative_pointer; the virtual-position math is portable
+  // (hosts/shared/relative_pointer.h) and the warp is one platform seam.
+
+  static bool NEUI_ABI ptr_begin_relative(neui_session_t session,
+                                            neui_widget_t widget)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return false;
+    return s->begin_relative_pointer(WidgetToIndex(widget));
+  }
+
+  static void NEUI_ABI ptr_end_relative(neui_session_t session)
+  {
+    if (auto* s = get_session(session)) s->end_relative_pointer();
+  }
+
+  static bool NEUI_ABI ptr_is_relative(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    return s ? s->is_relative_pointer() : false;
+  }
+
+  neui_pointer_api_t pointer_api = {
+    NEUI_VERSION,
+    ptr_begin_relative,
+    ptr_end_relative,
+    ptr_is_relative,
+  };
+
+  // ---------------------------------------------------------------------------
+  // Popup API (NEUI_API_POPUP) - overlay surfaces that may leave their owner
+  // frame. Thin validation over Session::open_popup_surface and friends; the
+  // placement, cascade and dismissal policy are all in host.cpp, and the window
+  // itself is a platform seam.
+
+  static bool NEUI_ABI pop_open(neui_session_t session, neui_widget_t surface,
+                                neui_widget_t anchor, int x, int y, int side)
+  {
+    auto* s = get_session_for_widget(session, surface);
+    if (!s) return false;
+    // Both handles must belong to THIS session: a cross-session anchor would
+    // have the host resolve geometry in one widget tree and place a window from
+    // another. get_session_for_widget already rejected a foreign surface.
+    if (!get_session_for_widget(session, anchor)) return false;
+    return s->open_popup_surface(WidgetToIndex(surface), WidgetToIndex(anchor),
+                                 x, y, side);
+  }
+
+  static void NEUI_ABI pop_close(neui_session_t session, neui_widget_t surface)
+  {
+    auto* s = get_session_for_widget(session, surface);
+    if (!s) return;
+    s->close_popup_surface(WidgetToIndex(surface), NEUI_POPUP_DISMISS_CLIENT);
+  }
+
+  static void NEUI_ABI pop_close_all(neui_session_t session)
+  {
+    if (auto* s = get_session(session))
+      s->close_all_popup_surfaces(NEUI_POPUP_DISMISS_CLIENT);
+  }
+
+  static bool NEUI_ABI pop_is_open(neui_session_t session, neui_widget_t surface)
+  {
+    auto* s = get_session_for_widget(session, surface);
+    if (!s) return false;
+    return s->popup_surface_depth(WidgetToIndex(surface)) >= 0;
+  }
+
+  static void NEUI_ABI pop_get_clamp_size(neui_session_t session,
+                                          neui_widget_t anchor,
+                                          int* width, int* height)
+  {
+    if (width)  *width  = 0;
+    if (height) *height = 0;
+    auto* s = get_session_for_widget(session, anchor);
+    if (!s) return;
+    s->popup_clamp_size(WidgetToIndex(anchor), width, height);
+  }
+
+  static bool NEUI_ABI pop_escapes_frame(neui_session_t session,
+                                         neui_widget_t anchor)
+  {
+    auto* s = get_session_for_widget(session, anchor);
+    if (!s) return false;
+    return s->popup_escapes_frame(WidgetToIndex(anchor));
+  }
+
+  neui_popup_api_t popup_api = {
+    NEUI_VERSION,
+    pop_open,
+    pop_close,
+    pop_close_all,
+    pop_is_open,
+    pop_get_clamp_size,
+    pop_escapes_frame,
+  };
+
+  // ---------------------------------------------------------------------------
+  // Accessibility API (NEUI_API_A11Y) - per-widget declarations that a platform
+  // accessibility provider reads. Every setter is a store into the widget's
+  // ordinary AttrBag: the declarations have to outlive any single query (an AT
+  // can ask at any time, including before the frame is shown), and reusing the
+  // bag means no second lifetime to manage and zero cost on a widget that
+  // declares nothing.
+  //
+  // Clearing convention throughout: NULL / "" REMOVES the key so the derived
+  // default comes back, rather than storing an empty string that would override
+  // the default with nothing.
+
+  // Store-or-remove for the string-valued declarations.
+  static void a11y_set_str(neui_session_t session, neui_widget_t widget,
+                           const char* key, const char* utf8)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    if (!utf8 || !*utf8) {
+      if (wd.attrs) wd.attrs->remove(key);
+      return;
+    }
+    neui_detail::ensure_attrs(wd.attrs).set_string(key, utf8);
+  }
+
+  static void NEUI_ABI a11y_set_role(neui_session_t session, neui_widget_t widget,
+                                     neui_a11y_role_t role)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    // ROLE_DEFAULT means "derive", which is the absence of a declaration - so
+    // remove the key rather than storing 0 and having the model special-case it.
+    if (role == NEUI_A11Y_ROLE_DEFAULT) {
+      if (wd.attrs) wd.attrs->remove(NEUI_ATTR_A11Y_ROLE);
+      return;
+    }
+    neui_detail::ensure_attrs(wd.attrs)
+      .set_int(NEUI_ATTR_A11Y_ROLE, static_cast<int>(role));
+  }
+
+  static void NEUI_ABI a11y_set_name(neui_session_t session, neui_widget_t widget,
+                                     const char* utf8)
+  { a11y_set_str(session, widget, NEUI_ATTR_A11Y_NAME, utf8); }
+
+  static void NEUI_ABI a11y_set_description(neui_session_t session,
+                                            neui_widget_t widget,
+                                            const char* utf8)
+  { a11y_set_str(session, widget, NEUI_ATTR_A11Y_DESCRIPTION, utf8); }
+
+  static void NEUI_ABI a11y_set_value_text(neui_session_t session,
+                                           neui_widget_t widget,
+                                           const char* utf8)
+  { a11y_set_str(session, widget, NEUI_ATTR_A11Y_VALUE_TEXT, utf8); }
+
+  static void NEUI_ABI a11y_set_value_range(neui_session_t session,
+                                            neui_widget_t widget,
+                                            float min, float max, float step)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    // min == max is the documented "clear" - and also the degenerate range that
+    // would make any normalized->real mapping divide by zero downstream, so it
+    // must not be stored.
+    if (!(min < max) && !(min > max)) {
+      if (wd.attrs) {
+        wd.attrs->remove(NEUI_ATTR_A11Y_RANGE_MIN);
+        wd.attrs->remove(NEUI_ATTR_A11Y_RANGE_MAX);
+        wd.attrs->remove(NEUI_ATTR_A11Y_RANGE_STEP);
+      }
+      return;
+    }
+    auto& bag = neui_detail::ensure_attrs(wd.attrs);
+    bag.set_float(NEUI_ATTR_A11Y_RANGE_MIN,  min);
+    bag.set_float(NEUI_ATTR_A11Y_RANGE_MAX,  max);
+    bag.set_float(NEUI_ATTR_A11Y_RANGE_STEP, step);
+  }
+
+  static void NEUI_ABI a11y_set_value(neui_session_t session,
+                                      neui_widget_t widget, float normalized)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    // Clamp rather than reject: a client computing a normalized value from its
+    // own state can drift slightly outside [0..1], and an AT announcing 103% is
+    // a worse outcome than silently pinning it.
+    if (!(normalized >= 0.0f)) normalized = 0.0f;   // also catches NaN
+    if (normalized > 1.0f)     normalized = 1.0f;
+    neui_detail::ensure_attrs(s->_widgets[idx].attrs)
+      .set_float(NEUI_ATTR_A11Y_VALUE, normalized);
+  }
+
+  static void NEUI_ABI a11y_set_state(neui_session_t session,
+                                      neui_widget_t widget,
+                                      uint32_t mask, uint32_t values)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    if (mask == 0) {                       // documented: restore derivation
+      if (wd.attrs) {
+        wd.attrs->remove(NEUI_ATTR_A11Y_STATE_MASK);
+        wd.attrs->remove(NEUI_ATTR_A11Y_STATE_VALUES);
+      }
+      return;
+    }
+    auto& bag = neui_detail::ensure_attrs(wd.attrs);
+    bag.set_int(NEUI_ATTR_A11Y_STATE_MASK,   static_cast<int>(mask));
+    // Bits set outside the mask would be meaningless (the model only consults
+    // masked bits), so drop them at the door instead of storing noise.
+    bag.set_int(NEUI_ATTR_A11Y_STATE_VALUES, static_cast<int>(values & mask));
+  }
+
+  static void NEUI_ABI a11y_set_labelled_by(neui_session_t session,
+                                            neui_widget_t widget,
+                                            neui_widget_t label)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    auto& wd = s->_widgets[idx];
+    // widget_none clears. A self-reference is rejected here rather than left for
+    // the model's cycle guard - it can only be a caller bug, and dropping it at
+    // the door keeps the stored data trustworthy.
+    if (label.id == widget_none.id || label.id == widget.id) {
+      if (wd.attrs) wd.attrs->remove(NEUI_ATTR_A11Y_LABELLED_BY);
+      return;
+    }
+    neui_detail::ensure_attrs(wd.attrs)
+      .set_int(NEUI_ATTR_A11Y_LABELLED_BY, static_cast<int>(label.id));
+  }
+
+  static void NEUI_ABI a11y_notify(neui_session_t session, neui_widget_t widget,
+                                   neui_a11y_change_t what)
+  {
+    auto* s = get_session_for_widget(session, widget);
+    if (!s) return;
+    uint32_t idx = WidgetToIndex(widget);
+    if (!s->_widgets.exists(idx)) return;
+    // Bump first: a provider answers from a tree built behind this counter, so
+    // without the bump it would re-read the SAME cached node and the
+    // notification would tell an AT to fetch a value that has not changed.
+    // (Client-driven changes - set_value / set_name / set_state on a
+    // hand-painted widget - are exactly the ones a repaint does not have to
+    // express, which is why this is not left to paint_frame's bump.)
+    s->bump_a11y_revision();
+    // Structure changes also invalidate the cached LAYOUT the tree is built
+    // from: a client saying "children changed" means the node geometry the
+    // provider would report is no longer trustworthy.
+    if (what == NEUI_A11Y_CHANGE_STRUCTURE) s->mark_layout_dirty(idx);
+
+    void* frame = s->find_parent_native_handle(idx);
+    if (!frame) return;
+    // The public enum's five members map 1:1 onto the platform seam's first
+    // five, so this forwards unchanged - see A11yNotifyKind in platform.h.
+    platform_a11y_notify(frame, s->_widgets[idx].widget_id,
+                         static_cast<int>(what));
+  }
+
+  static void NEUI_ABI a11y_announce(neui_session_t session, const char* utf8,
+                                     bool assertive)
+  {
+    auto* s = get_session(session);
+    if (!s || !utf8 || !*utf8) return;
+    // An announcement has no node behind it, so any of this session's frames
+    // can carry it; the first realized one is as good as any (on macOS the
+    // notification is posted on its window). A session with no realized frame
+    // still reaches the platform layer, which decides whether it can speak
+    // without one.
+    void* frame = nullptr;
+    for (uint32_t idx = s->_widgets.child(0); idx != 0;
+         idx = s->_widgets.next(idx)) {
+      if (!s->_widgets.exists(idx)) continue;
+      auto& wd = s->_widgets[idx];
+      if (wd.is_frame() && wd.native_handle) { frame = wd.native_handle; break; }
+    }
+    platform_a11y_announce(frame, utf8, assertive);
+  }
+
+  static bool NEUI_ABI a11y_is_active(neui_session_t session)
+  {
+    auto* s = get_session(session);
+    if (!s) return false;
+    // Two sources, because the platforms differ in what they can honestly say.
+    // "Has anything ever queried us" is all macOS can offer (accessibility there
+    // is lazy and has no attach signal); win32's UiaClientsAreListening knows
+    // BEFORE the first query. Either being true means an AT may be watching.
+    // False on a platform with no provider at all, since nothing can query.
+    return s->a11y_queried() || platform_a11y_is_listening();
+  }
+
+  neui_a11y_api_t a11y_api = {
+    NEUI_VERSION,
+    a11y_set_role,
+    a11y_set_name,
+    a11y_set_description,
+    a11y_set_value_range,
+    a11y_set_value,
+    a11y_set_value_text,
+    a11y_set_state,
+    a11y_set_labelled_by,
+    a11y_notify,
+    a11y_announce,
+    a11y_is_active,
   };
 
   // ---------------------------------------------------------------------------

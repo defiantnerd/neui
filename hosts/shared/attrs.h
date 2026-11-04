@@ -10,6 +10,7 @@
 
 #include <neui/d/attrs.h>
 #include <neui/d/grid.h>
+#include <neui/d/a11y.h>
 
 // Shared attribute bag used by both hosts. Stored lazily on a widget so the
 // per-widget overhead is one pointer when unused.
@@ -66,11 +67,14 @@ namespace neui_detail
     { NEUI_ATTR_MAX_WIDTH,            AttrKind::INT    },
     { NEUI_ATTR_MAX_HEIGHT,           AttrKind::INT    },
     { NEUI_ATTR_ICON_PATH,            AttrKind::STRING },
+    { NEUI_ATTR_UI_SCALE,             AttrKind::FLOAT  },
+    { NEUI_ATTR_PAINT_DEVICE_PIXELS,  AttrKind::INT    },
     { NEUI_ATTR_ROTATION,             AttrKind::FLOAT  },
     { NEUI_ATTR_BACKGROUND,           AttrKind::INT    },
     { NEUI_ATTR_THEME_MODE,           AttrKind::INT    },
     { NEUI_ATTR_FOLLOW_SYSTEM_THEME,  AttrKind::INT    },
     { NEUI_ATTR_ORIENTATION,          AttrKind::STRING },
+    { NEUI_ATTR_CURSOR,               AttrKind::STRING },
     { NEUI_ATTR_POLARITY,             AttrKind::STRING },
     { NEUI_ATTR_STEPS,                AttrKind::INT    },
     { NEUI_ATTR_MODAL,                AttrKind::INT    },
@@ -87,9 +91,24 @@ namespace neui_detail
     { NEUI_ATTR_TAB_CHIP_TEXT_COLOR,  AttrKind::INT    },
     { NEUI_ATTR_TAB_CHIP_RADIUS,      AttrKind::INT    },
     { NEUI_ATTR_TAB_STRIP_BG_COLOR,   AttrKind::INT    },
+    { NEUI_ATTR_NAV_COUNT,            AttrKind::INT    },
+    { NEUI_ATTR_NAV_INDEX,            AttrKind::INT    },
+    { NEUI_ATTR_NAV_PAGE,             AttrKind::INT    },
+    { NEUI_ATTR_NAV_WRAP,             AttrKind::INT    },
     { NEUI_ATTR_FONT_FAMILY,          AttrKind::STRING },
     { NEUI_ATTR_FONT_SIZE,            AttrKind::FLOAT  },
     { NEUI_ATTR_FONT_WEIGHT,          AttrKind::INT    },
+    { NEUI_ATTR_A11Y_ROLE,            AttrKind::INT    },
+    { NEUI_ATTR_A11Y_NAME,            AttrKind::STRING },
+    { NEUI_ATTR_A11Y_DESCRIPTION,     AttrKind::STRING },
+    { NEUI_ATTR_A11Y_VALUE_TEXT,      AttrKind::STRING },
+    { NEUI_ATTR_A11Y_VALUE,           AttrKind::FLOAT  },
+    { NEUI_ATTR_A11Y_RANGE_MIN,       AttrKind::FLOAT  },
+    { NEUI_ATTR_A11Y_RANGE_MAX,       AttrKind::FLOAT  },
+    { NEUI_ATTR_A11Y_RANGE_STEP,      AttrKind::FLOAT  },
+    { NEUI_ATTR_A11Y_STATE_MASK,      AttrKind::INT    },
+    { NEUI_ATTR_A11Y_STATE_VALUES,    AttrKind::INT    },
+    { NEUI_ATTR_A11Y_LABELLED_BY,     AttrKind::INT    },
     { NEUI_PARAM_VALUE,               AttrKind::FLOAT  },
     { NEUI_PARAM_DEFAULT,             AttrKind::FLOAT  },
     { NEUI_ATTR_GRID_ROW_HEIGHT,              AttrKind::INT },

@@ -5,6 +5,10 @@
 #include <cstdint>
 #include <neui/neui.h>
 
+// enum neui_cursor_kind - the cursor shape set, shared with the native win32
+// host and with the public NEUI_ATTR_CURSOR string attribute.
+#include "cursor_kind.h"
+
 // Forward-declarations for shared data-item types (defined in
 // hosts/shared/clipboard_item.h). Decoupled here to keep platform.h light;
 // implementation files include the full definition.
@@ -15,9 +19,14 @@ namespace neui_detail { class DataItem; }
 
 // Public NEUI_KEY_* / NEUI_KMOD_* constants come from <neui/neui.h>'s
 // d/keys.h header. Mouse-modifier bits (NEUI_MK_*) come from d/events.h
-// since they describe the public neui_event_mouse_t::buttonmap field;
-// numeric values match Win32 MK_* so the platform layer forwards wParam
-// directly.
+// since they describe the public neui_event_mouse_t::buttonmap field.
+//
+// The NEUI_MK_* values were CHOSEN to match Win32 MK_*, but a platform must
+// still MASK rather than forward a raw wParam: MK_XBUTTON1 is 0x0020, which is
+// the bit NEUI_MK_ALT reserves, so forwarding would report a phantom Alt on
+// any mouse with side buttons. Each OS has a translation helper for this -
+// hosts/shared/{win32/keys_win32.h,macos/keys_macos.h,linux/keys_linux.h}
+// (win32_buttonmap / mac_buttonmap / x11_buttonmap). Use them.
 
 namespace xpl_host
 {
@@ -104,13 +113,142 @@ namespace xpl_host
   void platform_set_window_title(void* native_handle, const char* text);
 
   // Resize / reposition a native window. Coordinates are logical pixels (96 DPI base).
+  // Sentinel for platform_set_window_pos's x / y: "leave the window where it
+  // is, change only the size". Needed because no xpl platform tracks user
+  // window moves back into wd.x/y, so passing the stored position would
+  // teleport a window the user had dragged - which is what a live zoom change
+  // would otherwise do on every adjustment.
+  static constexpr int NEUI_WINDOW_POS_KEEP = (-2147483647 - 1);   // INT_MIN
+
   void platform_set_window_pos(void* native_handle,
                                 int x, int y, int w, int h, uint32_t dpi);
 
-  // A realized frame's zoom (wd.zoom, NEUI_ATTR_ZOOM) changed: resize its
-  // native window to its logical client size times the zoom, hand the render
-  // context the zoomed DPI, and repaint. No-op where zoom isn't supported.
-  void platform_apply_zoom(WidgetData& wd);
+  // -------------------------------------------------------------------------
+  // Popup surfaces (NEUI_W_POPUPSURFACE / NEUI_API_POPUP).
+  //
+  // The platform contributes four things and nothing else: the window, the box
+  // to clamp into, the two coordinate conversions, and the notification that a
+  // press landed somewhere we do not own. Placement arithmetic, the cascade, the
+  // input gate and dismissal policy are all portable (Session::open_popup_surface
+  // and friends).
+
+  // Non-zero while the platform layer is itself creating or placing a
+  // popup-surface window. Bracket every such call with PopupPlacingScope below.
+  //
+  // A popup surface dismisses when its owner moves or resizes - that is what OS
+  // menus do, and re-placing one mid-drag is worse than closing it. The hooks
+  // that implement it (WM_MOVE / WM_SIZE, windowDidMove:, ConfigureNotify)
+  // cannot tell a user dragging the window apart from OUR OWN geometry calls,
+  // and every platform posts those for the very window being placed. Without the
+  // bracket, opening a cascade level dismisses the level underneath it - which
+  // is not a theoretical race: it is the first thing a two-level menu does.
+  //
+  // Shared rather than per-platform because all three desktop backings hit it
+  // identically, and a second copy would drift the first time one was touched.
+  //
+  // PROCESS-GLOBAL, guarding state that is per-Session, and deliberately left
+  // that way: it is a depth counter around straight-line platform calls, so the
+  // only thing that could make it suppress the WRONG session's dismissal is a
+  // nested message pump running INSIDE a scope - re-entering another session's
+  // WM_MOVE / ConfigureNotify while the counter is up. None of the bracketed
+  // calls pumps today (create / SetWindowPos / ShowWindow / XMapWindow / XSync),
+  // and two plugin instances in one DAW are separate Sessions on the same thread,
+  // which is exactly the arrangement where a per-Session counter would matter. So
+  // if a bracketed call ever grows a nested pump - or a modal - this needs to
+  // become per-Session state rather than a static, and the symptom will be a
+  // popup that fails to dismiss when its owner is dragged.
+  inline int& popup_placing_depth() { static int depth = 0; return depth; }
+  inline bool popup_placing() { return popup_placing_depth() != 0; }
+
+  struct PopupPlacingScope {
+    PopupPlacingScope()  { ++popup_placing_depth(); }
+    ~PopupPlacingScope() { --popup_placing_depth(); }
+    PopupPlacingScope(const PopupPlacingScope&)            = delete;
+    PopupPlacingScope& operator=(const PopupPlacingScope&) = delete;
+  };
+
+  // True when this platform can give a popup surface its own OS window, so it
+  // may extend past the owner frame. False = the in-frame backing is used and a
+  // popup is clamped to the owner's client area (iOS / WASM / LVGL / null).
+  // Mirrors platform_supports_tree_popup / _relative_pointer / _ui_scale.
+  bool platform_supports_popup_surface();
+
+  // The usable screen area (excluding taskbar / dock / menu bar) of the monitor
+  // that `near_native` is on, in LOGICAL px, as SCREEN coordinates.
+  //
+  // Returns a rect WITH AN ORIGIN, not a size: a frame on a second monitor must
+  // clamp to that monitor's work area, and its origin is not (0, 0). The
+  // in-frame popup paths get away with an origin-anchored box because they clamp
+  // to a client rect; a desktop popup cannot.
+  //
+  // near_native may be nullptr (falls back to the primary monitor). Out-pointers
+  // must all be non-null. A platform with no screen concept reports a plausible
+  // fallback rather than zeros, so clamping never collapses to a 0x0 box.
+  void platform_get_work_area(void* near_native,
+                              int* x, int* y, int* w, int* h);
+
+  // Convert a point in a frame's CLIENT area (logical px, origin at the client
+  // top-left - the same space widget abs_x/abs_y live in) to SCREEN coordinates
+  // in logical px. Used to turn an anchor rectangle into a popup position.
+  // No-op leaving *sx/*sy at the input values when the handle is null.
+  void platform_client_to_screen(void* native_handle, int lx, int ly,
+                                 int* sx, int* sy);
+
+  // Current pointer position in SCREEN coordinates, logical px. Backs
+  // NEUI_POPUP_AT_POINTER - a context menu opens where the cursor is, and the
+  // press that opened it may already be over by the time open() runs.
+  void platform_get_pointer_pos(int* sx, int* sy);
+
+  // Create the native window for a popup surface: borderless, NON-ACTIVATING
+  // (the owner must not lose focus - inside a DAW that would look to the host
+  // like the plugin editor being deactivated), and owned by `owner_native` for
+  // z-order so it travels with the editor instead of being stranded behind it.
+  //
+  // wd.x / wd.y are SCREEN coordinates in logical px (already placed and clamped
+  // by Session::open_popup_surface), unlike every other frame kind where they
+  // are parent-relative. Sets wd.native_handle / wd.render_ctx / wd.dpi like the
+  // other create_* seams. Must NOT count toward the appwindow quit threshold.
+  //
+  // `owner_native` is the ROOT ancestor's handle, which for an embedded plugin
+  // is the DAW's window - not ours. A cascade is FLAT: every level is owned by
+  // that same root, never by the level above it (deep owner chains buy nothing
+  // where they work and are one more thing for a host to break where they do
+  // not). May be nullptr, in which case the window is simply unowned.
+  //
+  // No-op on a platform without the desktop backing; callers must check
+  // wd.native_handle afterwards.
+  void platform_create_popup_surface(Session* session, uint32_t widget_index,
+                                     WidgetData& wd, void* owner_native);
+
+  // Show / hide an already-created popup-surface window at a screen position
+  // (logical px). Separate from platform_show_window + platform_set_window_pos
+  // because a popup is re-shown against a possibly DIFFERENT owner each time it
+  // opens, and the owner relationship, the ordering and the non-activating
+  // presentation have to be (re-)established atomically with the placement.
+  // `zoom` is the owner's NEUI_ATTR_UI_SCALE, already inherited by the surface.
+  void platform_show_popup_surface(void* popup_native, void* owner_native,
+                                   int sx, int sy, int w, int h, float zoom);
+  void platform_hide_popup_surface(void* popup_native, void* owner_native);
+
+  // Begin / end watching for a press that neui's own windows will never see -
+  // one that lands in a foreign window of the same process (the DAW's own UI) or
+  // in another application. The platform calls
+  // Session::close_all_popup_surfaces(NEUI_POPUP_DISMISS_OUTSIDE_PRESS) or
+  // ..._DEACTIVATED when it sees one.
+  //
+  // Deliberately NOT a pointer capture. Capture's real product is suppression of
+  // the UI underneath, and that is handled portably by the session gate; what is
+  // left is only this notification. Per platform: macOS an NSEvent local monitor
+  // plus NSApplicationDidResignActive (complete coverage, no grab); X11 an
+  // XGrabPointer with owner_events=True, which IS the menu mechanism there and
+  // still delivers normally over our own windows; win32 our own windows plus
+  // WM_ACTIVATEAPP, which leaves one documented gap - a press in the DAW's own UI
+  // outside our child HWND is never seen, because we hold no activation to lose.
+  //
+  // begin is idempotent per session; end must be safe to call when no watch is
+  // active. Both must be robust to the owner window dying first.
+  void platform_popup_grab_begin(Session* session, void* popup_native);
+  void platform_popup_grab_end(Session* session);
 
   // Post an asynchronous close request to a native window.
   void platform_post_close(void* native_handle);
@@ -118,6 +256,21 @@ namespace xpl_host
   // Invalidate the entire client area of a native window so it repaints on the
   // next message-loop iteration. Used after focus changes to update the outline.
   void platform_invalidate(void* native_handle);
+
+  // Repaint a native window NOW, synchronously, before returning - unlike
+  // platform_invalidate, which only marks it dirty for the next loop iteration.
+  //
+  // Exists for out-of-band positional queries (Session::ensure_abs_positions):
+  // some layout state is only produced by the paint path, so a caller that must
+  // answer a geometry question about a never-painted frame has to make that
+  // paint happen rather than duplicate the computation. Do NOT reach for this to
+  // "make a repaint happen sooner" - that is what platform_invalidate is for.
+  //
+  // Best-effort: a platform with no synchronous repaint entry point, or a window
+  // that is hidden / off-screen / not yet mapped, may legitimately do nothing, in
+  // which case the caller's cached geometry stays stale rather than becoming
+  // wrong. Must not be called from inside a paint (it would re-enter).
+  void platform_force_paint(void* native_handle);
 
   // Start / stop a 16 ms repaint heartbeat on a frame's native window.
   // Used by the toast overlay (and any future animation that does not
@@ -387,19 +540,164 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // Mouse cursor.
   //
-  // Switching the cursor mid-widget (e.g. when hovering a column-resize
-  // divider in the GRID header band). One call per change; the platform
-  // is expected to track the active cursor and reapply on every
-  // WM_SETCURSOR / cursor-update message so the cursor stays sticky
-  // until set_cursor is called again.
+  // The shape set is `enum neui_cursor_kind` in hosts/shared/cursor_kind.h,
+  // shared with the native win32 host (which used to keep its own copy of the
+  // list) and with the public NEUI_ATTR_CURSOR string attribute.
   //
-  // Default kind reverts to the OS arrow.
-  enum CursorKind {
-    NEUI_CURSOR_DEFAULT   = 0,
-    NEUI_CURSOR_EW_RESIZE = 1,   // double-headed horizontal arrow (column resize)
+  // Called on every hover change and on the internal transient overrides
+  // (the GRID header column-resize divider), so it must be cheap and
+  // idempotent - Session::refresh_cursor already suppresses no-op changes,
+  // but a platform that round-trips to a server should dedupe as well.
+  //
+  // STICKINESS IS THE PLATFORM'S JOB, and it is not automatic: on win32 the
+  // window class registers an arrow in wc.hCursor and DefWindowProc reapplies
+  // it on every WM_SETCURSOR, and on macOS AppKit resets the cursor from the
+  // view's cursor rects on every mouse-moved. A platform must therefore track
+  // the active kind and reapply it from its cursor-update message
+  // (WM_SETCURSOR / -cursorUpdate:), not merely set it once here.
+  //
+  // NEUI_CURSOR_DEFAULT reaches the platform already resolved to "no widget
+  // asked for anything", so it means the OS arrow. Inheritance up the widget
+  // tree is resolved in Session::resolve_cursor_for before this is called.
+  void platform_set_cursor(int kind /* neui_cursor_kind */);
+
+  // -------------------------------------------------------------------------
+  // Relative (unbounded) pointer mode (NEUI_API_POINTER, <neui/d/pointer.h>).
+  //
+  // Pins the visible cursor while a drag keeps consuming device motion, so a
+  // knob drag doesn't die at the screen edge. Session owns the virtual-position
+  // bookkeeping (hosts/shared/relative_pointer.h); these three calls are only
+  // the platform mechanics.
+  //
+  // platform_begin_relative_pointer records the anchor in whatever coordinates
+  // that platform needs for the warp-back (SCREEN px on every current
+  // platform - deliberately opaque to the caller, which only passes them back)
+  // and returns false when the platform has no seam at all (iOS / null), so
+  // begin_relative can honestly report failure instead of pinning nothing.
+  //
+  // The three implementations are NOT the same shape, and the difference is
+  // load-bearing:
+  //   - macOS uses CGAssociateMouseAndMouseCursorPosition(false), which
+  //     decouples the cursor from the device WITHOUT moving it. No per-move
+  //     warp, and therefore no synthetic motion event to filter.
+  //   - win32 (SetCursorPos) and X11 (XWarpPointer) must warp back on every
+  //     move, and each warp generates a fresh motion event that has to be
+  //     recognised and dropped - see relative_is_warp_echo. A handler that
+  //     misses this reads the echo as an equal-and-opposite delta and the
+  //     pointer appears frozen.
+  bool platform_supports_relative_pointer();
+  bool platform_begin_relative_pointer(void* native_handle,
+                                        int* out_anchor_x, int* out_anchor_y);
+  void platform_end_relative_pointer(void* native_handle,
+                                      int anchor_x, int anchor_y);
+
+  // -------------------------------------------------------------------------
+  // Client timers (NEUI_API_TIMER, <neui/d/timer.h>).
+  //
+  // ONE native periodic tick per session, not one per client timer: the
+  // portable TimerTable (hosts/shared/timer_table.h) owns deadlines and
+  // multiplexes, so the platform only has to fire session->tick_client_timers()
+  // every `interval_ms`. Start is idempotent and re-arms at a new interval when
+  // the shortest live timer changes; stop is called as soon as the last timer
+  // goes away so an idle session burns no wakeups.
+  //
+  // Must work under run(), under a hand-rolled pump_once() loop, and under
+  // NEUI_API_EMBED - i.e. it has to hang off whatever already services the
+  // session, not off a thread of its own.
+  // True when this platform layer implements the INPUT half of
+  // NEUI_ATTR_UI_SCALE: dividing mouse / touch coordinates by the zoom and
+  // scaling the native window. The paint-side CTM in Session::paint_frame is
+  // platform-independent, so a platform that scales paint without dividing
+  // input would hit-test in a different space than it draws - which is worse
+  // than not zooming. WidgetData::ui_scale() returns 1.0 when this is false,
+  // making the attr inert rather than broken.
+  bool platform_supports_ui_scale();
+
+  // True when this platform layer routes input to the standalone tree popup
+  // (widgets->popup_tree_menu): press / move / release plus Esc-to-dismiss, and
+  // draining Session::tree_popup_take_release.
+  //
+  // Session::paint_frame paints the cascade platform-independently, so a
+  // platform that paints it without wiring input would put up a menu that the
+  // user can neither pick from nor dismiss, and whose taps fall THROUGH to the
+  // widgets underneath - strictly worse than not offering the feature.
+  // show_tree_popup therefore refuses when this is false, so the API fails
+  // honestly instead of painting something inert. (Same shape as
+  // platform_supports_ui_scale, and as begin_relative on iOS / null.)
+  bool platform_supports_tree_popup();
+
+  // Modal file dialog owned by the given frame's native window, behind
+  // NEUI_API_NOTIFY::open_file / save_file. `save` selects the save flavour
+  // (one destination, extension completion, overwrite prompt) over the open
+  // one (existing file(s) or a folder). Blocks until the user confirms or
+  // cancels - the same contract as platform_message_box - and invokes `cb`
+  // once per chosen path before returning.
+  //
+  // Returns the number of paths delivered: 0 = cancelled, N>0 = that many
+  // callbacks fired, -1 = this platform has no file-dialog surface (null,
+  // iOS). Unlike platform_message_box, -1 and 0 are distinct: the public API
+  // promises a client can tell "no dialog" from "user said no".
+  //
+  // A NULL `cb` is legal and still runs the dialog (the count is the useful
+  // part); implementations must not dereference it.
+  int platform_file_dialog(void* native_handle, int save,
+                           const neui_file_dialog_t* desc,
+                           neui_file_path_cb cb, void* userdata);
+
+  void platform_timer_start(Session* session, uint32_t interval_ms);
+  void platform_timer_stop(Session* session);
+
+  // -------------------------------------------------------------------------
+  // Accessibility (NEUI_API_A11Y, <neui/d/a11y.h>).
+  //
+  // The TREE itself is not a seam: a11y_adapter.cpp + hosts/shared/a11y_tree.h
+  // build it once, portably, for every platform (the xpl host paints one native
+  // surface per frame, so the tree has to be synthesised whatever the platform
+  // provider API looks like). What a platform layer adds is the PROVIDER - the
+  // object the OS asks - plus the two things a provider cannot pull:
+  // notifications, and a spoken announcement with no node behind it.
+  //
+  // Both take the FRAME's native handle, because a provider is rooted at one
+  // frame's native surface (per-frame focus, per-frame subtree - see G3 in
+  // plans/accessibility.md). A platform with no provider implements these as
+  // no-ops and the accessibility API stays honest: declarations are stored and
+  // cost nothing, and nothing reads them. That is Linux, iOS and null today.
+
+  // What changed, for platform_a11y_notify. The first five mirror
+  // neui_a11y_change_t exactly, so a client's notify() forwards its argument
+  // unchanged. Focus has no public counterpart - a client never drives focus by
+  // hand - so it sits above the public range rather than renumbering it.
+  enum A11yNotifyKind
+  {
+    a11y_notify_value     = 0,   // == NEUI_A11Y_CHANGE_VALUE
+    a11y_notify_name      = 1,
+    a11y_notify_state     = 2,
+    a11y_notify_structure = 3,
+    a11y_notify_selection = 4,
+    a11y_notify_focus     = 100
   };
 
-  void platform_set_cursor(int kind /* CursorKind */);
+  // `widget_id` is the PUBLIC widget id (session << 16 | slot), not a tree
+  // slot, so this seam needs no Session. A provider that has not been asked for
+  // anything yet should do nothing: posting a notification for a tree it has
+  // never built would make the OS query at an arbitrary moment for no reason.
+  void platform_a11y_notify(void* frame_native_handle, uint32_t widget_id,
+                            int change /* A11yNotifyKind */);
+
+  // Speak `utf8` now, with no node behind it - the accessibility counterpart of
+  // a toast. `assertive` interrupts whatever is being spoken.
+  void platform_a11y_announce(void* frame_native_handle, const char* utf8,
+                              bool assertive);
+
+  // "Is an AT actually listening right now", when the platform can say. Backs
+  // half of NEUI_API_A11Y::is_active, which is documented as ADVISORY - a client
+  // must never gate correctness on it.
+  //
+  // Only win32 can answer honestly (UiaClientsAreListening). macOS has no such
+  // signal by design - accessibility there is lazy, so "has anything queried us"
+  // is the only truthful answer and that is what the Session flag tracks. A
+  // platform with no provider returns false, which is not conservative but exact.
+  bool platform_a11y_is_listening();
 
 #ifdef NEUI_PLATFORM_LVGL
   // -------------------------------------------------------------------------

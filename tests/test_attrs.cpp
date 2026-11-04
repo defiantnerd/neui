@@ -2,6 +2,7 @@
 
 #include "attrs.h"
 
+#include <cstring>
 #include <memory>
 
 using namespace neui_detail;
@@ -69,4 +70,69 @@ TEST_CASE("ensure_attrs / attrs_readonly: lazy allocation")
   CHECK(slot != nullptr);
   CHECK(attrs_readonly(slot) != nullptr);
   CHECK_EQ(attrs_readonly(slot)->get_int("k", -1), 1);
+}
+
+// ---------------------------------------------------------------------------
+// UI zoom keys (NEUI_ATTR_UI_SCALE / NEUI_ATTR_PAINT_DEVICE_PIXELS)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ui_scale / paint_device_pixels are registered with the right kinds")
+{
+  bool saw_scale = false, saw_device = false;
+  for (const auto& row : k_well_known_attrs) {
+    if (!std::strcmp(row.key, NEUI_ATTR_UI_SCALE)) {
+      saw_scale = true;
+      CHECK(row.kind == AttrKind::FLOAT);
+    }
+    if (!std::strcmp(row.key, NEUI_ATTR_PAINT_DEVICE_PIXELS)) {
+      saw_device = true;
+      CHECK(row.kind == AttrKind::INT);
+    }
+  }
+  CHECK(saw_scale);
+  CHECK(saw_device);
+}
+
+// The clamp lives on WidgetData::ui_scale() in the xpl host (which the Tier-1
+// suite deliberately does not link), so mirror the contract here over the raw
+// AttrBag: garbage in must not be able to produce a non-positive or absurd
+// scale, because that would divide input coordinates by zero or blow up the
+// native window size.
+namespace {
+  float clamp_ui_scale(const AttrBag& bag)
+  {
+    float z = bag.get_float(NEUI_ATTR_UI_SCALE, 1.0f);
+    if (!(z > 0.0f)) return 1.0f;
+    if (z < NEUI_UI_SCALE_MIN) return NEUI_UI_SCALE_MIN;
+    if (z > NEUI_UI_SCALE_MAX) return NEUI_UI_SCALE_MAX;
+    return z;
+  }
+}
+
+TEST_CASE("ui_scale clamp: unset is 1.0 and sane values pass through")
+{
+  AttrBag bag;
+  CHECK_APPROX(clamp_ui_scale(bag), 1.0);
+  bag.set_float(NEUI_ATTR_UI_SCALE, 1.5f);
+  CHECK_APPROX(clamp_ui_scale(bag), 1.5);
+  bag.set_float(NEUI_ATTR_UI_SCALE, 2.0f);
+  CHECK_APPROX(clamp_ui_scale(bag), 2.0);
+}
+
+TEST_CASE("ui_scale clamp: zero / negative fall back to 1.0, not to a degenerate scale")
+{
+  AttrBag bag;
+  bag.set_float(NEUI_ATTR_UI_SCALE, 0.0f);
+  CHECK_APPROX(clamp_ui_scale(bag), 1.0);
+  bag.set_float(NEUI_ATTR_UI_SCALE, -3.0f);
+  CHECK_APPROX(clamp_ui_scale(bag), 1.0);
+}
+
+TEST_CASE("ui_scale clamp: out-of-range values pin to the documented bounds")
+{
+  AttrBag bag;
+  bag.set_float(NEUI_ATTR_UI_SCALE, 0.01f);
+  CHECK_APPROX(clamp_ui_scale(bag), (double)NEUI_UI_SCALE_MIN);
+  bag.set_float(NEUI_ATTR_UI_SCALE, 1000.0f);
+  CHECK_APPROX(clamp_ui_scale(bag), (double)NEUI_UI_SCALE_MAX);
 }

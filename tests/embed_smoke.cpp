@@ -58,32 +58,47 @@ int main()
   int fd = embed->event_fd(sess, plug);
   std::printf("embed_event_fd = %d\n", fd);
 
-  // Drive ~1s purely via the host-driven pump (no neui loop).
-  for (int i = 0; i < 60; ++i) {
+  // The child's background is unpainted = BlackPixel until the Cairo blit lands
+  // a non-black themed frame, so "has it rendered" is directly observable.
+  auto count_nonblack = [&](Window win) -> long {
+    if (!win) return 0;
+    XSync(hd, False);
+    XImage* img = XGetImage(hd, win, 0, 0, 320, 200, AllPlanes, ZPixmap);
+    if (!img) return 0;
+    long n = 0;
+    for (int y = 0; y < 200; ++y)
+      for (int x = 0; x < 320; ++x)
+        if ((XGetPixel(img, x, y) & 0xffffff) > 0x080808) ++n;
+    XDestroyImage(img);
+    return n;
+  };
+
+  // Drive the UI purely via the host-driven pump (no neui loop) UNTIL the child
+  // has actually rendered, rather than for a fixed number of ticks.
+  //
+  // An embedded editor paints when the DAW pumps it, and how many pumps that
+  // takes depends on the machine and on whatever else is competing for the X
+  // server. A fixed ~1 s was enough on an idle desktop and not enough directly
+  // after the rest of the Linux suite had run, which failed this harness with
+  // "child did not render" about two runs in three - a timing artefact reported
+  // as a rendering bug.
+  Window child = 0;
+  unsigned int nk = 0;
+  long nonblack = 0;
+  for (int i = 0; i < 700 && nonblack < 500; ++i) {   // up to ~11 s
     embed->pump_and_tick(sess, plug);
     usleep(16000);
-  }
-
-  // The embedded window must be a child of the foreign parent.
-  Window rr, pp, *kids = nullptr; unsigned int nk = 0;
-  XQueryTree(hd, parent, &rr, &pp, &kids, &nk);
-  std::printf("parent children = %u\n", nk);
-  Window child = nk > 0 ? kids[0] : 0;
-  if (kids) XFree(kids);
-
-  // The child must have rendered (its background is unpainted = BlackPixel
-  // until the Cairo blit lands a non-black themed frame).
-  long nonblack = 0;
-  if (child) {
-    XSync(hd, False);
-    XImage* img = XGetImage(hd, child, 0, 0, 320, 200, AllPlanes, ZPixmap);
-    if (img) {
-      for (int y = 0; y < 200; ++y)
-        for (int x = 0; x < 320; ++x)
-          if ((XGetPixel(img, x, y) & 0xffffff) > 0x080808) ++nonblack;
-      XDestroyImage(img);
+    if (i < 20) continue;              // let the window be created and mapped
+    if (!child) {
+      // The embedded window must be a child of the foreign parent.
+      Window rr, pp, *kids = nullptr;
+      XQueryTree(hd, parent, &rr, &pp, &kids, &nk);
+      if (nk > 0) child = kids[0];
+      if (kids) XFree(kids);
     }
+    if (child && (i % 4) == 0) nonblack = count_nonblack(child);
   }
+  std::printf("parent children = %u\n", nk);
   std::printf("child nonblack = %ld\n", nonblack);
 
   int fail = 0;

@@ -532,6 +532,87 @@ if(APPLE)
   target_link_libraries(neui_arc_example PRIVATE neui-macoshost)
 endif()
 
+# Popup surface example (NEUI_W_POPUPSURFACE / NEUI_API_POPUP): an overlay that
+# leaves its frame - a 640x520 picker opened from a 520x300 window, a cascade
+# level, AT_POINTER placement, and the dismissal reasons. Crossplatform host
+# only (NEUI_API_POPUP is xpl-only), which it selects explicitly.
+if(WIN32 AND MSVC)
+  add_executable(neui_popup_surface_example WIN32
+    examples/popup_surface_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_popup_surface_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_popup_surface_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_popup_surface_example WIN32 examples/popup_surface_example.cpp)
+elseif(APPLE)
+  add_executable(neui_popup_surface_example MACOSX_BUNDLE examples/popup_surface_example.cpp)
+else()
+  add_executable(neui_popup_surface_example examples/popup_surface_example.cpp)
+endif()
+target_link_libraries(neui_popup_surface_example PRIVATE neui neui-xplhost)
+# The native hosts still have to be linked even though the example selects the
+# xpl one: neui_init() registers every compiled-in host, so its per-host
+# registration wrapper is an undefined symbol otherwise.
+if(WIN32)
+  target_link_libraries(neui_popup_surface_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_popup_surface_example PRIVATE neui-macoshost)
+endif()
+
+# UI zoom example (NEUI_ATTR_UI_SCALE): 100/150/200 % switching, plus the two
+# CUSTOMDRAW painting modes (logical vs NEUI_ATTR_PAINT_DEVICE_PIXELS).
+# Crossplatform host only - it selects that host explicitly.
+if(WIN32 AND MSVC)
+  add_executable(neui_zoom_example WIN32
+    examples/zoom_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_zoom_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_zoom_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_zoom_example WIN32 examples/zoom_example.cpp)
+elseif(APPLE)
+  add_executable(neui_zoom_example MACOSX_BUNDLE examples/zoom_example.cpp)
+else()
+  add_executable(neui_zoom_example examples/zoom_example.cpp)
+endif()
+target_link_libraries(neui_zoom_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_zoom_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_zoom_example PRIVATE neui-macoshost)
+endif()
+
+# Accessibility example (NEUI_API_A11Y). The plugin-UI shape: custom-painted
+# controls with declared roles, a normalized value declared in real units
+# (-60..+6 dB), and LABEL-names-INPUTBOX pairings - the three things an
+# accessibility framework cannot infer. xpl host only (the interface is
+# xpl-only), and the one example whose point is what a screen reader HEARS.
+if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.rc")
+  add_executable(neui_a11y_example WIN32
+    examples/a11y_example.cpp
+    examples/neui_example.rc)
+  target_link_options(neui_a11y_example PRIVATE "/MANIFEST:NO")
+  set_property(TARGET neui_a11y_example APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/neui_example.manifest")
+elseif(WIN32)
+  add_executable(neui_a11y_example WIN32 examples/a11y_example.cpp)
+elseif(APPLE)
+  add_executable(neui_a11y_example MACOSX_BUNDLE examples/a11y_example.cpp)
+else()
+  add_executable(neui_a11y_example examples/a11y_example.cpp)
+endif()
+target_link_libraries(neui_a11y_example PRIVATE neui neui-xplhost)
+if(WIN32)
+  target_link_libraries(neui_a11y_example PRIVATE neui-win32host)
+endif()
+if(APPLE)
+  target_link_libraries(neui_a11y_example PRIVATE neui-macoshost)
+endif()
+
 # Filmstrip / stitchmap knob example. Generates a vertical frame strip into a
 # SURFACE, tags it via assets->set_frame_layout, and drives it with a compound
 # asset layer whose "frame" prop is bound to NEUI_PARAM_VALUE + a rotational

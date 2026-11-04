@@ -12,6 +12,7 @@
 #include "../shared/win32/theme_provider_win32.h"
 #include "../shared/win32/dark_menu_win32.h"
 #include "../shared/win32/dark_menubar_win32.h"
+#include "../shared/win32/keys_win32.h"
 
 #include <winrt/windows.foundation.h>
 #include <winrt/Windows.UI.ViewManagement.h>
@@ -585,6 +586,10 @@ namespace win32_host
           sess->dispatch_event(&event);
         } else {
           neui_event_t event = { NEUI_EVENT_MOUSE_BUTTON_CLICK };
+          // buttonmap deliberately 0: BN_CLICKED is a control notification the
+          // keyboard can raise (Space / Enter on a focused button) with no
+          // mouse involved, so reading the live button state here would report
+          // a phantom press. The real WM_?BUTTON* messages carry the bits.
           event.data.mouse = { wid, 0, 0, 0 };
           sess->dispatch_event(&event);
         }
@@ -1121,8 +1126,12 @@ namespace win32_host
             EnableWindow(owner->hwnd, TRUE);
             SetForegroundWindow(owner->hwnd);
           }
-          // Drop the modal pump so widget_show unwinds and returns.
-          if (wd) wd->modal_pump_active = false;
+          // Drop the modal pump so widget_show unwinds and returns. Writes
+          // THROUGH the share, so the waiting pump sees it even when this
+          // WidgetData is freed a moment later by the client's close handler -
+          // which is the ordinary way a modal dialog ends. (`wd` is already
+          // known non-null here; the guard this replaces was redundant.)
+          if (wd->modal_pump_flag) *wd->modal_pump_flag = false;
         }
         return 0;
       }
@@ -1319,6 +1328,11 @@ namespace win32_host
       int lx = MulDiv(GET_X_LPARAM(lParam), 96, (int)dpi);
       int ly = MulDiv(GET_Y_LPARAM(lParam), 96, (int)dpi);
       neui_widget_t wid = { wd->widget_id };
+      // NEUI_MK_* button / modifier bits. Every mouse message handled below
+      // except WM_MOUSELEAVE carries the key state in wParam, so forward that
+      // (state as of when the message was posted); LEAVE falls back to the
+      // live state so a drag leaving the widget still reports its held button.
+      uint32_t mk = neui_detail::win32_buttonmap(wParam);
 
       switch (msg)
       {
@@ -1331,12 +1345,12 @@ namespace win32_host
           TrackMouseEvent(&tme);
           wd->mouse_tracked = true;
           neui_event_t enter = { NEUI_EVENT_MOUSE_ENTER };
-          enter.data.mouse = { wid, 0, 0, 0 };
+          enter.data.mouse = { wid, 0, 0, mk };
           wd->session->dispatch_event(&enter);
         }
         {
           neui_event_t event = { NEUI_EVENT_MOUSE_MOVE };
-          event.data.mouse = { wid, lx, ly, 0 };
+          event.data.mouse = { wid, lx, ly, mk };
           wd->session->dispatch_event(&event);
         }
         break;
@@ -1344,28 +1358,29 @@ namespace win32_host
         wd->mouse_tracked = false;
         {
           neui_event_t event = { NEUI_EVENT_MOUSE_LEAVE };
-          event.data.mouse = { wid, 0, 0, 0 };
+          event.data.mouse = { wid, 0, 0,
+                               neui_detail::win32_buttonmap_from_state() };
           wd->session->dispatch_event(&event);
         }
         break;
       case WM_LBUTTONDOWN:
         {
           neui_event_t event = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
-          event.data.mouse = { wid, lx, ly, 1 };
+          event.data.mouse = { wid, lx, ly, mk };
           wd->session->dispatch_event(&event);
         }
         break;
       case WM_LBUTTONUP:
         {
           neui_event_t event = { NEUI_EVENT_MOUSE_BUTTON_UP };
-          event.data.mouse = { wid, lx, ly, 0 };
+          event.data.mouse = { wid, lx, ly, mk };
           wd->session->dispatch_event(&event);
         }
         break;
       case WM_LBUTTONDBLCLK:
         {
           neui_event_t event = { NEUI_EVENT_MOUSE_BUTTON_DBLCLICK };
-          event.data.mouse = { wid, lx, ly, 1 };
+          event.data.mouse = { wid, lx, ly, mk };
           wd->session->dispatch_event(&event);
           // Slider double-click -> reset to NEUI_PARAM_DEFAULT. Knob has its
           // own DBLCLK handling in painted_msg_knob_w32; only the native
@@ -1377,28 +1392,32 @@ namespace win32_host
       case WM_RBUTTONDOWN:
         {
           neui_event_t event = { NEUI_EVENT_MOUSE_RBUTTON_DOWN };
-          event.data.mouse = { wid, lx, ly, 0 };
+          event.data.mouse = { wid, lx, ly, mk };
           wd->session->dispatch_event(&event);
         }
         break;
       case WM_RBUTTONUP:
         {
           neui_event_t event = { NEUI_EVENT_MOUSE_RBUTTON_UP };
-          event.data.mouse = { wid, lx, ly, 0 };
+          event.data.mouse = { wid, lx, ly, mk };
           wd->session->dispatch_event(&event);
         }
         break;
       case WM_KEYDOWN:
         {
+          // The key messages carry no modifier state (wParam is the VK), so
+          // read the live state - matching the xpl host's build_modifiers().
           neui_event_t event = { NEUI_EVENT_KEYDOWN };
-          event.data.key = { wid, static_cast<uint32_t>(wParam), 0 };
+          event.data.key = { wid, static_cast<uint32_t>(wParam),
+                             neui_detail::win32_kmod_from_state() };
           wd->session->dispatch_event(&event);
         }
         break;
       case WM_KEYUP:
         {
           neui_event_t event = { NEUI_EVENT_KEYUP };
-          event.data.key = { wid, static_cast<uint32_t>(wParam), 0 };
+          event.data.key = { wid, static_cast<uint32_t>(wParam),
+                             neui_detail::win32_kmod_from_state() };
           wd->session->dispatch_event(&event);
         }
         break;

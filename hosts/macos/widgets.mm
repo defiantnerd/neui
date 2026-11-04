@@ -24,6 +24,7 @@
 #define NEUI_TOAST_MACOS_IMPLEMENTATION
 #include "../shared/macos/toast_macos.h"
 #include "../shared/macos/message_box_macos.h"
+#include "../shared/macos/file_dialog_macos.h"
 
 #include <algorithm>
 #include <cstring>
@@ -169,11 +170,8 @@ namespace macos_host
   // render-ctx resize). No-op until the native object exists.
   void apply_geometry_native_macos(WidgetData& wd);
   // Defined in window.mm. Blocking popup menu anchored to an NSView; returns
-  // the 1-based pick (separators consume an index) or 0 on dismiss. The
-  // _strings variant takes popup_menu's NULL-terminated strings.
-  int  run_popup_menu_macos(NSView* anchor, int x, int y,
-                            const neui_popup_item_t* items, int count, int item_size);
-  int  run_popup_menu_strings_macos(NSView* anchor, int x, int y, const char* const* items);
+  // the 1-based pick (separators consume an index) or 0 on dismiss.
+  int  run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items);
   // Defined in window.mm. Applies NEUI_ATTR_FONT_* to a native control's
   // NSFont (no-op for painted widgets + when no font attr is set).
   void apply_font_native_macos(WidgetData& wd);
@@ -623,37 +621,20 @@ namespace macos_host
     }
     if (x) *x = 0; if (y) *y = 0; if (w) *w = gw; if (h) *h = gh;
   }
-  // The anchor's NSView (nil: none), or false if there is no such widget.
-  static bool popup_anchor_view_macos(neui_session_t session, neui_widget_t anchor, NSView** view)
-  {
-    auto* s = get_session_for_widget(session, anchor);
-    if (!s) return false;
-    uint32_t i = WidgetToIndex(anchor);
-    if (!s->_widgets.exists(i)) return false;
-    auto& wd = s->_widgets[i];
-    *view = nil;
-    if (wd.native_control) {
-      id obj = (__bridge id)wd.native_control;
-      if ([obj isKindOfClass:[NSView class]]) *view = (NSView*)obj;
-    }
-    return true;
-  }
-  static int   NEUI_ABI w_popup_menu_items(neui_session_t session, neui_widget_t anchor,
-                                            int x, int y, const neui_popup_item_t* items,
-                                            int count, int item_size)
-  {
-    if (!items || count <= 0 || item_size < NEUI_POPUP_ITEM_SIZE_MIN) return 0;
-    NSView* view = nil;
-    if (!popup_anchor_view_macos(session, anchor, &view)) return 0;
-    return run_popup_menu_macos(view, x, y, items, count, item_size);
-  }
   static int   NEUI_ABI w_popup_menu(neui_session_t session, neui_widget_t anchor,
                                       int x, int y, const char* const* items)
   {
-    if (!items) return 0;
+    auto* s = get_session_for_widget(session, anchor);
+    if (!s || !items) return 0;
+    uint32_t i = WidgetToIndex(anchor);
+    if (!s->_widgets.exists(i)) return 0;
+    auto& wd = s->_widgets[i];
     NSView* view = nil;
-    if (!popup_anchor_view_macos(session, anchor, &view)) return 0;
-    return run_popup_menu_strings_macos(view, x, y, items);
+    if (wd.native_control) {
+      id obj = (__bridge id)wd.native_control;
+      if ([obj isKindOfClass:[NSView class]]) view = (NSView*)obj;
+    }
+    return run_popup_menu_macos(view, x, y, items);
   }
 
   // Request a repaint of the widget. For painted views (IMAGE, KNOB,
@@ -822,10 +803,52 @@ namespace macos_host
     return neui_detail::message_box_macos(win, text, caption, flags);
   }
 
+  // open_file / save_file. NSOpenPanel / NSSavePanel runModal is app-modal,
+  // so the resolved NSWindow is validation only (it proves the handle names a
+  // realised frame) rather than a required sheet parent. -1 = no dialog ran,
+  // which the public contract keeps distinct from a 0 = cancelled.
+  static int notify_run_file_dialog(neui_session_t session,
+                                    neui_widget_t parent_window,
+                                    const neui_file_dialog_t* desc,
+                                    neui_file_path_cb cb, void* userdata,
+                                    bool save)
+  {
+    NSWindow* win = notify_frame_window(session, parent_window);
+    if (!win) return -1;
+    neui_file_dialog_t empty = {};
+    if (!desc) desc = &empty;
+
+    std::vector<std::string> paths;
+    int n = save ? neui_detail::file_dialog_save_macos(win, desc, paths)
+                 : neui_detail::file_dialog_open_macos(win, desc, paths);
+    if (n <= 0) return n;
+    if (cb)
+      for (const auto& p : paths) cb(userdata, p.c_str());
+    return (int)paths.size();
+  }
+
+  static int NEUI_ABI notify_open_file(neui_session_t session,
+                                        neui_widget_t parent_window,
+                                        const neui_file_dialog_t* desc,
+                                        neui_file_path_cb cb, void* userdata)
+  {
+    return notify_run_file_dialog(session, parent_window, desc, cb, userdata, false);
+  }
+
+  static int NEUI_ABI notify_save_file(neui_session_t session,
+                                        neui_widget_t parent_window,
+                                        const neui_file_dialog_t* desc,
+                                        neui_file_path_cb cb, void* userdata)
+  {
+    return notify_run_file_dialog(session, parent_window, desc, cb, userdata, true);
+  }
+
   neui_notify_api_t notify_api = {
     NEUI_VERSION,
     notify_toast,
     notify_message_box,
+    notify_open_file,
+    notify_save_file,
   };
 
   neui_widget_api_t widgets_api = {
@@ -846,7 +869,12 @@ namespace macos_host
     w_get_enabled,
     w_get_client_rect,
     w_create_from_component,
-    w_popup_menu_items,
+    // popup_tree_menu: not implemented on the native macOS host. Would need
+    // -[NSMenu popUpMenuPositioningItem:atLocation:inView:] over an NSMenu
+    // built from the POPUPMENU's item model. Explicit nullptr so this reads as
+    // a decision, not a missed initializer; clients null-check appended slots
+    // per <neui/d/widgets.h>. Use the xpl host for a tree-model context menu.
+    nullptr,
   };
 
   // -------------------------------------------------------------------------

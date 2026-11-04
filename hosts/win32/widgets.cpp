@@ -17,7 +17,11 @@
 #include "../shared/win32/icon_win32.h"
 #include "../shared/win32/image_loader_win32.h"
 #include "../shared/win32/accel_table_win32.h"
+#include "../shared/win32/keys_win32.h"
+#include "../shared/win32/cursor_win32.h"
 #include "../shared/win32/toast_win32.h"
+#include "../shared/win32/file_dialog_win32.h"
+#include "../shared/wheel_direction.h"
 #include "../shared/shortcut_format.h"
 #include "../shared/widget_paint_knob.h"
 #include "../shared/widget_paint_section.h"
@@ -635,10 +639,16 @@ namespace win32_host
     if (msg == WM_MOUSEWHEEL) {
       short delta = static_cast<short>(HIWORD(wParam));
       bool fine = (LOWORD(wParam) & MK_SHIFT) != 0;
-      // Wheel up INCREASES knob value, wheel down DECREASES - matching the
-      // SLIDER and the natural scroll direction.
+      // Wheel up DECREASES, down INCREASES - the shared value convention (see
+      // hosts/shared/wheel_direction.h), which a behavior asset's WHEEL handler
+      // has always used and which the built-in knobs now follow too.
+      //
+      // No inversion to undo here: Windows applies the touchpad's "reverse
+      // scrolling direction" setting in the driver with no way to query it, so
+      // this delta is taken as physical (neui_event_wheel_t::is_flipped is
+      // documented as "0 = not inverted OR unknown" for exactly this reason).
       float step = nudge_delta_w32(wd, 1, fine ? 0.01f : 0.05f) *
-                   (delta > 0 ? 1.0f : -1.0f);
+                   neui_detail::wheel_value_sign(delta);
       widget_set_value_user_gesture_w32(wd, widget_get_value_w32(wd) + step);
       return;
     }
@@ -876,6 +886,10 @@ namespace win32_host
       ev.data.paint.width       = w;
       ev.data.paint.height      = h;
       ev.data.paint.focused     = focused;
+      // No user zoom on the native host (child widgets are real HWNDs sized by
+      // the OS), so the device scale is purely the monitor's DPI ratio.
+      ev.data.paint.scale       =
+        (backend && backend->get_scale_factor) ? backend->get_scale_factor(ctx) : 1.0f;
       wd.session->dispatch_event(&ev);
     }
 
@@ -995,23 +1009,23 @@ namespace win32_host
     switch (msg) {
       case WM_LBUTTONDOWN:
         out_ev = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
-        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        out_ev.data.mouse = { wid, lx, ly, neui_detail::win32_buttonmap(wParam) };
         return true;
       case WM_LBUTTONUP:
         out_ev = { NEUI_EVENT_MOUSE_BUTTON_UP };
-        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        out_ev.data.mouse = { wid, lx, ly, neui_detail::win32_buttonmap(wParam) };
         return true;
       case WM_MOUSEMOVE:
         out_ev = { NEUI_EVENT_MOUSE_MOVE };
-        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        out_ev.data.mouse = { wid, lx, ly, neui_detail::win32_buttonmap(wParam) };
         return true;
       case WM_RBUTTONDOWN:
         out_ev = { NEUI_EVENT_MOUSE_RBUTTON_DOWN };
-        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        out_ev.data.mouse = { wid, lx, ly, neui_detail::win32_buttonmap(wParam) };
         return true;
       case WM_RBUTTONUP:
         out_ev = { NEUI_EVENT_MOUSE_RBUTTON_UP };
-        out_ev.data.mouse = { wid, lx, ly, static_cast<uint32_t>(wParam) };
+        out_ev.data.mouse = { wid, lx, ly, neui_detail::win32_buttonmap(wParam) };
         return true;
       case WM_MOUSEWHEEL: {
         short delta = static_cast<short>(HIWORD(wParam));
@@ -1020,6 +1034,11 @@ namespace win32_host
         out_ev.data.wheel.x      = lx;
         out_ev.data.wheel.y      = ly;
         out_ev.data.wheel.delta  = delta / WHEEL_DELTA;
+        // On the wheel messages wParam packs the delta in the HIGH word and
+        // the key/button state in the LOW word, so unlike the mouse cases
+        // above it needs GET_KEYSTATE_WPARAM rather than the whole wParam.
+        out_ev.data.wheel.buttonmap =
+          neui_detail::win32_buttonmap(GET_KEYSTATE_WPARAM(wParam));
         return true;
       }
       default:
@@ -1064,10 +1083,7 @@ namespace win32_host
 
     if (msg == WM_KEYDOWN) {
       // Modifiers: read live (the WM_KEYDOWN message doesn't carry them).
-      uint32_t mods = 0;
-      if (GetKeyState(VK_SHIFT)   & 0x8000) mods |= NEUI_KMOD_SHIFT;
-      if (GetKeyState(VK_CONTROL) & 0x8000) mods |= NEUI_KMOD_CTRL;
-      if (GetKeyState(VK_MENU)    & 0x8000) mods |= NEUI_KMOD_ALT;
+      uint32_t mods = neui_detail::win32_kmod_from_state();
       neui_detail::behavior_dispatch_key(*ba, *wd.behavior_rt, ctx,
                                           static_cast<uint32_t>(wParam), mods);
       return;
@@ -2980,11 +2996,17 @@ namespace win32_host
           EnableWindow(owner_hwnd, FALSE);
         // Native blocking modal: spin a nested OS pump until the dialog
         // HWND is destroyed. AppWindowProc's WM_DESTROY for the dialog
-        // clears modal_pump_active, breaking the pump so widget_show
+        // clears the pump flag, breaking the pump so widget_show
         // returns to the caller.
         if (is_dialog && is_modal) {
-          w.modal_pump_active = true;
-          run_modal_until(&w.modal_pump_active);
+          // Hold a share of the flag across the pump. The pump outlives the
+          // widget in the ordinary case - a client callback destroying the
+          // dialog is how a modal show is meant to end - so polling through `w`
+          // would be polling freed memory. This local keeps the flag itself
+          // alive to be read; see host.h.
+          auto keep_running = std::make_shared<bool>(true);
+          w.modal_pump_flag = keep_running;
+          run_modal_until(keep_running.get());
         }
       }
     } else if (w.hwnd != nullptr) {
@@ -4693,15 +4715,14 @@ namespace win32_host
   // ---------------------------------------------------------------------------
   // Popup menu (context menu, free of the menubar)
 
-  static int NEUI_ABI popup_menu_items(neui_session_t session, neui_widget_t anchor,
-                                        int x, int y, const neui_popup_item_t* items,
-                                        int count, int item_size)
+  static int NEUI_ABI popup_menu(neui_session_t session, neui_widget_t anchor,
+                                  int x, int y, const char* const* items)
   {
-    if (!items || count <= 0 || item_size < NEUI_POPUP_ITEM_SIZE_MIN) return 0;
     auto* s = get_session(session);
     if (!s) return 0;
     auto* wd = s->get_widget(WidgetToIndex(anchor));
     if (!wd || !wd->session) return 0;
+    if (!items) return 0;
 
     // Find the parent frame's HWND for screen-coord conversion + as the
     // owner of TrackPopupMenuEx.
@@ -4712,23 +4733,21 @@ namespace win32_host
     HMENU h = CreatePopupMenu();
     if (!h) return 0;
 
-    const char* p = reinterpret_cast<const char*>(items);
-    for (int i = 0; i < count; ++i, p += item_size) {
-      const auto* it = reinterpret_cast<const neui_popup_item_t*>(p);
-      if (it->flags & NEUI_POPUP_ITEM_SEPARATOR) {
+    int count = 0;
+    for (int i = 0; items[i] != nullptr; ++i) {
+      const char* s8 = items[i];
+      bool is_sep = (s8[0] == '-' && s8[1] == 0);
+      ++count;
+      if (is_sep) {
         AppendMenuW(h, MF_SEPARATOR, 0, nullptr);
       } else {
         // Convert UTF-8 to UTF-16.
-        const char* s8 = it->text ? it->text : "";
         int wlen = MultiByteToWideChar(CP_UTF8, 0, s8, -1, nullptr, 0);
         std::wstring ws(wlen ? wlen - 1 : 0, L'\0');
         if (wlen > 1) {
           MultiByteToWideChar(CP_UTF8, 0, s8, -1, ws.data(), wlen);
         }
-        AppendMenuW(h, MF_STRING |
-                       ((it->flags & NEUI_POPUP_ITEM_CHECKED) ? MF_CHECKED : MF_UNCHECKED) |
-                       ((it->flags & NEUI_POPUP_ITEM_DISABLED) ? MF_GRAYED : MF_ENABLED),
-                    static_cast<UINT_PTR>(i + 1), ws.c_str());
+        AppendMenuW(h, MF_STRING, static_cast<UINT_PTR>(count), ws.c_str());
       }
     }
 
@@ -4756,20 +4775,6 @@ namespace win32_host
         pt.x, pt.y, owner, nullptr);
     DestroyMenu(h);
     return static_cast<int>(picked);
-  }
-
-  static int NEUI_ABI popup_menu(neui_session_t session, neui_widget_t anchor,
-                                  int x, int y, const char* const* items)
-  {
-    if (!items) return 0;
-    std::vector<neui_popup_item_t> v;
-    for (int i = 0; items[i] != nullptr; ++i) {
-      const bool sep = items[i][0] == '-' && items[i][1] == 0;
-      v.push_back({ items[i], sep ? NEUI_POPUP_ITEM_SEPARATOR : 0u });
-    }
-    if (v.empty()) return 0;
-    return popup_menu_items(session, anchor, x, y, v.data(), static_cast<int>(v.size()),
-                            static_cast<int>(sizeof(neui_popup_item_t)));
   }
 
   // -------------------------------------------------------------------------
@@ -4819,10 +4824,52 @@ namespace win32_host
                          mb, MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL));
   }
 
+  // open_file / save_file via IFileDialog (shared helper). The owner HWND is
+  // what makes the dialog modal, so an unrealised frame cannot host one; -1
+  // reports that as "no dialog", which the contract keeps distinct from 0 =
+  // cancelled.
+  static int notify_run_file_dialog(neui_session_t session,
+                                    neui_widget_t parent_window,
+                                    const neui_file_dialog_t* desc,
+                                    neui_file_path_cb cb, void* userdata,
+                                    bool save)
+  {
+    HWND hwnd = notify_frame_hwnd(session, parent_window);
+    if (!hwnd) return -1;
+    neui_file_dialog_t empty = {};
+    if (!desc) desc = &empty;
+
+    std::vector<std::string> paths;
+    int n = save ? neui_detail::file_dialog_save_win32(hwnd, desc, paths)
+                 : neui_detail::file_dialog_open_win32(hwnd, desc, paths);
+    if (n <= 0) return n;
+    if (cb)
+      for (const auto& p : paths) cb(userdata, p.c_str());
+    return static_cast<int>(paths.size());
+  }
+
+  static int NEUI_ABI notify_open_file(neui_session_t session,
+                                        neui_widget_t parent_window,
+                                        const neui_file_dialog_t* desc,
+                                        neui_file_path_cb cb, void* userdata)
+  {
+    return notify_run_file_dialog(session, parent_window, desc, cb, userdata, false);
+  }
+
+  static int NEUI_ABI notify_save_file(neui_session_t session,
+                                        neui_widget_t parent_window,
+                                        const neui_file_dialog_t* desc,
+                                        neui_file_path_cb cb, void* userdata)
+  {
+    return notify_run_file_dialog(session, parent_window, desc, cb, userdata, true);
+  }
+
   neui_notify_api_t notify_api = {
     NEUI_VERSION,
     notify_toast,
     notify_message_box,
+    notify_open_file,
+    notify_save_file,
   };
 
   neui_widget_api_t widgets_api = {
@@ -4852,7 +4899,13 @@ namespace win32_host
     get_enabled,
     get_client_rect_api,
     create_from_component,
-    popup_menu_items,
+    // popup_tree_menu: not implemented on the native win32 host. Would need
+    // TrackPopupMenuEx on an HMENU built from the POPUPMENU's item model
+    // (which this host does not keep - its menus live in HMENUs directly).
+    // Explicit nullptr so this reads as a decision, not a missed initializer;
+    // clients null-check appended slots per <neui/d/widgets.h>. Use the xpl
+    // host (neui.host.crossplatform) for a tree-model context menu.
+    nullptr,
   };
 
   // -------------------------------------------------------------------------
@@ -6251,18 +6304,13 @@ namespace win32_host
   // hosts/shared/widget_paint_grid.h; this file only carries the win32
   // glue (paint_fn, painted_msg_fn, the C API table).
 
-  // Cursor seam (private to the win32 host - the xpl host's
-  // platform_set_cursor lives in a different namespace). Mirrors
-  // xpl_host::CursorKind values.
-  enum { NEUI_CURSOR_DEFAULT = 0, NEUI_CURSOR_EW_RESIZE = 1 };
+  // Cursor seam. The shape set (enum neui_cursor_kind) and the kind->HCURSOR
+  // table are shared with the xpl host - see ../shared/win32/cursor_win32.h.
+  // This host previously kept a two-entry copy of the list; it did not survive
+  // the set being widened, which is exactly why the table moved to shared.
   static void platform_set_cursor_w32(int kind)
   {
-    HCURSOR cur = nullptr;
-    switch (kind) {
-      case NEUI_CURSOR_EW_RESIZE: cur = LoadCursorW(nullptr, (LPCWSTR)IDC_SIZEWE); break;
-      default:                    cur = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);  break;
-    }
-    if (cur) SetCursor(cur);
+    neui_detail::win32_apply_cursor(kind);
   }
 
   // Lazy-allocate the model so non-GRID widgets pay only a pointer.

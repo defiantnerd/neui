@@ -37,6 +37,7 @@ namespace neui_d2d_backend
   {
     std::wstring family;   // empty = host default (Segoe UI)
     int          weight = 0;  // 0 = DWRITE_FONT_WEIGHT_NORMAL (400)
+    bool         italic = false;
   };
 
   // Per-window or per-surface render context. The active render target
@@ -178,10 +179,12 @@ namespace neui_d2d_backend
     std::wstring family;
     int          weight = 0;     // DWRITE_FONT_WEIGHT_* (100..950)
     uint32_t     size_q10 = 0;   // round(font_size * 10)
+    bool         italic = false;
 
     bool operator==(const TextFormatKey& other) const {
       return weight == other.weight
           && size_q10 == other.size_q10
+          && italic == other.italic
           && family == other.family;
     }
   };
@@ -193,6 +196,7 @@ namespace neui_d2d_backend
       size_t h = std::hash<std::wstring>{}(k.family);
       h ^= std::hash<int>{}(k.weight)        + 0x9e3779b9 + (h << 6) + (h >> 2);
       h ^= std::hash<uint32_t>{}(k.size_q10) + 0x9e3779b9 + (h << 6) + (h >> 2);
+      h ^= std::hash<bool>{}(k.italic)       + 0x9e3779b9 + (h << 6) + (h >> 2);
       return h;
     }
   };
@@ -556,6 +560,7 @@ namespace neui_d2d_backend
     else                            key.family = L"Segoe UI";
     key.weight   = static_cast<int>(normalise_weight(fs ? fs->weight : 0));
     key.size_q10 = neui_detail::font_size_q10(font_size);
+    key.italic   = fs ? fs->italic : false;
 
     auto it = g_text_format_cache.find(key);
     if (it != g_text_format_cache.end()) return it->second;
@@ -567,7 +572,10 @@ namespace neui_d2d_backend
       key.family.c_str(),
       g_custom_collection,
       static_cast<DWRITE_FONT_WEIGHT>(key.weight),
-      DWRITE_FONT_STYLE_NORMAL,
+      // DWRITE_FONT_STYLE_ITALIC selects a real italic face; DirectWrite falls
+      // back to the upright face when the family has none, rather than
+      // shearing the glyphs (that would be _OBLIQUE).
+      key.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
       DWRITE_FONT_STRETCH_NORMAL,
       font_size,
       L"",
@@ -1039,6 +1047,44 @@ namespace neui_d2d_backend
     layout->GetMetrics(&metrics);
     layout->Release();
     return metrics.widthIncludingTrailingWhitespace;
+  }
+
+  // Vertical metrics of the active font. DirectWrite exposes these per LINE
+  // rather than per font, so measure a one-line layout through the same
+  // get_text_format path draw_text uses (font stack, registered families,
+  // fallback) - the numbers are then guaranteed consistent with what actually
+  // gets drawn. DWRITE_LINE_METRICS gives baseline (== ascent) and height,
+  // which is exactly the per-line advance PARAGRAPH_ALIGNMENT_CENTER lays the
+  // block out with, so line_height matches draw_text's own math.
+  static void d2d_font_metrics(neui_render_ctx_t raw, float font_size,
+                                float* out_ascent, float* out_descent,
+                                float* out_line_height)
+  {
+    if (out_ascent)      *out_ascent      = 0.0f;
+    if (out_descent)     *out_descent     = 0.0f;
+    if (out_line_height) *out_line_height = 0.0f;
+    auto* ctx = static_cast<D2DContext*>(raw);
+    if (!g_dwrite_factory || font_size <= 0.0f) return;
+    IDWriteTextFormat* fmt = get_text_format(ctx, font_size);
+    if (!fmt) return;
+
+    // "Hxp" spans a cap-height ascender and a descender; any single line would
+    // do, since DWRITE_LINE_METRICS reports the font's line box, not the ink.
+    static const wchar_t probe[] = L"Hxp";
+    IDWriteTextLayout* layout = nullptr;
+    HRESULT hr = g_dwrite_factory->CreateTextLayout(
+      probe, 3, fmt, 100000.0f, 100000.0f, &layout);
+    if (FAILED(hr) || !layout) return;
+
+    DWRITE_LINE_METRICS lm = {};
+    UINT32 line_count = 0;
+    hr = layout->GetLineMetrics(&lm, 1, &line_count);
+    layout->Release();
+    if (FAILED(hr) || line_count == 0) return;
+
+    if (out_ascent)      *out_ascent      = lm.baseline;
+    if (out_descent)     *out_descent     = lm.height - lm.baseline;
+    if (out_line_height) *out_line_height = lm.height;
   }
 
   static void* d2d_create_bitmap(neui_render_ctx_t raw,
@@ -1589,9 +1635,10 @@ namespace neui_d2d_backend
   // ---------------------------------------------------------------------------
   // Font stack
 
-  static void d2d_push_font(neui_render_ctx_t raw,
-                             const char* family_utf8,
-                             int          weight)
+  static void d2d_push_font_styled(neui_render_ctx_t raw,
+                                    const char* family_utf8,
+                                    int          weight,
+                                    bool         italic)
   {
     auto* ctx = static_cast<D2DContext*>(raw);
     if (!ctx) return;
@@ -1604,7 +1651,15 @@ namespace neui_d2d_backend
       }
     }
     fs.weight = weight;
+    fs.italic = italic;
     ctx->font_stack.push_back(std::move(fs));
+  }
+
+  static void d2d_push_font(neui_render_ctx_t raw,
+                             const char* family_utf8,
+                             int          weight)
+  {
+    d2d_push_font_styled(raw, family_utf8, weight, false);
   }
 
   static void d2d_pop_font(neui_render_ctx_t raw)
@@ -1867,6 +1922,8 @@ namespace neui_d2d_backend
     d2d_set_fill_rule,
     d2d_stroke_path_styled,
     d2d_stroke_path_gradient,
+    d2d_font_metrics,
+    d2d_push_font_styled,
   };
 
   neui_render_backend_t* get_backend() { return &backend; }

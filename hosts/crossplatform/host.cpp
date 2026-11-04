@@ -8,6 +8,8 @@
 #include "platform.h"
 #include "../shared/dnd_dispatch.h"
 #include "../shared/widget_paint_knob.h"
+#include "../shared/wheel_direction.h"
+#include "../shared/popup_nav.h"
 #include "../shared/widget_paint_section.h"
 #include "../shared/widget_paint_tabview.h"
 #include "../shared/widget_tabview_host.h"
@@ -118,6 +120,10 @@ namespace xpl_host
   extern neui_tabs_api_t      tabs_api;
   extern neui_notify_api_t    notify_api;
   extern neui_embed_api_t     embed_api;
+  extern neui_timer_api_t     timer_api;
+  extern neui_pointer_api_t   pointer_api;
+  extern neui_popup_api_t     popup_api;
+  extern neui_a11y_api_t      a11y_api;
 
   // Resolve a Session* from a 1-based session id (the upper 16 bits of a
   // widget id). Used by the iOS platform layer's NEUI_API_METRICS seam to walk
@@ -177,6 +183,10 @@ namespace xpl_host
     if (!strcmp(iface, NEUI_API_NOTIFY))    return &notify_api;
     if (!strcmp(iface, NEUI_API_METRICS))   return &neui_detail::k_metrics_api;
     if (!strcmp(iface, NEUI_API_EMBED))     return &embed_api;
+    if (!strcmp(iface, NEUI_API_TIMER))     return &timer_api;
+    if (!strcmp(iface, NEUI_API_POINTER))   return &pointer_api;
+    if (!strcmp(iface, NEUI_API_POPUP))     return &popup_api;
+    if (!strcmp(iface, NEUI_API_A11Y))      return &a11y_api;
 #if defined(NEUI_PLATFORM_IOS)
     // iOS host specialities. Exposed only when this host is built on its UIKit
     // platform layer; every other build returns NULL, which is the contract
@@ -287,6 +297,33 @@ namespace xpl_host
 
   Session::~Session()
   {
+    // Drop the native timer tick FIRST. Every platform's tick callback holds a
+    // raw Session* and re-checks its registry before dereferencing, so a leaked
+    // tick would be inert rather than a use-after-free - but leaving one armed
+    // would still burn wakeups for the life of the process.
+    _timers.clear();
+    _timer_native_interval = 0;
+    platform_timer_stop(this);
+
+    // Leave relative pointer mode if a drag was still in flight. This un-hides
+    // the pointer and re-associates it with the device; skipping it would leave
+    // the whole machine with a cursor that does not follow the mouse.
+    end_relative_pointer();
+
+    // Close any open popup surface. Same class of leak as the two above and worse
+    // to look at: a borderless desktop window with no owner left alive, plus an
+    // outside-press watch holding this Session pointer. The widget tree is torn
+    // down below without walking the popup stack, so this has to happen here.
+    close_all_popup_surfaces(NEUI_POPUP_DISMISS_OWNER_MOVED);
+    platform_popup_grab_end(this);
+
+    // Hand the cursor back to the OS. A hidden pointer (NEUI_CURSOR_NONE)
+    // outlives the session that hid it, and on macOS hide/unhide is a balanced
+    // counter - so an embedded plugin editor torn down while the pointer was
+    // over a cursor="none" widget would leave the DAW with NO POINTER for the
+    // rest of the process's life.
+    release_cursor();
+
     if (_theme_listener_handle != 0) {
       neui_detail::unregister_theme_listener(_theme_listener_handle);
       _theme_listener_handle = 0;
@@ -433,37 +470,164 @@ namespace xpl_host
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Client timers (NEUI_API_TIMER). The deadline math lives in the portable
+  // TimerTable; this layer only owns re-arming the single native tick.
+
+  void Session::sync_timer_tick()
+  {
+    const uint32_t want = _timers.native_interval_ms();
+    if (want == _timer_native_interval) return;   // already armed correctly
+    _timer_native_interval = want;
+    if (want == 0) platform_timer_stop(this);      // last timer went away
+    else           platform_timer_start(this, want);
+  }
+
+  uint32_t Session::timer_add(uint32_t interval_ms)
+  {
+    const uint32_t id = _timers.add(interval_ms, platform_now_ms());
+    if (id) sync_timer_tick();
+    return id;
+  }
+
+  bool Session::timer_remove(uint32_t timer_id)
+  {
+    if (!_timers.remove(timer_id)) return false;
+    // Safe during a tick: the table tombstones, and sync_timer_tick only
+    // touches the native tick, never the walk.
+    sync_timer_tick();
+    return true;
+  }
+
+  bool Session::timer_set_interval(uint32_t timer_id, uint32_t interval_ms)
+  {
+    if (!_timers.set_interval(timer_id, interval_ms, platform_now_ms())) return false;
+    sync_timer_tick();
+    return true;
+  }
+
+  void Session::tick_client_timers()
+  {
+    // The walk itself (re-entrancy guard, local due list, liveness recheck)
+    // lives in the portable TimerTable so it is Tier-1 testable - a
+    // use-after-free hid in this loop when it was written out here.
+    _timers.tick_and_dispatch(platform_now_ms(),
+      [this](uint32_t id, uint32_t interval_ms) {
+        neui_event_t ev = {};
+        ev.type                   = NEUI_EVENT_TIMER;
+        ev.data.timer.timer_id    = id;
+        ev.data.timer.interval_ms = interval_ms;
+        dispatch_event(&ev);
+      });
+    // A handler may have added or removed timers; re-arm if the shortest
+    // interval moved.
+    sync_timer_tick();
+  }
+
+  // Which user-driven change events an accessibility provider has to hear about,
+  // and as what. <neui/d/a11y.h> promises "the framework raises these itself for
+  // every built-in widget", and this is where it keeps that promise: one place
+  // that sees every built-in change, rather than a notify call bolted onto each
+  // of the value / check / selection paths, which is where such a scheme rots.
+  //
+  // Deliberately NOT the whole event set - only the ones that change what an AT
+  // would speak. Returns -1 for everything else, which is the common case and
+  // costs one switch.
+  static int a11y_kind_for_event(neui_event_type_t t)
+  {
+    switch (t) {
+      case NEUI_EVENT_VALUE_CHANGED:
+      case NEUI_EVENT_ATTR_CHANGED:      return a11y_notify_value;
+      case NEUI_EVENT_CHECKBOX_CHANGED:  return a11y_notify_state;
+      case NEUI_EVENT_ITEM_SELECTED:
+      case NEUI_EVENT_TREE_ITEM_SELECTED:
+      case NEUI_EVENT_GRID_ROW_SELECTED:
+      case NEUI_EVENT_GRID_CELL_SELECTED:
+      case NEUI_EVENT_TAB_SELECTED:      return a11y_notify_selection;
+      // Scrolling changes WHICH children are on screen (and their OFFSCREEN
+      // state), so it is a layout change rather than a value change.
+      case NEUI_EVENT_SCROLL_CHANGED:    return a11y_notify_structure;
+      default:                           return -1;
+    }
+  }
+
+  // The widget a given event payload is about. Only called for the handful of
+  // types above, so it only has to know those payloads.
+  static uint32_t a11y_widget_of_event(const neui_event_t* ev)
+  {
+    switch (ev->type) {
+      case NEUI_EVENT_VALUE_CHANGED:     return ev->data.value.widget.id;
+      case NEUI_EVENT_ATTR_CHANGED:      return ev->data.attr.widget.id;
+      case NEUI_EVENT_CHECKBOX_CHANGED:  return ev->data.checkbox.widget.id;
+      case NEUI_EVENT_ITEM_SELECTED:     return ev->data.item.widget.id;
+      case NEUI_EVENT_TREE_ITEM_SELECTED:return ev->data.tree.widget.id;
+      case NEUI_EVENT_GRID_ROW_SELECTED: return ev->data.grid_row.widget.id;
+      case NEUI_EVENT_GRID_CELL_SELECTED:return ev->data.grid_cell.widget.id;
+      case NEUI_EVENT_TAB_SELECTED:      return ev->data.tab.widget.id;
+      case NEUI_EVENT_SCROLL_CHANGED:    return ev->data.scroll.widget.id;
+      default:                           return 0;
+    }
+  }
+
   bool Session::dispatch_event(neui_event_t* event)
   {
+    // Accessibility notification for the built-in widgets. Before the client
+    // callback, so a client that consumes the event does not suppress it - the
+    // AT still needs to hear that the value changed. The revision bump is what
+    // makes the AT's follow-up query see the NEW state: platform_invalidate only
+    // schedules a paint, so the query can easily arrive before it.
+    const int a11y_kind = a11y_kind_for_event(event->type);
+    if (a11y_kind >= 0) {
+      const uint32_t wid = a11y_widget_of_event(event);
+      const uint32_t slot = wid & 0xffff;
+      if (slot != 0 && _widgets.exists(slot)) {
+        bump_a11y_revision();
+        if (void* frame = find_parent_native_handle(slot))
+          platform_a11y_notify(frame, wid, a11y_kind);
+      }
+    }
+
     if (_client_widget_api && _client_widget_api->onevent)
       return _client_widget_api->onevent(_token, event);
     return false;
   }
 
+  bool Session::dispatch_menu_command(MenubarWidget& mb, uint32_t cmd_id)
+  {
+    auto it = mb.menu_cmd_map.find(cmd_id);
+    if (it == mb.menu_cmd_map.end()) return false;
+    uint32_t neui_id = it->second;
+
+    // If this item is bound to a built-in command, try the focused
+    // widget first. Only if no widget consumes it do we fall through
+    // to the client.
+    auto data_it = mb.menu_items.find(neui_id);
+    if (data_it != mb.menu_items.end()) {
+      uint32_t cmd = data_it->second.menu_cmd;
+      if (cmd != 0 && cmd < NEUI_CMD_USER_BASE) {
+        if (invoke_focused_command(cmd)) return true;
+      }
+    }
+
+    neui_event_t ev = {};
+    ev.type      = NEUI_EVENT_TREE_ITEM_ACTIVATED;
+    ev.data.tree = { { mb.widget_id }, { neui_id } };
+    dispatch_event(&ev);
+    // The command WAS routed, whether or not the client consumed the event -
+    // the caller uses this to decide "did this menu own the id", not "did
+    // anyone handle it".
+    return true;
+  }
+
   bool Session::dispatch_menu_event(uint32_t cmd_id)
   {
+    // _menubars holds menu BARS only (POPUPMENU is deliberately absent - see
+    // PopupMenuWidget), so a popup's ids can never be matched here by accident.
     for (uint32_t mb_idx : _menubars) {
       if (!_widgets.exists(mb_idx)) continue;
-      auto& mb = dynamic_cast<MenubarWidget&>(_widgets[mb_idx]);
-      auto it = mb.menu_cmd_map.find(cmd_id);
-      if (it == mb.menu_cmd_map.end()) continue;
-      uint32_t neui_id = it->second;
-
-      // If this item is bound to a built-in command, try the focused
-      // widget first. Only if no widget consumes it do we fall through
-      // to the client.
-      auto data_it = mb.menu_items.find(neui_id);
-      if (data_it != mb.menu_items.end()) {
-        uint32_t cmd = data_it->second.menu_cmd;
-        if (cmd != 0 && cmd < NEUI_CMD_USER_BASE) {
-          if (invoke_focused_command(cmd)) return true;
-        }
-      }
-
-      neui_event_t ev = {};
-      ev.type      = NEUI_EVENT_TREE_ITEM_ACTIVATED;
-      ev.data.tree = { { mb.widget_id }, { neui_id } };
-      return dispatch_event(&ev);
+      auto* mb = dynamic_cast<MenubarWidget*>(&_widgets[mb_idx]);
+      if (!mb) continue;
+      if (dispatch_menu_command(*mb, cmd_id)) return true;
     }
     return false;
   }
@@ -515,7 +679,7 @@ namespace xpl_host
     while (idx != 0) {
       if (widgets.exists(idx)) {
         auto& wd = widgets[idx];
-        if (!wd.native_handle && !wd.is_menubar() && wd.visible) {
+        if (!wd.native_handle && !wd.is_menu_model() && wd.visible) {
           if (wd.hit_test(x, y)) {
             // Disabled widgets are click-transparent: they don't claim
             // the hit, but children remain hit-testable. This matches
@@ -586,7 +750,7 @@ namespace xpl_host
     while (idx != 0) {
       if (widgets.exists(idx)) {
         auto& wd = widgets[idx];
-        if (!wd.native_handle && !wd.is_menubar() && wd.visible) {
+        if (!wd.native_handle && !wd.is_menu_model() && wd.visible) {
           if (wd.hit_test(x, y)) {
             if (wd.enabled && wd.drop_target &&
                 dnd_formats_match(wd.accepted_mimes, formats, formats_count)) {
@@ -809,12 +973,22 @@ namespace xpl_host
   void Session::set_focus(uint32_t new_idx)
   {
     if (new_idx == _focused_widget) return;
-    // Captured BEFORE the assignment below - both invalidate paths need the
-    // widget that is LOSING focus (set_hovered / set_pressed keep old_idx for
-    // the same reason). Reading _focused_widget after the store makes clearing
-    // focus (new_idx == 0) invalidate nothing, leaving a stale caret / focus
-    // ring on screen until an unrelated repaint.
+    // A nonexistent target is always a caller bug (a stale handle, or a slot
+    // freed since). Assigning it anyway is how focus ends up naming a freed slot
+    // that a later create silently inherits - the defect 6.6 fixed on the
+    // destroy path, reachable in one call from here.
+    if (new_idx != 0 && !_widgets.exists(new_idx)) return;
+
+    // The frame that is LOSING the focus ring, captured before _focused_widget
+    // is overwritten. Without this the clear path (new_idx == 0) invalidated
+    // nothing: it read _focused_widget after the assignment, which is 0 by then.
+    void* old_frame = (_focused_widget != 0)
+                        ? find_parent_native_handle(_focused_widget) : nullptr;
+#ifdef NEUI_PLATFORM_LVGL
+    // The widget LOSING focus, for the LVGL host's per-widget repaint below
+    // (captured before the assignment, for the same reason).
     const uint32_t prev_focus = _focused_widget;
+#endif
 
     // If the open combo is losing focus, close its overlay.
     if (_open_combo != 0 && _open_combo == _focused_widget && new_idx != _focused_widget)
@@ -854,11 +1028,31 @@ namespace xpl_host
     // only (whole-frame fallback happens inside the hook when needed).
     platform_retained_widget_invalidate(this, new_idx);
     platform_retained_widget_invalidate(this, prev_focus);
+    void* frame = (new_idx != 0) ? find_parent_native_handle(new_idx) : nullptr;
+    (void)old_frame;
 #else
-    uint32_t ref = (new_idx != 0) ? new_idx : prev_focus;
-    void* frame = find_parent_native_handle(ref);
+    void* frame = (new_idx != 0) ? find_parent_native_handle(new_idx) : nullptr;
     if (frame) platform_invalidate(frame);
+    // Repaint the old frame too when it is a different one (or the only one, on
+    // a clear): it has a focus ring to erase.
+    if (old_frame && old_frame != frame) platform_invalidate(old_frame);
 #endif
+
+    // Tell an attached AT where focus went. Bump first: the provider resolves
+    // the widget against a freshly built tree, and the FOCUSED bit it needs to
+    // report lives in that tree. Focus gets an explicit bump because it is one
+    // of the few changes a repaint does not necessarily express - the frame can
+    // repaint pixel-identically (focus decorations are suppressed while the
+    // frame lacks OS focus) and the newly focused control can even be scrolled
+    // out of view.
+    bump_a11y_revision();
+    // Nothing is posted when focus is CLEARED (new_idx == 0): there is no
+    // element to name as the new focus, and NSAccessibility / UIA both expect a
+    // focused-element-changed notification to carry one. An AT re-reads focus
+    // from the provider on its next query, which then answers "none".
+    if (frame && new_idx != 0 && _widgets.exists(new_idx))
+      platform_a11y_notify(frame, _widgets[new_idx].widget_id,
+                           a11y_notify_focus);
   }
 
   void Session::set_hovered(uint32_t new_idx)
@@ -890,6 +1084,13 @@ namespace xpl_host
       }
     }
 
+    // The hovered widget decides the cursor (NEUI_ATTR_CURSOR), so resolve it
+    // on every hover transition. Must run AFTER _hovered_widget is updated, and
+    // the stale-override drop must run BEFORE the resolve or the old override
+    // would win one more time.
+    drop_cursor_override_on_hover_change(new_idx);
+    refresh_cursor();
+
     // Repaint the frame so widgets whose paint reacts to .hovered (BUTTON, ...)
     // swap visuals. Hover transitions happen at human pointer speed - cheap.
 #ifdef NEUI_PLATFORM_LVGL
@@ -904,6 +1105,255 @@ namespace xpl_host
 #endif
   }
 
+  // ---------------------------------------------------------------------------
+  // Mouse cursor (NEUI_ATTR_CURSOR).
+
+  int Session::resolve_cursor_for(uint32_t widget_idx) const
+  {
+    // Nearest ancestor with an explicit cursor wins. A widget whose attr is
+    // unset - or set to an unrecognised name, which parses to DEFAULT - is
+    // transparent to the walk, which is what makes "inherit" work: a client
+    // sets "ibeam" once on a SECTION and every interactive child inside it gets
+    // an I-beam.
+    //
+    // Note the START of the walk is the HOVERED widget, and widget_at only ever
+    // hands back widgets with emit_events && enabled && !input_transparent. So a
+    // cursor set on a non-hit-testing widget (LABEL, IMAGE, a non-scrolling
+    // SECTION's bare background) never becomes the starting point and is inert -
+    // correctly, since the pointer is logically interacting with whatever is
+    // beneath it. Such a widget is still walked THROUGH as an ancestor.
+    // Documented in <neui/d/attrs.h> and docs/attributes.md.
+    //
+    // The guard bounds a malformed tree (a parent cycle would otherwise spin
+    // here on every mouse move). get_parent returns 0 at the root sentinel.
+    for (int guard = 0; widget_idx != 0 && guard < 256; ++guard) {
+      if (!_widgets.exists(widget_idx)) break;
+      const auto& wd = _widgets[widget_idx];
+      if (wd.attrs) {
+        if (const char* name = wd.attrs->get_string(NEUI_ATTR_CURSOR)) {
+          int kind = neui_detail::cursor_kind_from_name(name);
+          if (kind != NEUI_CURSOR_DEFAULT) return kind;
+        }
+      }
+      widget_idx = _widgets.get_parent(widget_idx);
+    }
+    return NEUI_CURSOR_DEFAULT;
+  }
+
+  void Session::refresh_cursor()
+  {
+    // A DRAG OWNS THE CURSOR. While a widget holds the pointer (it is the
+    // press target, and every mouse event is being routed to it regardless of
+    // where the pointer has wandered), its cursor persists until release - which
+    // is what makes a drag feel anchored, and why a splitter keeps showing the
+    // resize arrow when you overshoot it. Resolving from the hovered widget
+    // instead made a fader or splitter flicker back to the arrow the moment the
+    // pointer left its rect, mid-drag (issue #20).
+    //
+    // Note this is the rule drop_cursor_override_on_hover_change already applied
+    // to the OVERRIDE path; the widget-attr path simply had not been given it.
+    const uint32_t target = (_pressed_widget != 0) ? _pressed_widget
+                                                   : _hovered_widget;
+    // An internal override (GRID column-resize band) still outranks the widget
+    // attr, drag or no drag: it is positional feedback about what a drag right
+    // here would do, which is more specific than "this widget generally shows a
+    // hand" - and during a column drag the GRID *is* the pressed widget, so
+    // letting the attr win would replace the resize arrow with the grid's own
+    // cursor for the whole drag.
+    int kind = (_cursor_override != NEUI_CURSOR_DEFAULT)
+                 ? _cursor_override
+                 : resolve_cursor_for(target);
+
+    if (kind == _cursor_applied) return;
+    _cursor_applied = kind;
+    platform_set_cursor(kind);
+  }
+
+  void Session::set_cursor_override(uint32_t owner_idx, int kind)
+  {
+    // Clearing: forget the owner too, so a later hover change has nothing to
+    // compare against and cannot resurrect a stale override.
+    if (kind == NEUI_CURSOR_DEFAULT) {
+      if (_cursor_override == NEUI_CURSOR_DEFAULT) return;
+      _cursor_override       = NEUI_CURSOR_DEFAULT;
+      _cursor_override_owner = 0;
+      refresh_cursor();
+      return;
+    }
+
+    if (kind == _cursor_override && owner_idx == _cursor_override_owner) return;
+    _cursor_override       = kind;
+    _cursor_override_owner = owner_idx;
+    refresh_cursor();
+  }
+
+  void Session::forget_dead_hover()
+  {
+    bool changed = false;
+
+    if (_hovered_widget != 0 && !_widgets.exists(_hovered_widget)) {
+      // Deliberately NOT set_hovered(0): the old widget is already gone, so
+      // firing MOUSE_LEAVE at it would hand the client a dangling handle (and
+      // set_hovered's own exists() check would skip the notification anyway).
+      _hovered_widget = 0;
+      changed = true;
+    }
+    if (_pressed_widget != 0 && !_widgets.exists(_pressed_widget)) {
+      _pressed_widget = 0;
+      changed = true;
+    }
+    if (_cursor_override_owner != 0 && !_widgets.exists(_cursor_override_owner)) {
+      _cursor_override       = NEUI_CURSOR_DEFAULT;
+      _cursor_override_owner = 0;
+      changed = true;
+    }
+
+    if (changed) refresh_cursor();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Relative (unbounded) pointer mode (NEUI_API_POINTER).
+
+  bool Session::begin_relative_pointer(uint32_t widget_idx)
+  {
+    if (_relative.active)                 return false;   // not re-entrant
+    if (!platform_supports_relative_pointer()) return false;
+    if (widget_idx == 0 || !_widgets.exists(widget_idx)) return false;
+
+    void* native = find_parent_native_handle(widget_idx);
+    if (!native) return false;   // not realized yet: nothing to pin against
+
+    int ax = 0, ay = 0;
+    if (!platform_begin_relative_pointer(native, &ax, &ay)) return false;
+
+    // Seed the virtual position from where the pointer actually is in
+    // widget-local space, so the first MOUSE_MOVE is continuous with the press
+    // that started the drag. Falling back to the widget centre would put a
+    // visible jump at the start of every drag.
+    auto& wd = _widgets[widget_idx];
+    float start_x = (float)wd.width  * 0.5f;
+    float start_y = (float)wd.height * 0.5f;
+    if (_last_mouse_valid) {
+      // _last_mouse_frame_* is FRAME-local; the virtual position is WIDGET-local
+      // (that is what the event payload carries), hence the abs_* subtraction.
+      start_x = _last_mouse_frame_x - (float)wd.abs_x;
+      start_y = _last_mouse_frame_y - (float)wd.abs_y;
+    }
+
+    _relative_anchor_x = ax;
+    _relative_anchor_y = ay;
+    _relative_native   = native;
+    _relative.begin(widget_idx, start_x, start_y);
+    return true;
+  }
+
+  void Session::end_relative_pointer()
+  {
+    if (!_relative.active) return;   // safe to call unconditionally from an UP
+
+    // Only hand the platform a handle that is still LIVE. X11 dereferences it to
+    // reach the Display, so a frame destroyed between begin and end would be a
+    // use-after-free. end_relative_pointer_if_within closes that window for the
+    // paths we know about; this re-check covers any teardown route that doesn't
+    // go through widget destroy, and every platform tolerates nullptr.
+    void* native = _relative_native;
+    if (native != nullptr) {
+      bool live = false;
+      for (uint32_t i = 0; i < _widgets.slot_count(); ++i) {
+        if (_widgets.exists(i) && _widgets[i].native_handle == native) {
+          live = true;
+          break;
+        }
+      }
+      if (!live) native = nullptr;
+    }
+
+    _relative.end();
+    _relative_native = nullptr;
+    platform_end_relative_pointer(native, _relative_anchor_x, _relative_anchor_y);
+  }
+
+  void Session::end_relative_pointer_if_within(uint32_t subtree_root)
+  {
+    if (!_relative.active || subtree_root == 0) return;
+
+    // Walk up from the owner: if we reach subtree_root, the owner is inside the
+    // doomed subtree. Guarded like resolve_cursor_for against a malformed tree.
+    uint32_t idx = _relative.widget;
+    bool inside = false;
+    for (int guard = 0; idx != 0 && guard < 256; ++guard) {
+      if (idx == subtree_root) { inside = true; break; }
+      if (!_widgets.exists(idx)) break;
+      idx = _widgets.get_parent(idx);
+    }
+
+    // Also end it when the doomed subtree owns the FRAME whose native handle we
+    // are holding - destroying a frame frees that handle even when the owner
+    // widget itself is elsewhere in the tree.
+    if (!inside && _relative_native != nullptr &&
+        _widgets.exists(subtree_root) &&
+        _widgets[subtree_root].native_handle == _relative_native)
+      inside = true;
+
+    if (inside) end_relative_pointer();
+  }
+
+  void Session::dispatch_relative_motion(float dx, float dy, uint32_t buttonmap)
+  {
+    if (!_relative.active) return;
+
+    // The owner can be destroyed mid-drag (a client rebuilding its UI from a
+    // parameter change). Bail out of the whole mode rather than dispatching at a
+    // freed slot - and go through end_relative_pointer so the cursor is unhidden
+    // and warped back, which forget_dead_hover alone would not do.
+    if (!_widgets.exists(_relative.widget)) { end_relative_pointer(); return; }
+
+    _relative.accumulate(dx, dy);
+
+    auto& wd = _widgets[_relative.widget];
+    neui_event_t ev = {};
+    ev.type                 = NEUI_EVENT_MOUSE_MOVE;
+    ev.data.mouse.widget    = { wd.widget_id };
+    // dispatch_mouse_event takes FRAME-local coordinates and converts to
+    // widget-local for the client itself, so the widget-local virtual position
+    // has to be shifted back up by abs_* here. Handing it widget-local
+    // coordinates would subtract abs_* a second time.
+    ev.data.mouse.x         = _relative.report_x() + wd.abs_x;
+    ev.data.mouse.y         = _relative.report_y() + wd.abs_y;
+    ev.data.mouse.buttonmap = buttonmap;
+
+    // Straight to the owner: hit-testing would be meaningless here, since the
+    // virtual position deliberately leaves the widget (that is the entire point)
+    // and the real pointer never moves at all.
+    dispatch_mouse_event(_relative.widget, &ev);
+  }
+
+  void Session::release_cursor()
+  {
+    // Only touch the platform if this session actually changed the cursor.
+    // ~Session can run during static teardown, where reaching into AppKit / X11
+    // for no reason is worth avoiding.
+    if (_cursor_applied == -1 || _cursor_applied == NEUI_CURSOR_DEFAULT) return;
+    _cursor_override       = NEUI_CURSOR_DEFAULT;
+    _cursor_override_owner = 0;
+    _hovered_widget        = 0;
+    _cursor_applied        = NEUI_CURSOR_DEFAULT;
+    platform_set_cursor(NEUI_CURSOR_DEFAULT);
+  }
+
+  void Session::drop_cursor_override_on_hover_change(uint32_t new_idx)
+  {
+    if (_cursor_override == NEUI_CURSOR_DEFAULT) return;
+    if (_cursor_override_owner == new_idx)       return;   // still inside it
+    // A drag owns the pointer: a column-resize drag continues past the GRID's
+    // edge and must keep its EW cursor until the button comes up. _pressed_widget
+    // is the capture holder, so this is exactly "the owner is mid-drag".
+    if (_cursor_override_owner != 0 &&
+        _cursor_override_owner == _pressed_widget) return;
+    _cursor_override       = NEUI_CURSOR_DEFAULT;
+    _cursor_override_owner = 0;
+  }
+
   void Session::set_pressed(uint32_t new_idx)
   {
     if (new_idx == _pressed_widget) return;
@@ -916,6 +1366,22 @@ namespace xpl_host
 
     if (new_idx != 0 && _widgets.exists(new_idx))
       _widgets[new_idx].pressed = true;
+
+    // The press target now decides the cursor (see refresh_cursor), so both
+    // grabbing and releasing have to re-resolve it. Releasing is the one that
+    // matters: without it the drag's shape would stay on screen until the next
+    // hover transition happened to refresh it.
+    //
+    // A RELEASE also ends the override's drag exemption.
+    // drop_cursor_override_on_hover_change keeps a GRID column-resize override
+    // alive while its owner holds the press, and it only ever ran on hover
+    // transitions - so when the drag ENDED somewhere else, the override stayed
+    // armed until the pointer happened to move again. Re-evaluating it here (with
+    // _pressed_widget already cleared, so the exemption no longer applies) is
+    // what makes "the override lives exactly as long as the drag" true rather
+    // than approximately true.
+    if (new_idx == 0) drop_cursor_override_on_hover_change(_hovered_widget);
+    refresh_cursor();
 
     // Same rationale as set_hovered: frame repaint so .pressed-aware widgets
     // (BUTTON) flip to their pressed visual immediately.
@@ -939,7 +1405,7 @@ namespace xpl_host
     if (new_dpi == 0) new_dpi = 96;
     wd->dpi = new_dpi;
     if (wd->render_ctx && _backend)
-      _backend->update_dpi(wd->render_ctx, wd->client_dpi());
+      _backend->update_dpi(wd->render_ctx, new_dpi);
   }
 
   // -------------------------------------------------------------------------
@@ -1325,6 +1791,7 @@ namespace xpl_host
                       attrs->get_int(NEUI_ATTR_TAB_BORDER_COLOR, 0) != 0;
     float bw = attrs ? static_cast<float>(attrs->get_int(NEUI_ATTR_TAB_BORDER_WIDTH, 0)) : 0.0f;
     int it = 0, il = 0, ib = 0, ir = 0;
+    uint32_t deselected_with_focus = 0;
     neui_detail::tabview_page_insets(edge_used, has_border, bw, it, il, ib, ir);
     int pw_w = body_w - il - ir; if (pw_w < 0) pw_w = 0;
     int pw_h = body_h - it - ib; if (pw_h < 0) pw_h = 0;
@@ -1335,8 +1802,30 @@ namespace xpl_host
       pw.x = il; pw.y = it;
       pw.width  = pw_w;
       pw.height = pw_h;
+      const bool was_visible = pw.visible;
       pw.visible = (i == selected);
+      // Note the page that is taking the focus off screen, but do NOT move focus
+      // here - see after the loop.
+      if (was_visible && !pw.visible && session &&
+          session->is_in_subtree(session->_focused_widget, pages[i]))
+        deselected_with_focus = pages[i];
     }
+
+    // A page going off screen must not keep the focus: switching tabs used to
+    // leave the caret on a control the user could no longer see, and every
+    // subsequent keystroke went to it.
+    //
+    // AFTER the loop, for two reasons. (a) Every page's `visible` is final, so
+    // focus_next sees the real picture - doing it mid-loop made the outcome
+    // depend on switch DIRECTION, since pages update in index order: going
+    // backwards the new page was already visible and focus landed on it, going
+    // forwards it was not and focus left the tabview entirely (or was cleared,
+    // when the frame's only tab stops live inside the pages). (b) It dispatches
+    // client focus events, and this loop holds a WidgetData reference across the
+    // iteration - a client that mutated the tabview from a focus handler would
+    // have left the loop reading a freed slot.
+    if (deselected_with_focus != 0 && session)
+      session->focus_leave_subtree(deselected_with_focus, true);
 #ifdef NEUI_PLATFORM_LVGL
     if (session) platform_retained_tree_changed(session, index);
 #endif
@@ -2117,10 +2606,17 @@ namespace xpl_host
     native_accel = nullptr;
 #endif
     if (hmenu) {
-      for (auto& kv : menu_items) {
-        if (kv.second.submenu)
-          platform_menubar_destroy(kv.second.submenu);
-      }
+      // Release ONLY the root. A submenu is owned by the menu it is attached to
+      // on both platforms: win32 DestroyMenu on the root destroys every attached
+      // submenu with it, and on macOS platform_menubar_add_popup hands back a
+      // NON-owning (__bridge void*) while the parent NSMenuItem holds the only
+      // strong reference. Releasing them individually first was therefore a
+      // double-free on win32, and on macOS an over-release that raised
+      // NSInternalInconsistencyException from -[NSMenu dealloc] ("A submenu is
+      // being released before being detached from its parent menu") - an
+      // UNCAUGHT ObjC exception, i.e. a hard abort when destroying any menubar
+      // that had a popup in it. Nothing leaks: t_remove detaches-and-destroys,
+      // so no orphan submenu is reachable from menu_items.
       platform_menubar_destroy(hmenu);
       hmenu = nullptr;
       s->_menubars.erase(
@@ -2141,6 +2637,40 @@ namespace xpl_host
   // happens with the renderer transform set so the child paints at its
   // own (x, y) which maps to the correct absolute position - so widget
   // paint code can stay coordinate-agnostic.
+  // Where a widget's CHILDREN start - in both the parent-relative space the
+  // renderer's translate uses and the frame-local absolute space cached on each
+  // widget. Extracted so the painting walk and the non-painting
+  // refresh_abs_positions walk share ONE definition of the offset rules and
+  // cannot drift apart.
+  //
+  // Note the direction of the dependency: this READS the layout a SECTION /
+  // TABVIEW cached during its own paint (section_layout_ptr) instead of
+  // recomputing it. That is deliberate - TabViewWidget's body rect depends on
+  // backend->measure_text for the chip widths (host.cpp:1665-1685), so it is not
+  // reproducible without a live render context. Layout computation therefore
+  // stays single-sourced in the paint path; only the offset arithmetic is
+  // shared. Before a frame's first paint these caches are empty, which is what
+  // WidgetData::painted_once / Session::ensure_abs_positions deal with.
+  struct ChildOrigin { int rel_x, rel_y, abs_x, abs_y; };
+
+  static ChildOrigin child_origin_of(WidgetData& wd)
+  {
+    ChildOrigin o{ wd.x, wd.y, wd.abs_x, wd.abs_y };
+    // Children of a SECTION / TABVIEW are positioned relative to the BODY's
+    // top-left, and a scrolling section additionally shifts by (-scroll).
+    const auto* slay = wd.section_layout_ptr();
+    if (slay) {
+      auto* sst = wd.scroll_state_ptr();
+      const int sx = sst ? sst->scroll_x : 0;
+      const int sy = sst ? sst->scroll_y : 0;
+      o.rel_x = wd.x     + slay->body_x - sx;
+      o.rel_y = wd.y     + slay->body_y - sy;
+      o.abs_x = wd.abs_x + slay->body_x - sx;
+      o.abs_y = wd.abs_y + slay->body_y - sy;
+    }
+    return o;
+  }
+
   static void paint_widgets_recursive(neui_render_backend_t* backend,
                                       neui_render_ctx_t ctx,
                                       neui_detail::Tree<WidgetData>& widgets,
@@ -2154,7 +2684,7 @@ namespace xpl_host
         auto& wd = widgets[idx];
         wd.abs_x = parent_abs_x + wd.x;
         wd.abs_y = parent_abs_y + wd.y;
-        if (!wd.native_handle && !wd.is_menubar() && wd.visible && wd.width > 0 && wd.height > 0) {
+        if (!wd.native_handle && !wd.is_menu_model() && wd.visible && wd.width > 0 && wd.height > 0) {
           // Fire WIDGET_PREUPDATE to opted-in widgets so the client can
           // refresh attribute-driven state (e.g. NEUI_PARAM_VALUE) before
           // we read it during paint.
@@ -2186,20 +2716,14 @@ namespace xpl_host
         // non-selected TABPAGE children). Without this gate the children of
         // a hidden parent would still paint.
         if (wd.visible) {
-        auto* sst = wd.scroll_state_ptr();
         const auto* slay = wd.section_layout_ptr();
-        int child_origin_x = wd.x;
-        int child_origin_y = wd.y;
-        int abs_origin_x   = wd.abs_x;
-        int abs_origin_y   = wd.abs_y;
+        const ChildOrigin org = child_origin_of(wd);
+        const int child_origin_x = org.rel_x;
+        const int child_origin_y = org.rel_y;
+        const int abs_origin_x   = org.abs_x;
+        const int abs_origin_y   = org.abs_y;
         bool pushed_clip = false;
         if (slay) {
-          int sx = sst ? sst->scroll_x : 0;
-          int sy = sst ? sst->scroll_y : 0;
-          child_origin_x = wd.x + slay->body_x - sx;
-          child_origin_y = wd.y + slay->body_y - sy;
-          abs_origin_x   = wd.abs_x + slay->body_x - sx;
-          abs_origin_y   = wd.abs_y + slay->body_y - sy;
           if (backend->push_clip && slay->body_w > 0 && slay->body_h > 0) {
             backend->push_clip(ctx,
                                 static_cast<float>(wd.x + slay->body_x),
@@ -2221,7 +2745,7 @@ namespace xpl_host
         // translated by (wd.x, wd.y) above and have not popped yet).
         // Used by CUSTOMDRAW + compound to paint z>=0 layers above the
         // child-widget pass; default implementation is a no-op.
-        if (!wd.native_handle && !wd.is_menubar() && wd.visible && wd.width > 0 && wd.height > 0) {
+        if (!wd.native_handle && !wd.is_menu_model() && wd.visible && wd.width > 0 && wd.height > 0) {
           wd.paint_after_children(backend, ctx, idx == focused_widget);
         }
         if (backend->pop_transform) backend->pop_transform(ctx);
@@ -2261,6 +2785,21 @@ namespace xpl_host
   void Session::paint_frame(neui_render_ctx_t ctx, uint32_t parent_index)
   {
     if (!_backend || !ctx) return;
+    // In-paint guard + accessibility cache key, both for the WHOLE paint
+    // including the client callbacks it makes (PREUPDATE / WIDGET_PAINT). A
+    // client can call into the framework from those, and an accessibility query
+    // that forced a second paint on this same render context would corrupt the
+    // frame - see Session::ensure_abs_positions and in_paint().
+    //
+    // The bump is here rather than at each mutation site because a paint is the
+    // one thing every visible change has in common; see a11y_revision().
+    struct PaintScope
+    {
+      int& depth;
+      explicit PaintScope(int& d) : depth(d) { ++depth; }
+      ~PaintScope() { --depth; }
+    } paint_scope(_in_paint);
+    bump_a11y_revision();
     // Choose the palette for this frame BEFORE reading any colour: the
     // begin_frame clear, the widget paints, the combo / popup overlays,
     // and the focus outline all flow through current_palette(). Frames
@@ -2284,12 +2823,42 @@ namespace xpl_host
     // AttrBag is null on most frames so the branch is a single pointer
     // test).
     uint32_t clear = neui_detail::color(neui_detail::ColorRole::frame_bg);
-    if (parent_index < UINT32_MAX) {
-      WidgetData* fw = get_widget(parent_index);
-      if (fw && fw->attrs && fw->attrs->has(NEUI_ATTR_BACKGROUND))
-        clear = static_cast<uint32_t>(fw->attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
-    }
+    // Also the source of the frame's zoom below, so it is looked up once here
+    // rather than per-consumer.
+    WidgetData* fw = (parent_index < UINT32_MAX) ? get_widget(parent_index)
+                                                 : nullptr;
+    if (fw && fw->attrs && fw->attrs->has(NEUI_ATTR_BACKGROUND))
+      clear = static_cast<uint32_t>(fw->attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
     _backend->begin_frame(ctx, clear);
+
+    // User zoom (NEUI_ATTR_UI_SCALE). One CTM scale wrapping the entire frame
+    // paint - the widget walk AND every overlay below - so all of it scales
+    // together and nothing else in the host has to know about zoom. Held on
+    // the Session for the duration of the paint so the painters handed to
+    // client CUSTOMDRAW code can report the true device scale (and undo this
+    // transform for a device-pixel widget).
+    //
+    // This is the only rendering seam that works identically on all three
+    // backends: D2D and Cairo would also accept a dpi*Z lie, but a CG window
+    // context applies no CTM scale of its own at all (AppKit hands it a
+    // point-based context), so update_dpi would not zoom macOS.
+    //
+    // Deliberately a transform and not a change to any logical number:
+    // measure_text is transform-independent on every backend, so every rect
+    // derived from text (combo drop width, menubar columns, popup, toast)
+    // stays in the same logical space as the cached abs_x/abs_y and the
+    // logical mouse coordinates - which is what keeps paint and hit-test
+    // agreeing for free. Font caches key on (family, weight, size) with no
+    // DPI, so zoom needs no cache invalidation either.
+    const float zoom = (fw ? fw->ui_scale() : 1.0f);
+    _paint_zoom = zoom;
+    const bool zooming = (zoom != 1.0f) && _backend->push_transform
+                         && _backend->scale && _backend->pop_transform;
+    if (zooming) {
+      _backend->push_transform(ctx);
+      _backend->scale(ctx, zoom, zoom);
+    }
+
     // While the frame doesn't own OS keyboard focus, suppress focus
     // decorations (caret, focus outline) by reporting "no focused widget" to
     // the painters. The logical focus is preserved so input routing snaps
@@ -2303,6 +2872,13 @@ namespace xpl_host
     // by `inset` (so cached abs_x/abs_y stay screen-accurate for hit-test) and
     // paint the band over the cleared strip afterwards. inset is 0 on Win32 /
     // macOS (native menu) and for frames without a menubar.
+    // Mark the frame as having painted at least once. ensure_abs_positions
+    // reads this to decide whether the SECTION / TABVIEW body-layout caches it
+    // depends on have been populated yet.
+    if (parent_index != 0 && _widgets.exists(parent_index)) {
+      _widgets[parent_index].painted_once = true;
+      _widgets[parent_index].layout_dirty = false;
+    }
     int inset = frame_top_inset(parent_index);
     if (inset > 0 && _backend->push_transform && _backend->translate) {
       _backend->push_transform(ctx);
@@ -2328,8 +2904,14 @@ namespace xpl_host
     paint_menubar(ctx, parent_index);
     // Popup-menu overlay sits on top of the combo overlay.
     paint_popup_menu(ctx);
+    // Standalone tree popup (widgets->popup_tree_menu) - above the menubar's own
+    // cascade, since it is the thing the user just opened.
+    paint_tree_popup(ctx, parent_index);
     // Toast overlay sits on top of every other overlay.
     paint_toast(ctx, parent_index);
+
+    if (zooming) _backend->pop_transform(ctx);
+    _paint_zoom = 1.0f;
     _backend->end_frame(ctx);
 
     // Restore the previous override so non-paint callers (event
@@ -2436,6 +3018,174 @@ namespace xpl_host
 #endif // NEUI_PLATFORM_LVGL
 
   // -------------------------------------------------------------------------
+  // Absolute-position refresh without painting
+  //
+  // abs_x/abs_y are normally a by-product of paint_widgets_recursive, which is
+  // fine for hit-testing (input cannot arrive before the first paint) but not
+  // for anything that must answer a positional question out-of-band - an
+  // accessibility provider being the motivating case, since a screen reader can
+  // probe a window that has not painted yet. This walk reproduces exactly the
+  // origin arithmetic the paint walk uses (via the shared child_origin_of) and
+  // nothing else: no PREUPDATE dispatch, no drawing, no layout recomputation.
+  static void refresh_abs_positions_recursive(neui_detail::Tree<WidgetData>& widgets,
+                                              uint32_t parent_index,
+                                              int parent_abs_x, int parent_abs_y)
+  {
+    uint32_t idx = widgets.child(parent_index);
+    while (idx != 0) {
+      if (widgets.exists(idx)) {
+        auto& wd = widgets[idx];
+        wd.abs_x = parent_abs_x + wd.x;
+        wd.abs_y = parent_abs_y + wd.y;
+        // Descend only into visible containers, matching the paint walk - an
+        // invisible parent hides its whole subtree, so its descendants' cached
+        // positions are meaningless either way.
+        if (wd.visible) {
+          const ChildOrigin org = child_origin_of(wd);
+          refresh_abs_positions_recursive(widgets, idx, org.abs_x, org.abs_y);
+        }
+      }
+      idx = widgets.next(idx);
+    }
+  }
+
+  void Session::refresh_abs_positions(uint32_t frame_index)
+  {
+    if (frame_index == 0 || !_widgets.exists(frame_index)) return;
+    // Same root offset the paint walk starts from: the in-frame menubar band on
+    // hosts that draw it (0 on win32 / macOS and for frames without a menubar).
+    refresh_abs_positions_recursive(_widgets, frame_index, 0,
+                                    frame_top_inset(frame_index));
+  }
+
+  bool Session::ensure_abs_positions(uint32_t frame_index)
+  {
+    if (frame_index == 0 || !_widgets.exists(frame_index)) return false;
+    // Never from inside a paint. The force-paint below would re-enter
+    // paint_frame on a render context that is mid-frame, and the reachable path
+    // is real: an accessibility query arriving while a client WIDGET_PREUPDATE
+    // or WIDGET_PAINT handler runs. Refusing costs one unanswered query; the
+    // alternative is a corrupted frame or a crash inside a backend.
+    if (in_paint()) return false;
+    auto& fw = _widgets[frame_index];
+    // The layout state child_origin_of reads (SECTION / TABVIEW body rects) is
+    // produced only by a paint. Two cases need one forcing:
+    //   - the frame has never painted, so every cache is empty;
+    //   - the widget tree changed since the last paint (post-show dynamic
+    //     creation is a supported pattern), so a NEW section's cache is empty
+    //     even though the frame has painted before.
+    // Forcing a real paint beats duplicating the layout code: TabViewWidget's
+    // body rect needs backend->measure_text, so a non-painting recomputation
+    // could not match it anyway. Cheap - Wave 5 measured a full 100-widget frame
+    // at ~0.9 ms, and this is once per change, not per query.
+    if ((!fw.painted_once || fw.layout_dirty) && fw.native_handle)
+      platform_force_paint(fw.native_handle);
+    // If the paint did not happen (hidden / unmapped window, or not yet
+    // realized), the caches are still empty and walking now would OVERWRITE the
+    // cached geometry with band-less, partially-wrong values. The documented
+    // contract is that geometry goes stale rather than wrong, so leave it alone
+    // and report failure; the caller decides what to do with an unanswerable
+    // positional query.
+    if (!fw.painted_once) return false;
+    refresh_abs_positions(frame_index);
+    return true;
+  }
+
+  // Mark the frame owning `widget_index` as needing a paint before its cached
+  // layout can be trusted. Called from the structural mutations (create /
+  // destroy / geometry / show / hide); cleared by paint_frame.
+  void Session::mark_layout_dirty(uint32_t widget_index)
+  {
+    uint32_t frame = frame_of(widget_index);
+    if (frame != 0 && _widgets.exists(frame))
+      _widgets[frame].layout_dirty = true;
+    // A structural change must invalidate the accessibility cache WITHOUT
+    // waiting for a paint. Paint is the invalidation signal for everything a
+    // repaint expresses (see a11y_revision), but a destroy is exactly the case
+    // where waiting is wrong: not every mutation path repaints promptly, and a
+    // provider answering from a tree that still contains a destroyed widget
+    // would hand an AT its name, role and rectangle - a wrong answer, not a
+    // stale one. Cheap: an increment, and the rebuild only happens if something
+    // actually queries.
+    bump_a11y_revision();
+  }
+
+  bool Session::is_in_subtree(uint32_t widget_index, uint32_t root_index) const
+  {
+    if (widget_index == 0 || root_index == 0) return false;
+    if (widget_index == root_index) return true;
+    if (!_widgets.exists(widget_index)) return false;
+    for (uint32_t p : _widgets.get_all_parents(widget_index))
+      if (p == root_index) return true;
+    return false;
+  }
+
+  void Session::end_modal(uint32_t frame_index)
+  {
+    if (frame_index == 0 || !_widgets.exists(frame_index)) return;
+    auto* fw = dynamic_cast<FrameWidget*>(&_widgets[frame_index]);
+    if (!fw) return;
+    if (fw->modal_pump_flag) *fw->modal_pump_flag = false;
+
+    // Take the saved focus and clear it in one go, so a later widget_destroy on
+    // the same dialog cannot restore a second time.
+    const uint32_t slot = fw->prev_focus;
+    const uint32_t gen  = fw->prev_focus_gen;
+    fw->prev_focus     = 0;
+    fw->prev_focus_gen = 0;
+    if (slot == 0 || !_widgets.exists(slot)) return;
+    // A recycled slot is NOT the widget that held focus. Refusing beats handing
+    // focus to something the user never touched.
+    if (a11y_generation(slot) != gen) return;
+    set_focus(slot);
+  }
+
+  void Session::focus_leave_subtree(uint32_t root_index, bool try_next)
+  {
+    if (_focused_widget == 0) return;
+    if (!is_in_subtree(_focused_widget, root_index)) return;
+
+    if (try_next) {
+      // Frame-scoped, so this cannot move focus into another window. Resolve the
+      // frame BEFORE moving focus: frame_of walks up from the widget, and the
+      // widget we are moving away from is the only reliable route to it.
+      const uint32_t frame = frame_of(root_index);
+      focus_next(true, frame);
+      // CALLERS MUST MAKE THE SUBTREE INVISIBLE FIRST. collect_tab_stops does not
+      // descend into an invisible container, so that is what keeps focus_next
+      // from handing focus straight back to a sibling inside the subtree we are
+      // leaving - which would fire a focus-GAINED event for a control that is
+      // about to disappear (and auto-scroll to it) before we cleared it again.
+      // The re-check below is the backstop, not the mechanism.
+      //
+      // Note this lands on the frame's FIRST tab stop, not the "next" one, when
+      // the leaving widget is already out of the stop list (focus_next finds no
+      // current index). That is fine - there is no meaningful "next" once the
+      // widget is gone from the traversal order - but it is not what "next"
+      // suggests, hence this note.
+      if (_focused_widget != 0 && !is_in_subtree(_focused_widget, root_index))
+        return;
+    }
+    set_focus(0);
+  }
+
+  // The tree slot of the FRAME owning `widget_index` (a root child), or 0.
+  uint32_t Session::frame_of(uint32_t widget_index) const
+  {
+    if (widget_index == 0 || !_widgets.exists(widget_index)) return 0;
+    if (_widgets.get_parent(widget_index) == 0) return widget_index;
+    auto parents = _widgets.get_all_parents(widget_index);
+    // get_all_parents walks upward and STOPS at knone, so its last entry is the
+    // root SENTINEL (slot 0), not the root child - scan from the end for the
+    // first entry whose own parent is the sentinel. The sentinel itself fails
+    // that test (get_parent(0) == knone), so it is skipped rather than returned.
+    for (size_t i = parents.size(); i-- > 0; )
+      if (_widgets.exists(parents[i]) && _widgets.get_parent(parents[i]) == 0)
+        return parents[i];
+    return 0;
+  }
+
+  // -------------------------------------------------------------------------
   // Tab stop / focus cycling
 
   static void collect_tab_stops(neui_detail::Tree<WidgetData>& widgets,
@@ -2446,23 +3196,73 @@ namespace xpl_host
     while (idx != 0) {
       if (widgets.exists(idx)) {
         auto& wd = widgets[idx];
-        if (!wd.native_handle && !wd.is_menubar() && wd.visible && wd.tab_stop && wd.enabled)
+        if (!wd.native_handle && !wd.is_menu_model() && wd.visible && wd.tab_stop && wd.enabled)
           out.push_back(idx);
-        collect_tab_stops(widgets, idx, out);
+        // Do NOT descend into an invisible container - matching the paint walk,
+        // which gates descent on visibility too. This used to recurse
+        // unconditionally, so Tab could land on a visible child of a hidden
+        // parent: most sharply on a TABVIEW, whose unselected pages are
+        // `visible = false` while their controls are not, which let Tab move
+        // focus onto a control on a page that is not on screen.
+        if (wd.visible)
+          collect_tab_stops(widgets, idx, out);
       }
       idx = widgets.next(idx);
     }
   }
 
-  void Session::focus_next(bool forward)
+  void Session::focus_next(bool forward, uint32_t frame_hint)
   {
-    std::vector<uint32_t> stops;
-    uint32_t root_child = _widgets.child(0);
-    while (root_child != 0) {
-      if (_widgets.exists(root_child))
-        collect_tab_stops(_widgets, root_child, stops);
-      root_child = _widgets.next(root_child);
+    // Traversal is PER FRAME. Collecting across every root child would let TAB
+    // walk out of one window and into a widget in another - each frame owns its
+    // own native surface and its own OS keyboard focus, so moving the logical
+    // focus there would leave the two disagreeing (and the user pressing keys at
+    // a window that doesn't hold focus).
+    //
+    // `frame_hint` is the frame whose native surface DELIVERED the Tab, which the
+    // platform layer always knows. Prefer it over the focused widget's frame: it
+    // is the only source that is right when nothing is focused yet, and it is
+    // what makes "Tab at a freshly-opened second window" focus that window's
+    // first control instead of some other frame's.
+    uint32_t frame = 0;
+    // An OPEN POPUP SURFACE owns the traversal, ahead of the hint. It is a frame
+    // the user is inside, but it is a ROOT CHILD - so the owner's tab-stop walk
+    // cannot reach it (collect_tab_stops never leaves the frame it is given) -
+    // and `frame_hint` is always the owner, because a popup never takes OS
+    // keyboard focus and so is never the surface that delivered the key. That is
+    // the one case where the per-frame rule above, which exists to keep logical
+    // focus and OS focus in the same window, produces the wrong answer: the two
+    // are SUPPOSED to disagree here. Left alone, Tab inside an open picker jumped
+    // out to the first control of the editor behind it.
+    if (!_popup_surfaces.empty()) {
+      const uint32_t top = _popup_surfaces.back();
+      if (_widgets.exists(top)) frame = top;
     }
+    if (frame == 0 && frame_hint != 0 && _widgets.exists(frame_hint) &&
+        _widgets[frame_hint].is_frame())
+      frame = frame_hint;
+    if (frame == 0) frame = frame_of(_focused_widget);
+    if (frame == 0) {
+      // Last resort (no hint, nothing focused): the first root child that is
+      // actually a REALIZED frame. Testing `visible` here would be useless -
+      // every widget is created visible=true (widgets.cpp:191) and hide() on a
+      // realized frame deliberately leaves the flag alone (widgets.cpp:403-406),
+      // so `visible` does not distinguish shown frames from unshown ones.
+      // native_handle does, and it also skips a menu-model root (POPUPMENU is
+      // isroot but is not a window and holds no tab stops).
+      uint32_t rc = _widgets.child(0);
+      while (rc != 0) {
+        if (_widgets.exists(rc)) {
+          auto& cand = _widgets[rc];
+          if (cand.is_frame() && cand.native_handle) { frame = rc; break; }
+        }
+        rc = _widgets.next(rc);
+      }
+    }
+    if (frame == 0 || !_widgets.exists(frame)) return;
+
+    std::vector<uint32_t> stops;
+    collect_tab_stops(_widgets, frame, stops);
 
     if (stops.empty()) return;
 
@@ -2501,13 +3301,33 @@ namespace xpl_host
     // handler, which subtracts abs_x/abs_y itself.
     const int frame_x = ev->data.mouse.x;
     const int frame_y = ev->data.mouse.y;
+
+    // Remember where the pointer was, in FRAME-local px, so
+    // begin_relative_pointer can seed its virtual position from the actual press
+    // point. It is called from a client's MOUSE_BUTTON_DOWN handler, i.e. from
+    // inside this very dispatch, so the value is always fresh at that moment.
+    // Skipped while relative mode is active: those coordinates are virtual and
+    // unbounded, and feeding them back would corrupt the next drag's seed.
+    if (!_relative.active) {
+      _last_mouse_frame_x = (float)frame_x;
+      _last_mouse_frame_y = (float)frame_y;
+      _last_mouse_valid   = true;
+    }
+
     ev->data.mouse.x = frame_x - w.abs_x;
     ev->data.mouse.y = frame_y - w.abs_y;
     const bool handled = dispatch_event(ev);
     ev->data.mouse.x = frame_x;
     ev->data.mouse.y = frame_y;
-    if (!handled)
-      w.on_mouse_event(ev);
+    if (handled) return;
+    // The client callback just ran, so the tree may have changed under us: "the
+    // OK button was clicked, tear the dialog down" is the most ordinary handler
+    // there is, and returning false from it - the documented default, meaning
+    // "also do the built-in handling" - is exactly what brings us here. `w` is a
+    // reference INTO the slot, so re-resolve instead of calling through it; a
+    // destroyed widget simply has no built-in handling left to run.
+    if (!_widgets.exists(widget_idx)) return;
+    _widgets[widget_idx].on_mouse_event(ev);
   }
 
   // Wheel events bubble up the widget-tree parent chain so a scrolling
@@ -2534,7 +3354,10 @@ namespace xpl_host
       ev->data.wheel.x = frame_x;
       ev->data.wheel.y = frame_y;
       if (handled) return true;
-      return w.on_mouse_event(ev);
+      // Same re-entrancy as dispatch_mouse_event: the client callback above may
+      // have destroyed this widget, and `w` is a reference into its slot.
+      if (!_widgets.exists(i)) return false;
+      return _widgets[i].on_mouse_event(ev);
     };
     if (widget_idx == stop_before) return false;
     if (try_widget(widget_idx)) return true;
@@ -2749,6 +3572,52 @@ namespace xpl_host
     widget_emit_gesture(wd, false);
   }
 
+  // One accessibility increment / decrement, honouring the real-world step a
+  // client declared with NEUI_API_A11Y::set_value_range.
+  //
+  // Returns false when there is no declared step to honour, which is the signal
+  // for the caller to fall back to the ordinary arrow-key path (10 % of the
+  // range, or one NEUI_ATTR_STEPS detent) - the right answer when the client
+  // named no step, since then keyboard and AT should move by the same amount.
+  //
+  // Lives here rather than in the provider because it must produce the SAME
+  // events a keypress does, and widget_set_value_user_gesture (the thing that
+  // brackets the change in GESTURE_BEGIN / _END) is file-local to host.cpp.
+  bool Session::a11y_step_value(uint32_t slot, bool up)
+  {
+    if (slot == 0 || !_widgets.exists(slot)) return false;
+    WidgetData& wd = _widgets[slot];
+    if (!wd.attrs) return false;
+    // Both ends are needed to turn a real-world step into a normalized one - the
+    // same all-or-nothing rule the adapter applies to the range itself.
+    if (!wd.attrs->has(NEUI_ATTR_A11Y_RANGE_MIN) ||
+        !wd.attrs->has(NEUI_ATTR_A11Y_RANGE_MAX)) return false;
+    const float step = wd.attrs->get_float(NEUI_ATTR_A11Y_RANGE_STEP, 0.0f);
+    if (!(step > 0.0f)) return false;             // 0 = continuous, and catches NaN
+    float lo = wd.attrs->get_float(NEUI_ATTR_A11Y_RANGE_MIN, 0.0f);
+    float hi = wd.attrs->get_float(NEUI_ATTR_A11Y_RANGE_MAX, 1.0f);
+    if (lo > hi) { float t = lo; lo = hi; hi = t; }
+    const float span = hi - lo;
+    if (!(span > 0.0f)) return false;
+    const float d = step / span;                  // normalized increment
+    widget_set_value_user_gesture(wd, widget_get_value(wd) + (up ? d : -d));
+    return true;
+  }
+
+  bool Session::a11y_set_value_user(uint32_t slot, float normalized)
+  {
+    if (slot == 0 || !_widgets.exists(slot)) return false;
+    WidgetData& wd = _widgets[slot];
+    // Only widgets that actually carry NEUI_PARAM_VALUE. A CUSTOMDRAW whose value
+    // lives in the client's own state is not one of them - the client owns that
+    // value, and writing the attr would put the two out of step.
+    if (!wd.type) return false;
+    if (strcmp(wd.type, NEUI_W_KNOB) != 0 && strcmp(wd.type, NEUI_W_SLIDER) != 0)
+      return false;
+    widget_set_value_user_gesture(wd, normalized);
+    return true;
+  }
+
   // ---- SliderWidget --------------------------------------------------------
 
   // Read NEUI_ATTR_ORIENTATION ("horizontal" / "vertical") into `is_vertical`.
@@ -2914,9 +3783,20 @@ namespace xpl_host
 
     if (event->type == NEUI_EVENT_MOUSE_WHEEL) {
       int delta = event->data.wheel.delta;
-      bool fine = (event->data.mouse.buttonmap & NEUI_MK_SHIFT) != 0;
+      // data.WHEEL.buttonmap, not data.mouse: the two structs overlap in the
+      // event union and mouse.buttonmap sits at the SAME offset (12) as
+      // wheel.delta, so this used to test the scroll delta as a modifier mask -
+      // (delta & NEUI_MK_SHIFT). Wheel-down (negative -> 0xFFFFFFFF...) always
+      // read as "fine" and wheel-up never did. The wheel payload carries a real
+      // buttonmap now, so read that.
+      bool fine = (event->data.wheel.buttonmap & NEUI_MK_SHIFT) != 0;
+      // PHYSICAL direction - a fader follows the user's fingers, not the delta
+      // the OS already inverted for content scrolling. Same reasoning as the
+      // KNOB; see wheel_direction.h (issue #21).
+      delta = neui_detail::wheel_physical_delta(event->data.wheel);
+      // Same shared convention as the KNOB and the behavior runtime.
       float step = nudge_delta(*this, 1, fine ? 0.01f : 0.05f) *
-                   (delta > 0 ? 1.0f : -1.0f);
+                   neui_detail::wheel_value_sign(delta);
       widget_set_value_user_gesture(*this, widget_get_value(*this) + step);
       repaint();
       return true;
@@ -3016,16 +3896,51 @@ namespace xpl_host
     const float fw = static_cast<float>(width);
     const float fh = static_cast<float>(height);
 
+    // Device scale actually in effect: the frame's zoom (already pushed as a
+    // CTM scale by paint_frame) times the monitor's DPI ratio (applied by the
+    // backend). This is what the client is told in neui_event_paint_t::scale.
+    const float zoom = session->paint_zoom();
+    float dev_scale = zoom;
+    if (backend->get_scale_factor) dev_scale *= backend->get_scale_factor(ctx);
+
+    // NEUI_ATTR_PAINT_DEVICE_PIXELS: hand the client DEVICE pixels instead of
+    // logical ones. We can only undo the part of the scale WE pushed (the
+    // zoom); the backend's own DPI scale isn't ours to unwind, so "device
+    // pixels" here means logical x zoom, and `scale` still reports the full
+    // factor so a client can reason about the rest.
+    const bool device_px =
+      !!neui_detail::attrs_readonly(attrs)
+      && neui_detail::attr_as_float(neui_detail::attrs_readonly(attrs),
+                                     NEUI_ATTR_PAINT_DEVICE_PIXELS, 0.0f) != 0.0f;
+    const bool unzoom = device_px && zoom != 1.0f
+                        && backend->scale && backend->push_transform;
+
     if (backend->push_transform) backend->push_transform(ctx);
     if (backend->translate)
       backend->translate(ctx, static_cast<float>(x), static_cast<float>(y));
+    // Clip BEFORE unzooming, so the clip rect stays in the widget's logical
+    // box however the callback's coordinate space is set up.
     if (backend->push_clip) backend->push_clip(ctx, 0.0f, 0.0f, fw, fh);
+
+    // Widget-local size in whatever space the callback will draw in.
+    float cb_w = fw, cb_h = fh;
+    if (unzoom) {
+      // Undo the frame zoom for the callback only: one unit under the
+      // callback is now one zoomed (device-side) pixel, and the widget covers
+      // fw*zoom x fh*zoom of them - the same physical area as before.
+      backend->scale(ctx, 1.0f / zoom, 1.0f / zoom);
+      cb_w = fw * zoom;
+      cb_h = fh * zoom;
+    }
 
     neui_painter painter{};
     painter.backend          = backend;
     painter.ctx              = ctx;
     painter.host_token       = session;
     painter.draw_asset_thunk = &xpl_painter_draw_asset_thunk;
+    // Under a device-pixel callback the zoom is no longer in the CTM, so the
+    // backend's own get_scale_factor is already the whole truth.
+    painter.extra_scale      = unzoom ? 1.0f : zoom;
 
     if (auto* ca = resolve_widget_compound(session, compound_asset)) {
       // Compound mode: paint z<0 layers here; z>=0 layers come from
@@ -3033,7 +3948,7 @@ namespace xpl_host
       bool selected = neui_detail::attr_as_float(
                         neui_detail::attrs_readonly(attrs), NEUI_ATTR_SELECTED, 0.0f) != 0.0f;
       uint32_t state_mask = neui_detail::compose_widget_state(enabled, hovered, pressed, selected);
-      neui_detail::paint_compound_below(&painter, *ca, fw, fh,
+      neui_detail::paint_compound_below(&painter, *ca, cb_w, cb_h,
                                           neui_detail::attrs_readonly(attrs),
                                           state_mask);
     } else {
@@ -3042,9 +3957,10 @@ namespace xpl_host
       ev.data.paint.widget.id  = widget_id;
       ev.data.paint.painter_api = &neui_detail::k_painter_api;
       ev.data.paint.p           = &painter;
-      ev.data.paint.width       = fw;
-      ev.data.paint.height      = fh;
+      ev.data.paint.width       = cb_w;
+      ev.data.paint.height      = cb_h;
       ev.data.paint.focused     = is_focused;
+      ev.data.paint.scale       = dev_scale;
       session->dispatch_event(&ev);
     }
 
@@ -3074,6 +3990,7 @@ namespace xpl_host
     painter.ctx              = ctx;
     painter.host_token       = session;
     painter.draw_asset_thunk = &xpl_painter_draw_asset_thunk;
+    painter.extra_scale      = session->paint_zoom();
 
     bool selected = neui_detail::attr_as_float(
                       neui_detail::attrs_readonly(attrs), NEUI_ATTR_SELECTED, 0.0f) != 0.0f;
@@ -3142,7 +4059,9 @@ namespace xpl_host
   {
     auto* wd = static_cast<CustomDrawWidget*>(host_data);
     if (!wd || !wd->session || !items) return 0;
-    return wd->session->open_popup_menu(wd->index, local_x, local_y, popup_items_from_strings(items));
+    std::vector<std::string> v;
+    for (int i = 0; items[i] != nullptr; ++i) v.emplace_back(items[i]);
+    return wd->session->open_popup_menu(wd->index, local_x, local_y, v);
   }
 
   // Defined in widgets.cpp where dnd_begin_drag_with_preview is in scope.
@@ -3263,12 +4182,26 @@ namespace xpl_host
   {
     if (event->type == NEUI_EVENT_MOUSE_WHEEL) {
       int delta = event->data.wheel.delta;
-      bool fine = (event->data.mouse.buttonmap & NEUI_MK_SHIFT) != 0;
-      // Wheel up INCREASES knob value, wheel down DECREASES - matching the
-      // SLIDER and the natural scroll direction (delta > 0 == scroll up on
-      // every platform).
+      // data.WHEEL.buttonmap, not data.mouse: the two structs overlap in the
+      // event union and mouse.buttonmap sits at the SAME offset (12) as
+      // wheel.delta, so this used to test the scroll delta as a modifier mask -
+      // (delta & NEUI_MK_SHIFT). Wheel-down (negative -> 0xFFFFFFFF...) always
+      // read as "fine" and wheel-up never did. The wheel payload carries a real
+      // buttonmap now, so read that.
+      bool fine = (event->data.wheel.buttonmap & NEUI_MK_SHIFT) != 0;
+      // PHYSICAL direction, not the delta as delivered. `delta > 0 == scroll up`
+      // was only ever true with macOS natural scrolling OFF: the OS applies that
+      // preference before we see the event, so the same swipe arrived with
+      // opposite signs and a knob felt backwards for anyone on the default
+      // setting (issue #21). A knob has no content to move, so it follows the
+      // user's fingers - see wheel_direction.h, which also undoes the platform
+      // layer's Shift->horizontal flip.
+      delta = neui_detail::wheel_physical_delta(event->data.wheel);
+      // Direction from the shared convention (up DECREASES - the audio-plugin
+      // convention a behavior asset's WHEEL handler has always used). The KNOB
+      // used to do the opposite, so the two felt opposite in one UI.
       float step = nudge_delta(*this, 1, fine ? 0.01f : 0.05f) *
-                   (delta > 0 ? 1.0f : -1.0f);
+                   neui_detail::wheel_value_sign(delta);
       widget_set_value_user_gesture(*this, widget_get_value(*this) + step);
       repaint();
       return true;
@@ -3293,8 +4226,8 @@ namespace xpl_host
       // frame-local; subtract the widget's frame-local origin to get local.
       int local_x = event->data.mouse.x - abs_x;
       int local_y = event->data.mouse.y - abs_y;
-      static const std::vector<PopupItem> k_items = {
-        { "Reset to default", 0 },
+      static const std::vector<std::string> k_items = {
+        "Reset to default",
       };
       int picked = session->open_popup_menu(index, local_x, local_y, k_items);
       if (picked == 1) {
@@ -3970,133 +4903,38 @@ namespace xpl_host
   static constexpr int POPUP_PAD_Y    = 4;
   static constexpr int POPUP_SEP_H    = 7;
   static constexpr int POPUP_MIN_W    = 140;
-  static constexpr int POPUP_CHECK_W  = 16;   // the check mark's gutter (left of the text)
-  // The frame's edge the popup stays off, so there is always somewhere
-  // outside it to click (a click outside dismisses it); a frame smaller
-  // than POPUP_MARGIN_MIN gets none.
-  static constexpr int POPUP_MARGIN     = 16;
-  static constexpr int POPUP_MARGIN_MIN = 8 * POPUP_MARGIN;
-  // The editor behind a popup of more than one column is dimmed by this.
-  static constexpr uint8_t POPUP_DIM_ALPHA = 0x59;
 
-  std::vector<PopupItem> popup_items_from_strings(const char* const* strings)
+  static bool popup_item_is_separator(const std::string& s)
   {
-    std::vector<PopupItem> v;
-    for (int i = 0; strings && strings[i] != nullptr; ++i) {
-      const bool sep = strings[i][0] == '-' && strings[i][1] == '\0';
-      v.push_back({ strings[i], sep ? NEUI_POPUP_ITEM_SEPARATOR : 0u });
-    }
-    return v;
+    return s.size() == 1 && s[0] == '-';
   }
 
-  static bool popup_item_is_separator(const PopupItem& it)
+  static int popup_item_height(const std::string& s)
   {
-    return (it.flags & NEUI_POPUP_ITEM_SEPARATOR) != 0;
+    return popup_item_is_separator(s) ? POPUP_SEP_H : POPUP_ITEM_H();
   }
 
-  // A separator or a disabled item can't be hovered or picked.
-  static bool popup_item_is_pickable(const PopupItem& it)
+  static int popup_total_height(const std::vector<std::string>& items)
   {
-    return (it.flags & (NEUI_POPUP_ITEM_SEPARATOR | NEUI_POPUP_ITEM_DISABLED)) == 0;
+    int h = POPUP_PAD_Y * 2;
+    for (auto& s : items) h += popup_item_height(s);
+    return h;
   }
 
-  static int popup_item_height(const PopupItem& it, int item_h)
+  static int popup_total_width(neui_render_backend_t* backend,
+                                neui_render_ctx_t ctx,
+                                const std::vector<std::string>& items)
   {
-    return popup_item_is_separator(it) ? POPUP_SEP_H : item_h;
-  }
-
-  // Each item's text width at font_px (0 for a separator).
-  static std::vector<int> popup_text_widths(neui_render_backend_t* backend,
-                                            const std::vector<PopupItem>& items,
-                                            int font_px)
-  {
-    std::vector<int> widths(items.size(), 0);
-    if (!backend || !backend->measure_text) return widths;
-    for (size_t i = 0; i < items.size(); ++i) {
-      if (popup_item_is_separator(items[i])) continue;
-      widths[i] = (int)backend->measure_text(nullptr, items[i].text.c_str(), -1, (float)font_px);
-    }
-    return widths;
-  }
-
-  void Session::layout_popup(int frame_w, int frame_h)
-  {
-    // One column below the anchor while the items fit the frame's height;
-    // a longer list wraps into columns of the frame's height, each as wide
-    // as its widest item, and while those would be wider than the frame the
-    // rows get tighter (down to the font's height and a little), then the
-    // font smaller (two steps). Each column that holds a checked item gets a
-    // gutter for the check marks. The popup stays POPUP_MARGIN off the
-    // frame's edge: moved up and left as far as it takes.
-    const int mx = frame_w >= POPUP_MARGIN_MIN ? POPUP_MARGIN : 0;
-    const int my = frame_h >= POPUP_MARGIN_MIN ? POPUP_MARGIN : 0;
-    const int avail_w = frame_w > 0 ? frame_w - 2 * mx : 0;
-    const int avail_h = frame_h > 0 ? frame_h - 2 * my : 0;
-    const int base_font = POPUP_FONT_PX();
-    for (int font = base_font; font >= base_font - 2; --font) {
-      const std::vector<int> widths = popup_text_widths(_backend, _popup_items, font);
-      const int tightest = font + 4;
-      bool fits = false;
-      for (int item_h = font == base_font ? POPUP_ITEM_H() : tightest; item_h >= tightest; --item_h) {
-        _popup_cells.clear();
-        int col = 0, y = POPUP_PAD_Y, tallest = 0;
-        for (size_t i = 0; i < _popup_items.size(); ++i) {
-          int h = popup_item_height(_popup_items[i], item_h);
-          if (avail_h > 0 && y > POPUP_PAD_Y && y + h + POPUP_PAD_Y > avail_h) {
-            tallest = (std::max)(tallest, y + POPUP_PAD_Y);
-            ++col;
-            y = POPUP_PAD_Y;
-          }
-          _popup_cells.push_back({col, y, h});
-          y += h;
-        }
-        _popup_h = (std::max)(tallest, y + POPUP_PAD_Y);
-        // Each column's left edge, then the popup's width.
-        std::vector<int> col_w(static_cast<size_t>(col + 1), 0);
-        _popup_col_checked.assign(static_cast<size_t>(col + 1), false);
-        for (size_t i = 0; i < _popup_cells.size(); ++i) {
-          const size_t c = static_cast<size_t>(_popup_cells[i].col);
-          col_w[c] = (std::max)(col_w[c], widths[i]);
-          if (_popup_items[i].flags & NEUI_POPUP_ITEM_CHECKED) _popup_col_checked[c] = true;
-        }
-        _popup_col_x.assign(1, 0);
-        for (int c = 0; c <= col; ++c) {
-          int w = col_w[static_cast<size_t>(c)] + POPUP_PAD_X * 2 + (_popup_col_checked[static_cast<size_t>(c)] ? POPUP_CHECK_W : 0);
-          if (col == 0 && w < POPUP_MIN_W) w = POPUP_MIN_W;
-          _popup_col_x.push_back(_popup_col_x.back() + w);
-        }
-        _popup_font_px = font;
-        if (avail_w <= 0 || _popup_col_x.back() <= avail_w) { fits = true; break; }
+    float maxw = 0.0f;
+    if (backend && backend->measure_text) {
+      for (auto& s : items) {
+        if (popup_item_is_separator(s)) continue;
+        float w = backend->measure_text(ctx, s.c_str(), -1, (float)POPUP_FONT_PX());
+        if (w > maxw) maxw = w;
       }
-      if (fits) break;
     }
-    _popup_frame_w = frame_w;
-    _popup_frame_h = frame_h;
-    if (frame_h > 0 && _popup_y_abs + _popup_h > frame_h - my)
-      _popup_y_abs = frame_h - my - _popup_h;
-    if (frame_h > 0 && _popup_y_abs < my) _popup_y_abs = (std::max)(0, (std::min)(my, frame_h - _popup_h));
-    int w = _popup_col_x.back();
-    if (frame_w > 0 && _popup_x_abs + w > frame_w - mx)
-      _popup_x_abs = frame_w - mx - w;
-    if (frame_w > 0 && _popup_x_abs < mx) _popup_x_abs = (std::max)(0, (std::min)(mx, frame_w - w));
-  }
-
-  int Session::popup_item_at(float lx, float ly) const
-  {
-    int w = _popup_col_x.empty() ? 0 : _popup_col_x.back();
-    if (lx < static_cast<float>(_popup_x_abs) || lx >= static_cast<float>(_popup_x_abs + w) ||
-        ly < static_cast<float>(_popup_y_abs) || ly >= static_cast<float>(_popup_y_abs + _popup_h)) {
-      return -1;
-    }
-    int rel_x = (int)lx - _popup_x_abs;
-    int col = 0;
-    while (col + 2 < (int)_popup_col_x.size() && rel_x >= _popup_col_x[static_cast<size_t>(col + 1)]) ++col;
-    int rel_y = (int)ly - _popup_y_abs;
-    for (size_t i = 0; i < _popup_cells.size(); ++i) {
-      auto& c = _popup_cells[i];
-      if (c.col == col && rel_y >= c.y && rel_y < c.y + c.h) return (int)i + 1;
-    }
-    return 0;
+    int w = (int)maxw + POPUP_PAD_X * 2;
+    return w < POPUP_MIN_W ? POPUP_MIN_W : w;
   }
 
   // Handle a click on the popup at frame-local (lx, ly). Updates
@@ -4106,31 +4944,69 @@ namespace xpl_host
   bool Session::handle_popup_click(float lx, float ly)
   {
     if (!_popup_active) return false;
-    int idx = popup_item_at(lx * _popup_zoom, ly * _popup_zoom);
-    if (idx < 0) {
+    int width = popup_total_width(_backend, nullptr, _popup_items);
+    int height = popup_total_height(_popup_items);
+    if (lx < static_cast<float>(_popup_x_abs) || lx >= static_cast<float>(_popup_x_abs + width) ||
+        ly < static_cast<float>(_popup_y_abs) || ly >= static_cast<float>(_popup_y_abs + height)) {
       // click outside -> dismiss
       _popup_picked = 0;
       _popup_active = false;
       _popup_running = false;
       return true;
     }
-    if (idx == 0 || !popup_item_is_pickable(_popup_items[static_cast<size_t>(idx - 1)])) {
-      // padding, a separator or a disabled item: stay open
-      return true;
+    int rel_y = (int)ly - _popup_y_abs - POPUP_PAD_Y;
+    int idx = 0;       // 1-based pick
+    int run_y = 0;
+    for (auto& s : _popup_items) {
+      ++idx;
+      int h = popup_item_height(s);
+      if (rel_y >= run_y && rel_y < run_y + h) {
+        if (popup_item_is_separator(s)) {
+          // ignore separator click; stay open
+          return true;
+        }
+        _popup_picked = idx;
+        _popup_active = false;
+        _popup_running = false;
+        return true;
+      }
+      run_y += h;
     }
-    _popup_picked = idx;
-    _popup_active = false;
-    _popup_running = false;
     return true;
   }
 
   bool Session::handle_popup_hover(float lx, float ly)
   {
     if (!_popup_active) return false;
-    int idx = popup_item_at(lx * _popup_zoom, ly * _popup_zoom);
-    // 1-based, as paint_popup_menu and handle_popup_key read it; -1: none
+    int width  = popup_total_width(_backend, nullptr, _popup_items);
+    int height = popup_total_height(_popup_items);
+    if (lx < static_cast<float>(_popup_x_abs) || lx >= static_cast<float>(_popup_x_abs + width) ||
+        ly < static_cast<float>(_popup_y_abs) || ly >= static_cast<float>(_popup_y_abs + height)) {
+      if (_popup_hover != -1) {
+        _popup_hover = -1;
+        void* frame = nullptr;
+        uint32_t f = _widgets.child(0);
+        while (f != 0 && _widgets.exists(f)) {
+          if (_widgets[f].native_handle) { frame = _widgets[f].native_handle; break; }
+          f = _widgets.next(f);
+        }
+        if (frame) platform_invalidate(frame);
+      }
+      return false;
+    }
+    int rel_y = (int)ly - _popup_y_abs - POPUP_PAD_Y;
+    int idx = 0;
+    int run_y = 0;
     int new_hover = -1;
-    if (idx > 0 && popup_item_is_pickable(_popup_items[static_cast<size_t>(idx - 1)])) new_hover = idx;
+    for (auto& s : _popup_items) {
+      int h = popup_item_height(s);
+      if (rel_y >= run_y && rel_y < run_y + h) {
+        if (!popup_item_is_separator(s)) new_hover = idx;
+        break;
+      }
+      run_y += h;
+      ++idx;
+    }
     if (new_hover != _popup_hover) {
       _popup_hover = new_hover;
       uint32_t f = _widgets.child(0);
@@ -4142,7 +5018,7 @@ namespace xpl_host
         f = _widgets.next(f);
       }
     }
-    return idx >= 0;
+    return true;
   }
 
   bool Session::handle_popup_key(uint32_t keycode)
@@ -4167,20 +5043,14 @@ namespace xpl_host
     if (keycode == NEUI_KEY_DOWN || keycode == NEUI_KEY_UP) {
       int n = (int)_popup_items.size();
       int dir = (keycode == NEUI_KEY_DOWN) ? 1 : -1;
-      // From the hovered item, else from the first checked one, else from an end.
-      int from = _popup_hover;
-      for (int i = 0; from < 1 && i < n; ++i)
-        if (_popup_items[static_cast<size_t>(i)].flags & NEUI_POPUP_ITEM_CHECKED) from = i + 1;
-      int next = (from < 1) ? (dir > 0 ? 1 : n) : from + dir;
-      // Skip separators and disabled items.
-      bool found = false;
+      int next = (_popup_hover < 1) ? (dir > 0 ? 1 : n) : _popup_hover + dir;
+      // Skip separators.
       for (int safety = 0; safety < n; ++safety) {
         if (next < 1) next = n;
         if (next > n) next = 1;
-        if (popup_item_is_pickable(_popup_items[static_cast<size_t>(next - 1)])) { found = true; break; }
+        if (!popup_item_is_separator(_popup_items[static_cast<size_t>(next - 1)])) break;
         next += dir;
       }
-      if (!found) return true;
       _popup_hover = next;
       uint32_t f = _widgets.child(0);
       while (f != 0 && _widgets.exists(f)) {
@@ -4197,76 +5067,49 @@ namespace xpl_host
 
   void Session::paint_popup_menu(neui_render_ctx_t ctx)
   {
-    if (!_popup_active || !_backend || _popup_col_x.size() < 2) return;
+    if (!_popup_active || !_backend) return;
     using neui_detail::ColorRole;
-    const int cols = (int)_popup_col_x.size() - 1;
-    int w = _popup_col_x.back();
-    int h = _popup_h;
+    int w = popup_total_width(_backend, ctx, _popup_items);
+    int h = popup_total_height(_popup_items);
     float fx = (float)_popup_x_abs;
     float fy = (float)_popup_y_abs;
 
-    // popup px -> the frame's logical px
-    bool zoomed = _popup_zoom != 1.0f && _backend->push_transform && _backend->scale;
-    if (zoomed) {
-      _backend->push_transform(ctx);
-      _backend->scale(ctx, 1.0f / _popup_zoom, 1.0f / _popup_zoom);
-    }
-    // A popup of columns covers most of the frame: the rest is dimmed, the
-    // place to click to dismiss it.
-    if (cols > 1 && _popup_frame_w > 0 && _popup_frame_h > 0) {
-      _backend->fill_rect(ctx, 0.0f, 0.0f, (float)_popup_frame_w, (float)_popup_frame_h,
-                          neui_detail::with_alpha(0xFF000000u, POPUP_DIM_ALPHA));
-    }
     _backend->fill_rect(ctx, fx, fy, (float)w, (float)h,
                         neui_detail::color(ColorRole::control_bg_alt));
     _backend->draw_rect(ctx, fx, fy, (float)w, (float)h, 1.0f,
                         neui_detail::color(ColorRole::border));
-    for (int c = 1; c < cols; ++c) {
-      _backend->fill_rect(ctx, fx + (float)_popup_col_x[static_cast<size_t>(c)], fy + 4.0f, 1.0f, (float)h - 8.0f,
-                          neui_detail::color(ColorRole::scrollbar_separator));
-    }
 
-    for (size_t i = 0; i < _popup_items.size() && i < _popup_cells.size(); ++i) {
-      auto& item = _popup_items[i];
-      auto& cell = _popup_cells[i];
-      float cx = fx + (float)_popup_col_x[static_cast<size_t>(cell.col)];
-      float cw = (float)(_popup_col_x[static_cast<size_t>(cell.col) + 1] - _popup_col_x[static_cast<size_t>(cell.col)]);
-      float cy = fy + (float)cell.y;
-      if (popup_item_is_separator(item)) {
-        float sy = cy + (float)POPUP_SEP_H * 0.5f;
-        _backend->fill_rect(ctx, cx + 4.0f, sy,
-                             cw - 8.0f, 1.0f,
+    int run_y = POPUP_PAD_Y;
+    int idx = 0;
+    for (auto& s : _popup_items) {
+      ++idx;
+      int ih = popup_item_height(s);
+      if (popup_item_is_separator(s)) {
+        float sy = fy + (float)run_y + (float)POPUP_SEP_H * 0.5f;
+        _backend->fill_rect(ctx, fx + 4.0f, sy,
+                             (float)w - 8.0f, 1.0f,
                              neui_detail::color(ColorRole::scrollbar_separator));
+        run_y += ih;
         continue;
       }
-      bool hovered = ((int)i + 1 == _popup_hover);
+      bool hovered = (idx == _popup_hover);
       if (hovered) {
-        _backend->fill_rect(ctx, cx + 1.0f, cy,
-                             cw - 2.0f, (float)cell.h,
+        _backend->fill_rect(ctx, fx + 1.0f, fy + (float)run_y,
+                             (float)w - 2.0f, (float)ih,
                              neui_detail::color(ColorRole::accent));
       }
-      uint32_t tcol = neui_detail::color(ColorRole::text_primary);
-      if (item.flags & NEUI_POPUP_ITEM_DISABLED) tcol = neui_detail::color(ColorRole::text_disabled);
-      else if (hovered)                          tcol = neui_detail::color(ColorRole::accent_text);
-      // A column with a checked item has a gutter for the check marks, as
-      // the in-frame menubar's dropdowns do.
-      float gutter = _popup_col_checked[static_cast<size_t>(cell.col)] ? (float)POPUP_CHECK_W : 0.0f;
-      if (item.flags & NEUI_POPUP_ITEM_CHECKED) {
-        _backend->draw_text(ctx, cx + (float)POPUP_PAD_X, cy,
-                            (float)POPUP_CHECK_W, (float)cell.h,
-                            "\xE2\x9C\x93" /* U+2713 check mark */,
-                            (float)_popup_font_px, tcol);
-      }
       _backend->draw_text(ctx,
-        cx + (float)POPUP_PAD_X + gutter, cy,
-        cw - (float)POPUP_PAD_X * 2.0f - gutter, (float)cell.h,
-        item.text.c_str(), (float)_popup_font_px, tcol);
+        fx + (float)POPUP_PAD_X, fy + (float)run_y,
+        (float)w - (float)POPUP_PAD_X * 2.0f, (float)ih,
+        s.c_str(), (float)POPUP_FONT_PX(),
+        hovered ? neui_detail::color(ColorRole::accent_text)
+                : neui_detail::color(ColorRole::text_primary));
+      run_y += ih;
     }
-    if (zoomed) _backend->pop_transform(ctx);
   }
 
   int Session::open_popup_menu(uint32_t anchor_idx, int lx, int ly,
-                                const std::vector<PopupItem>& items)
+                                const std::vector<std::string>& items)
   {
     if (items.empty() || !_widgets.exists(anchor_idx)) return 0;
     if (_popup_active) return 0;
@@ -4281,32 +5124,17 @@ namespace xpl_host
     auto parents = _widgets.get_all_parents(anchor_idx);
     abs_x += anchor.x;
     abs_y += anchor.y;
-    int frame_w = 0, frame_h = 0;
-    float zoom = 1.0f;
     for (auto p : parents) {
       if (p == 0 || !_widgets.exists(p)) continue;
       auto& pw = _widgets[p];
-      if (pw.native_handle) {       // stop at the frame
-        frame_w = pw.width;
-        frame_h = pw.height;
-        zoom    = pw.zoom;
-        break;
-      }
+      if (pw.native_handle) break;  // stop at the frame
       abs_x += pw.x;
       abs_y += pw.y;
     }
-    // In popup px (the frame's zoom applied), so a zoomed frame's popup
-    // keeps its unzoomed size.
-    auto zoomed = [zoom](int v) { return static_cast<int>(static_cast<float>(v) * zoom + 0.5f); };
 
     _popup_items     = items;
-    // A separator carries no other flag.
-    for (auto& it : _popup_items)
-      if (popup_item_is_separator(it)) it.flags = NEUI_POPUP_ITEM_SEPARATOR;
-    _popup_zoom      = zoom;
-    _popup_x_abs     = zoomed(abs_x);
-    _popup_y_abs     = zoomed(abs_y);
-    layout_popup(zoomed(frame_w), zoomed(frame_h));
+    _popup_x_abs     = abs_x;
+    _popup_y_abs     = abs_y;
     _popup_hover     = -1;
     _popup_picked    = 0;
     _popup_active    = true;
@@ -4323,9 +5151,6 @@ namespace xpl_host
     int picked = _popup_picked;
     _popup_active = false;
     _popup_items.clear();
-    _popup_cells.clear();
-    _popup_col_x.clear();
-    _popup_col_checked.clear();
     _popup_hover  = -1;
     _popup_picked = 0;
 
@@ -4356,7 +5181,9 @@ namespace xpl_host
 
   namespace {
 
-    // A laid-out dropdown row. y/h are relative to the column's top-left.
+    // A laid-out dropdown row. x/y/w/h are relative to the column's top-left:
+    // a level taller than the frame wraps into sub-columns side by side, and a
+    // row's x / w are its sub-column's.
     struct MenuRowL {
       uint32_t    item_id   = 0;
       std::string text;
@@ -4365,13 +5192,16 @@ namespace xpl_host
       bool        submenu   = false;
       bool        enabled   = true;
       bool        checked   = false;
+      bool        gutter    = false;  // its sub-column reserves a left checkmark gutter
+      int         x         = 0;
       int         y         = 0;
+      int         w         = 0;
       int         h         = 0;
     };
+    // One open level of the cascade: its rows in one or more sub-columns.
     struct MenuColL {
       uint32_t              parent_item = 0;  // the item whose children this column shows
       int                   x = 0, y = 0, w = 0, h = 0;
-      bool                  check_gutter = false;  // reserve a left checkmark column
       std::vector<MenuRowL> rows;
     };
     struct MenuBandItem {
@@ -4474,11 +5304,23 @@ namespace xpl_host
 
   // Build the chain of open dropdown columns from `path`, positioning each
   // below/beside its parent and clamping to the frame so cascades stay visible.
+  //
+  // Serves BOTH the in-frame menubar and the standalone tree popup
+  // (popup_tree_menu). The two differ in exactly one thing - where level 0 goes -
+  // so an empty `band` means "standalone popup: put level 0 at (root_x, root_y)"
+  // and a non-empty `band` means "menubar: put level 0 under its band item".
+  // Everything else (row sizing, a level taller than the frame wrapped into
+  // sub-columns, arbitrary-depth cascade placement, right/bottom clamping, the
+  // submenu left-flip, the checkmark gutter, shortcut columns, and
+  // validate-driven enabling) is already origin-agnostic and shared verbatim.
+  // The standalone popup passes its frame in popup px (tp_scale), so it lays
+  // out at its unzoomed size.
   static void mb_build_columns(Session* s, neui_render_ctx_t ctx,
                                const MenubarWidget& mb, int frame_w, int frame_h,
                                const std::vector<MenuBandItem>& band,
                                const std::vector<uint32_t>& path,
-                               std::vector<MenuColL>& out)
+                               std::vector<MenuColL>& out,
+                               int root_x = 0, int root_y = 0)
   {
     for (size_t level = 0; level < path.size(); ++level) {
       uint32_t parent_id = path[level];
@@ -4488,8 +5330,7 @@ namespace xpl_host
       std::vector<uint32_t> kids;
       menu_children(mb, parent_id, kids);
 
-      int max_text = 0, max_short = 0;
-      bool any_sub = false, any_check = false;
+      std::vector<int> text_w, short_w;
       for (uint32_t kid : kids) {
         auto it = mb.menu_items.find(kid);
         if (it == mb.menu_items.end()) continue;
@@ -4503,37 +5344,74 @@ namespace xpl_host
         r.checked   = !r.separator && !r.submenu && mi.checked;
         r.enabled   = r.separator ? false
                     : (r.submenu ? mi.enabled : s->menu_item_enabled(mb, kid));
-        if (!r.separator) {
-          max_text = std::max(max_text, menu_measure(s->_backend, ctx, r.text));
-          if (!r.shortcut.empty())
-            max_short = std::max(max_short, menu_measure(s->_backend, ctx, r.shortcut));
-          if (r.submenu) any_sub = true;
-          if (r.checked) any_check = true;
-        }
+        text_w.push_back(r.separator ? 0 : menu_measure(s->_backend, ctx, r.text));
+        short_w.push_back(r.separator || r.shortcut.empty() ? 0
+                          : menu_measure(s->_backend, ctx, r.shortcut));
         col.rows.push_back(std::move(r));
       }
 
-      int w = POPUP_PAD_X * 2 + max_text;
-      if (any_check)     w += MENU_CHECK_W;
-      if (max_short > 0) w += MENU_SHORTCUT_GAP + max_short;
-      if (any_sub)       w += MENU_ARROW_W;
-      if (w < POPUP_MIN_W) w = POPUP_MIN_W;
-
-      int run = POPUP_PAD_Y;
-      for (auto& r : col.rows) {
-        r.y = run;
-        r.h = r.separator ? POPUP_SEP_H : POPUP_ITEM_H();
-        run += r.h;
+      // One column while the rows fit the frame's height; else sub-columns of
+      // the frame's height side by side, each as wide as its own rows - so every
+      // item of a long list is on screen - with the rows tighter (down to the
+      // font's height and a little) while those are wider than the frame.
+      const int tightest = MENUBAR_FONT_PX + 4;
+      for (int item_h = POPUP_ITEM_H(); ; --item_h) {
+        int run = POPUP_PAD_Y, x = 0, tallest = 0, subs = 0;
+        size_t first = 0;
+        // close the sub-column of rows [first, end): its width, its gutter
+        auto close_sub = [&](size_t end) {
+          int max_text = 0, max_short = 0;
+          bool any_sub = false, any_check = false;
+          for (size_t i = first; i < end; ++i) {
+            const auto& r = col.rows[i];
+            if (r.separator) continue;
+            max_text  = std::max(max_text, text_w[i]);
+            max_short = std::max(max_short, short_w[i]);
+            if (r.submenu) any_sub = true;
+            if (r.checked) any_check = true;
+          }
+          int w = POPUP_PAD_X * 2 + max_text;
+          if (any_check)     w += MENU_CHECK_W;
+          if (max_short > 0) w += MENU_SHORTCUT_GAP + max_short;
+          if (any_sub)       w += MENU_ARROW_W;
+          if (x == 0 && end == col.rows.size() && w < POPUP_MIN_W) w = POPUP_MIN_W;
+          for (size_t i = first; i < end; ++i) {
+            col.rows[i].x = x;
+            col.rows[i].w = w;
+            col.rows[i].gutter = any_check;
+          }
+          x += w;
+          tallest = std::max(tallest, run + POPUP_PAD_Y);
+          ++subs;
+        };
+        for (size_t i = 0; i < col.rows.size(); ++i) {
+          auto& r = col.rows[i];
+          r.h = r.separator ? POPUP_SEP_H : item_h;
+          if (frame_h > 0 && run > POPUP_PAD_Y && run + r.h + POPUP_PAD_Y > frame_h) {
+            close_sub(i);
+            first = i;
+            run = POPUP_PAD_Y;
+          }
+          r.y = run;
+          run += r.h;
+        }
+        close_sub(col.rows.size());
+        col.w = x;
+        col.h = tallest;
+        if (subs == 1 || frame_w <= 0 || col.w <= frame_w || item_h <= tightest) break;
       }
-      col.w = w;
-      col.h = run + POPUP_PAD_Y;
-      col.check_gutter = any_check;
 
       if (level == 0) {
-        int bx = 0;
-        for (auto& b : band) if (b.item_id == parent_id) { bx = b.x; break; }
-        col.x = bx;
-        col.y = MENUBAR_BAND_H;
+        if (band.empty()) {
+          // Standalone popup: level 0 opens AT the anchor point.
+          col.x = root_x;
+          col.y = root_y;
+        } else {
+          int bx = 0;
+          for (auto& b : band) if (b.item_id == parent_id) { bx = b.x; break; }
+          col.x = bx;
+          col.y = MENUBAR_BAND_H;
+        }
       } else {
         const MenuColL& prev = out[level - 1];
         int py = prev.y;
@@ -4623,6 +5501,79 @@ namespace xpl_host
       platform_invalidate(_widgets[frame].native_handle);
   }
 
+  // Paint an open cascade of dropdown columns. Shared verbatim by the in-frame
+  // menubar and by the standalone tree popup - the columns are already
+  // positioned by mb_build_columns, so nothing here knows or cares which one it
+  // is drawing.
+  static void paint_menu_columns(Session* s, neui_render_ctx_t ctx,
+                                 const std::vector<MenuColL>& cols,
+                                 const std::vector<uint32_t>& path,
+                                 uint32_t hover_item)
+  {
+    auto* _backend = s->_backend;
+    using neui_detail::ColorRole;
+    auto C = [](ColorRole r) { return neui_detail::color(r); };
+    for (auto& col : cols) {
+      _backend->fill_rect(ctx, (float)col.x, (float)col.y, (float)col.w, (float)col.h,
+                          C(ColorRole::control_bg_alt));
+      _backend->draw_rect(ctx, (float)col.x, (float)col.y, (float)col.w, (float)col.h, 1.0f,
+                          C(ColorRole::border));
+      for (auto& r : col.rows) {
+        float ry = (float)(col.y + r.y);
+        const int rx = col.x + r.x;
+        // a rule left of each sub-column after the first, at its first row
+        if (r.x > 0 && r.y == POPUP_PAD_Y)
+          _backend->fill_rect(ctx, (float)rx, (float)col.y + 4.0f, 1.0f, (float)col.h - 8.0f,
+                              C(ColorRole::scrollbar_separator));
+        if (r.separator) {
+          _backend->fill_rect(ctx, (float)rx + 4.0f, ry + (float)POPUP_SEP_H * 0.5f,
+                              (float)r.w - 8.0f, 1.0f, C(ColorRole::scrollbar_separator));
+          continue;
+        }
+        // Highlight the hovered row, or the row whose submenu is currently open.
+        bool open_sub = false;
+        for (uint32_t pid : path) if (pid == r.item_id) { open_sub = true; break; }
+        bool hl = (r.item_id == hover_item) || open_sub;
+        if (hl)
+          _backend->fill_rect(ctx, (float)rx + 1.0f, ry, (float)r.w - 2.0f, (float)r.h,
+                              C(ColorRole::accent));
+        uint32_t tcol = !r.enabled ? C(ColorRole::text_disabled)
+                      : hl          ? C(ColorRole::accent_text)
+                                    : C(ColorRole::text_primary);
+        // When the sub-column reserves a checkmark gutter, text is indented past
+        // it and a check glyph is drawn in the gutter for checked rows.
+        int gutter = r.gutter ? MENU_CHECK_W : 0;
+        if (r.checked) {
+          _backend->draw_text(ctx, (float)(rx + POPUP_PAD_X), ry,
+                              (float)MENU_CHECK_W, (float)r.h,
+                              "\xE2\x9C\x93" /* U+2713 check mark */,
+                              (float)MENUBAR_FONT_PX, tcol);
+        }
+        _backend->draw_text(ctx, (float)(rx + POPUP_PAD_X + gutter), ry,
+                            (float)(r.w - POPUP_PAD_X * 2 - gutter), (float)r.h,
+                            r.text.c_str(), (float)MENUBAR_FONT_PX, tcol);
+        if (!r.shortcut.empty()) {
+          int sw = menu_measure(_backend, ctx, r.shortcut);
+          int sx = rx + r.w - POPUP_PAD_X - (r.submenu ? MENU_ARROW_W : 0) - sw;
+          uint32_t scol = !r.enabled ? C(ColorRole::text_disabled)
+                        : hl          ? C(ColorRole::accent_text)
+                                      : C(ColorRole::text_secondary);
+          _backend->draw_text(ctx, (float)sx, ry, (float)sw, (float)r.h,
+                              r.shortcut.c_str(), (float)MENUBAR_FONT_PX, scol);
+        }
+        if (r.submenu) {
+          uint32_t acol = !r.enabled ? C(ColorRole::text_disabled)
+                        : hl          ? C(ColorRole::accent_text)
+                                      : C(ColorRole::text_secondary);
+          _backend->draw_text(ctx, (float)(rx + r.w - MENU_ARROW_W), ry,
+                              (float)MENU_ARROW_W, (float)r.h,
+                              "\xE2\x96\xB8" /* U+25B8 small right triangle */,
+                              (float)MENUBAR_FONT_PX, acol);
+        }
+      }
+    }
+  }
+
   void Session::paint_menubar(neui_render_ctx_t ctx, uint32_t frame_index)
   {
     if (!_backend) return;
@@ -4669,60 +5620,854 @@ namespace xpl_host
 
     std::vector<MenuColL> cols;
     mb_build_columns(this, ctx, mb, fw, fh, band, _menu_path, cols);
-    for (auto& col : cols) {
-      _backend->fill_rect(ctx, (float)col.x, (float)col.y, (float)col.w, (float)col.h,
-                          C(ColorRole::control_bg_alt));
-      _backend->draw_rect(ctx, (float)col.x, (float)col.y, (float)col.w, (float)col.h, 1.0f,
-                          C(ColorRole::border));
-      for (auto& r : col.rows) {
-        float ry = (float)(col.y + r.y);
-        if (r.separator) {
-          _backend->fill_rect(ctx, (float)col.x + 4.0f, ry + (float)POPUP_SEP_H * 0.5f,
-                              (float)col.w - 8.0f, 1.0f, C(ColorRole::scrollbar_separator));
-          continue;
-        }
-        // Highlight the hovered row, or the row whose submenu is currently open.
-        bool open_sub = false;
-        for (uint32_t pid : _menu_path) if (pid == r.item_id) { open_sub = true; break; }
-        bool hl = (r.item_id == _menu_hover_item) || open_sub;
-        if (hl)
-          _backend->fill_rect(ctx, (float)col.x + 1.0f, ry, (float)col.w - 2.0f, (float)r.h,
-                              C(ColorRole::accent));
-        uint32_t tcol = !r.enabled ? C(ColorRole::text_disabled)
-                      : hl          ? C(ColorRole::accent_text)
-                                    : C(ColorRole::text_primary);
-        // When the column reserves a checkmark gutter, text is indented past it
-        // and a check glyph is drawn in the gutter for checked rows.
-        int gutter = col.check_gutter ? MENU_CHECK_W : 0;
-        if (r.checked) {
-          _backend->draw_text(ctx, (float)(col.x + POPUP_PAD_X), ry,
-                              (float)MENU_CHECK_W, (float)r.h,
-                              "\xE2\x9C\x93" /* U+2713 check mark */,
-                              (float)MENUBAR_FONT_PX, tcol);
-        }
-        _backend->draw_text(ctx, (float)(col.x + POPUP_PAD_X + gutter), ry,
-                            (float)(col.w - POPUP_PAD_X * 2 - gutter), (float)r.h,
-                            r.text.c_str(), (float)MENUBAR_FONT_PX, tcol);
-        if (!r.shortcut.empty()) {
-          int sw = menu_measure(_backend, ctx, r.shortcut);
-          int sx = col.x + col.w - POPUP_PAD_X - (r.submenu ? MENU_ARROW_W : 0) - sw;
-          uint32_t scol = !r.enabled ? C(ColorRole::text_disabled)
-                        : hl          ? C(ColorRole::accent_text)
-                                      : C(ColorRole::text_secondary);
-          _backend->draw_text(ctx, (float)sx, ry, (float)sw, (float)r.h,
-                              r.shortcut.c_str(), (float)MENUBAR_FONT_PX, scol);
-        }
-        if (r.submenu) {
-          uint32_t acol = !r.enabled ? C(ColorRole::text_disabled)
-                        : hl          ? C(ColorRole::accent_text)
-                                      : C(ColorRole::text_secondary);
-          _backend->draw_text(ctx, (float)(col.x + col.w - MENU_ARROW_W), ry,
-                              (float)MENU_ARROW_W, (float)r.h,
-                              "\xE2\x96\xB8" /* U+25B8 small right triangle */,
-                              (float)MENUBAR_FONT_PX, acol);
-        }
+    paint_menu_columns(this, ctx, cols, _menu_path, _menu_hover_item);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Standalone tree popup (widgets->popup_tree_menu).
+  //
+  // Deliberately thin: every hard part - cascade layout, edge clamping, submenu
+  // flipping, checkmark gutters, shortcut columns, per-item enable via
+  // NEUI_API_MENU_CLIENT::validate, and painting - is the menubar's, reused
+  // unchanged. Only two things differ: level 0 opens at an anchor point instead
+  // of under a band item (a mb_build_columns parameter), and a pick reports as
+  // NEUI_EVENT_ITEM_SELECTED instead of driving a menu bar.
+  //
+  // Unlike the menubar cascade - which only ever runs where the host draws its
+  // own menu band (Linux) - this runs on ALL THREE platforms, so it owns its
+  // input plumbing rather than borrowing the menubar's: every platform layer
+  // routes press / move / release / Esc through the handlers below.
+
+  bool Session::show_tree_popup(uint32_t anchor_idx, int x, int y, uint32_t menu_idx)
+  {
+    // Refuse where the platform layer does not route input to the popup (iOS,
+    // null). paint_frame would still PAINT the cascade - it is
+    // platform-independent - so without this the API would put up a menu that
+    // cannot be picked or dismissed and whose taps fall through to the widgets
+    // underneath. Failing honestly is strictly better.
+    if (!platform_supports_tree_popup()) return false;
+
+    if (!_widgets.exists(menu_idx)) return false;
+    auto* pm = dynamic_cast<PopupMenuWidget*>(&_widgets[menu_idx]);
+    if (!pm) return false;                       // not a POPUPMENU
+
+    // An empty menu must not open: a 1-row-high empty box that swallows the next
+    // click is worse than doing nothing.
+    std::vector<uint32_t> roots;
+    menu_children(*pm, 0, roots);
+    if (roots.empty()) return false;
+
+    // Resolve the anchor to frame-local logical px. The anchor's own frame owns
+    // the overlay, since that is the surface the popup paints on.
+    uint32_t frame_idx = anchor_idx;
+    while (frame_idx != 0 && _widgets.exists(frame_idx) &&
+           !_widgets[frame_idx].is_frame())
+      frame_idx = _widgets.get_parent(frame_idx);
+    if (frame_idx == 0 || !_widgets.exists(frame_idx)) return false;
+
+    int ax = x, ay = y;
+    if (anchor_idx != frame_idx && _widgets.exists(anchor_idx)) {
+      ax += _widgets[anchor_idx].abs_x;
+      ay += _widgets[anchor_idx].abs_y;
+    }
+
+    // Close whatever menu cascade is open first: only one at a time, matching
+    // the OS menus this mirrors. (Both share _menu_path / _menu_hover_item.)
+    close_menubar_menu();
+    close_tree_popup();
+
+    _tree_popup_active = true;
+    _tree_popup_menu   = menu_idx;
+    _tree_popup_frame  = frame_idx;
+    _tree_popup_x      = ax;
+    _tree_popup_y      = ay;
+    // Level 0's "parent" is the tree root, so the popup's rows are the items
+    // directly under tree_item_root - exactly what a client added there.
+    _menu_path         = { 0 };
+    _menu_hover_item   = 0;
+
+    if (void* native = _widgets[frame_idx].native_handle)
+      platform_invalidate(native);
+    return true;
+  }
+
+  void Session::close_tree_popup()
+  {
+    if (!_tree_popup_active) return;
+    uint32_t frame_idx = _tree_popup_frame;
+    _tree_popup_active = false;
+    _tree_popup_menu   = 0;
+    _tree_popup_frame  = 0;
+    _menu_path.clear();
+    _menu_hover_item   = 0;
+    if (frame_idx != 0 && _widgets.exists(frame_idx)) {
+      if (void* native = _widgets[frame_idx].native_handle)
+        platform_invalidate(native);
+    }
+  }
+
+  void Session::close_tree_popup_if_within(uint32_t subtree_root)
+  {
+    if (!_tree_popup_active || subtree_root == 0) return;
+    if (subtree_root == _tree_popup_menu || subtree_root == _tree_popup_frame) {
+      close_tree_popup();
+      return;
+    }
+    // Also catch an ancestor going away (destroying the frame takes the popup
+    // widget with it, and destroying a SECTION can take the menu widget).
+    for (uint32_t probe : { _tree_popup_menu, _tree_popup_frame }) {
+      if (probe == 0 || !_widgets.exists(probe)) continue;
+      for (uint32_t p : _widgets.get_all_parents(probe)) {
+        if (p == subtree_root) { close_tree_popup(); return; }
       }
     }
+  }
+
+  void Session::refresh_open_tree_popup(uint32_t menu_idx)
+  {
+    if (!_tree_popup_active || _tree_popup_menu != menu_idx) return;
+    if (!_widgets.exists(_tree_popup_frame)) return;
+    if (void* native = _widgets[_tree_popup_frame].native_handle)
+      platform_invalidate(native);
+  }
+
+  bool Session::tree_popup_take_release()
+  {
+    if (!_tree_popup_swallow_release) return false;
+    _tree_popup_swallow_release = false;
+    return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Popup surfaces (NEUI_W_POPUPSURFACE / NEUI_API_POPUP).
+  //
+  // Everything here is portable. The platform layer supplies the window, the
+  // work area, the two coordinate conversions and the outside-press watch; the
+  // placement arithmetic, the cascade, the input gate and the dismissal policy
+  // live in this file so both backings and all platforms share one copy.
+
+  namespace {
+
+  // The frame a popup cascade ultimately hangs off: walk out of any popup levels
+  // until a real window frame is reached. Ownership is FLAT - every level is
+  // owned by this frame, never by the level above it - so this is also the
+  // handle every level's window is created against.
+  uint32_t ps_root_owner(Session* s, uint32_t frame_idx)
+  {
+    // Bounded rather than while(true): popup_owner is written only by
+    // open_popup_surface, but a cycle here would hang the UI thread, and the
+    // cost of not trusting it is one int.
+    for (int guard = 0; guard < 64; ++guard) {
+      if (frame_idx == 0 || !s->_widgets.exists(frame_idx)) return 0;
+      auto* ps = dynamic_cast<PopupSurfaceWidget*>(&s->_widgets[frame_idx]);
+      if (!ps) return frame_idx;
+      frame_idx = ps->popup_owner;
+    }
+    return 0;
+  }
+
+  // The frame containing `widget_idx`, or the widget itself when it IS a frame.
+  uint32_t ps_frame_of_or_self(Session* s, uint32_t widget_idx)
+  {
+    uint32_t idx = widget_idx;
+    while (idx != 0 && s->_widgets.exists(idx) && !s->_widgets[idx].is_frame())
+      idx = s->_widgets.get_parent(idx);
+    return (idx != 0 && s->_widgets.exists(idx)) ? idx : 0;
+  }
+
+  // Pop the deepest open level and tear it down, reporting `reason`.
+  //
+  // Order matters: the level is removed from the stack FIRST, so every observer
+  // that runs afterwards (the focus / hover / press cleanups, and the client's
+  // NEUI_EVENT_POPUP_DISMISSED handler) sees a consistent stack and may itself
+  // close or destroy things without corrupting the walk.
+  void ps_close_top(Session* s, uint32_t reason)
+  {
+    if (s->_popup_surfaces.empty()) return;
+    const uint32_t idx = s->_popup_surfaces.back();
+    s->_popup_surfaces.pop_back();
+
+    uint32_t owner_idx = 0;
+    uint32_t widget_id = 0;
+    if (s->_widgets.exists(idx)) {
+      auto& wd  = s->_widgets[idx];
+      widget_id = wd.widget_id;
+      auto* ps  = dynamic_cast<PopupSurfaceWidget*>(&wd);
+      if (ps) owner_idx = ps->popup_owner;
+
+      void* owner_native = nullptr;
+      if (owner_idx != 0 && s->_widgets.exists(owner_idx))
+        owner_native = s->_widgets[owner_idx].native_handle;
+      if (wd.native_handle)
+        platform_hide_popup_surface(wd.native_handle, owner_native);
+      wd.visible = false;
+      if (ps) ps->popup_anchor = 0;
+
+      // A popup is a frame, so focus / hover / press can all be pointing INSIDE
+      // it when it closes, and no leave event arrives for a surface that simply
+      // stops existing on screen. Left alone, focus would sit on a control in a
+      // hidden window (a dead keyboard) and a cursor="none" widget would leave
+      // the pointer hidden process-wide.
+      if (s->_focused_widget != 0 && s->is_in_subtree(s->_focused_widget, idx))
+        s->focus_leave_subtree(idx, /*try_next*/false);
+      if (s->_hovered_widget != 0 && s->is_in_subtree(s->_hovered_widget, idx))
+        s->set_hovered(0);
+      if (s->_pressed_widget != 0 && s->is_in_subtree(s->_pressed_widget, idx))
+        s->set_pressed(0);
+    }
+
+    // Repaint the owner. Load-bearing for the in-frame backing (the popup was
+    // pixels in the owner's surface); harmless for the desktop one.
+    if (owner_idx != 0 && s->_widgets.exists(owner_idx)) {
+      if (void* native = s->_widgets[owner_idx].native_handle)
+        platform_invalidate(native);
+    }
+
+    if (widget_id != 0) {
+      neui_event_t ev = {};
+      ev.type              = NEUI_EVENT_POPUP_DISMISSED;
+      ev.data.popup.widget = { widget_id };
+      ev.data.popup.reason = reason;
+      s->dispatch_event(&ev);
+    }
+  }
+
+  } // namespace
+
+  int Session::popup_surface_depth(uint32_t frame_idx) const
+  {
+    if (frame_idx == 0) return -1;
+    for (size_t i = 0; i < _popup_surfaces.size(); ++i)
+      if (_popup_surfaces[i] == frame_idx) return static_cast<int>(i);
+    return -1;
+  }
+
+  void Session::popup_clamp_size(uint32_t anchor_idx, int* out_w, int* out_h)
+  {
+    if (out_w) *out_w = 0;
+    if (out_h) *out_h = 0;
+    uint32_t frame_idx = ps_frame_of_or_self(this, anchor_idx);
+    if (frame_idx == 0) return;
+    uint32_t root = ps_root_owner(this, frame_idx);
+    if (root == 0 || !_widgets.exists(root)) return;
+
+    if (!platform_supports_popup_surface()) {
+      // In-frame backing: the box is the owner's client area, menubar band
+      // excluded - the same rect a client lays its own children out against.
+      const auto& fw = _widgets[root];
+      if (out_w) *out_w = fw.width;
+      if (out_h) *out_h = fw.height - frame_top_inset(root);
+      return;
+    }
+
+    int wx = 0, wy = 0, ww = 0, wh = 0;
+    platform_get_work_area(_widgets[root].native_handle, &wx, &wy, &ww, &wh);
+    // The work area comes back in UNZOOMED screen logical px, but a client sizes
+    // its surface in logical px that the host then multiplies by the owner's zoom
+    // - so on a 150 % editor a popup built to fill this box would come out half
+    // again too big and get clamped. Report the box the client can actually
+    // spend. (Same space as the in-frame branch above, which uses fw.width /
+    // fw.height - widget geometry, logical at every zoom.)
+    const float zoom = _widgets[root].ui_scale();
+    if (zoom > 0.0f && zoom != 1.0f) {
+      ww = static_cast<int>(static_cast<float>(ww) / zoom);
+      wh = static_cast<int>(static_cast<float>(wh) / zoom);
+    }
+    if (out_w) *out_w = ww;
+    if (out_h) *out_h = wh;
+  }
+
+  bool Session::popup_escapes_frame(uint32_t anchor_idx)
+  {
+    if (!platform_supports_popup_surface()) return false;
+    return ps_frame_of_or_self(this, anchor_idx) != 0;
+  }
+
+  bool Session::open_popup_surface(uint32_t surface_idx, uint32_t anchor_idx,
+                                   int off_x, int off_y, int side)
+  {
+    if (!_widgets.exists(surface_idx) || !_widgets.exists(anchor_idx)) return false;
+    auto* ps = dynamic_cast<PopupSurfaceWidget*>(&_widgets[surface_idx]);
+    if (!ps) return false;
+    // A zero-sized surface would be an invisible box that swallows the next
+    // click - the same reason an empty tree popup refuses to open.
+    if (ps->width <= 0 || ps->height <= 0) return false;
+    // A surface cannot anchor to itself or to anything inside itself: the
+    // resulting cascade would own its own owner.
+    if (anchor_idx == surface_idx || is_in_subtree(anchor_idx, surface_idx))
+      return false;
+
+    const uint32_t anchor_frame = ps_frame_of_or_self(this, anchor_idx);
+    if (anchor_frame == 0) return false;
+    const uint32_t root = ps_root_owner(this, anchor_frame);
+    if (root == 0 || !_widgets.exists(root)) return false;
+    void* owner_native = _widgets[root].native_handle;
+    // Nothing to hang off yet. Anchoring to a frame that has not been realized
+    // would place the popup from uninitialised geometry.
+    if (!owner_native) return false;
+    void* anchor_native = _widgets[anchor_frame].native_handle;
+    if (!anchor_native) return false;
+
+    // The anchor rectangle, in its own frame's client coordinates. abs_x/abs_y
+    // are a by-product of the paint walk, so a popup opened before the anchor's
+    // frame has ever painted (or after a tree change) needs them recomputed.
+    ensure_abs_positions(anchor_frame);
+    int ax = 0, ay = 0, aw = 0, ah = 0;
+    {
+      const auto& awd = _widgets[anchor_idx];
+      if (anchor_idx == anchor_frame) {
+        ax = 0;
+        ay = frame_top_inset(anchor_frame);
+        aw = awd.width;
+        ah = awd.height - ay;
+      } else {
+        ax = awd.abs_x;
+        ay = awd.abs_y;
+        aw = awd.width;
+        ah = awd.height;
+      }
+    }
+
+    // Anchor origin in screen coordinates (logical px).
+    int sx = ax, sy = ay;
+    platform_client_to_screen(anchor_native, ax, ay, &sx, &sy);
+
+    // The owner's zoom, read BEFORE any placement arithmetic. It used to be read
+    // after all of it, which is what made this whole block wrong at zoom != 1.
+    //
+    // Screen coordinates here are UNZOOMED logical px (screen physical / DPI):
+    // that is what platform_client_to_screen returns, what platform_get_work_area
+    // reports, and what platform_show_popup_surface takes for the POSITION -
+    // while it takes the SIZE unzoomed and applies the zoom itself. So a widget's
+    // on-screen extent in this space is its logical extent times the zoom, and
+    // every extent compared against a screen coordinate below has to be
+    // converted. Left unconverted, a 150 % editor placed its popup as though
+    // everything were 100 %: a BELOW popup landed partway up its own anchor, and
+    // the clamp reserved room for a box (zoom-1)*ph shorter than the window that
+    // was then created, so it hung off the bottom of the work area.
+    const float owner_zoom = _widgets[root].ui_scale();
+    const auto to_screen = [owner_zoom](int v) {
+      return static_cast<int>(v * owner_zoom + (v < 0 ? -0.5f : 0.5f));
+    };
+    const int pw = ps->width;
+    const int ph = ps->height;
+    const int aws = to_screen(aw), ahs = to_screen(ah);   // anchor, on screen
+    const int pws = to_screen(pw), phs = to_screen(ph);   // popup, on screen
+    // The offsets are documented as anchor-LOCAL logical px, so they zoom too.
+    const int oxs = to_screen(off_x), oys = to_screen(off_y);
+    int px = sx, py = sy;
+    switch (side) {
+    case NEUI_POPUP_ABOVE: px = sx + oxs;       py = sy - phs + oys;  break;
+    case NEUI_POPUP_RIGHT: px = sx + aws + oxs; py = sy + oys;        break;
+    case NEUI_POPUP_LEFT:  px = sx - pws + oxs; py = sy + oys;        break;
+    case NEUI_POPUP_AT_POINTER: {
+      int cx = sx, cy = sy;
+      platform_get_pointer_pos(&cx, &cy);
+      px = cx + oxs;
+      py = cy + oys;
+      break;
+    }
+    case NEUI_POPUP_BELOW:
+    default:               px = sx + oxs;       py = sy + ahs + oys;  break;
+    }
+
+    // Clamp box. Desktop placement buys a much bigger box, not an unbounded one:
+    // a tall menu on a 1080p display with a DAW docked at the bottom can still
+    // hit the work-area edge, which is exactly why NEUI_API_POPUP::get_clamp_size
+    // exists for the client to size content against.
+    int wx = 0, wy = 0, ww = 0, wh = 0;
+    platform_get_work_area(owner_native, &wx, &wy, &ww, &wh);
+    if (ww > 0 && wh > 0) {
+      // Flip to the opposite side when the preferred one does not fit and the
+      // other does - the drop-list / submenu behaviour, on all four sides.
+      switch (side) {
+      case NEUI_POPUP_BELOW:
+        if (py + phs > wy + wh && (sy - phs + oys) >= wy) py = sy - phs + oys;
+        break;
+      case NEUI_POPUP_ABOVE:
+        if (py < wy && (sy + ahs + oys) + phs <= wy + wh) py = sy + ahs + oys;
+        break;
+      case NEUI_POPUP_RIGHT:
+        if (px + pws > wx + ww && (sx - pws + oxs) >= wx) px = sx - pws + oxs;
+        break;
+      case NEUI_POPUP_LEFT:
+        if (px < wx && (sx + aws + oxs) + pws <= wx + ww) px = sx + aws + oxs;
+        break;
+      default: break;
+      }
+      // Then clamp the POSITION only - never the size. Silently shrinking a
+      // surface would change the layout the client already committed to; the
+      // clamp-size query is the honest way to tell it in advance, and a popup
+      // bigger than the work area is a client that ignored the answer.
+      if (px + pws > wx + ww) px = wx + ww - pws;
+      if (py + phs > wy + wh) py = wy + wh - phs;
+      if (px < wx) px = wx;
+      if (py < wy) py = wy;
+    }
+
+    // Inherit the owner's zoom, or a 100 % popup appears over a 150 % editor.
+    // Written UNCONDITIONALLY: guarded by `if (owner_zoom != 1.0f)` this was
+    // one-directional, and line for line the only writer of the attr on a popup
+    // surface - nothing ever cleared it. So a surface opened once against a 150 %
+    // editor kept that zoom for the rest of its life: reopen it against a 100 %
+    // owner and paint_frame scaled by the stale 1.5 while the platform sized the
+    // window from the fresh 1.0, giving a clipped, misaligned popup.
+    neui_detail::ensure_attrs(ps->attrs).set_float(NEUI_ATTR_UI_SCALE, owner_zoom);
+
+    ps->popup_owner  = root;
+    ps->popup_anchor = anchor_idx;
+    ps->popup_side   = side;
+    ps->popup_off_x  = off_x;
+    ps->popup_off_y  = off_y;
+    // A popup surface stores SCREEN coordinates in x/y - it is the one frame kind
+    // whose position is not parent-relative, because it has no parent to be
+    // relative to and the platform needs screen placement.
+    ps->x = px;
+    ps->y = py;
+
+    if (!ps->native_handle)
+      platform_create_popup_surface(this, surface_idx, *ps, owner_native);
+    if (!ps->native_handle) return false;   // no desktop backing on this platform
+
+    ps->visible = true;
+    mark_layout_dirty(surface_idx);
+    // Pushed BEFORE the window is shown, so anything the platform's show path
+    // wakes up (macOS posts windowDidMove: / setFrameSize: for the panel being
+    // placed) already sees this level as part of the stack rather than as a
+    // foreign frame whose movement should dismiss the level below it.
+    if (popup_surface_depth(surface_idx) < 0)
+      _popup_surfaces.push_back(surface_idx);
+    platform_show_popup_surface(ps->native_handle, owner_native,
+                                px, py, pw, ph, owner_zoom);
+    // Idempotent per session - a cascade shares ONE watch, since dismissal is a
+    // decision about the whole stack rather than about any single level.
+    platform_popup_grab_begin(this, ps->native_handle);
+    return true;
+  }
+
+  // Re-point the outside-press watch at whatever level is now deepest, or end it
+  // when the stack has emptied. Called after every close.
+  //
+  // X11 needs this and the other two do not. There the watch IS an
+  // XGrabPointer, held on the deepest popup's own window - and X releases a grab
+  // when its grab window stops being viewable, which is precisely what
+  // platform_hide_popup_surface does by unmapping. So closing one level of a
+  // cascade silently killed the watch for the levels that REMAIN, after which
+  // nothing dismissed at all: popup_press_landed_outside depends entirely on the
+  // grab redirecting foreign presses to us. macOS installs one session-scoped
+  // watch per stack (idempotent, so the re-point is free) and win32 has no grab
+  // to re-point, so this stays one rule instead of a platform special case.
+  void ps_resync_grab(Session* s)
+  {
+    if (s->_popup_surfaces.empty()) { platform_popup_grab_end(s); return; }
+    const uint32_t top = s->_popup_surfaces.back();
+    if (s->_widgets.exists(top))
+      platform_popup_grab_begin(s, s->_widgets[top].native_handle);
+  }
+
+  void Session::close_popup_surface(uint32_t surface_idx, uint32_t reason)
+  {
+    const int d = popup_surface_depth(surface_idx);
+    if (d < 0) return;
+    while (_popup_surfaces.size() > static_cast<size_t>(d) + 1)
+      ps_close_top(this, NEUI_POPUP_DISMISS_CASCADE);
+    ps_close_top(this, reason);
+    ps_resync_grab(this);
+  }
+
+  void Session::close_popup_surfaces_deeper_than(size_t depth, uint32_t reason)
+  {
+    while (_popup_surfaces.size() > depth) ps_close_top(this, reason);
+    ps_resync_grab(this);
+  }
+
+  void Session::close_all_popup_surfaces(uint32_t reason)
+  {
+    close_popup_surfaces_deeper_than(0, reason);
+  }
+
+  void Session::close_popup_surfaces_if_within(uint32_t subtree_root)
+  {
+    if (_popup_surfaces.empty() || subtree_root == 0) return;
+    // Copy first: closing one level cascades and mutates the stack.
+    const std::vector<uint32_t> open = _popup_surfaces;
+    for (uint32_t idx : open) {
+      if (popup_surface_depth(idx) < 0) continue;   // already gone with a cascade
+      bool hit = (idx == subtree_root) || is_in_subtree(idx, subtree_root);
+      if (!hit && _widgets.exists(idx)) {
+        // The surface is its own root child, so the OWNER frame's subtree does
+        // not contain it - destroying the editor while a picker is open has to be
+        // caught through the recorded owner / anchor instead, or a live window is
+        // left over the DAW with a dead owner and a watch still running.
+        if (auto* ps = dynamic_cast<PopupSurfaceWidget*>(&_widgets[idx])) {
+          for (uint32_t probe : { ps->popup_anchor, ps->popup_owner }) {
+            if (probe == 0) continue;
+            if (probe == subtree_root || is_in_subtree(probe, subtree_root)) {
+              hit = true;
+              break;
+            }
+          }
+        }
+      }
+      if (hit) close_popup_surface(idx, NEUI_POPUP_DISMISS_OWNER_MOVED);
+    }
+  }
+
+  bool Session::popup_gate_press(uint32_t frame_idx)
+  {
+    if (_popup_surfaces.empty()) return false;
+    const int d = popup_surface_depth(frame_idx);
+    if (d < 0) {
+      // Outside the whole stack: dismiss and SWALLOW. The press that closes a
+      // popup must not also act on what is underneath - one click closing a
+      // picker and moving a parameter is the failure this prevents, and it is
+      // what every OS menu and drop-list does.
+      close_all_popup_surfaces(NEUI_POPUP_DISMISS_OUTSIDE_PRESS);
+      _popup_surface_swallow_release = true;
+      return true;
+    }
+    // On a shallower level: close what is deeper and let the press through, so
+    // clicking a parent row while a submenu is open re-targets rather than
+    // needing two clicks.
+    if (static_cast<size_t>(d) + 1 < _popup_surfaces.size())
+      close_popup_surfaces_deeper_than(static_cast<size_t>(d) + 1,
+                                       NEUI_POPUP_DISMISS_OUTSIDE_PRESS);
+    return false;
+  }
+
+  bool Session::popup_gate_press_outside()
+  {
+    if (_popup_surfaces.empty()) return false;
+    close_all_popup_surfaces(NEUI_POPUP_DISMISS_OUTSIDE_PRESS);
+    _popup_surface_swallow_release = true;
+    return true;
+  }
+
+  bool Session::popup_gate_hover(uint32_t frame_idx)
+  {
+    if (_popup_surfaces.empty()) return false;
+    if (popup_surface_depth(frame_idx) >= 0) return false;
+    // Suppression, not delivery, is what an OS pointer capture was ever buying:
+    // without this, moving off the popup and across the owner lights up hover on
+    // every widget on the way, which is the one thing that reads as "not a menu".
+    if (_hovered_widget != 0) set_hovered(0);
+    return true;
+  }
+
+  bool Session::popup_gate_wheel(uint32_t frame_idx)
+  {
+    if (_popup_surfaces.empty()) return false;
+    // Inside the stack the wheel is ordinary: that is what makes the recommended
+    // idiom work at all - popup content in a scrolling SECTION sized to
+    // get_clamp_size (see <neui/d/popup.h>).
+    return popup_surface_depth(frame_idx) < 0;
+  }
+
+  bool Session::popup_diverts_keys() const
+  {
+    if (_popup_surfaces.empty()) return false;
+    const uint32_t top = _popup_surfaces.back();
+    if (!_widgets.exists(top)) return false;
+    // Focus inside the deepest level: the ordinary routing is already correct,
+    // and the popup is not diverting anything.
+    if (_focused_widget != 0 && is_in_subtree(_focused_widget, top)) return false;
+    return true;
+  }
+
+  bool Session::popup_gate_key(neui_event_type_t type, uint32_t keycode,
+                               uint32_t modifiers)
+  {
+    if (_popup_surfaces.empty()) return false;
+
+    // Escape closes the whole stack. KEYDOWN only, because NEUI_KEY_ESCAPE is
+    // 0x1B - which is also the CHARACTER win32 hands us in the WM_CHAR that
+    // follows, and one press reporting two dismissals for a stack that is already
+    // gone is a client-visible lie.
+    if (type == NEUI_EVENT_KEYDOWN && keycode == NEUI_KEY_ESCAPE) {
+      close_all_popup_surfaces(NEUI_POPUP_DISMISS_ESCAPE);
+      return true;
+    }
+
+    if (!popup_diverts_keys()) return false;
+
+    // Focus is somewhere the user is not looking. SWALLOW - that is the whole
+    // point - and deliver to the surface so a client-drawn menu can navigate
+    // itself.
+    //
+    // A key that mapped to no neui keycode (a dead key, an IME intermediate)
+    // still has to be swallowed, but there is nothing meaningful to report.
+    if (keycode == 0) return true;
+
+    const uint32_t top = _popup_surfaces.back();
+    const uint32_t widget_id = _widgets[top].widget_id;
+    neui_event_t ev = {};
+    ev.type     = type;
+    ev.data.key = { { widget_id }, keycode, modifiers };
+    // THE CLIENT GETS THE KEY FIRST, and `true` means it handled it - the same
+    // two-tier contract as mouse events, so a client that draws its own menu
+    // takes over per KEYSTROKE rather than per popup (arrows for itself, Home /
+    // End left to the host, if that is what it wants). No opt-out flag exists
+    // because this already is the opt-out.
+    const bool client_took_it = dispatch_event(&ev);
+
+    // The handler may have closed this level, opened a deeper one, or destroyed
+    // the surface outright, so `top` is re-validated rather than trusted: it has
+    // to still exist AND still be the deepest level before the host navigates
+    // anything on it.
+    if (!client_took_it && type == NEUI_EVENT_KEYDOWN &&
+        !_popup_surfaces.empty() && _popup_surfaces.back() == top &&
+        _widgets.exists(top))
+      popup_navigate(top, keycode);
+    return true;
+  }
+
+  // The host's own navigation over a client-DECLARED item list (NEUI_ATTR_NAV_*).
+  // The arithmetic is in hosts/shared/popup_nav.h, Tier-1 tested; this is the
+  // part that needs a live session - reading the declaration, writing the index
+  // back, and telling the client what happened.
+  void Session::popup_navigate(uint32_t surface_idx, uint32_t keycode)
+  {
+    auto& wd = _widgets[surface_idx];
+    const neui_detail::AttrBag* bag = wd.attrs.get();
+    if (!bag) return;
+
+    neui_detail::PopupNav nav;
+    nav.count = bag->get_int(NEUI_ATTR_NAV_COUNT, 0);
+    if (nav.count <= 0) return;          // nothing declared: not ours to walk
+    nav.index = bag->get_int(NEUI_ATTR_NAV_INDEX, -1);
+    nav.page  = bag->get_int(NEUI_ATTR_NAV_PAGE, 10);
+    nav.wrap  = bag->get_int(NEUI_ATTR_NAV_WRAP, 1) != 0;
+
+    const neui_detail::PopupNavResult r = neui_detail::popup_nav_key(nav, keycode);
+    if (!r.handled) return;
+
+    const uint32_t widget_id = wd.widget_id;
+
+    if (r.changed) {
+      // Written back BEFORE either event, so a handler that reads the attribute
+      // (or repaints synchronously) sees the value the event is announcing.
+      neui_detail::ensure_attrs(wd.attrs).set_int(NEUI_ATTR_NAV_INDEX, r.index);
+      if (wd.native_handle) platform_invalidate(wd.native_handle);
+
+      neui_event_t ev = {};
+      ev.type            = NEUI_EVENT_ATTR_CHANGED;
+      ev.data.attr.widget   = { widget_id };
+      ev.data.attr.attr_key = NEUI_ATTR_NAV_INDEX;
+      ev.data.attr.value    = static_cast<float>(r.index);
+      dispatch_event(&ev);
+      // The handler may have destroyed the surface; there is nothing left to do
+      // on this key either way, since activate and changed are never both set.
+      return;
+    }
+
+    if (r.activate) {
+      neui_event_t ev = {};
+      ev.type             = NEUI_EVENT_ITEM_SELECTED;
+      ev.data.item.widget = { widget_id };
+      ev.data.item.index  = static_cast<uint32_t>(r.index);
+      dispatch_event(&ev);
+    }
+  }
+
+  bool Session::popup_take_release()
+  {
+    if (!_popup_surface_swallow_release) return false;
+    _popup_surface_swallow_release = false;
+    return true;
+  }
+
+  // The standalone popup keeps its unzoomed size in a zoomed frame
+  // (NEUI_ATTR_UI_SCALE), as an OS menu does: it is laid out in popup px, the
+  // frame's logical px times its scale, and painted through 1 / scale. At a
+  // scale of 0.5 a frame-zoomed menu's text would be half its size.
+  static float tp_scale(Session* s, uint32_t frame_index)
+  {
+    return s->_widgets.exists(frame_index) ? s->_widgets[frame_index].ui_scale() : 1.0f;
+  }
+
+  static int tp_px(int logical, float scale)
+  {
+    return static_cast<int>(static_cast<float>(logical) * scale + 0.5f);
+  }
+
+  // Build the open cascade for the active popup, in popup px (tp_scale).
+  // Returns false when there is nothing to show, so paint / hit-test share one
+  // guard.
+  static bool tp_build(Session* s, neui_render_ctx_t ctx, uint32_t frame_index,
+                       std::vector<MenuColL>& cols)
+  {
+    if (!s->_tree_popup_active || frame_index != s->_tree_popup_frame) return false;
+    if (!s->_widgets.exists(s->_tree_popup_menu)) return false;
+    auto* pm = dynamic_cast<PopupMenuWidget*>(&s->_widgets[s->_tree_popup_menu]);
+    if (!pm) return false;
+    const auto& fw = s->_widgets[frame_index];
+    const float sc = tp_scale(s, frame_index);
+    // Empty band == standalone popup: mb_build_columns then puts level 0 at
+    // (root_x, root_y) rather than under a band item.
+    static const std::vector<MenuBandItem> kNoBand;
+    mb_build_columns(s, ctx, *pm, tp_px(fw.width, sc), tp_px(fw.height, sc), kNoBand,
+                     s->_menu_path, cols, tp_px(s->_tree_popup_x, sc),
+                     tp_px(s->_tree_popup_y, sc));
+    return !cols.empty();
+  }
+
+  void Session::paint_tree_popup(neui_render_ctx_t ctx, uint32_t frame_index)
+  {
+    if (!_backend) return;
+    std::vector<MenuColL> cols;
+    if (!tp_build(this, ctx, frame_index, cols)) return;
+    const float sc = tp_scale(this, frame_index);
+    const bool zoomed = sc != 1.0f && _backend->push_transform && _backend->scale &&
+                        _backend->pop_transform;
+    if (zoomed) {
+      _backend->push_transform(ctx);
+      _backend->scale(ctx, 1.0f / sc, 1.0f / sc);
+    }
+    paint_menu_columns(this, ctx, cols, _menu_path, _menu_hover_item);
+    if (zoomed) _backend->pop_transform(ctx);
+  }
+
+  // Shared front half of the click / hover handlers: decides whether this input
+  // belongs to the popup at all, and self-heals the two states that would
+  // otherwise leave an invisible modal grab swallowing input forever.
+  //
+  // Returns 0 = not ours (caller returns false and the input proceeds normally),
+  // 1 = ours, `cols` is built.
+  static int tp_claim(Session* s, uint32_t frame_index, std::vector<MenuColL>& cols)
+  {
+    if (!s->_tree_popup_active || !s->_backend) return 0;
+    // Input on a DIFFERENT frame: the popup loses its grab, exactly like an OS
+    // menu when another window is clicked. Dismiss, but do NOT consume - the
+    // click belongs to that other frame.
+    if (frame_index != s->_tree_popup_frame) { s->close_tree_popup(); return 0; }
+    if (!s->_widgets.exists(frame_index))    { s->close_tree_popup(); return 0; }
+    if (!tp_build(s, s->_widgets[frame_index].render_ctx, frame_index, cols)) {
+      // The menu widget is gone (destroyed, or no longer a POPUPMENU). Close so
+      // the popup cannot stay "active" with nothing to hit. Note this does NOT
+      // catch an EMPTIED menu: mb_build_columns still pushes one zero-row column
+      // for the root, so tp_build returns true. tree->clear closes the popup
+      // itself (t_clear in widgets.cpp) - that is where the empty case is
+      // handled, not here.
+      s->close_tree_popup();
+      return 0;
+    }
+    return 1;
+  }
+
+  bool Session::handle_tree_popup_click(uint32_t frame_index, float lx, float ly)
+  {
+    std::vector<MenuColL> cols;
+    if (!tp_claim(this, frame_index, cols)) return false;
+    const float sc = tp_scale(this, frame_index);   // popup px, as tp_build lays out
+    lx *= sc;
+    ly *= sc;
+
+    // Any click the popup consumes also owns the matching release, so the widget
+    // under the dismissed popup can't see an UP (and synthesise a CLICK).
+    _tree_popup_swallow_release = true;
+
+    for (size_t level = 0; level < cols.size(); ++level) {
+      const MenuColL& col = cols[level];
+      if (lx < col.x || lx >= col.x + col.w || ly < col.y || ly >= col.y + col.h)
+        continue;
+      for (const auto& r : col.rows) {
+        float ry = (float)(col.y + r.y);
+        if (ly < ry || ly >= ry + (float)r.h) continue;
+        if (lx < (float)(col.x + r.x) || lx >= (float)(col.x + r.x + r.w)) continue;
+        if (r.separator || !r.enabled) return true;   // consumed, no action
+        if (r.submenu) {
+          // Open the submenu: truncate the path to this level and descend.
+          _menu_path.resize(level + 1);
+          _menu_path.push_back(r.item_id);
+          _menu_hover_item = r.item_id;
+          if (void* native = _widgets[frame_index].native_handle)
+            platform_invalidate(native);
+          return true;
+        }
+        // A leaf: report it, then close. The item id is captured BEFORE closing
+        // because close_tree_popup clears the state the id came from.
+        const uint32_t menu_idx = _tree_popup_menu;
+        const uint32_t item_id  = r.item_id;
+        uint32_t menu_cmd = 0;
+        if (_widgets.exists(menu_idx)) {
+          if (auto* pm = dynamic_cast<PopupMenuWidget*>(&_widgets[menu_idx])) {
+            auto it = pm->menu_items.find(item_id);
+            if (it != pm->menu_items.end()) menu_cmd = it->second.menu_cmd;
+          }
+        }
+        close_tree_popup();
+
+        // Built-in command routing first (set_menu_cmd with NEUI_CMD_COPY and
+        // friends): offer it to the focused widget, exactly as the menu bar does.
+        //
+        // Deliberately NOT dispatch_menu_event / dispatch_menu_command: cmd ids
+        // restart at 0x8000 per menu widget, so the _menubars scan would hand a
+        // popup's pick to whichever menu BAR happens to hold the same id. And
+        // going through dispatch_menu_command even with the right widget would
+        // fire TREE_ITEM_ACTIVATED for EVERY row (every leaf carries a cmd_id,
+        // bound or not), making ITEM_SELECTED a redundant second event per pick.
+        // One pick, one client-facing event.
+        if (menu_cmd != 0 && menu_cmd < NEUI_CMD_USER_BASE)
+          invoke_focused_command(menu_cmd);
+        if (_widgets.exists(menu_idx)) {
+          neui_event_t ev = {};
+          ev.type              = NEUI_EVENT_ITEM_SELECTED;
+          ev.data.item.widget  = { _widgets[menu_idx].widget_id };
+          ev.data.item.index   = item_id;
+          dispatch_event(&ev);
+        }
+        return true;
+      }
+      return true;   // inside the column but between rows: swallow
+    }
+
+    // Outside every column: dismiss without picking. The click is consumed, as
+    // it is on both native platforms - dismissing a menu does not also actuate
+    // whatever was under the pointer.
+    close_tree_popup();
+    return true;
+  }
+
+  bool Session::handle_tree_popup_hover(uint32_t frame_index, float lx, float ly)
+  {
+    std::vector<MenuColL> cols;
+    if (!tp_claim(this, frame_index, cols)) return false;
+    const float sc = tp_scale(this, frame_index);
+    lx *= sc;
+    ly *= sc;
+
+    for (size_t level = 0; level < cols.size(); ++level) {
+      const MenuColL& col = cols[level];
+      if (lx < col.x || lx >= col.x + col.w || ly < col.y || ly >= col.y + col.h)
+        continue;
+      for (const auto& r : col.rows) {
+        float ry = (float)(col.y + r.y);
+        if (ly < ry || ly >= ry + (float)r.h) continue;
+        if (lx < (float)(col.x + r.x) || lx >= (float)(col.x + r.x + r.w)) continue;
+        if (r.separator) return true;
+        // Hover-to-open submenus, and hover-to-collapse a deeper cascade, which
+        // is what makes a cascading menu feel native.
+        std::vector<uint32_t> want(_menu_path.begin(),
+                                   _menu_path.begin() + (long)level + 1);
+        if (r.submenu && r.enabled) want.push_back(r.item_id);
+        if (want != _menu_path || _menu_hover_item != r.item_id) {
+          _menu_path       = want;
+          _menu_hover_item = r.item_id;
+          if (void* native = _widgets[frame_index].native_handle)
+            platform_invalidate(native);
+        }
+        return true;
+      }
+      return true;
+    }
+    return true;   // still inside the popup's modal-ish grab: swallow hover
+  }
+
+  bool Session::handle_tree_popup_key(uint32_t keycode)
+  {
+    if (!_tree_popup_active) return false;
+    if (keycode == NEUI_KEY_ESCAPE) { close_tree_popup(); return true; }
+    return false;
   }
 
   // Find the index of the visible menubar child of `frame_index` (0 if none).
@@ -4789,6 +6534,7 @@ namespace xpl_host
       for (auto& r : col.rows) {
         float ry = (float)(col.y + r.y);
         if (ly < ry || ly >= ry + (float)r.h) continue;
+        if (lx < (float)(col.x + r.x) || lx >= (float)(col.x + r.x + r.w)) continue;
         if (r.separator) return true;
         if (r.submenu) {
           if (!r.enabled) return true;
@@ -4854,6 +6600,7 @@ namespace xpl_host
       for (auto& r : col.rows) {
         float ry = (float)(col.y + r.y);
         if (ly < ry || ly >= ry + (float)r.h) continue;
+        if (lx < (float)(col.x + r.x) || lx >= (float)(col.x + r.x + r.w)) continue;
         if (r.separator) return true;
         std::vector<uint32_t> newpath(_menu_path.begin(),
                                       _menu_path.begin() + static_cast<std::ptrdiff_t>(level + 1));
@@ -5084,6 +6831,16 @@ namespace xpl_host
     ts.active = true;
     ts.start_ms = platform_now_ms();
 
+    // A toast is host-drawn chrome that is not a widget and not in the a11y
+    // tree, so a screen reader would otherwise never know it appeared - the
+    // window would flash a message that a blind user simply misses.
+    // <neui/d/a11y.h> promises the framework announces its own toasts; this is
+    // that. Not assertive: a toast is informational by definition, and
+    // interrupting whatever the user is listening to would be worse than
+    // waiting for a gap.
+    if (!ts.text.empty())
+      platform_a11y_announce(fw->native_handle, ts.text.c_str(), false);
+
     // Measure lines with the default text format. The xpl backend has no
     // measure-text-with-explicit-font seam beyond push_font, so we use
     // the default font that the toast paints with. Width = widest line +
@@ -5110,9 +6867,7 @@ namespace xpl_host
       }
     }
 
-    // In toast px: the frame's logical px times its zoom, so a zoomed
-    // frame's toast keeps its unzoomed size.
-    int max_box_w = static_cast<int>(static_cast<float>(fw->width) * fw->zoom *
+    int max_box_w = static_cast<int>(static_cast<float>(fw->width) *
                                       TOAST_MAX_FRAME_FRAC);
     if (max_box_w < 80) max_box_w = 80;
     int w_px = static_cast<int>(std::ceil(max_w)) + 2 * TOAST_PAD_X;
@@ -5135,9 +6890,8 @@ namespace xpl_host
     platform_invalidate(fw->native_handle);
   }
 
-  // Compute the toast rect (in frame-local toast px: logical px times the
-  // frame's zoom) for a frame's current ToastState. base_y is in logical px.
-  // Returns false if no toast is active.
+  // Compute the toast rect (in frame-local logical px) for a frame's
+  // current ToastState. Returns false if no toast is active.
   static bool toast_current_rect(FrameWidget* fw, int base_y,
                                   int& out_x, int& out_y,
                                   int& out_w, int& out_h)
@@ -5160,13 +6914,12 @@ namespace xpl_host
       float e     = p * p * p;
       slide_t     = 1.0f - e;
     }
-    base_y      = static_cast<int>(static_cast<float>(base_y) * fw->zoom + 0.5f);
     int rest_y  = base_y + ts.line_h;
     int start_y = base_y - ts.height;
     out_y = static_cast<int>(static_cast<float>(start_y) +
             (static_cast<float>(rest_y) - static_cast<float>(start_y)) *
             slide_t);
-    out_x = (static_cast<int>(static_cast<float>(fw->width) * fw->zoom + 0.5f) - ts.width) / 2;
+    out_x = (fw->width - ts.width) / 2;
     if (out_x < 0) out_x = 0;
     out_w = ts.width;
     out_h = ts.height;
@@ -5181,8 +6934,6 @@ namespace xpl_host
     int rx, ry, rw, rh;
     if (!toast_current_rect(fw, frame_top_inset(frame_widget_idx), rx, ry, rw, rh))
       return false;
-    lx *= fw->zoom;
-    ly *= fw->zoom;
     if (lx < static_cast<float>(rx) || lx >= static_cast<float>(rx + rw) ||
         ly < static_cast<float>(ry) || ly >= static_cast<float>(ry + rh))
       return false;
@@ -5243,10 +6994,6 @@ namespace xpl_host
     // base_y is 0 on native-menu platforms / menubar-less frames.
     int cx, cy, cw, ch;
     widget_client_rect(frame_widget_idx, &cx, &cy, &cw, &ch);
-    // To toast px, so a zoomed frame's toast keeps its unzoomed size.
-    float zoom = fw->zoom;
-    auto zoomed = [zoom](int v) { return static_cast<int>(static_cast<float>(v) * zoom + 0.5f); };
-    cx = zoomed(cx); cy = zoomed(cy); cw = zoomed(cw); ch = zoomed(ch);
     int base_y   = cy;
 
     // Resting position: top edge sits `line_h` below the client-area top
@@ -5257,18 +7004,13 @@ namespace xpl_host
     int top_y    = static_cast<int>(static_cast<float>(start_y) +
                     (static_cast<float>(rest_y) - static_cast<float>(start_y)) *
                     slide_t);
-    int left_x   = (zoomed(fw->width) - ts.width) / 2;
+    int left_x   = (fw->width - ts.width) / 2;
     if (left_x < 0) left_x = 0;
 
     if (!_backend->push_alpha || !_backend->pop_alpha) {
       // Alpha stack is required for the cross-fade; without it skip painting
       // rather than dump a fully opaque toast on top of widgets.
       return;
-    }
-    bool scaled = zoom != 1.0f && _backend->push_transform && _backend->scale;
-    if (scaled) {
-      _backend->push_transform(ctx);
-      _backend->scale(ctx, 1.0f / zoom, 1.0f / zoom);
     }
     // Clip to the client area so the fly-in never paints over the menubar band
     // (the toast is painted after the band). No-op-equivalent full-window clip
@@ -5326,7 +7068,6 @@ namespace xpl_host
 
     _backend->pop_alpha(ctx);
     if (clipped) _backend->pop_clip(ctx);
-    if (scaled) _backend->pop_transform(ctx);
   }
 
   void Session::open_combo(uint32_t idx)
@@ -7410,7 +9151,7 @@ namespace xpl_host
         if (new_w > 5000) new_w = 5000;
         model.columns[(size_t)model.column_resize_col].width = new_w;
         grid_clamp_scroll(model, vp, cfg.row_h);
-        platform_set_cursor(NEUI_CURSOR_EW_RESIZE);
+        session->set_cursor_override(widget_id & 0xffff, NEUI_CURSOR_EW_RESIZE);
         repaint();
         return true;
       }
@@ -7421,7 +9162,7 @@ namespace xpl_host
         model.column_resize_col     = -1;
         model.column_resize_start_x = 0;
         model.column_resize_start_w = 0;
-        platform_set_cursor(NEUI_CURSOR_DEFAULT);
+        session->set_cursor_override(widget_id & 0xffff, NEUI_CURSOR_DEFAULT);
         if (new_w != old_w) xpl_grid_fire_column_resized(*this, col, old_w, new_w);
         repaint();
         return true;
@@ -7480,9 +9221,13 @@ namespace xpl_host
     if (event->type == NEUI_EVENT_MOUSE_MOVE) {
       GridHit hit = grid_hit_test(model, vp, cfg.row_h,
                                     width, height, lx, ly);
-      platform_set_cursor(hit.region == GridHitRegion::HeaderDivider
-                            ? NEUI_CURSOR_EW_RESIZE
-                            : NEUI_CURSOR_DEFAULT);
+      // DEFAULT here clears the override rather than forcing an arrow, so a
+      // client's NEUI_ATTR_CURSOR on the GRID (or an ancestor) shows through
+      // everywhere except the resize band.
+      session->set_cursor_override(widget_id & 0xffff,
+                                     hit.region == GridHitRegion::HeaderDivider
+                                       ? NEUI_CURSOR_EW_RESIZE
+                                       : NEUI_CURSOR_DEFAULT);
       return false;
     }
 
@@ -7515,7 +9260,7 @@ namespace xpl_host
           model.column_resize_start_x = event->data.mouse.x;
           model.column_resize_start_w = model.columns[(size_t)hit.col].width;
           model.column_resize_old_w   = model.column_resize_start_w;
-          platform_set_cursor(NEUI_CURSOR_EW_RESIZE);
+          session->set_cursor_override(widget_id & 0xffff, NEUI_CURSOR_EW_RESIZE);
           return true;
         }
         return true;
@@ -7618,6 +9363,130 @@ namespace xpl_host
     }
 
     return false;
+  }
+
+  // -------------------------------------------------------------------------
+  // Accessibility support seams (consumed by a11y_adapter.cpp)
+  //
+  // Two things the adapter needs live here rather than in its own translation
+  // unit: the painted row metrics (file-static, right next to the paint code
+  // they belong to) and the menu cascade geometry (built by mb_build_band /
+  // mb_build_columns over anonymous-namespace layout types). Both are exposed
+  // as accessors so there is exactly ONE definition of each - a second copy in
+  // the adapter would drift the first time either side was touched, and the
+  // failure mode is an AT pointing at the wrong place on screen, which is worse
+  // than not reporting a position at all.
+
+  int list_row_height()         { return LIST_ITEM_H(); }
+  int tree_row_height()         { return TREE_ROW_H(); }
+  int menubar_band_height()     { return MENUBAR_BAND_H; }
+  int scrollbar_gutter_width()  { return SCROLLBAR_W; }
+
+  void Session::collect_menu_elements(uint32_t menu_idx,
+                                      std::vector<MenuElementRect>& out)
+  {
+    if (!_backend || !_widgets.exists(menu_idx)) return;
+    auto* mbp = dynamic_cast<MenubarWidget*>(&_widgets[menu_idx]);
+    if (!mbp) return;
+    const MenubarWidget& mb = *mbp;
+
+    const bool is_popup = !mb.is_menubar();
+    // A real menu BAR only has an on-screen presence where this host draws the
+    // band itself. Where the OS owns the menu it also owns its accessibility,
+    // and publishing our own copy would have the AT read every menu twice.
+    if (!is_popup && !platform_menubar_in_frame()) return;
+    // ...and only while it is visible, matching frame_menubar() / paint_menubar.
+    // A hidden menubar reserves no band (frame_top_inset returns 0), so its
+    // children occupy y 0..band_h - reporting band items there would put phantom
+    // menus on top of real widgets.
+    if (!is_popup && !mb.visible) return;
+
+    // Which frame's surface is this menu drawn on, and is its cascade open?
+    uint32_t frame_index = 0;
+    std::vector<uint32_t> path;
+    if (is_popup) {
+      if (!_tree_popup_active || _tree_popup_menu != menu_idx) return;
+      frame_index = _tree_popup_frame;
+      path        = _menu_path;
+    } else {
+      frame_index = frame_of(menu_idx);
+      if (_menu_open && _menu_bar == menu_idx) path = _menu_path;
+    }
+    if (frame_index == 0 || !_widgets.exists(frame_index)) return;
+
+    const auto& fw = _widgets[frame_index];
+    neui_render_ctx_t ctx = fw.render_ctx;
+    // Text measurement needs a context. Reporting nothing beats reporting rects
+    // measured as zero-width, which would collapse every item onto one point.
+    if (!ctx) return;
+
+    // Shared lookup: the geometry structs hold COPIES of the item text, but the
+    // rows we emit must point at storage that outlives this call, so the text
+    // comes from the item model itself.
+    auto item_text = [&mb](uint32_t id, const char** text, const char** shortcut) {
+      auto it = mb.menu_items.find(id);
+      if (it == mb.menu_items.end()) return;
+      if (text)     *text     = it->second.text.c_str();
+      if (shortcut) *shortcut = it->second.shortcut.c_str();
+    };
+
+    std::vector<MenuBandItem> band;
+    if (!is_popup) {
+      mb_build_band(this, ctx, mb, band);
+      const int band_h = MENUBAR_BAND_H;
+      for (const auto& b : band) {
+        MenuElementRect e;
+        e.item_id     = b.item_id;
+        e.parent_item = 0;
+        e.x = b.x; e.y = 0; e.w = b.w; e.h = band_h;
+        e.has_submenu = menu_item_has_children(mb, b.item_id);
+        // Same rule mb_build_columns applies to a dropdown row: a submenu
+        // holder reports its own flag (a validate() verdict is about a command,
+        // and a submenu has none), a leaf goes through the full verdict.
+        auto bit = mb.menu_items.find(b.item_id);
+        e.enabled = e.has_submenu ? (bit != mb.menu_items.end() && bit->second.enabled)
+                                  : menu_item_enabled(mb, b.item_id);
+        e.expanded    = !path.empty() && path[0] == b.item_id;
+        item_text(b.item_id, &e.text, &e.shortcut);
+        out.push_back(e);
+      }
+    }
+
+    if (path.empty()) return;
+
+    // The open cascade. mb_build_columns is the same call the paint and
+    // hit-test paths make, with the same arguments, so the reported rows are
+    // the rows on screen by construction.
+    std::vector<MenuColL> cols;
+    float sc = 1.0f;   // popup px per logical px (tp_scale): 1 for a menu bar's cascade
+    if (is_popup) {
+      sc = tp_scale(this, frame_index);
+      static const std::vector<MenuBandItem> kNoBand;
+      mb_build_columns(this, ctx, mb, tp_px(fw.width, sc), tp_px(fw.height, sc), kNoBand,
+                       path, cols, tp_px(_tree_popup_x, sc), tp_px(_tree_popup_y, sc));
+    } else {
+      mb_build_columns(this, ctx, mb, fw.width, fw.height, band, path, cols);
+    }
+    auto logical = [sc](int px) { return static_cast<int>(static_cast<float>(px) / sc + 0.5f); };
+
+    for (size_t level = 0; level < cols.size(); ++level) {
+      const MenuColL& col = cols[level];
+      for (const auto& r : col.rows) {
+        MenuElementRect e;
+        e.item_id     = r.item_id;
+        e.parent_item = col.parent_item;
+        e.x = logical(col.x + r.x); e.y = logical(col.y + r.y);
+        e.w = logical(r.w);         e.h = logical(r.h);
+        e.enabled     = r.enabled;
+        e.checked     = r.checked;
+        e.has_submenu = r.submenu;
+        e.separator   = r.separator;
+        // A row whose submenu is the NEXT open column is the expanded one.
+        e.expanded    = (level + 1 < path.size()) && path[level + 1] == r.item_id;
+        item_text(r.item_id, &e.text, &e.shortcut);
+        out.push_back(e);
+      }
+    }
   }
 
 } // namespace xpl_host

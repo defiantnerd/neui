@@ -775,7 +775,7 @@ TEST_CASE("gesture: DRAG_VERTICAL brackets grab..release around the changes")
   neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
   down.data.mouse = { wid, 10, 50, NEUI_MK_LBUTTON };
   CHECK(behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 50));
-  CHECK_EQ(log.recs.size(), (size_t)1);
+  REQUIRE_EQ(log.recs.size(), (size_t)1);
   CHECK_EQ(log.recs[0].kind, 'B');
   CHECK_EQ(log.recs[0].attr, std::string(NEUI_PARAM_VALUE));
   CHECK_APPROX(log.recs[0].value, 0.0);   // value at grab
@@ -783,13 +783,13 @@ TEST_CASE("gesture: DRAG_VERTICAL brackets grab..release around the changes")
   neui_event_t move = { NEUI_EVENT_MOUSE_MOVE };
   move.data.mouse = { wid, 10, 40, NEUI_MK_LBUTTON };  // up 10px -> +0.1 (sweep 100)
   CHECK(behavior_dispatch_mouse(ba, rt, ctx, &move, 10, 40));
-  CHECK_EQ(log.recs.size(), (size_t)2);
+  REQUIRE_EQ(log.recs.size(), (size_t)2);
   CHECK_EQ(log.recs[1].kind, 'A');        // the change lands inside the pair
 
   neui_event_t up = { NEUI_EVENT_MOUSE_BUTTON_UP };
   up.data.mouse = { wid, 10, 40, 0 };
   CHECK(behavior_dispatch_mouse(ba, rt, ctx, &up, 10, 40));
-  CHECK_EQ(log.recs.size(), (size_t)3);
+  REQUIRE_EQ(log.recs.size(), (size_t)3);
   CHECK_EQ(log.recs[2].kind, 'E');
   CHECK_APPROX(log.recs[2].value, bag.get_float(NEUI_PARAM_VALUE, -1.0f));
 }
@@ -812,7 +812,7 @@ TEST_CASE("gesture: a grab with no movement still pairs (begin + end)")
   up.data.mouse = { wid, 10, 10, 0 };
   behavior_dispatch_mouse(ba, rt, ctx, &up, 10, 10);
 
-  CHECK_EQ(log.recs.size(), (size_t)2);
+  REQUIRE_EQ(log.recs.size(), (size_t)2);
   CHECK_EQ(log.recs[0].kind, 'B');
   CHECK_EQ(log.recs[1].kind, 'E');
 }
@@ -833,7 +833,7 @@ TEST_CASE("gesture: DRAG_BIAXIAL opens and closes one pair per target")
   neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
   down.data.mouse = { wid, 10, 10, NEUI_MK_LBUTTON };
   behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 10);
-  CHECK_EQ(log.recs.size(), (size_t)2);
+  REQUIRE_EQ(log.recs.size(), (size_t)2);
   CHECK_EQ(log.recs[0].kind, 'B');
   CHECK_EQ(log.recs[0].attr, std::string(NEUI_PARAM_VALUE));
   CHECK_EQ(log.recs[1].kind, 'B');
@@ -842,7 +842,7 @@ TEST_CASE("gesture: DRAG_BIAXIAL opens and closes one pair per target")
   neui_event_t up = { NEUI_EVENT_MOUSE_BUTTON_UP };
   up.data.mouse = { wid, 10, 10, 0 };
   behavior_dispatch_mouse(ba, rt, ctx, &up, 10, 10);
-  CHECK_EQ(log.recs.size(), (size_t)4);
+  REQUIRE_EQ(log.recs.size(), (size_t)4);
   CHECK_EQ(log.recs[2].kind, 'E');
   CHECK_EQ(log.recs[2].attr, std::string(NEUI_PARAM_VALUE));
   CHECK_EQ(log.recs[3].kind, 'E');
@@ -869,7 +869,7 @@ TEST_CASE("gesture: handler removed mid-drag still closes from the snapshot")
   neui_event_t move = { NEUI_EVENT_MOUSE_MOVE };
   move.data.mouse = { wid, 10, 5, NEUI_MK_LBUTTON };
   CHECK_FALSE(behavior_dispatch_mouse(ba, rt, ctx, &move, 10, 5));
-  CHECK_EQ(log.recs.size(), (size_t)2);
+  REQUIRE_EQ(log.recs.size(), (size_t)2);
   CHECK_EQ(log.recs[1].kind, 'E');
   CHECK_EQ(log.recs[1].attr, std::string(NEUI_PARAM_VALUE));
   CHECK_FALSE(rt.dragging);
@@ -890,7 +890,7 @@ TEST_CASE("gesture: WHEEL is an implicit pair around an actual change")
   neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
   wheel.data.wheel = { wid, 10, 10, -1 };   // wheel down = increase
   CHECK(behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10));
-  CHECK_EQ(log.recs.size(), (size_t)3);
+  REQUIRE_EQ(log.recs.size(), (size_t)3);
   CHECK_EQ(log.recs[0].kind, 'B');
   CHECK_APPROX(log.recs[0].value, 0.0);
   CHECK_EQ(log.recs[1].kind, 'A');
@@ -916,6 +916,106 @@ TEST_CASE("gesture: WHEEL that cannot move the value emits nothing")
   CHECK_EQ(log.recs.size(), (size_t)0);
 }
 
+// ---------------------------------------------------------------------------
+// WHEEL + neui_event_wheel_t::buttonmap -> fine_modifier.
+//
+// Two rules, both documented on the WHEEL branch in behavior_runtime.h:
+//   - a horizontal notch WITH Shift is the platform layer's flipped vertical
+//     notch, so the negation is undone (the flip stays in the platform layer
+//     by design);
+//   - with `steps` detents a notch advances exactly one detent and fine is
+//     ignored (matching the native KNOB, and avoiding snap starvation).
+// ---------------------------------------------------------------------------
+
+namespace {
+  // One physical wheel-UP notch as the win32 / macOS xpl hosts actually emit
+  // it: Shift both sets MK_SHIFT and makes the layer flip+negate the notch.
+  float wheel_up_once(bool shift_held, float step, int steps_attr,
+                       float start = 0.5f)
+  {
+    BehaviorAsset ba;
+    uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
+    behavior_get_handler(ba, slot)->step = step;
+    BehaviorRuntime rt;
+    AttrBag bag;
+    bag.set_float(NEUI_PARAM_VALUE, start);
+    if (steps_attr > 0) bag.set_int(NEUI_ATTR_STEPS, steps_attr);
+    GestureLog log;
+    auto ctx = gesture_ctx(bag, log);
+    neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
+    wheel.data.wheel = { { 1 }, 10, 10,
+                          shift_held ? -1 : 1,
+                          shift_held ? 1 : 0,
+                          shift_held ? (uint32_t)NEUI_MK_SHIFT : 0u };
+    behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10);
+    return bag.get_float(NEUI_PARAM_VALUE, -1.0f);
+  }
+}
+
+TEST_CASE("WHEEL: a plain notch advances by the full step")
+{
+  CHECK_APPROX(wheel_up_once(/*shift*/false, 0.1f, /*steps*/0), 0.4);
+}
+
+TEST_CASE("WHEEL: Shift scales by fine_scale and does NOT reverse direction")
+{
+  // Same direction as the unmodified notch (0.5 -> below), just smaller:
+  // 0.1 * 0.2 = 0.02. Before the flip was undone this moved UP to 0.6.
+  CHECK_APPROX(wheel_up_once(/*shift*/true, 0.1f, /*steps*/0), 0.48);
+}
+
+TEST_CASE("WHEEL: a genuine horizontal notch (no Shift) is unchanged")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
+  behavior_get_handler(ba, slot)->step = 0.1f;
+  BehaviorRuntime rt;
+  AttrBag bag;
+  bag.set_float(NEUI_PARAM_VALUE, 0.5f);
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+  // Tilt-wheel / trackpad: is_horizontal with no Shift -> no un-negation.
+  neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
+  wheel.data.wheel = { { 1 }, 10, 10, 1, 1, 0 };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10));
+  CHECK_APPROX(bag.get_float(NEUI_PARAM_VALUE, -1.0f), 0.4);
+}
+
+TEST_CASE("WHEEL: with steps, a notch moves exactly one detent and ignores fine")
+{
+  // steps=11 over [0,1] -> quantum 0.1. Coarse and fine both advance one
+  // detent; step (0.1) and fine_scale (0.2) are both irrelevant here.
+  CHECK_APPROX(wheel_up_once(/*shift*/false, 0.1f, /*steps*/11), 0.4);
+  CHECK_APPROX(wheel_up_once(/*shift*/true,  0.1f, /*steps*/11), 0.4);
+}
+
+TEST_CASE("WHEEL: stepped fine no longer starves (the regression that blocked this)")
+{
+  // The exact config that would round back to the start under a naive
+  // fine multiply: steps=11 (quantum 0.1), step 0.1, fine_scale 0.2 ->
+  // 0.02 < quantum/2, so the snap would return the value unchanged forever.
+  CHECK_APPROX(wheel_up_once(/*shift*/true, 0.1f, /*steps*/11, 0.5f), 0.4);
+  // ...and a step far smaller than the quantum still advances one detent.
+  CHECK_APPROX(wheel_up_once(/*shift*/true, 0.001f, /*steps*/11, 0.5f), 0.4);
+}
+
+TEST_CASE("WHEEL: multi-line notch multiplies (win32 SPI_GETWHEELSCROLLLINES)")
+{
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
+  behavior_get_handler(ba, slot)->step = 0.1f;
+  BehaviorRuntime rt;
+  AttrBag bag;
+  bag.set_float(NEUI_PARAM_VALUE, 0.9f);
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+  // Shift-flipped 3-line notch: un-negated to +3, fine 0.2 -> 3*0.1*0.2 = 0.06.
+  neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
+  wheel.data.wheel = { { 1 }, 10, 10, -3, 1, NEUI_MK_SHIFT };
+  CHECK(behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10));
+  CHECK_APPROX(bag.get_float(NEUI_PARAM_VALUE, -1.0f), 0.84);
+}
+
 TEST_CASE("gesture: KEY_STEP pairs per keypress")
 {
   BehaviorAsset ba;
@@ -928,7 +1028,7 @@ TEST_CASE("gesture: KEY_STEP pairs per keypress")
   auto ctx = gesture_ctx(bag, log);
 
   CHECK(behavior_dispatch_key(ba, rt, ctx, NEUI_KEY_RIGHT, 0));
-  CHECK_EQ(log.recs.size(), (size_t)3);
+  REQUIRE_EQ(log.recs.size(), (size_t)3);
   CHECK_EQ(log.recs[0].kind, 'B');
   CHECK_EQ(log.recs[1].kind, 'A');
   CHECK_EQ(log.recs[2].kind, 'E');
@@ -956,7 +1056,7 @@ TEST_CASE("gesture: CLICK_TOGGLE pairs around the flip")
   neui_event_t down = { NEUI_EVENT_MOUSE_BUTTON_DOWN };
   down.data.mouse = { wid, 10, 10, NEUI_MK_LBUTTON };
   CHECK(behavior_dispatch_mouse(ba, rt, ctx, &down, 10, 10));
-  CHECK_EQ(log.recs.size(), (size_t)3);
+  REQUIRE_EQ(log.recs.size(), (size_t)3);
   CHECK_EQ(log.recs[0].kind, 'B');
   CHECK_EQ(log.recs[1].kind, 'A');
   CHECK_EQ(log.recs[2].kind, 'E');
@@ -978,7 +1078,7 @@ TEST_CASE("gesture: CONTEXT_RESET pairs only when the reset moves the value")
   neui_event_t rdown = { NEUI_EVENT_MOUSE_RBUTTON_DOWN };
   rdown.data.mouse = { wid, 10, 10, 0 };
   CHECK(behavior_dispatch_mouse(ba, rt, ctx, &rdown, 10, 10));
-  CHECK_EQ(log.recs.size(), (size_t)3);   // 0.5 -> default (min = 0)
+  REQUIRE_EQ(log.recs.size(), (size_t)3);   // 0.5 -> default (min = 0)
   CHECK_EQ(log.recs[0].kind, 'B');
   CHECK_APPROX(log.recs[0].value, 0.5);
   CHECK_EQ(log.recs[1].kind, 'A');

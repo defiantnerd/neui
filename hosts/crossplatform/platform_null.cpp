@@ -44,12 +44,13 @@ namespace xpl_host
                                 int /*x*/, int /*y*/, int /*w*/, int /*h*/,
                                 uint32_t /*dpi*/) {}
 
-  void platform_apply_zoom(WidgetData& /*wd*/) {}
   void platform_post_close(void* /*native_handle*/) {}
 
   float platform_get_scale_factor(void* /*native_handle*/) { return 1.0f; }
 
   void platform_invalidate(void* /*native_handle*/) {}
+  // No windows and no paint path, so there is nothing to force.
+  void platform_force_paint(void* /*native_handle*/) {}
 
   bool platform_run() { return true; }
   bool platform_pump_once() { return true; }
@@ -128,6 +129,66 @@ namespace xpl_host
 
   void     platform_set_cursor(int /*kind*/)                                  {}
 
+  // No pointer warping: the null platform has no mouse cursor to pin, so relative
+  // (unbounded) pointer mode reports unsupported and NEUI_API_POINTER's
+  // begin_relative returns false. A client's drag then behaves as an ordinary
+  // bounded one rather than silently doing nothing.
+  bool platform_supports_relative_pointer()                                   { return false; }
+  bool platform_begin_relative_pointer(void*, int*, int*)                     { return false; }
+  void platform_end_relative_pointer(void*, int, int)                         {}
+  // No event loop on the null platform, so nothing can drive a tick; add_timer
+  // still returns an id and the table stays consistent, it just never fires.
+  // null: no input at all, so the zoom would only skew paint.
+  bool platform_supports_ui_scale() { return false; }
+  // No surface, no input: nothing to route.
+  bool platform_supports_tree_popup() { return false; }
+
+  // Popup surfaces: no windows at all here, so the in-frame backing is the only
+  // possible one and every seam below is inert. The TYPE still exists and
+  // NEUI_API_POPUP still answers - see docs/popup-surfaces.md for why a client
+  // must never have to ask "does this platform have popups" and fork its UI.
+  bool platform_supports_popup_surface() { return false; }
+
+  void platform_get_work_area(void* /*near_native*/,
+                              int* x, int* y, int* w, int* h)
+  {
+    // A plausible box rather than zeros: the contract is that clamping never
+    // collapses to 0x0, even where there is no screen to measure.
+    if (x) *x = 0;
+    if (y) *y = 0;
+    if (w) *w = 1024;
+    if (h) *h = 768;
+  }
+
+  void platform_client_to_screen(void* /*native_handle*/, int lx, int ly,
+                                 int* sx, int* sy)
+  {
+    if (sx) *sx = lx;
+    if (sy) *sy = ly;
+  }
+
+  void platform_get_pointer_pos(int* sx, int* sy)
+  {
+    if (sx) *sx = 0;
+    if (sy) *sy = 0;
+  }
+
+  void platform_create_popup_surface(Session*, uint32_t, WidgetData&, void*) {}
+  void platform_show_popup_surface(void*, void*, int, int, int, int, float) {}
+  void platform_hide_popup_surface(void*, void*) {}
+  void platform_popup_grab_begin(Session*, void*) {}
+  void platform_popup_grab_end(Session*) {}
+
+  void     platform_timer_start(Session*, uint32_t)                            {}
+  void     platform_timer_stop(Session*)                                       {}
+
+  // Accessibility: no surface, so no provider and nothing to notify. The
+  // declarations a client makes are still stored (they live in the widget's
+  // attribute bag) and simply go unread.
+  void platform_a11y_notify(void*, uint32_t, int)                              {}
+  void platform_a11y_announce(void*, const char*, bool)                        {}
+  bool platform_a11y_is_listening()                                { return false; }
+
   // Toast animation - no platform timer on the null host; toasts will
   // still paint a single frame if the client invalidates manually.
   void platform_start_toast_animation(void* /*native_handle*/)                {}
@@ -137,6 +198,12 @@ namespace xpl_host
   // No surface to show a message box on; 0 = failure per the contract.
   int platform_message_box(void* /*native_handle*/, const char* /*text*/,
                            const char* /*caption*/, uint32_t /*flags*/)       { return 0; }
+
+  // No file-dialog surface either. -1 (not 0) so the client can tell this
+  // apart from a cancel and fall back to its own path entry.
+  int platform_file_dialog(void* /*native_handle*/, int /*save*/,
+                           const neui_file_dialog_t* /*desc*/,
+                           neui_file_path_cb /*cb*/, void* /*userdata*/)      { return -1; }
 
 } // namespace xpl_host
 

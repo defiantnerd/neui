@@ -20,10 +20,16 @@
 #import <objc/runtime.h>
 
 #include <cstring>
+#include <cmath>
 
 #include "../shared/objc_class_names.h"   // NEUI_OBJC_SUFFIX
 #include "host.h"
 #include "platform.h"
+// NSAccessibility provider (NEUI_API_A11Y). Lives in its own TU - see the
+// header - so the NEUIView overrides below stay one line each.
+#include "a11y_macos.h"
+
+#include <unordered_map>
 #include "../shared/macos/modal_pump_macos.h"
 #include "../../backends/cg/cg_backend.h"
 #include "../shared/macos/clipboard_macos.h"
@@ -38,6 +44,7 @@
 #include "../shared/macos/menubar_macos.h"
 #include "../shared/macos/theme_provider_macos.h"
 #include "../shared/macos/message_box_macos.h"
+#include "../shared/macos/file_dialog_macos.h"
 
 // ---------------------------------------------------------------------------
 // Forward declarations (Objective-C classes).
@@ -46,6 +53,13 @@
 @class NEUIWindowDelegate;
 
 namespace xpl_host { class Session; class WidgetData; }
+
+// Cursor state, defined with the rest of the cursor code far below but needed
+// up here by NEUIView's -cursorUpdate:.
+namespace xpl_host {
+  extern int  g_cursor_kind;
+  void        mac_apply_cursor(int kind);
+}
 
 // Key + modifier + button translation primitives now live in
 // hosts/shared/macos/keys_macos.h and are shared with the native macOS host.
@@ -111,36 +125,63 @@ void wake_app_event_pump()
   // Toast animation heartbeat. 60 Hz tick that just invalidates the view;
   // paint_toast self-terminates when the toast lifetime expires.
   NSTimer*           _toast_timer;
+  // Last LOGICAL size reported through NEUI_EVENT_RESIZE. Seeded at view
+  // creation so the create-time sizing is not reported, and compared (rather
+  // than the view's previous frame) so a pure ZOOM change - which moves the
+  // native frame while the logical size is unchanged - fires no RESIZE, while a
+  // real resize at any zoom still does. Comparing against wd.width/height would
+  // NOT work: widget_set_size updates those BEFORE calling the platform layer,
+  // so every programmatic resize would suppress itself.
+  int                _reported_w;
+  int                _reported_h;
+  // Set while platform_set_window_pos is applying OUR OWN geometry. Such a
+  // resize must neither report a RESIZE (the client asked for it, and
+  // wd.width/height are already authoritative) nor recompute the logical size
+  // by dividing the native size back out: `logical -> native -> logical` is
+  // lossy at fractional zoom. 402 px at zoom 0.75 rounds to 302 native, which
+  // divides back to 403 - a silent 1 px growth per call plus a spurious RESIZE.
+  BOOL               _self_resizing;
 }
 - (void)toastStart;
 - (void)toastStop;
-- (void)neuiApplyZoom;
+- (BOOL)isPopupSurfaceView;
+- (float)frameZoom;
+- (void)seedReportedSize:(int)w height:(int)h;
+- (void)beginSelfResize:(int)w height:(int)h;
+- (void)endSelfResize;
 @end
 
 @implementation NEUIView
 
+- (void)seedReportedSize:(int)w height:(int)h
+{
+  _reported_w = w;
+  _reported_h = h;
+}
+
+// True when this view is the content view of a NEUI_W_POPUPSURFACE frame. Two
+// things key off it: the tracking-area mode (a non-activating panel is never the
+// key window) and the dismiss-on-owner-moved hooks, which must not fire for the
+// popup's own geometry.
+- (BOOL)isPopupSurfaceView
+{
+  if (!session) return NO;
+  xpl_host::WidgetData* wd = session->get_widget(widget_index);
+  return wd && dynamic_cast<xpl_host::PopupSurfaceWidget*>(wd) != nullptr;
+}
+
+- (void)beginSelfResize:(int)w height:(int)h
+{
+  // Record the INTENDED logical size, not whatever the native round-trip
+  // produces, so the next externally-driven resize compares against the truth.
+  _self_resizing = YES;
+  _reported_w = w;
+  _reported_h = h;
+}
+
+- (void)endSelfResize { _self_resizing = NO; }
+
 - (BOOL)isFlipped { return YES; }
-
-// The frame's zoom (NEUI_ATTR_ZOOM): the bounds keep the frame's logical
-// size while the frame (the view's size in the window) is that times the
-// zoom, so drawRect:'s CTM and every convertPoint: carry the zoom. Re-applied
-// on every frame size change, since AppKit resizes the bounds along with it.
-- (void)neuiApplyZoom
-{
-  float zoom = 1.0f;
-  if (session) {
-    if (xpl_host::WidgetData* wd = session->get_widget(widget_index)) zoom = wd->zoom;
-  }
-  NSSize f = self.frame.size;
-  NSSize b = NSMakeSize(f.width / zoom, f.height / zoom);
-  if (!NSEqualSizes(self.bounds.size, b)) [self setBoundsSize:b];
-}
-
-- (void)setFrameSize:(NSSize)size
-{
-  [super setFrameSize:size];
-  [self neuiApplyZoom];
-}
 
 - (BOOL)isOpaque  { return YES; }
 
@@ -179,12 +220,81 @@ void wake_app_event_pump()
   uint32_t dpi = (uint32_t)(96.0 * scale + 0.5);
   if (dpi != wd->dpi) {
     wd->dpi = dpi;
-    if (wd->render_ctx) {
-      if (auto* backend = xpl_host::platform_get_backend())
-        backend->update_dpi(wd->render_ctx, wd->client_dpi());
-    }
     [self setNeedsDisplay:YES];
   }
+}
+
+// Frame resize -> NEUI_EVENT_RESIZE with the new client size in logical px.
+// Hooked on the VIEW rather than the window delegate on purpose: NEUIView is
+// the content view of a standalone frame (AppKit resizes it with the window)
+// AND the root subview of a DAW-embedded PLUGWINDOW, where there is no
+// NSWindow of ours to get a windowDidResize: from. One hook covers both.
+// Mirrors the win32 xpl WM_SIZE path and the macOS-native windowDidResize:.
+//
+// The view is isFlipped with a backing-scale CTM, so its size is already in
+// logical points (= logical px at 96 DPI). Programmatic resizes report too,
+// matching win32 (SetWindowPos also raises WM_SIZE).
+- (void)setFrameSize:(NSSize)newSize
+{
+  const NSSize old = self.frame.size;
+  [super setFrameSize:newSize];
+
+  // session is nil until install_view_and_context / the embed path assigns it,
+  // so the initWithFrame: sizing never reaches a client.
+  if (!session) return;
+  // Our own geometry application - beginSelfResize already recorded the
+  // intended logical size, and wd.width/height are authoritative.
+  if (_self_resizing) return;
+
+  // Divide out the frame zoom. The view's frame is in ZOOMED points (that is
+  // what platform_set_window_pos sets it to), but wd.width/height and every
+  // client-facing size are LOGICAL px at 96 DPI by design - the zoom exists
+  // only in the paint transform and the platform conversions. Storing the
+  // zoomed value here would make get_client_rect report 800x480 at zoom 2.0
+  // for a 400x240 frame, and a reset to 1.0 would not restore the original.
+  const float z = [self frameZoom];
+  const int w_log = (int)((float)newSize.width  / (z > 0.0f ? z : 1.0f) + 0.5f);
+  const int h_log = (int)((float)newSize.height / (z > 0.0f ? z : 1.0f) + 0.5f);
+  if (w_log == _reported_w && h_log == _reported_h) return;
+  _reported_w = w_log;
+  _reported_h = h_log;
+  (void)old;
+
+  xpl_host::WidgetData* wd = session->get_widget(widget_index);
+  if (!wd) return;
+  wd->width  = w_log;
+  wd->height = h_log;
+
+  // An owner being resized dismisses any open popup surface. A picker positioned
+  // against the old geometry is wrong the moment the window changes shape, and
+  // re-placing it mid-resize is worse than closing it - which is what every OS
+  // menu does. Skipped for the popup's own views and for our own placement.
+  if (!xpl_host::popup_placing() && session->popup_surface_open() &&
+      ![self isPopupSurfaceView]) {
+    session->close_all_popup_surfaces(NEUI_POPUP_DISMISS_OWNER_MOVED);
+    // That dispatched POPUP_DISMISSED synchronously, and the documented client
+    // response - drop the state the popup was opened with - routinely means
+    // destroying the owner frame, which frees the WidgetData resolved above. So
+    // re-resolve before touching it again, exactly as the win32 (get_wud) and
+    // Linux (find_window) dismissal sites do; a frame that is gone has no RESIZE
+    // left to report. Without this the dispatch below reads wd->widget_id out of
+    // freed memory - invisible under the normal allocator, which is why the
+    // harness phase covering it runs under Guard Malloc.
+    wd = session->get_widget(widget_index);
+    if (!wd) return;
+  }
+
+  // Report the height BELOW any in-frame menubar band so client layout matches
+  // the other hosts. 0 on macOS (the menubar is the system menu bar), but
+  // routing through the accessor keeps the three xpl platforms identical.
+  const int inset = session->frame_top_inset(widget_index);
+
+  neui_event_t ev = {};
+  ev.type               = NEUI_EVENT_RESIZE;
+  ev.data.resize.widget = { wd->widget_id };
+  ev.data.resize.width  = w_log;
+  ev.data.resize.height = h_log - inset;
+  session->dispatch_event(&ev);
 }
 
 - (void)drawRect:(NSRect)dirtyRect
@@ -215,10 +325,23 @@ void wake_app_event_pump()
     [self removeTrackingArea:_tracking_area];
     _tracking_area = nil;
   }
+  // A popup surface's panel is deliberately NON-ACTIVATING, so it never becomes
+  // the key window - and NSTrackingActiveInKeyWindow would then deliver no
+  // mouseMoved: / mouseEntered: / mouseExited: to it at all, leaving a menu with
+  // no row highlighting and no way to clear one. This is the enter/leave cost of
+  // not taking a pointer capture: with real windows per level, each one has to do
+  // its own tracking. ActiveAlways is what makes hover work inside a popup.
   NSTrackingAreaOptions opts =
       NSTrackingMouseEnteredAndExited
     | NSTrackingMouseMoved
-    | NSTrackingActiveInKeyWindow
+    // Makes AppKit send -cursorUpdate: to this view, which is what lets
+    // NEUI_ATTR_CURSOR stick: AppKit resets the cursor from cursor rects on
+    // every mouse-moved, so a cursor merely `set` from platform_set_cursor is
+    // reverted before it is seen. Without this option -cursorUpdate: is never
+    // called at all (it is opt-in per tracking area, not a free NSView hook).
+    | NSTrackingCursorUpdate
+    | ([self isPopupSurfaceView] ? NSTrackingActiveAlways
+                                 : NSTrackingActiveInKeyWindow)
     | NSTrackingInVisibleRect;
   _tracking_area = [[NSTrackingArea alloc] initWithRect:self.bounds
                                                  options:opts
@@ -227,17 +350,107 @@ void wake_app_event_pump()
   [self addTrackingArea:_tracking_area];
 }
 
+// AppKit's "you own the cursor here" hook, paired with NSTrackingCursorUpdate
+// above. Reapplies whatever Session::refresh_cursor last resolved rather than
+// letting AppKit fall back to the arrow.
+//
+// Deliberately does NOT call super: NSView's implementation applies the view's
+// cursor rects, which is precisely the reset being overridden.
+- (void)cursorUpdate:(NSEvent*)event
+{
+  (void)event;
+  xpl_host::mac_apply_cursor(xpl_host::g_cursor_kind);
+}
+
+// The frame's user zoom (NEUI_ATTR_UI_SCALE), 1.0 when unset. AppKit points
+// already equal neui logical px, so the zoom is the ONLY conversion factor on
+// this platform - unlike win32/Linux there is no DPI ratio to fold in (the
+// backing scale is handled inside the CGContext's own CTM).
+- (float)frameZoom
+{
+  if (!session) return 1.0f;
+  xpl_host::WidgetData* wd = session->get_widget(widget_index);
+  return wd ? wd->ui_scale() : 1.0f;
+}
+
 // Convert an NSEvent's cursor location into top-left-origin view-local logical
-// pixels (matches the renderer.h coordinate convention).
+// pixels (matches the renderer.h coordinate convention). Divides out the frame
+// zoom so input arrives in the same logical space the widget tree, the cached
+// abs_x/abs_y and the paint walk use. Every mouse handler on this view funnels
+// through here, so this is the single conversion point.
 - (NSPoint)localPointForEvent:(NSEvent*)event
 {
-  return [self convertPoint:event.locationInWindow fromView:nil];
+  NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+  float z = [self frameZoom];
+  if (z != 1.0f && z > 0.0f) { p.x /= z; p.y /= z; }
+  return p;
 }
+
+// ---- Accessibility (NSAccessibility) --------------------------------------
+//
+// As far as the OS is concerned this view IS the frame - one native surface per
+// frame - so these four hooks are the whole platform-side accessibility
+// surface. Every answer comes from the shared node tree (a11y_macos.mm ->
+// a11y_adapter.cpp -> hosts/shared/a11y_tree.h); nothing about widgets is
+// decided here. The hit-test point arrives in SCREEN coordinates, which is why
+// the provider owns the conversion.
+
+- (NSArray*)accessibilityChildren
+{
+  return xpl_host::mac_a11y_children(self, session, widget_index);
+}
+
+- (id)accessibilityHitTest:(NSPoint)point
+{
+  id hit = xpl_host::mac_a11y_hit_test(self, session, widget_index, point);
+  // No node there (or the frame itself): let AppKit answer with the view, so a
+  // click on empty frame background still reports the window rather than
+  // nothing at all.
+  return hit ? hit : [super accessibilityHitTest:point];
+}
+
+- (id)accessibilityFocusedUIElement
+{
+  id el = xpl_host::mac_a11y_focused_element(self, session, widget_index);
+  return el ? el : [super accessibilityFocusedUIElement];
+}
+
+// A group, not a window: the NSWindow above us already carries the window role
+// and title, and reporting a second window here would make VoiceOver announce
+// the frame twice.
+- (NSString*)accessibilityRole { return NSAccessibilityGroupRole; }
 
 - (void)dispatchMouseEventForType:(neui_event_type_t)type
                             event:(NSEvent*)event
 {
   if (!session) return;
+
+  // Relative (unbounded) pointer mode: the cursor is decoupled from the device
+  // (CGAssociateMouseAndMouseCursorPosition(false)), so localPointForEvent: is
+  // frozen at the anchor and useless. Consume the raw delta instead and let
+  // Session report an accumulated virtual position.
+  //
+  // NSEvent's mouse deltaY is in DEVICE orientation (positive = downward), which
+  // already matches the y-down widget space this view uses - no flip, unlike the
+  // scroll-wheel deltas elsewhere in this file.
+  //
+  // Only MOVE is redirected: a button DOWN / UP still carries a meaningful
+  // position (the anchor), and end_relative_pointer runs off the UP.
+  if (type == NEUI_EVENT_MOUSE_MOVE && session->is_relative_pointer()) {
+    // Divide by the frame zoom, exactly as localPointForEvent: does for absolute
+    // positions: dispatch_relative_motion's contract is LOGICAL px. Without this
+    // a drag's sensitivity jumped by the zoom factor the instant relative mode
+    // began, and macOS disagreed with win32 (logical_to_physical) and Linux
+    // (window_scale), both of which already divide the delta.
+    const float z = [self frameZoom];
+    const float s = (z > 0.0f) ? z : 1.0f;
+    session->dispatch_relative_motion((float)event.deltaX / s,
+                                        (float)event.deltaY / s,
+                                        mac_buttonmap(NSEvent.pressedMouseButtons,
+                                                       event.modifierFlags));
+    return;
+  }
+
   NSPoint p = [self localPointForEvent:event];
   float lx = (float)p.x;
   float ly = (float)p.y;
@@ -286,6 +499,22 @@ void wake_app_event_pump()
   // for keyboard input to route here. No-op when already first responder.
   if (self.window && self.window.firstResponder != self)
     [self.window makeFirstResponder:self];
+  // The standalone tree popup is checked BEFORE the clickCount branch: a
+  // double-click inside an open menu must pick the row it lands on, not bypass
+  // the menu entirely and deliver a DBLCLICK to the widget underneath it.
+  session->tree_popup_discard_pending_release();
+  if (session->_tree_popup_active) {
+    NSPoint tp = [self localPointForEvent:event];
+    if (session->handle_tree_popup_click(widget_index, (float)tp.x, (float)tp.y))
+      return;
+    // Not consumed (the popup belongs to another frame and has now dismissed):
+    // fall through so this frame still gets the click.
+  }
+  // Popup surfaces, checked before the clickCount branch for the same reason the
+  // tree popup is: a double-click on the owner while a picker is open must
+  // dismiss it, not bypass it and deliver a DBLCLICK underneath.
+  session->popup_discard_pending_release();
+  if (session->popup_gate_press(widget_index)) return;
   // clickCount == 2 -> DBLCLICK; clickCount >= 3 not modeled.
   if (event.clickCount == 2) {
     [self dispatchMouseEventForType:NEUI_EVENT_MOUSE_BUTTON_DBLCLICK event:event];
@@ -316,7 +545,16 @@ void wake_app_event_pump()
 - (BOOL)overlayHandledMove:(NSEvent*)event
 {
   if (!session) return NO;
+  // While a popup surface is open, the widgets UNDER it must stop behaving like
+  // a live UI: without this, moving off the popup and across the owner lights up
+  // hover on every button on the way, which is the one thing that reads as "not
+  // a menu". This is the suppression an OS pointer capture would have bought,
+  // done portably (see Session::popup_gate_hover).
+  if (session->popup_gate_hover(widget_index)) return YES;
   NSPoint p = [self localPointForEvent:event];
+  if (session->_tree_popup_active &&
+      session->handle_tree_popup_hover(widget_index, (float)p.x, (float)p.y))
+    return YES;
   if (session->_popup_active) {
     session->handle_popup_hover((float)p.x, (float)p.y);
     return YES;
@@ -338,6 +576,15 @@ void wake_app_event_pump()
 - (void)mouseUp:(NSEvent*)event
 {
   if (!session) return;
+  // Swallow the release that pairs with a press the tree popup consumed.
+  // Without this the widget under the just-dismissed menu sees an UP with no
+  // DOWN and synthesises a CLICK - i.e. picking a context-menu row would also
+  // actuate the button beneath it.
+  if (session->tree_popup_take_release()) return;
+  // Same for a press the popup gate swallowed: without this the widget under the
+  // just-dismissed popup gets an UP with no DOWN and synthesises a CLICK - i.e.
+  // clicking outside a picker would also actuate whatever was beneath it.
+  if (session->popup_take_release()) return;
   // End a combo overlay scrollbar drag if one was active (win32 parity).
   if (session->_combo_sb_dragging) {
     session->_combo_sb_dragging = false;
@@ -358,7 +605,12 @@ void wake_app_event_pump()
   ev.data.mouse.widget    = { hw->widget_id };
   ev.data.mouse.x         = (int)lx;
   ev.data.mouse.y         = (int)ly;
-  ev.data.mouse.buttonmap = 0;
+  // Report the modifier bits (the buttons are already released by the time an
+  // UP arrives, which is exactly what pressedMouseButtons reflects). win32 xpl
+  // populates the same events; leaving these at 0 made Shift/Ctrl invisible to
+  // a client deciding what a click meant.
+  ev.data.mouse.buttonmap = mac_buttonmap(NSEvent.pressedMouseButtons,
+                                           event.modifierFlags);
 
   ev.type = NEUI_EVENT_MOUSE_BUTTON_UP;
   session->dispatch_mouse_event(hit, &ev);
@@ -373,6 +625,18 @@ void wake_app_event_pump()
 - (void)rightMouseDown:(NSEvent*)event
 {
   if (!session) return;
+  session->popup_discard_pending_release();
+  if (session->popup_gate_press(widget_index)) return;
+  session->tree_popup_discard_pending_release();
+  // A right-click while a tree popup is open goes to it rather than opening a
+  // second menu on top: it picks the row under the cursor, descends a cascade,
+  // or dismisses, exactly as a left-click does (matching NSMenu, which also
+  // actuates on the right button).
+  if (session->_tree_popup_active) {
+    NSPoint tp = [self localPointForEvent:event];
+    if (session->handle_tree_popup_click(widget_index, (float)tp.x, (float)tp.y))
+      return;
+  }
   // If a popup is up, a right-click outside dismisses it (win32 parity).
   if (session->_popup_active) {
     NSPoint p = [self localPointForEvent:event];
@@ -385,6 +649,8 @@ void wake_app_event_pump()
 - (void)rightMouseUp:(NSEvent*)event
 {
   if (!session) return;
+  if (session->tree_popup_take_release()) return;
+  if (session->popup_take_release()) return;
   NSPoint p = [self localPointForEvent:event];
   float lx = (float)p.x;
   float ly = (float)p.y;
@@ -397,7 +663,8 @@ void wake_app_event_pump()
   ev.data.mouse.widget    = { hw->widget_id };
   ev.data.mouse.x         = (int)lx;
   ev.data.mouse.y         = (int)ly;
-  ev.data.mouse.buttonmap = 0;
+  ev.data.mouse.buttonmap = mac_buttonmap(NSEvent.pressedMouseButtons,
+                                           event.modifierFlags);
   session->dispatch_mouse_event(hit, &ev);
 }
 
@@ -614,6 +881,15 @@ void wake_app_event_pump()
 - (void)scrollWheel:(NSEvent*)event
 {
   if (!session) return;
+  // An open tree popup absorbs the wheel. Without this a scrolling SECTION
+  // or GRID *under* the visible menu scrolls away beneath it, which no OS
+  // menu does. No scroll-the-menu behaviour yet - a cascade taller than the
+  // frame clamps (see docs/deferred-issues.md).
+  if (session->_tree_popup_active) return;
+  // Same for an open popup surface. AppKit delivers the wheel to the view under
+  // the POINTER, so a wheel over the popup arrives at the popup's own view and
+  // passes the gate - which is what lets popup content scroll.
+  if (session->popup_gate_wheel(widget_index)) return;
   NSPoint p = [self localPointForEvent:event];
   float lx = (float)p.x;
   float ly = (float)p.y;
@@ -750,6 +1026,13 @@ void wake_app_event_pump()
   ev.data.wheel.y             = (int)ly;
   ev.data.wheel.delta         = delta;
   ev.data.wheel.is_horizontal = horizontal ? 1 : 0;
+  // Same NEUI_MK_* bits as the mouse path, from the same shared helper.
+  // The ONLY platform that can report this. A value consumer needs it to
+  // recover the physical gesture direction (issue #21); a scrolling consumer
+  // ignores it and keeps using the delta the OS adjusted for it.
+  ev.data.wheel.is_flipped    = event.isDirectionInvertedFromDevice ? 1 : 0;
+  ev.data.wheel.buttonmap     = mac_buttonmap(NSEvent.pressedMouseButtons,
+                                               event.modifierFlags);
 
   if (sec_idx != 0) {
     // Bounded bubble: only the widgets strictly below the section get the
@@ -776,13 +1059,22 @@ void wake_app_event_pump()
   uint32_t mods = mac_modifiers_to_neui(event.modifierFlags);
   uint32_t keycode = mac_keycode_to_neui(event.keyCode);
 
-  // A popup menu absorbs Esc / Enter / Space / arrow keys (win32 parity).
-  if (session->_popup_active && session->handle_popup_key(keycode)) return;
+  // Esc dismisses an open tree popup, before anything else can claim the key.
+  if (session->handle_tree_popup_key(keycode)) return;
+
+  // ...and an open popup-surface stack, for the same reason and ahead of the
+  // same competition. Note the key arrives HERE, at the owner: a popup surface
+  // never takes activation (inside a DAW that would read as the plugin editor
+  // losing focus), so it is not first responder and cannot be sent keys
+  // directly. The gate retargets it - see Session::popup_gate_key.
+  if (session->popup_gate_key(NEUI_EVENT_KEYDOWN, keycode, mods)) return;
 
   // Tab cycles logical focus inside our hand-rolled Tab traversal - same as
   // the win32 path. Consume here; the focus_next path doesn't fire KEYDOWN.
   if (keycode == NEUI_KEY_TAB) {
-    session->focus_next(!(mods & NEUI_KMOD_SHIFT));
+    // Pass the frame this view belongs to: it is the window that actually has
+    // the keystroke, which is the only right answer when nothing is focused yet.
+    session->focus_next(!(mods & NEUI_KMOD_SHIFT), widget_index);
     return;
   }
 
@@ -822,6 +1114,9 @@ void wake_app_event_pump()
   if (keycode == 0) return;
 
   uint32_t mods = mac_modifiers_to_neui(event.modifierFlags);
+  // The release peer of the KEYDOWN gate: a press that the popup swallowed must
+  // not have its release land on the widget underneath.
+  if (session->popup_gate_key(NEUI_EVENT_KEYUP, keycode, mods)) return;
   uint32_t fw = session->_focused_widget;
   if (fw == 0 || !session->_widgets.exists(fw)) return;
   auto& wd = session->_widgets[fw];
@@ -950,9 +1245,16 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
 
   // Plain typing - fire one KEYCHAR per Unicode codepoint, with the same
   // dispatch_event -> on_keychar two-stage routing as keyDown:.
-  uint32_t fw = session->_focused_widget;
-  if (fw == 0 || !session->_widgets.exists(fw)) return;
-  auto& wd = session->_widgets[fw];
+  //
+  // Text is DIVERTED while a popup surface is open and focus is outside it: the
+  // stack gets it (a client's type-ahead) and the widget underneath must not.
+  // This is the path that let typing edit the field behind an open menu - the
+  // characters never pass keyDown:'s gate, they arrive here through
+  // interpretKeyEvents:. Tested before the focused-widget lookup, because in that
+  // case the focused widget is precisely the one that must not see the text.
+  const bool divert = session->popup_diverts_keys();
+  const uint32_t fw = session->_focused_widget;
+  if (!divert && (fw == 0 || !session->_widgets.exists(fw))) return;
 
   for (NSUInteger i = 0; i < s.length; ) {
     uint32_t cp = (uint32_t)[s characterAtIndex:i];
@@ -969,6 +1271,13 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
     if (!is_printable_codepoint(cp)) continue;
 
     uint32_t mods = mac_modifiers_to_neui(NSEvent.modifierFlags);
+    if (session->popup_gate_key(NEUI_EVENT_KEYCHAR, cp, mods)) continue;
+
+    // Re-resolved per codepoint rather than once before the loop: a client
+    // handler on the previous one may have destroyed widgets, and the slot table
+    // can reallocate under a held reference.
+    if (fw == 0 || !session->_widgets.exists(fw)) return;
+    auto& wd = session->_widgets[fw];
     bool client_consumed = false;
     if (wd.emit_events) {
       neui_event_t ev = {};
@@ -1006,6 +1315,12 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
 
   auto* wd = [self focusedWidget];
   if (!wd) return;
+
+  // Refuse to START composing into the widget under an open popup - the same
+  // diversion the plain-typing path makes. An in-flight composition is left
+  // alone: it began before the popup opened and still has to unwind through its
+  // own COMP_RESULT / COMP_END.
+  if (!_composing && session->popup_diverts_keys()) return;
 
   if (!_composing) {
     // First setMarkedText: in this composition - snapshot pre-state.
@@ -1093,10 +1408,15 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
   // by the widget's frame-local absolute origin (abs_x / abs_y, computed by
   // the paint walk - the widget's stored x/y is parent-relative) to get
   // view-local coords (still top-left since the view is isFlipped=YES).
-  NSRect view_r = NSMakeRect((CGFloat)(cx + fwd.abs_x),
-                              (CGFloat)(cy + fwd.abs_y),
-                              1.0,
-                              (CGFloat)ch);
+  // Multiply back up by the zoom: the caret is painted through the zoom
+  // transform, so its logical position has to be re-scaled into the view's
+  // point space or the candidate window detaches from the text at any
+  // zoom != 100%. (Inverse of the divide in localPointForEvent:.)
+  const CGFloat z = (CGFloat)[self frameZoom];
+  NSRect view_r = NSMakeRect((CGFloat)(cx + fwd.abs_x) * z,
+                              (CGFloat)(cy + fwd.abs_y) * z,
+                              1.0 * z,
+                              (CGFloat)ch * z);
   // convertRect:toView:nil un-flips into window coords (NSWindow uses
   // bottom-left origin). convertRectToScreen: is again bottom-left, screen.
   NSRect win_r    = [self convertRect:view_r toView:nil];
@@ -1121,7 +1441,12 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
   NSPoint loc = [sender draggingLocation];
   // draggingLocation is in window coords (bottom-left origin); convert to
   // view-local. NEUIView is isFlipped=YES so the Y is already top-down.
-  return [self convertPoint:loc fromView:nil];
+  NSPoint p = [self convertPoint:loc fromView:nil];
+  // Same zoom divide as localPointForEvent: - drop hit-testing walks the same
+  // logical widget rects as mouse hit-testing, so it needs the same space.
+  float z = [self frameZoom];
+  if (z != 1.0f && z > 0.0f) { p.x /= z; p.y /= z; }
+  return p;
 }
 
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender
@@ -1212,6 +1537,34 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
   return allow ? YES : NO;
 }
 
+// An owner being dragged dismisses any open popup surface - the other half of
+// the resize hook in NEUIView::setFrameSize:. A frame move produces no view
+// notification at all, so it has to be caught here.
+//
+// Guarded twice: not while WE are placing a popup (AppKit posts this for the
+// panel we just moved, which would dismiss the level below a cascade), and not
+// for a window that is itself a popup level.
+- (void)windowDidMove:(NSNotification*)note
+{
+  (void)note;
+  if (!session || xpl_host::popup_placing()) return;
+  if (!session->popup_surface_open()) return;
+  if (session->popup_surface_depth(widget_index) >= 0) return;
+  session->close_all_popup_surfaces(NEUI_POPUP_DISMISS_OWNER_MOVED);
+}
+
+// The owner losing key status dismisses too. NSApplicationDidResignActive (in
+// platform_popup_grab_begin) covers another APPLICATION coming forward; this
+// covers another window of OURS becoming key, which raises no app-level change.
+- (void)windowDidResignKey:(NSNotification*)note
+{
+  (void)note;
+  if (!session || xpl_host::popup_placing()) return;
+  if (!session->popup_surface_open()) return;
+  if (session->popup_surface_depth(widget_index) >= 0) return;
+  session->close_all_popup_surfaces(NEUI_POPUP_DISMISS_DEACTIVATED);
+}
+
 - (void)windowWillClose:(NSNotification*)note
 {
   (void)note;
@@ -1229,9 +1582,23 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
         backend->destroy_context(wd->render_ctx);
         wd->render_ctx = nullptr;
       }
-      // Drop the modal pump flag so widget_show unwinds and returns.
-      if (auto* fw = dynamic_cast<xpl_host::FrameWidget*>(wd))
-        fw->modal_pump_active = false;
+      // Drop the modal pump flag so widget_show unwinds and returns - and WAKE
+      // the pump. run_modal_pump_macos blocks in nextEventMatchingMask: on
+      // distantFuture and only re-tests the flag once an event arrives, so
+      // clearing the flag alone is not enough: a dialog dismissed with no
+      // further user input (a client closing it from a timer or a callback, or
+      // any programmatic destroy) left the pump waiting forever and hung the
+      // app. A user-driven close happens to be followed by more input, which is
+      // why this was invisible.
+      // end_modal drops the flag AND restores the focus the dialog took from its
+      // owner. Both matter here rather than only in widget_destroy: the USER
+      // closing the window unwinds the pump without any destroy running, so
+      // without this focus stays on a control inside a closed window - a dead
+      // keyboard until the client happens to destroy the dialog.
+      if (dynamic_cast<xpl_host::FrameWidget*>(wd)) {
+        session->end_modal(widget_index);
+        wake_app_event_pump();
+      }
     }
   }
 
@@ -1329,17 +1696,6 @@ namespace {
 NSRect logical_window_rect(int x, int y, int w, int h)
 { return neui_detail::logical_window_rect_macos(x, y, w, h); }
 
-// A logical size on screen: times the frame's zoom (NEUI_ATTR_ZOOM).
-CGFloat zoomed(int v, float zoom) { return (CGFloat)v * (CGFloat)zoom; }
-
-// A frame's window rect for its logical size, zoomed; (x, y) unchanged.
-NSRect zoomed_window_rect(const xpl_host::WidgetData& wd)
-{
-  return neui_detail::logical_window_rect_macos(wd.x, wd.y,
-                                                (int)(zoomed(wd.width, wd.zoom) + 0.5),
-                                                (int)(zoomed(wd.height, wd.zoom) + 0.5));
-}
-
 // A frame's native_handle is an NSWindow* for standalone frames and an
 // NEUIView* for a DAW-embedded PLUGWINDOW (see platform_set_embed_parent).
 // These three accessors are the only place that distinction lives: window-
@@ -1368,17 +1724,6 @@ NSView* frame_content_view(void* nh)
   return (NSView*)obj;
 }
 
-// The zoom of the frame behind a native handle (1 when it has none).
-float frame_zoom(void* nh)
-{
-  NSView* v = frame_content_view(nh);
-  if (![v isKindOfClass:[NEUIView class]]) return 1.0f;
-  NEUIView* nv = (NEUIView*)v;
-  if (!nv->session) return 1.0f;
-  xpl_host::WidgetData* wd = nv->session->get_widget(nv->widget_index);
-  return wd ? wd->zoom : 1.0f;
-}
-
 NSWindowStyleMask styles_for_appwindow()
 { return neui_detail::styles_for_appwindow_macos(); }
 
@@ -1400,12 +1745,16 @@ void install_view_and_context(xpl_host::Session* session,
   [window setAcceptsMouseMovedEvents:YES];
 
   // Content view (also the render target).
-  NEUIView* view = [[NEUIView alloc] initWithFrame:NSMakeRect(0, 0, zoomed(wd.width, wd.zoom),
-                                                              zoomed(wd.height, wd.zoom))];
+  // The content view fills the (already zoomed) window content rect; the zoom
+  // multiplies here because wd.width/height stay LOGICAL at every zoom.
+  const CGFloat vz = (CGFloat)wd.ui_scale();
+  NEUIView* view = [[NEUIView alloc]
+    initWithFrame:NSMakeRect(0, 0, wd.width * vz, wd.height * vz)];
   view->session      = session;
   view->widget_index = widget_index;
+  // Seed the RESIZE baseline so create-time sizing is not reported.
+  [view seedReportedSize:wd.width height:wd.height];
   [window setContentView:view];
-  [view neuiApplyZoom];
 
   // Force the view to be the initial / current first responder. Without this
   // AppKit may leave the window itself as first responder (which doesn't
@@ -1431,16 +1780,14 @@ void install_view_and_context(xpl_host::Session* session,
   auto* backend = xpl_host::platform_get_backend();
   if (backend) {
     wd.render_ctx = backend->create_context((__bridge void*)view,
-                                             (uint32_t)wd.width,
-                                             (uint32_t)wd.height);
+                                             (uint32_t)(wd.width  * vz),
+                                             (uint32_t)(wd.height * vz));
   }
 
   // Read back the actual backing scale (DPI source on macOS).
   CGFloat scale = window.backingScaleFactor;
   if (scale <= 0) scale = 1.0;
   wd.dpi = (uint32_t)(96.0 * scale + 0.5);
-  if (backend && wd.render_ctx && wd.zoom != 1.0f)
-    backend->update_dpi(wd.render_ctx, wd.client_dpi());
 
   // Hand back a +1 retain on the NSWindow as the native_handle. ARC will
   // release it via __bridge_transfer in platform_destroy_window or in the
@@ -1498,7 +1845,11 @@ namespace xpl_host
   void platform_create_appwindow(Session* session, uint32_t widget_index,
                                   WidgetData& wd)
   {
-    NSRect frame_rect = zoomed_window_rect(wd);
+    // Zoom scales the window's content rect; wd.width/height stay logical.
+    const float wz = wd.ui_scale();
+    NSRect frame_rect = logical_window_rect(wd.x, wd.y,
+                                            (int)(wd.width  * wz + 0.5f),
+                                            (int)(wd.height * wz + 0.5f));
     NSWindow* window = [[NSWindow alloc] initWithContentRect:frame_rect
                                                     styleMask:styles_for_appwindow()
                                                       backing:NSBackingStoreBuffered
@@ -1518,28 +1869,29 @@ namespace xpl_host
     // standalone create-then-show contract.
     if (wd.embed_parent) {
       NSView* parent = (__bridge NSView*)reinterpret_cast<void*>(wd.embed_parent);
+      // Zoom scales the view's footprint inside the DAW's parent; a plugin
+      // adapter that also negotiates a new size with the host should set both.
+      const CGFloat ez = (CGFloat)wd.ui_scale();
       NEUIView* view = [[NEUIView alloc]
-        initWithFrame:NSMakeRect(wd.x, wd.y, zoomed(wd.width, wd.zoom),
-                                 zoomed(wd.height, wd.zoom))];
+        initWithFrame:NSMakeRect(wd.x, wd.y, wd.width * ez, wd.height * ez)];
       view->session      = session;
       view->widget_index = widget_index;
-      [view neuiApplyZoom];
+      // Seed the RESIZE baseline so create-time sizing is not reported.
+      [view seedReportedSize:wd.width height:wd.height];
       view.hidden = YES;
       [parent addSubview:view];
 
       auto* backend = platform_get_backend();
       if (backend) {
         wd.render_ctx = backend->create_context((__bridge void*)view,
-                                                 (uint32_t)wd.width,
-                                                 (uint32_t)wd.height);
+                                                 (uint32_t)(wd.width  * ez),
+                                                 (uint32_t)(wd.height * ez));
       }
 
       CGFloat scale = parent.window ? parent.window.backingScaleFactor
                                     : NSScreen.mainScreen.backingScaleFactor;
       if (scale <= 0) scale = 1.0;
       wd.dpi = (uint32_t)(96.0 * scale + 0.5);
-      if (backend && wd.render_ctx && wd.zoom != 1.0f)
-        backend->update_dpi(wd.render_ctx, wd.client_dpi());
 
       // +1 retain on the NEUIView as the native_handle; released via
       // __bridge_transfer in platform_destroy_window (there is no window
@@ -1548,7 +1900,11 @@ namespace xpl_host
       return;
     }
 
-    NSRect frame_rect = zoomed_window_rect(wd);
+    // Zoom scales the window's content rect; wd.width/height stay logical.
+    const float wz = wd.ui_scale();
+    NSRect frame_rect = logical_window_rect(wd.x, wd.y,
+                                            (int)(wd.width  * wz + 0.5f),
+                                            (int)(wd.height * wz + 0.5f));
     NSWindow* window = [[NSWindow alloc] initWithContentRect:frame_rect
                                                     styleMask:NSWindowStyleMaskBorderless
                                                       backing:NSBackingStoreBuffered
@@ -1567,13 +1923,17 @@ namespace xpl_host
       // Convert owner's bottom-left frame back to top-left logical coords.
       int or_x = (int)or_rect.origin.x;
       int or_y = (int)(screen_h - or_rect.origin.y - or_rect.size.height);
-      wd.x = or_x + ((int)or_rect.size.width  - (int)zoomed(wd.width, wd.zoom))  / 2;
-      wd.y = or_y + ((int)or_rect.size.height - (int)zoomed(wd.height, wd.zoom)) / 2;
+      wd.x = or_x + ((int)or_rect.size.width  - wd.width)  / 2;
+      wd.y = or_y + ((int)or_rect.size.height - wd.height) / 2;
       if (wd.x < 0) wd.x = 0;
       if (wd.y < 0) wd.y = 0;
     }
 
-    NSRect frame_rect = zoomed_window_rect(wd);
+    // Zoom scales the window's content rect; wd.width/height stay logical.
+    const float wz = wd.ui_scale();
+    NSRect frame_rect = logical_window_rect(wd.x, wd.y,
+                                            (int)(wd.width  * wz + 0.5f),
+                                            (int)(wd.height * wz + 0.5f));
     NSWindow* window = [[NSWindow alloc] initWithContentRect:frame_rect
                                                     styleMask:styles_for_dialog()
                                                       backing:NSBackingStoreBuffered
@@ -1594,6 +1954,251 @@ namespace xpl_host
         if (d) d->sheet_owner = native_window(owner_native);
       }
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Popup surfaces (NEUI_W_POPUPSURFACE). macOS is the reference platform for
+  // the desktop backing, and the easy one for once: the outside-press watch is
+  // complete with no pointer grab at all (see platform_popup_grab_begin).
+
+  bool platform_supports_popup_surface() { return true; }
+
+  void platform_get_work_area(void* near_native, int* x, int* y, int* w, int* h)
+  {
+    NSScreen* scr = nil;
+    if (NSWindow* win = native_window(near_native)) scr = win.screen;
+    if (!scr) scr = NSScreen.mainScreen;
+    // visibleFrame already excludes the menu bar and the Dock, which is exactly
+    // "work area". It is in the GLOBAL screen space, so a frame on a second
+    // monitor clamps to THAT monitor - which is why this seam returns a rect with
+    // an origin rather than a size.
+    NSRect vf = scr.visibleFrame;
+    const CGFloat main_h = NSScreen.mainScreen.frame.size.height;
+    if (x) *x = (int)llround(vf.origin.x);
+    // Cocoa is Y-up from the main screen's bottom-left; every neui coordinate is
+    // Y-down from its top-left (see logical_window_rect_macos).
+    if (y) *y = (int)llround(main_h - vf.origin.y - vf.size.height);
+    if (w) *w = (int)llround(vf.size.width);
+    if (h) *h = (int)llround(vf.size.height);
+  }
+
+  void platform_client_to_screen(void* native_handle, int lx, int ly,
+                                 int* sx, int* sy)
+  {
+    if (sx) *sx = lx;
+    if (sy) *sy = ly;
+    NSView* v = frame_content_view(native_handle);
+    if (!v || !v.window) return;
+    // The view's coordinate space is ZOOMED points; (lx, ly) is logical px at
+    // any zoom, so multiply going in. Screen space itself is unzoomed points -
+    // frame POSITIONS are never scaled by the zoom, only sizes are.
+    CGFloat z = 1.0;
+    if ([v isKindOfClass:[NEUIView class]]) z = (CGFloat)[(NEUIView*)v frameZoom];
+    if (!(z > 0.0)) z = 1.0;
+    NSPoint wp = [v convertPoint:NSMakePoint(lx * z, ly * z) toView:nil];
+    NSRect  sr = [v.window convertRectToScreen:NSMakeRect(wp.x, wp.y, 0, 0)];
+    const CGFloat main_h = NSScreen.mainScreen.frame.size.height;
+    if (sx) *sx = (int)llround(sr.origin.x);
+    if (sy) *sy = (int)llround(main_h - sr.origin.y);
+  }
+
+  void platform_get_pointer_pos(int* sx, int* sy)
+  {
+    NSPoint p = NSEvent.mouseLocation;
+    const CGFloat main_h = NSScreen.mainScreen.frame.size.height;
+    if (sx) *sx = (int)llround(p.x);
+    if (sy) *sy = (int)llround(main_h - p.y);
+  }
+
+  void platform_create_popup_surface(Session* session, uint32_t widget_index,
+                                     WidgetData& wd, void* owner_native)
+  {
+    (void)owner_native;   // the owner relationship is (re)established on show
+    xpl_host::PopupPlacingScope placing;
+
+    // wd.x / wd.y are SCREEN coordinates here (Session::open_popup_surface has
+    // already placed and clamped them) - the one frame kind whose position is
+    // not parent-relative.
+    const float wz = wd.ui_scale();
+    NSRect r = logical_window_rect(wd.x, wd.y,
+                                   (int)(wd.width  * wz + 0.5f),
+                                   (int)(wd.height * wz + 0.5f));
+    // NonactivatingPanel is the load-bearing bit: the panel takes mouse input
+    // WITHOUT the app or the owner losing focus. Inside a DAW that matters more
+    // than anywhere else - a plugin editor that appears to lose focus every time
+    // the user opens a picker is a bug report about the host, not about us.
+    NSPanel* panel = [[NSPanel alloc]
+      initWithContentRect:r
+                styleMask:(NSWindowStyleMaskBorderless |
+                           NSWindowStyleMaskNonactivatingPanel)
+                  backing:NSBackingStoreBuffered
+                    defer:NO];
+    // Dismissal is ours to decide (the session gate and the watch below), so do
+    // NOT let AppKit hide the panel on deactivation behind our back: we would
+    // keep a stack entry for a window the user can no longer see or dismiss.
+    [panel setHidesOnDeactivate:NO];
+    [panel setBecomesKeyOnlyIfNeeded:YES];
+    // Above a modal session, so a picker opened from a modal dialog is usable.
+    [panel setWorksWhenModal:YES];
+    [panel setLevel:NSPopUpMenuWindowLevel];
+    // Shadowed like every other menu / popover on the platform.
+    [panel setHasShadow:YES];
+
+    install_view_and_context(session, widget_index, wd, panel,
+                             /*is_appwindow*/false);
+  }
+
+  void platform_show_popup_surface(void* popup_native, void* owner_native,
+                                   int sx, int sy, int w, int h, float zoom)
+  {
+    NSWindow* panel = native_window(popup_native);
+    if (!panel) return;
+    xpl_host::PopupPlacingScope placing;
+    if (!(zoom > 0.0f)) zoom = 1.0f;
+    const int zw = (int)((float)w * zoom + 0.5f);
+    const int zh = (int)((float)h * zoom + 0.5f);
+
+    // Borderless: content rect == frame rect, so no frameRectForContentRect:
+    // round-trip is needed (unlike platform_set_window_pos, which has chrome to
+    // account for).
+    NEUIView* nv = nil;
+    if (NSView* cv = [panel contentView])
+      if ([cv isKindOfClass:[NEUIView class]]) nv = (NEUIView*)cv;
+    [nv beginSelfResize:w height:h];
+    [panel setFrame:logical_window_rect(sx, sy, zw, zh) display:NO];
+    [nv endSelfResize];
+
+    // THE owner relationship. addChildWindow: is what makes the popup travel
+    // with the editor: it is ordered above the parent and follows it in the
+    // window list, so clicking away to another app and back leaves the popup in
+    // front instead of stranded behind - which is precisely the failure a client
+    // cannot fix for itself (issue #23).
+    //
+    // Re-established on every show because the owner can differ between opens.
+    //
+    // NOTE for the embedded case: native_window(owner_native) is the DAW's
+    // window, which we did not create. This mutates its child-window list. It is
+    // the documented best-effort part of the feature - a host that runs plugin
+    // UIs out of process cannot be made to cooperate at all, and one that
+    // manages its own child windows aggressively may fight us.
+    NSWindow* owner = native_window(owner_native);
+    if (owner && panel.parentWindow != owner) {
+      if (panel.parentWindow) [panel.parentWindow removeChildWindow:panel];
+      [owner addChildWindow:panel ordered:NSWindowAbove];
+    }
+    // orderFront, never makeKeyAndOrderFront: taking key status is the one thing
+    // this window must never do.
+    [panel orderFront:nil];
+  }
+
+  void platform_hide_popup_surface(void* popup_native, void* owner_native)
+  {
+    (void)owner_native;
+    NSWindow* panel = native_window(popup_native);
+    if (!panel) return;
+    xpl_host::PopupPlacingScope placing;
+    // Detach before ordering out: a child window left attached to a live parent
+    // is re-ordered (and re-shown) with it.
+    if (panel.parentWindow) [panel.parentWindow removeChildWindow:panel];
+    [panel orderOut:nil];
+  }
+
+  // The outside-press watch. Deliberately NOT a pointer grab: what a capture
+  // really buys is suppression of the UI underneath, and Session::popup_gate_*
+  // does that portably. What is left is only the presses our own windows will
+  // never see, and on macOS those are covered exactly:
+  //
+  //   - a press into a FOREIGN window of the same process (the DAW's own UI) ->
+  //     the local monitor below sees it before the window does;
+  //   - a press into another APPLICATION -> we deactivate, and
+  //     NSApplicationDidResignActive fires.
+  //
+  // Mouse-down masks need no Accessibility permission (only keyboard ones do),
+  // which is why this is clean here and a documented gap on win32.
+  namespace {
+
+  struct PopupWatch {
+    id monitor  = nil;
+    id observer = nil;
+  };
+
+  std::unordered_map<Session*, PopupWatch>& popup_watches()
+  {
+    static std::unordered_map<Session*, PopupWatch> m;
+    return m;
+  }
+
+  // True when `event` landed inside one of this session's own neui views.
+  //
+  // Testing the view rather than the WINDOW is what makes the embedded case
+  // work: an embedded frame shares the DAW's NSWindow, so "is this our window"
+  // would answer yes for a click on the DAW's transport and never dismiss.
+  bool mac_press_in_session_view(Session* s, NSEvent* event)
+  {
+    if (!s || !event) return false;
+    NSWindow* ew = event.window;
+    if (!ew) return false;   // menu-tracking / system event: treat as foreign
+    for (uint32_t idx = s->_widgets.child(0); idx != 0;
+         idx = s->_widgets.next(idx))
+    {
+      if (!s->_widgets.exists(idx)) continue;
+      WidgetData& wd = s->_widgets[idx];
+      if (!wd.is_frame() || !wd.native_handle || !wd.visible) continue;
+      NSView* v = frame_content_view(wd.native_handle);
+      if (!v || v.window != ew || v.hidden) continue;
+      NSPoint p = [v convertPoint:event.locationInWindow fromView:nil];
+      if (NSPointInRect(p, v.bounds)) return true;
+    }
+    return false;
+  }
+
+  } // namespace
+
+  void platform_popup_grab_begin(Session* session, void* /*popup_native*/)
+  {
+    if (!session) return;
+    PopupWatch& w = popup_watches()[session];
+    // Idempotent per session: a whole cascade shares ONE watch, because
+    // dismissal is a decision about the stack rather than about a level.
+    if (w.monitor || w.observer) return;
+
+    Session* s = session;
+    w.monitor = [NSEvent addLocalMonitorForEventsMatchingMask:
+                   (NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown |
+                    NSEventMaskOtherMouseDown)
+                 handler:^NSEvent*(NSEvent* e) {
+      // Only presses we would otherwise never hear about. A press into one of
+      // OUR views is left to the session gate, which dismisses AND swallows it -
+      // dismissing here first would let that same press act on the widget
+      // underneath the popup.
+      if (!mac_press_in_session_view(s, e))
+        s->close_all_popup_surfaces(NEUI_POPUP_DISMISS_OUTSIDE_PRESS);
+      // Never consume: a foreign window must still get its click.
+      return e;
+    }];
+
+    w.observer = [[NSNotificationCenter defaultCenter]
+      addObserverForName:NSApplicationDidResignActiveNotification
+                  object:nil
+                   queue:nil
+              usingBlock:^(NSNotification* /*note*/) {
+      s->close_all_popup_surfaces(NEUI_POPUP_DISMISS_DEACTIVATED);
+    }];
+  }
+
+  void platform_popup_grab_end(Session* session)
+  {
+    if (!session) return;
+    auto& map = popup_watches();
+    auto it = map.find(session);
+    if (it == map.end()) return;
+    PopupWatch w = it->second;
+    // Erase BEFORE unregistering: this runs from inside the monitor's own block
+    // on the ordinary path (a press dismisses the last level, which ends the
+    // watch), so the entry must already be gone if anything re-enters.
+    map.erase(it);
+    if (w.monitor)  [NSEvent removeMonitor:w.monitor];
+    if (w.observer) [[NSNotificationCenter defaultCenter] removeObserver:w.observer];
   }
 
   void platform_destroy_window(WidgetData& wd)
@@ -1696,51 +2301,63 @@ namespace xpl_host
                                 int x, int y, int w, int h, uint32_t /*dpi*/)
   {
     if (!native_handle) return;
-    // w / h are the logical client size; on screen it is zoomed.
-    float zoom = frame_zoom(native_handle);
+    // w/h are the logical CLIENT size; the frame's user zoom scales it (the
+    // client keeps thinking in logical units at any zoom).
+    float z = 1.0f;
+    if (NSView* cv = frame_content_view(native_handle)) {
+      if ([cv isKindOfClass:[NEUIView class]]) {
+        NEUIView* nv = (NEUIView*)cv;
+        if (nv->session) {
+          if (auto* wd = nv->session->get_widget(nv->widget_index))
+            z = wd->ui_scale();
+        }
+      }
+    }
+    const int zw = (int)((float)w * z + 0.5f);
+    const int zh = (int)((float)h * z + 0.5f);
+
+    // Bracket the geometry application so -setFrameSize: knows this resize is
+    // ours: it must not re-derive the logical size from the native one (lossy
+    // at fractional zoom) nor report a RESIZE the client just asked for.
+    NEUIView* nv = nil;
+    if (NSView* cv = frame_content_view(native_handle))
+      if ([cv isKindOfClass:[NEUIView class]]) nv = (NEUIView*)cv;
+    [nv beginSelfResize:w height:h];
+
     if (is_embedded_view(native_handle)) {
       // (x, y) is parent-view-relative in the parent's coordinate system;
       // drawRect: reads bounds each frame so the render follows the resize.
-      [frame_content_view(native_handle) setFrame:NSMakeRect(x, y, zoomed(w, zoom), zoomed(h, zoom))];
+      [frame_content_view(native_handle) setFrame:NSMakeRect(x, y, zw, zh)];
+      [nv endSelfResize];
       return;
     }
     NSWindow* win = native_window(native_handle);
-    [win setFrame:logical_window_rect(x, y, (int)(zoomed(w, zoom) + 0.5),
-                                      (int)(zoomed(h, zoom) + 0.5)) display:YES];
-  }
-
-  void platform_apply_zoom(WidgetData& wd)
-  {
-    if (!wd.native_handle) return;
-    NSView* v = frame_content_view(wd.native_handle);
-    if (![v isKindOfClass:[NEUIView class]]) return;
-    // The bounds are the logical size the user may have resized the window
-    // to; the view's new size is that times the new zoom.
-    NSSize logical = v.bounds.size;
-    NSSize size = NSMakeSize(logical.width * wd.zoom, logical.height * wd.zoom);
-    if (is_embedded_view(wd.native_handle)) {
-      [v setFrameSize:size];
-    } else {
-      // The window's content grows or shrinks with its top-left kept.
-      NSWindow* win = native_window(wd.native_handle);
-      NSRect content = [win contentRectForFrameRect:win.frame];
-      content.origin.y += content.size.height - size.height;
-      content.size = size;
-      if (wd.attrs) {
-        platform_apply_size_constraints(wd.native_handle,
-                                        wd.attrs->get_int(NEUI_ATTR_MIN_WIDTH,  0),
-                                        wd.attrs->get_int(NEUI_ATTR_MIN_HEIGHT, 0),
-                                        wd.attrs->get_int(NEUI_ATTR_MAX_WIDTH,  0),
-                                        wd.attrs->get_int(NEUI_ATTR_MAX_HEIGHT, 0));
-      }
-      [win setFrame:[win frameRectForContentRect:content] display:NO];
+    // (zw, zh) is the CLIENT area at the current zoom - the same contract
+    // create() uses (it passes this rect to initWithContentRect:) and the same
+    // one win32 maintains via AdjustWindowRectExForDpi. Sizing the OUTER frame
+    // to it instead let the title bar eat into the client, so a
+    // set_size(520, 300) produced a 520x268 client and every subsequent layout
+    // was short by the chrome. frameRectForContentRect: preserves the content
+    // rect's screen origin and grows the frame upward, so the position
+    // semantics match create() too.
+    NSRect content = logical_window_rect(x, y, zw, zh);
+    if (x == NEUI_WINDOW_POS_KEEP || y == NEUI_WINDOW_POS_KEEP) {
+      // Size-only: keep the window's current top-left on screen. In AppKit's
+      // Y-up frame space the TOP edge is origin.y + height, so preserve that
+      // rather than the origin, or the window would creep as it grows.
+      NSRect cur = [win frame];
+      NSRect want = [win frameRectForContentRect:content];
+      want.origin.x = cur.origin.x;
+      want.origin.y = cur.origin.y + cur.size.height - want.size.height;
+      [win setFrame:want display:YES];
+      [nv endSelfResize];
+      return;
     }
-    [(NEUIView*)v neuiApplyZoom];
-    if (wd.render_ctx) {
-      if (auto* backend = platform_get_backend())
-        backend->update_dpi(wd.render_ctx, wd.client_dpi());
-    }
-    [v setNeedsDisplay:YES];
+    [win setFrame:[win frameRectForContentRect:content] display:YES];
+    // Cleared unconditionally after the call, not inside the hook: setFrame:
+    // does not invoke -setFrameSize: when the size is unchanged, and a leaked
+    // flag would swallow the next genuine user resize.
+    [nv endSelfResize];
   }
 
   void platform_post_close(void* native_handle)
@@ -1767,6 +2384,15 @@ namespace xpl_host
   {
     if (!native_handle) return;
     [frame_content_view(native_handle) setNeedsDisplay:YES];
+  }
+
+  void platform_force_paint(void* native_handle)
+  {
+    if (!native_handle) return;
+    // -display marks the view dirty and runs drawRect: before returning, which
+    // is what makes this synchronous. AppKit skips the draw for a view that is
+    // not in a visible window - the documented best-effort case.
+    [frame_content_view(native_handle) display];
   }
 
   bool platform_run()
@@ -1992,12 +2618,21 @@ namespace xpl_host
     // host's window.
     if (is_embedded_view(native_handle)) return;
     NSWindow* w = native_window(native_handle);
-    // Logical sizes; the content is zoomed.
-    float zoom = frame_zoom(native_handle);
-    NSSize min_sz = NSMakeSize(min_w > 0 ? zoomed(min_w, zoom) : 0,
-                                min_h > 0 ? zoomed(min_h, zoom) : 0);
-    NSSize max_sz = NSMakeSize(max_w > 0 ? zoomed(max_w, zoom) : FLT_MAX,
-                                max_h > 0 ? zoomed(max_h, zoom) : FLT_MAX);
+    // The constraints are LOGICAL, but setContentMinSize:/MaxSize: bound the
+    // window in POINTS - which the zoom has already scaled. Without the factor
+    // a MIN_WIDTH of 400 at zoom 2 lets the user drag down to logical 200.
+    float z = 1.0f;
+    if (NSView* cv = frame_content_view(native_handle))
+      if ([cv isKindOfClass:[NEUIView class]]) {
+        NEUIView* nv = (NEUIView*)cv;
+        if (nv->session)
+          if (auto* wd = nv->session->get_widget(nv->widget_index)) z = wd->ui_scale();
+      }
+    if (!(z > 0.0f)) z = 1.0f;
+    NSSize min_sz = NSMakeSize(min_w > 0 ? min_w * z : 0,
+                                min_h > 0 ? min_h * z : 0);
+    NSSize max_sz = NSMakeSize(max_w > 0 ? max_w * z : FLT_MAX,
+                                max_h > 0 ? max_h * z : FLT_MAX);
     [w setContentMinSize:min_sz];
     [w setContentMaxSize:max_sz];
   }
@@ -2118,14 +2753,222 @@ namespace xpl_host
 
   // -------------------------------------------------------------------------
   // Mouse cursor.
+  //
+  // AppKit owns the cursor: it resets it from the view's cursor rects on every
+  // mouse-moved, so a bare `[cursor set]` here does not stick. The active kind
+  // is tracked in g_cursor_kind and reapplied from NEUIView's -cursorUpdate:,
+  // which is the documented hook for "this view decides its own cursor".
+  //
+  // AppKit is also missing shapes that win32 and X11 both have, though less so
+  // than it used to be: macOS 15 added public +frameResizeCursorFromPosition:
+  // inDirections: (the diagonals) and +columnResizeCursor / +rowResizeCursor.
+  // Those are preferred where they apply (mac_public_cursor). What still has no
+  // public equivalent at all is move, wait, progress and help; each tries a
+  // private class method - reached via +respondsToSelector:, so a macOS that
+  // drops one degrades instead of throwing - and otherwise falls back to the
+  // closest public shape.
+  //
+  // Note wait/progress cannot be fixed by a better selector: macOS has no
+  // app-settable busy cursor by design. The beachball is the window server's
+  // response to an app that stops answering events, so a Mac client should draw
+  // progress rather than set a cursor. Listed in docs/deferred-issues.md.
+  //
+  // +resizeLeftRightCursor / +resizeUpDownCursor (used for EW / NS below) are
+  // marked API_TO_BE_DEPRECATED in the macOS 15 SDK in favour of
+  // +columnResizeCursor / +rowResizeCursor. They still work and still look
+  // right, so they stay for now - swapping them would change the existing GRID
+  // column-divider appearance - but that migration is queued in
+  // docs/deferred-issues.md.
+
+  int g_cursor_kind = NEUI_CURSOR_DEFAULT;
+
+  // True while we hold a -hide. [NSCursor hide]/unhide is a BALANCED COUNTER,
+  // not a flag: hiding twice needs unhiding twice, and one stray extra unhide
+  // leaves the pointer permanently visible in a relative-pointer drag. So the
+  // transition is tracked explicitly and only ever toggled on a change.
+  bool g_cursor_hidden = false;
+
+  // macOS 15 finally added PUBLIC cursors for shapes AppKit had never exposed:
+  // +frameResizeCursorFromPosition:inDirections: (the diagonals) plus
+  // +columnResizeCursor / +rowResizeCursor. Prefer those when both the SDK
+  // declares them and the running OS has them; older systems fall through to
+  // the guarded private selectors below.
+  //
+  // Returns nil when there is no public answer for `kind`, so the caller keeps
+  // its existing fallback chain.
+  static NSCursor* mac_public_cursor(int kind)
+  {
+  #if defined(MAC_OS_VERSION_15_0) && \
+      MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_VERSION_15_0
+    if (@available(macOS 15.0, *)) {
+      switch (kind) {
+        // NSCursorFrameResizeDirectionsAll = the double-headed arrow, which is what a resize
+        // affordance wants; Inward/Outward are the single-headed variants for a
+        // frame that can only grow or only shrink on that edge.
+        case NEUI_CURSOR_NESW_RESIZE:
+          return [NSCursor
+            frameResizeCursorFromPosition:NSCursorFrameResizePositionTopRight
+                             inDirections:NSCursorFrameResizeDirectionsAll];
+        case NEUI_CURSOR_NWSE_RESIZE:
+          return [NSCursor
+            frameResizeCursorFromPosition:NSCursorFrameResizePositionTopLeft
+                             inDirections:NSCursorFrameResizeDirectionsAll];
+        default: break;
+      }
+    }
+  #else
+    (void)kind;
+  #endif
+    return nil;
+  }
+
+  // A private +[NSCursor foo] shape, or nil when this macOS doesn't have it.
+  static NSCursor* mac_private_cursor(const char* selname)
+  {
+    SEL sel = NSSelectorFromString([NSString stringWithUTF8String:selname]);
+    if (!sel || ![NSCursor respondsToSelector:sel]) return nil;
+    // -performSelector: on a class object returning an id: the cursor is
+    // autoreleased and owned by AppKit, exactly like the public accessors.
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    id c = [NSCursor performSelector:sel];
+    #pragma clang diagnostic pop
+    return [c isKindOfClass:[NSCursor class]] ? (NSCursor*)c : nil;
+  }
+
+  // The NSCursor for a kind, or nil for NEUI_CURSOR_NONE (hide is a mode, not
+  // a shape - see cursor_win32.h for the same split).
+  NSCursor* mac_cursor_for_kind(int kind)
+  {
+    switch (kind) {
+      case NEUI_CURSOR_IBEAM:       return [NSCursor IBeamCursor];
+      case NEUI_CURSOR_CROSSHAIR:   return [NSCursor crosshairCursor];
+      case NEUI_CURSOR_HAND:        return [NSCursor pointingHandCursor];
+      case NEUI_CURSOR_OPEN_HAND:   return [NSCursor openHandCursor];
+      case NEUI_CURSOR_CLOSED_HAND: return [NSCursor closedHandCursor];
+      case NEUI_CURSOR_EW_RESIZE:   return [NSCursor resizeLeftRightCursor];
+      case NEUI_CURSOR_NS_RESIZE:   return [NSCursor resizeUpDownCursor];
+
+      // Diagonals: public since macOS 15, private selector before that, and a
+      // same-axis double-arrow as the last resort - on a corner grip that still
+      // reads as "resize", where an arrow reads as "nothing here".
+      case NEUI_CURSOR_NESW_RESIZE:
+      case NEUI_CURSOR_NWSE_RESIZE: {
+        if (NSCursor* pub = mac_public_cursor(kind)) return pub;
+        NSCursor* c = mac_private_cursor(
+          kind == NEUI_CURSOR_NESW_RESIZE
+            ? "_windowResizeNorthEastSouthWestCursor"
+            : "_windowResizeNorthWestSouthEastCursor");
+        return c ? c : [NSCursor resizeUpDownCursor];
+      }
+
+      // No public move cursor; the open hand is the idiomatic Mac stand-in
+      // (Preview / Finder use it for exactly this).
+      case NEUI_CURSOR_MOVE: {
+        NSCursor* c = mac_private_cursor("_moveCursor");
+        return c ? c : [NSCursor openHandCursor];
+      }
+
+      // macOS has no app-controlled busy cursor at all: the spinning beachball
+      // is the WINDOW SERVER's response to an app that stops answering events,
+      // and an app cannot ask for it. So WAIT / PROGRESS degrade to the arrow
+      // unless the private shape exists. A client that wants visible progress
+      // on the Mac should draw it, not set a cursor.
+      case NEUI_CURSOR_WAIT:
+      case NEUI_CURSOR_PROGRESS: {
+        NSCursor* c = mac_private_cursor("busyButClickableCursor");
+        return c ? c : [NSCursor arrowCursor];
+      }
+      case NEUI_CURSOR_HELP: {
+        NSCursor* c = mac_private_cursor("_helpCursor");
+        return c ? c : [NSCursor arrowCursor];
+      }
+
+      case NEUI_CURSOR_NOT_ALLOWED: return [NSCursor operationNotAllowedCursor];
+      case NEUI_CURSOR_NONE:        return nil;   // hide
+      case NEUI_CURSOR_ARROW:
+      case NEUI_CURSOR_DEFAULT:
+      default:                      return [NSCursor arrowCursor];
+    }
+  }
+
+  // Apply the tracked kind. Called from platform_set_cursor and again from
+  // -cursorUpdate: every time AppKit would otherwise reset us.
+  void mac_apply_cursor(int kind)
+  {
+    const bool want_hidden = neui_detail::cursor_kind_is_hidden(kind);
+    if (want_hidden != g_cursor_hidden) {
+      if (want_hidden) [NSCursor hide]; else [NSCursor unhide];
+      g_cursor_hidden = want_hidden;
+    }
+    if (want_hidden) return;   // nothing to shape while hidden
+    if (NSCursor* c = mac_cursor_for_kind(kind)) [c set];
+  }
 
   void platform_set_cursor(int kind)
   {
-    switch (kind) {
-      case NEUI_CURSOR_EW_RESIZE: [[NSCursor resizeLeftRightCursor] set]; break;
-      case NEUI_CURSOR_DEFAULT:
-      default:                    [[NSCursor arrowCursor] set];          break;
-    }
+    g_cursor_kind = kind;
+    mac_apply_cursor(kind);
+  }
+
+  // -------------------------------------------------------------------------
+  // Relative (unbounded) pointer mode.
+  //
+  // macOS has the cleanest primitive of the three platforms:
+  // CGAssociateMouseAndMouseCursorPosition(false) stops the cursor tracking the
+  // device while NSEvent keeps delivering deltaX/deltaY. So there is no
+  // per-move warp and no synthetic motion event to filter out - unlike win32
+  // and X11, which must warp back on every move.
+  //
+  // The hide is done directly rather than through platform_set_cursor, so it is
+  // independent of NEUI_ATTR_CURSOR: a drag must not clobber the widget's
+  // configured shape, and on end the widget's own cursor has to come back. Kept
+  // balanced with an explicit flag for the same reason g_cursor_hidden exists -
+  // hide/unhide is a counter, and an unbalanced hide costs the process its
+  // pointer for good.
+
+  static bool g_relative_hidden = false;
+
+  bool platform_supports_relative_pointer() { return true; }
+
+  bool platform_begin_relative_pointer(void* native_handle,
+                                        int* out_anchor_x, int* out_anchor_y)
+  {
+    (void)native_handle;
+    // Anchor in Quartz GLOBAL DISPLAY coordinates (y DOWN from the top-left of
+    // the main display) because that is what CGWarpMouseCursorPosition consumes
+    // on the way back. NSEvent.mouseLocation is y-UP in Cocoa screen space, so
+    // it is flipped here once rather than at the (easier to forget) warp site.
+    const NSPoint cocoa = [NSEvent mouseLocation];
+    const CGFloat screen_h = NSMaxY([[NSScreen screens] firstObject].frame);
+    if (out_anchor_x) *out_anchor_x = (int)(cocoa.x + 0.5);
+    if (out_anchor_y) *out_anchor_y = (int)(screen_h - cocoa.y + 0.5);
+
+    // Decouple cursor from device. Deltas keep arriving; the cursor stops.
+    CGAssociateMouseAndMouseCursorPosition(false);
+    if (!g_relative_hidden) { [NSCursor hide]; g_relative_hidden = true; }
+    return true;
+  }
+
+  void platform_end_relative_pointer(void* native_handle,
+                                      int anchor_x, int anchor_y)
+  {
+    (void)native_handle;
+    // Warp FIRST, then re-associate. Both orders put the cursor back, because a
+    // warp moves it even while decoupled - but CGWarpMouseCursorPosition starts a
+    // local-events suppression interval (~250 ms by default) during which real
+    // mouse input is dropped. Re-associating after the warp is the standard way
+    // to avoid that: the association call ends the decoupled state and the
+    // suppression does not apply to the freshly re-associated device, so the
+    // pointer is live again immediately instead of feeling dead for a quarter
+    // second after every knob drag.
+    CGWarpMouseCursorPosition(CGPointMake((CGFloat)anchor_x, (CGFloat)anchor_y));
+    CGAssociateMouseAndMouseCursorPosition(true);
+    if (g_relative_hidden) { [NSCursor unhide]; g_relative_hidden = false; }
+    // Re-apply the widget's own cursor: the hide above bypassed
+    // platform_set_cursor, so g_cursor_kind is still whatever the widget asked
+    // for and simply needs re-asserting now that the pointer is visible again.
+    mac_apply_cursor(g_cursor_kind);
   }
 
   // -------------------------------------------------------------------------
@@ -2151,6 +2994,87 @@ namespace xpl_host
     }
   }
 
+  // Client timers (NEUI_API_TIMER). Session-scoped, so this hangs off the main
+  // runloop rather than off a view - unlike the toast heartbeat above, there is
+  // no one frame that owns it.
+  //
+  // NSRunLoopCommonModes (not the default mode) so the tick keeps running while
+  // AppKit is in a modal / event-tracking loop - i.e. an animation driven by a
+  // client timer does not freeze while the user holds a mouse button down. In a
+  // DAW the host's own runloop services this exactly the same way, which is what
+  // makes timers work under NEUI_API_EMBED with no loop of our own.
+  static std::unordered_map<Session*, NSTimer*>& mac_session_timers()
+  {
+    // Deliberately IMMORTAL (leaked), not a plain function-local static. The
+    // global `sessions` vector in host.cpp outlives this translation unit's
+    // statics: it is constructed first and so destroyed last, and ~Session
+    // calls platform_timer_stop(). A destructible map here is therefore read
+    // AFTER it has been destroyed during static teardown - a SEGV at exit for
+    // any client that uses a timer and never calls destroy(session), which is
+    // exactly what CLAUDE.md's own canonical usage does.
+    static auto* m = new std::unordered_map<Session*, NSTimer*>();
+    return *m;
+  }
+
+  // macOS: localPointForEvent divides by frameZoom.
+  bool platform_supports_ui_scale() { return true; }
+  bool platform_supports_tree_popup() { return true; }
+
+  void platform_timer_start(Session* session, uint32_t interval_ms)
+  {
+    if (!session || interval_ms == 0) return;
+    platform_timer_stop(session);   // idempotent re-arm at the new interval
+    NSTimer* t = [NSTimer timerWithTimeInterval:(double)interval_ms / 1000.0
+                                        repeats:YES
+                                          block:^(NSTimer*) {
+      // Re-check membership: a session torn down between fires would otherwise
+      // be a dangling pointer, since the block captures the raw Session*.
+      auto& m = mac_session_timers();
+      if (m.find(session) == m.end()) return;
+      session->tick_client_timers();
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
+    mac_session_timers()[session] = t;
+  }
+
+  void platform_timer_stop(Session* session)
+  {
+    if (!session) return;
+    auto& m = mac_session_timers();
+    auto it = m.find(session);
+    if (it == m.end()) return;
+    [it->second invalidate];
+    m.erase(it);
+  }
+
+  // -------------------------------------------------------------------------
+  // Accessibility seams. The provider itself lives in a11y_macos.mm; these two
+  // functions exist only to turn a frame's native handle into the content view
+  // it is rooted at, which is the one thing that file deliberately does not
+  // know (a handle is an NSWindow* for a standalone frame and an NEUIView* for
+  // a DAW-embedded one - see is_embedded_view).
+
+  void platform_a11y_notify(void* frame_native_handle, uint32_t widget_id,
+                            int change)
+  {
+    NSView* v = frame_content_view(frame_native_handle);
+    if (!v) return;
+    mac_a11y_notify(v, widget_id, change);
+  }
+
+  // macOS offers no "an AT attached" signal at all: accessibility here is lazy
+  // by design, so the honest answer is the one Session tracks (has anything
+  // queried us) and this adds nothing to it.
+  bool platform_a11y_is_listening() { return false; }
+
+  void platform_a11y_announce(void* frame_native_handle, const char* utf8,
+                              bool assertive)
+  {
+    // A null handle is legal here: an announcement has no node behind it, and
+    // the provider falls back to NSApp when there is no window to post on.
+    mac_a11y_announce(frame_content_view(frame_native_handle), utf8, assertive);
+  }
+
   uint64_t platform_now_ms()
   {
     // mach_absolute_time + NSProcessInfo systemUptime both work; pick the
@@ -2171,6 +3095,30 @@ namespace xpl_host
     NSWindow* win = native_window(native_handle);
     if (!win) return 0;
     return neui_detail::message_box_macos(win, text, caption, flags);
+  }
+
+  // -------------------------------------------------------------------------
+  // Modal file dialogs - shared NSOpenPanel / NSSavePanel mapping.
+
+  int platform_file_dialog(void* native_handle, int save,
+                           const neui_file_dialog_t* desc,
+                           neui_file_path_cb cb, void* userdata)
+  {
+    // runModal is app-modal on macOS, so an owner is not required to put the
+    // panel up - unlike win32, where the HWND is what makes it modal. The
+    // handle is therefore tolerated as nil HERE, even though the only caller
+    // (widgets.cpp notify_run_file_dialog) rejects a frame with no
+    // native_handle first: nothing below needs the window, so there is no
+    // reason for this layer to add a second refusal.
+    NSWindow* win = native_handle ? native_window(native_handle) : nil;
+
+    std::vector<std::string> paths;
+    int n = save ? neui_detail::file_dialog_save_macos(win, desc, paths)
+                 : neui_detail::file_dialog_open_macos(win, desc, paths);
+    if (n <= 0) return n;
+    if (cb)
+      for (const auto& p : paths) cb(userdata, p.c_str());
+    return static_cast<int>(paths.size());
   }
 
 } // namespace xpl_host

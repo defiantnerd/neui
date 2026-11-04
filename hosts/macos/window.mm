@@ -13,6 +13,7 @@
 #include "checkbox_image.h"
 #include "../shared/macos/image_loader_macos.h"
 #include "../shared/macos/keys_macos.h"
+#include "../shared/wheel_direction.h"
 #include "../shared/macos/theme_provider_macos.h"
 #include "../shared/macos/clipboard_macos.h"
 #include "../shared/macos/modal_pump_macos.h"
@@ -139,16 +140,12 @@ namespace macos_host {
                                                  uint32_t frame,
                                                  uint32_t tint);
 
-  // Blocking popup menu. Builds an NSMenu from `count` neui_popup_item_t
-  // `item_size` bytes apart (flags: checked, disabled, separator), presents
-  // it at `(x, y)` in `anchor`'s (flipped) coordinate space, and returns the
-  // 1-based index of the picked item (separators consume an index, matching
-  // the win32 host) or 0 on dismiss. The _strings variant takes
-  // popup_menu's NULL-terminated UTF-8 strings ("-" = separator). Defined
-  // after the view; the KNOB right-click handler calls it.
-  int run_popup_menu_macos(NSView* anchor, int x, int y,
-                           const neui_popup_item_t* items, int count, int item_size);
-  int run_popup_menu_strings_macos(NSView* anchor, int x, int y, const char* const* items);
+  // Blocking popup menu. Builds an NSMenu from the NULL-terminated UTF-8
+  // `items` ("-" = separator), presents it at `(x, y)` in `anchor`'s
+  // (flipped) coordinate space, and returns the 1-based index of the picked
+  // item (separators consume an index, matching the win32 host) or 0 on
+  // dismiss. Defined after the view; the KNOB right-click handler calls it.
+  int run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items);
 
   // Defined in widgets.mm. Routes a built-in command (NEUI_CMD_*) to the key
   // window's first responder; returns true if consumed. The menu-pick router
@@ -319,7 +316,7 @@ namespace macos_host {
     auto* wd = static_cast<WidgetData*>(host_data);
     if (!wd || !wd->native_control || !items) return 0;
     NSView* anchor = (__bridge NSView*)wd->native_control;
-    return run_popup_menu_strings_macos(anchor, local_x, local_y, items);
+    return run_popup_menu_macos(anchor, local_x, local_y, items);
   }
 
   // ------------------------------------------------------------------------
@@ -1591,6 +1588,10 @@ static float neui_snap_to_steps(float v, int steps)
       ev.data.paint.width       = (float)sz.width;
       ev.data.paint.height      = (float)sz.height;
       ev.data.paint.focused     = focused;
+      // No user zoom on the native host (child widgets are real NSViews sized
+      // by AppKit), so the device scale is purely the backing-scale ratio.
+      ev.data.paint.scale       =
+        (backend && backend->get_scale_factor) ? backend->get_scale_factor(render_ctx) : 1.0f;
       sess->dispatch_event(&ev);
     }
 
@@ -1894,7 +1895,8 @@ static float neui_snap_to_steps(float v, int steps)
     wd->hovered = true;
     macos_host::macos_invalidate_if_state_filtered_compound(wd);
   }
-  [self dispatchMouse:NEUI_EVENT_MOUSE_ENTER at:[self localPoint:event] buttonmap:0];
+  [self dispatchMouse:NEUI_EVENT_MOUSE_ENTER at:[self localPoint:event]
+                  buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
 }
 - (void)mouseExited:(NSEvent*)event
 {
@@ -1903,7 +1905,8 @@ static float neui_snap_to_steps(float v, int steps)
     wd->hovered = false;
     macos_host::macos_invalidate_if_state_filtered_compound(wd);
   }
-  [self dispatchMouse:NEUI_EVENT_MOUSE_LEAVE at:[self localPoint:event] buttonmap:0];
+  [self dispatchMouse:NEUI_EVENT_MOUSE_LEAVE at:[self localPoint:event]
+                  buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
 }
 - (void)mouseMoved:(NSEvent*)event
 {
@@ -1914,7 +1917,8 @@ static float neui_snap_to_steps(float v, int steps)
     return;
   }
   if (![self customDrawWantsInput]) { [super mouseMoved:event]; return; }
-  [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event] buttonmap:0];
+  [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event]
+                  buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
 }
 
 // Resolve the SECTION + state pointer for the painted view if this widget
@@ -2039,7 +2043,7 @@ static float neui_snap_to_steps(float v, int steps)
     }
     neui_event_type_t t = (event.clickCount >= 2)
       ? NEUI_EVENT_MOUSE_BUTTON_DBLCLICK : NEUI_EVENT_MOUSE_BUTTON_DOWN;
-    [self dispatchMouse:t at:[self localPoint:event] buttonmap:1];
+    [self dispatchMouse:t at:[self localPoint:event] buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
     return;
   }
   [super mouseDown:event];
@@ -2112,7 +2116,8 @@ static float neui_snap_to_steps(float v, int steps)
     // the difference between an in-flight drag and a release-then-move.
     // Clients that don't use behaviors still receive the MOVE event as
     // before and can ignore the buttonmap field.
-    [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event] buttonmap:NEUI_MK_LBUTTON];
+    [self dispatchMouse:NEUI_EVENT_MOUSE_MOVE at:[self localPoint:event]
+                  buttonmap:(NEUI_MK_LBUTTON | neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags))];
     return;
   }
   [super mouseDragged:event];
@@ -2146,7 +2151,8 @@ static float neui_snap_to_steps(float v, int steps)
       wd->pressed = false;
       macos_host::macos_invalidate_if_state_filtered_compound(wd);
     }
-    [self dispatchMouse:NEUI_EVENT_MOUSE_BUTTON_UP at:[self localPoint:event] buttonmap:0];
+    [self dispatchMouse:NEUI_EVENT_MOUSE_BUTTON_UP at:[self localPoint:event]
+                  buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
     return;
   }
   [super mouseUp:event];
@@ -2159,7 +2165,7 @@ static float neui_snap_to_steps(float v, int steps)
     if (wd && !wd->enabled) return;  // disabled knob: no context menu
     NSPoint p = [self localPointForKnobEvent:event];
     static const char* k_items[] = { "Reset to default", nullptr };
-    int pick = macos_host::run_popup_menu_strings_macos(self, (int)p.x, (int)p.y, k_items);
+    int pick = macos_host::run_popup_menu_macos(self, (int)p.x, (int)p.y, k_items);
     if (pick == 1) {
       float def = 0.0f;
       if (wd && wd->attrs) def = neui_clamp01(wd->attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f));
@@ -2168,7 +2174,8 @@ static float neui_snap_to_steps(float v, int steps)
     return;
   }
   if ([self customDrawWantsInput]) {
-    [self dispatchMouse:NEUI_EVENT_MOUSE_RBUTTON_DOWN at:[self localPoint:event] buttonmap:0];
+    [self dispatchMouse:NEUI_EVENT_MOUSE_RBUTTON_DOWN at:[self localPoint:event]
+                  buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
     return;
   }
   [super rightMouseDown:event];
@@ -2176,7 +2183,8 @@ static float neui_snap_to_steps(float v, int steps)
 - (void)rightMouseUp:(NSEvent*)event
 {
   if ([self customDrawWantsInput]) {
-    [self dispatchMouse:NEUI_EVENT_MOUSE_RBUTTON_UP at:[self localPoint:event] buttonmap:0];
+    [self dispatchMouse:NEUI_EVENT_MOUSE_RBUTTON_UP at:[self localPoint:event]
+                  buttonmap:neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons, event.modifierFlags)];
     return;
   }
   [super rightMouseUp:event];
@@ -2455,14 +2463,23 @@ static float neui_snap_to_steps(float v, int steps)
   if (wants_knob) {
     auto* wd = macos_host::widget_for_id(widget_id);
     if (wd && !wd->enabled) return;  // disabled knob ignores the wheel
-    // Match the xpl host's wheel-up = increase convention (matches the slider).
     bool fine = (event.modifierFlags & NSEventModifierFlagShift) != 0;
     int steps = [self knobSteps];
     float magnitude = (steps >= 2)
       ? (1.0f / (float)(steps - 1))
       : (fine ? 0.01f : 0.05f);
-    float sign = (ticks > 0) ? 1.0f : -1.0f;
-    int   mag_ticks = (ticks > 0) ? ticks : -ticks;
+    // PHYSICAL direction, then the shared value convention (up decreases). This
+    // path had both bugs: it read the OS-adjusted sign, so natural scrolling
+    // reversed it (issue #21), and it moved the opposite way from a behavior
+    // asset's WHEEL handler.
+    // buttonmap 0 and is_horizontal 0: this path only ever sees a VERTICAL tick
+    // count, so there is no Shift->horizontal flip for the helper to undo - only
+    // the OS inversion.
+    const int phys = neui_detail::wheel_physical_delta(
+      (int)ticks, /*is_horizontal*/0, /*buttonmap*/0u,
+      event.isDirectionInvertedFromDevice ? 1 : 0);
+    float sign = neui_detail::wheel_value_sign(phys);
+    int   mag_ticks = neui_detail::wheel_magnitude(phys);
     [self setKnobValueFromUserGesture:[self knobValue]
                                        + sign * magnitude * (float)mag_ticks];
     return;
@@ -2480,6 +2497,11 @@ static float neui_snap_to_steps(float v, int steps)
   ev.data.wheel.x      = (int)p.x;
   ev.data.wheel.y      = (int)p.y;
   ev.data.wheel.delta  = ticks;
+  // See the xpl macOS layer: only macOS can report this, and a value consumer
+  // needs it to recover the physical direction (issue #21).
+  ev.data.wheel.is_flipped = event.isDirectionInvertedFromDevice ? 1 : 0;
+  ev.data.wheel.buttonmap = neui_detail::mac_buttonmap(NSEvent.pressedMouseButtons,
+                                                        event.modifierFlags);
   sess->dispatch_event(&ev);
   macos_host::dispatch_behavior_mouse(widget_id, &ev, (float)p.x, (float)p.y);
 }
@@ -2526,7 +2548,9 @@ static float neui_snap_to_steps(float v, int steps)
   // unwinds and returns to the caller. No-op for non-modal frames.
   if (session && session->_widgets.exists(widget_index)) {
     auto& wd = session->_widgets[widget_index];
-    if (wd.modal_pump_active) wd.modal_pump_active = false;
+    // Writes THROUGH the share, so the waiting pump sees it even if this
+    // WidgetData is freed a moment later by the client's close handler.
+    if (wd.modal_pump_flag) *wd.modal_pump_flag = false;
   }
   if (is_appwindow) {
     if (--g_appwindow_count <= 0) {
@@ -2620,6 +2644,10 @@ static float neui_snap_to_steps(float v, int steps)
     neui_event_t ev = {};
     ev.type                 = NEUI_EVENT_MOUSE_BUTTON_CLICK;
     ev.data.mouse.widget    = { wd.widget_id };
+    // Deliberately 0: this is an NSControl ACTION, which the keyboard can
+    // trigger (Space on a focused button) with no mouse involved. Don't
+    // "fix" this to read the live button state - it would report a phantom
+    // press. The real mouse events carry the bits.
     ev.data.mouse.buttonmap = 0;
     sess->dispatch_event(&ev);
     return;
@@ -2929,31 +2957,28 @@ namespace macos_host {
 @end
 
 namespace macos_host {
-  int run_popup_menu_macos(NSView* anchor, int x, int y,
-                           const neui_popup_item_t* items, int count, int item_size)
+  int run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items)
   {
-    if (!items || count <= 0 || item_size < NEUI_POPUP_ITEM_SIZE_MIN) return 0;
+    if (!items) return 0;
     NSMenu* menu = [[NSMenu alloc] initWithTitle:@""];
     menu.autoenablesItems = NO;
     NEUIPopupCollector* collector = [[NEUIPopupCollector alloc] init];
 
-    // separators consume an index slot (matches the win32 host)
-    const char* p = (const char*)items;
-    for (int idx = 1; idx <= count; ++idx, p += item_size) {
-      const neui_popup_item_t* it = (const neui_popup_item_t*)p;
-      if (it->flags & NEUI_POPUP_ITEM_SEPARATOR) {
+    int idx = 0;
+    for (const char* const* p = items; *p; ++p) {
+      ++idx;  // separators consume an index slot (matches the win32 host)
+      const char* t = *p;
+      if (t[0] == '-' && t[1] == '\0') {
         [menu addItem:[NSMenuItem separatorItem]];
         continue;
       }
-      NSString* title = [NSString stringWithUTF8String:it->text ? it->text : ""];
       NSMenuItem* mi = [[NSMenuItem alloc]
-        initWithTitle:title ? title : @""
+        initWithTitle:[NSString stringWithUTF8String:t]
                action:@selector(neuiPopupPick:)
         keyEquivalent:@""];
       mi.target  = collector;
       mi.tag     = idx;
-      mi.enabled = (it->flags & NEUI_POPUP_ITEM_DISABLED) ? NO : YES;
-      if (it->flags & NEUI_POPUP_ITEM_CHECKED) mi.state = NSControlStateValueOn;
+      mi.enabled = YES;
       [menu addItem:mi];
     }
 
@@ -2969,17 +2994,6 @@ namespace macos_host {
                                 inView:kw.contentView];
     }
     return collector->pickedTag;
-  }
-
-  int run_popup_menu_strings_macos(NSView* anchor, int x, int y, const char* const* items)
-  {
-    if (!items) return 0;
-    std::vector<neui_popup_item_t> v;
-    for (const char* const* p = items; *p; ++p) {
-      const bool sep = (*p)[0] == '-' && (*p)[1] == '\0';
-      v.push_back({ *p, sep ? NEUI_POPUP_ITEM_SEPARATOR : 0u });
-    }
-    return run_popup_menu_macos(anchor, x, y, v.data(), (int)v.size(), (int)sizeof(neui_popup_item_t));
   }
 }
 
@@ -3512,8 +3526,10 @@ namespace macos_host
       // run by widget_show AFTER create_descendants_native populates the
       // dialog - pumping here would block before the children are ever
       // created, leaving an empty dialog. windowWillClose: clears the flag
-      // to unwind the pump.
-      w.modal_pump_active = true;
+      // to unwind the pump. Allocated here rather than being a plain member: the
+      // pump outlives this WidgetData whenever a client callback destroys the
+      // dialog, which is the documented way out (see host.h).
+      w.modal_pump_flag = std::make_shared<bool>(true);
     } else {
       [window makeKeyAndOrderFront:nil];
     }
@@ -4607,12 +4623,19 @@ namespace macos_host
       // descendant controls exist.
       rebuild_key_view_loop_macos(this, index, native_window_from(w.native_window));
       // A modal DIALOG blocks here - AFTER its children exist - spinning a
-      // nested NSEvent pump until windowWillClose: clears modal_pump_active
-      // (create_dialog armed the flag + presented the sheet). Do not touch
-      // `w` after this returns: the dialog is typically destroyed (slot
-      // freed) by the OK / close handler that unwound the pump.
-      if (w.modal_pump_active)
-        neui_detail::run_modal_pump_macos(&w.modal_pump_active);
+      // nested NSEvent pump until windowWillClose: clears the flag
+      // (create_dialog armed it + presented the sheet). Do not touch `w` after
+      // this returns: the dialog is typically destroyed (slot freed) by the OK /
+      // close handler that unwound the pump.
+      //
+      // That is also why the flag is held by SHARE rather than passed as
+      // `&w.modal_pump_active`: "do not touch `w` afterwards" was not enough,
+      // because the pump reads the flag on every iteration and so was already
+      // touching `w` for the whole time the dialog was up. This local is what
+      // keeps the flag alive to be read.
+      auto keep_running = w.modal_pump_flag;
+      if (keep_running && *keep_running)
+        neui_detail::run_modal_pump_macos(keep_running.get());
       return;
     }
 

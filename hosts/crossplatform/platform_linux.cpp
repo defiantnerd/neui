@@ -26,6 +26,9 @@
 #include "../shared/linux/clipboard_linux.h"
 #include "../shared/linux/dnd_linux.h"
 #include "../shared/linux/message_box_linux.h"
+#include "../shared/file_dialog_model.h"
+#include "../shared/linux/file_dialog_portal.h"
+#include "../shared/text_edit.h"           // name field in the drawn browser
 #include "../shared/theme_palette.h"
 #include "../shared/linux/theme_provider_linux.h"
 #include "../../backends/cairo/cairo_backend.h"
@@ -46,6 +49,9 @@
 
 #include <sys/select.h>
 #include <sys/timerfd.h>
+#include <sys/stat.h>
+#include <dirent.h>          // neui-drawn file browser directory listing
+#include <pwd.h>             // $HOME fallback for the browser's start folder
 #include <unistd.h>
 #include <time.h>
 
@@ -85,15 +91,103 @@ namespace
   // CLIPBOARD-selection owner/requestor (X11 selections, hosts/shared/linux).
   neui_detail::ClipboardX11 g_clipboard;
 
-  // Active cursor shape (CursorKind) + per-Display EW-resize cursor cache.
+  // Active cursor shape (enum neui_cursor_kind) + the per-Display cursor cache.
   // Cursors are a per-connection resource, so embedded windows on their own
-  // Display get their own entry.
+  // Display get their own entry; the inner map is keyed by kind because
+  // XCreateFontCursor is a server round-trip we only want to pay once per
+  // shape per connection.
   int g_cursor_kind = NEUI_CURSOR_DEFAULT;
-  std::unordered_map<Display*, Cursor> g_ew_cursors;
+  std::unordered_map<Display*, std::unordered_map<int, Cursor>> g_cursors;
+
+  // Relative (unbounded) pointer mode - see platform_begin_relative_pointer.
+  // Declared up here with the other module state because dispatch_motion (far
+  // above the implementation) reads all four.
+  //
+  // Process-wide, not per-window: one pointer, so one relative drag at a time.
+  // g_relative_window pins the mode to the window that started it, so a motion
+  // event arriving for a DIFFERENT window of ours is handled normally rather
+  // than being mistaken for drag motion. The anchor is in ROOT (screen) px,
+  // which is what XWarpPointer and MotionNotify's x_root/y_root both speak.
+  struct LinuxWindow;
+  bool         g_relative_active   = false;
+  LinuxWindow* g_relative_window   = nullptr;
+  int          g_relative_anchor_x = 0;
+  int          g_relative_anchor_y = 0;
+  // Previous pointer position in ROOT px, for event-to-event deltas. Anchor-
+  // relative deltas double-count whenever more than one MotionNotify is queued
+  // before the asynchronous warp lands - see dispatch_motion.
+  int          g_relative_last_x   = 0;
+  int          g_relative_last_y   = 0;
+
+  // The X font-cursor glyph for a kind. X11 is the richest of the three
+  // platforms here - the cursor font has a direct equivalent for every kind
+  // except "none", which is a mode (an empty pixmap, built separately).
+  unsigned int x11_cursor_glyph(int kind)
+  {
+    switch (kind) {
+      case NEUI_CURSOR_IBEAM:       return XC_xterm;
+      case NEUI_CURSOR_CROSSHAIR:   return XC_crosshair;
+      case NEUI_CURSOR_HAND:        return XC_hand2;
+      case NEUI_CURSOR_OPEN_HAND:   return XC_hand1;
+      // The cursor font has no closed/grabbing hand; the four-way move glyph
+      // is what GTK and Qt both fall back to for an in-progress grab.
+      case NEUI_CURSOR_CLOSED_HAND: return XC_fleur;
+      case NEUI_CURSOR_EW_RESIZE:   return XC_sb_h_double_arrow;
+      case NEUI_CURSOR_NS_RESIZE:   return XC_sb_v_double_arrow;
+      // The cursor font has corner glyphs, not diagonal double-arrows. A
+      // bottom-left corner reads as the NESW axis and vice versa.
+      case NEUI_CURSOR_NESW_RESIZE: return XC_bottom_left_corner;
+      case NEUI_CURSOR_NWSE_RESIZE: return XC_bottom_right_corner;
+      case NEUI_CURSOR_MOVE:        return XC_fleur;
+      case NEUI_CURSOR_WAIT:        return XC_watch;
+      case NEUI_CURSOR_PROGRESS:    return XC_watch;   // no separate glyph
+      case NEUI_CURSOR_HELP:        return XC_question_arrow;
+      case NEUI_CURSOR_NOT_ALLOWED: return XC_X_cursor;
+      case NEUI_CURSOR_ARROW:
+      default:                      return XC_left_ptr;
+    }
+  }
+
+  // A fully transparent 1x1 cursor - X11's only way to hide the pointer over a
+  // window. Cached like the others: creating one per motion event would leak a
+  // server resource per call.
+  Cursor x11_make_empty_cursor(Display* dpy, Window win)
+  {
+    char zero[8] = {0};   // 1x1 needs 1 byte, but 8 keeps XCreateBitmapFromData happy
+    Pixmap bm = XCreateBitmapFromData(dpy, win, zero, 1, 1);
+    if (!bm) return None;
+    XColor black = {};
+    Cursor c = XCreatePixmapCursor(dpy, bm, bm, &black, &black, 0, 0);
+    XFreePixmap(dpy, bm);
+    return c;
+  }
+
+  // The cached Cursor for (Display, kind), creating it on first use.
+  Cursor x11_cursor_for(Display* dpy, Window win, int kind)
+  {
+    auto& per_dpy = g_cursors[dpy];
+    auto  it      = per_dpy.find(kind);
+    if (it != per_dpy.end()) return it->second;
+
+    Cursor c = neui_detail::cursor_kind_is_hidden(kind)
+                 ? x11_make_empty_cursor(dpy, win)
+                 : XCreateFontCursor(dpy, x11_cursor_glyph(kind));
+    per_dpy[kind] = c;
+    return c;
+  }
 
   // Per-frame window record, stashed on WidgetData::native_handle.
   struct LinuxWindow
   {
+    // The logical size WE last asked X for, or 0 when none is outstanding.
+    // ConfigureNotify is asynchronous, so unlike win32/macOS a set-and-clear
+    // flag around the request would never still be live when the notify lands.
+    // Instead the notify snaps to this value when the size it derives is within
+    // rounding distance: `logical -> physical -> logical` is lossy at fractional
+    // zoom (402 px at zoom 0.75 round-trips to 403), and accepting the drifted
+    // value would corrupt wd.width and fire a spurious RESIZE.
+    int expect_w = 0;
+    int expect_h = 0;
     Display*     dpy          = nullptr;   // == g_display for standalone; own connection when embedded
     bool         owns_display = false;     // true => embedded (dedicated XOpenDisplay)
     uint64_t     last_tick_ms = 0;         // 16 ms gate for host-driven embedded ticks
@@ -106,7 +200,6 @@ namespace
     bool         is_appwindow = false;
     bool         counted      = false;     // contributes to g_appwindow_count
     uint32_t     dpi          = 96;
-    float        zoom         = 1.0f;      // the frame's NEUI_ATTR_ZOOM
     bool         needs_paint  = false;
     bool         toast_anim   = false;
     // Modal blocking: set while a modal child dialog is up (X11 has no native
@@ -134,7 +227,22 @@ namespace
     unsigned int last_click_button  = 0;
   };
 
-  std::unordered_map<Window, LinuxWindow*> g_windows;
+  // Immortal (leaked) rather than a destructible global, for exactly the reason
+  // client_timer_sessions() below is: the `sessions` vector lives in host.cpp,
+  // so the relative static-destruction order across the two TUs is unspecified,
+  // and ~Session reaches THIS map through four of its six teardown steps -
+  // platform_timer_stop -> refresh_timer_arm -> any_window_animating iterates
+  // it, and end_relative_pointer / close_all_popup_surfaces / release_cursor all
+  // look windows up in it. When this TU's statics happen to go first, an
+  // application that simply returns from main() without calling
+  // api->destroy(session) segfaults in static destruction, after all of its own
+  // output has been written but while stdio buffers are still unflushed - so the
+  // crash also eats the log that would have explained it.
+  //
+  // A leaked map at exit costs nothing; a destroyed one is a crash. The
+  // reference form keeps every existing `g_windows` use site unchanged.
+  std::unordered_map<Window, LinuxWindow*>& g_windows =
+      *new std::unordered_map<Window, LinuxWindow*>();
 
   LinuxWindow* find_window(Window w)
   {
@@ -142,17 +250,22 @@ namespace
     return it == g_windows.end() ? nullptr : it->second;
   }
 
-  // Physical px per logical client px: the DPI's scale times the frame's
-  // zoom. Positions stay at the DPI's scale alone.
-  float client_scale(const LinuxWindow* lw)
+  // Physical pixels per logical pixel for this window: the display's DPI ratio
+  // times the frame's user zoom (NEUI_ATTR_UI_SCALE). THE conversion constant
+  // for this platform layer - X gives us physical pixels, while the widget
+  // tree, the cached abs_x/abs_y and the paint walk are all logical, so every
+  // native->logical divide and logical->native multiply goes through here.
+  // Never returns <= 0.
+  float window_scale(const LinuxWindow* lw)
   {
-    float scale = static_cast<float>(lw->dpi) / 96.0f * lw->zoom;
-    return scale > 0.0f ? scale : 1.0f;
-  }
-
-  uint32_t client_dpi(const LinuxWindow* lw)
-  {
-    return static_cast<uint32_t>(static_cast<float>(lw->dpi) * lw->zoom + 0.5f);
+    if (!lw) return 1.0f;
+    float s = static_cast<float>(lw->dpi) / 96.0f;
+    if (!(s > 0.0f)) s = 1.0f;
+    if (lw->session) {
+      if (auto* wd = lw->session->get_widget(lw->widget_index))
+        s *= wd->ui_scale();
+    }
+    return (s > 0.0f) ? s : 1.0f;
   }
 
   // ---- XInput2 smooth scroll ------------------------------------------------
@@ -311,17 +424,67 @@ namespace
     // select() on the X fd alone instead of waking 60x/s for nothing.
   }
 
-  // Arm / disarm the 16 ms animation heartbeat. it_value == 0 disarms.
-  void arm_timer(bool on)
+  // Sessions with live NEUI_API_TIMER timers, and the shortest interval any of
+  // them wants. The heartbeat is SHARED with the animation ticks, so the armed
+  // period is the minimum of the two demands - a client asking for 8 ms must not
+  // be slowed to the animation's 16 ms, and an animation must not be starved by
+  // a client's 1000 ms timer.
+  // Immortal (leaked) rather than a destructible global: the `sessions` vector
+  // lives in host.cpp, so the relative static-destruction order across the two
+  // TUs is unspecified, and ~Session calls platform_timer_stop(). A leaked map
+  // at exit costs nothing; a destroyed one is a crash.
+  std::unordered_map<Session*, uint32_t>& client_timer_sessions()
+  {
+    static auto* m = new std::unordered_map<Session*, uint32_t>();
+    return *m;
+  }
+
+  uint32_t client_timer_min_ms()
+  {
+    uint32_t best = 0;
+    for (auto& kv : client_timer_sessions())
+      if (best == 0 || kv.second < best) best = kv.second;
+    return best;
+  }
+
+  // The period the timerfd is currently armed at (0 = disarmed). Tracked so a
+  // re-arm can be skipped when the demand has not moved: timerfd_settime RESETS
+  // the phase, so calling it every tick would turn the period into
+  // `period + handler time` and drift the animation heartbeat as well.
+  uint32_t g_armed_period_ms = 0;
+
+  // Arm the heartbeat at `period_ms`, or disarm when 0. Idempotent.
+  void arm_timer_ms(uint32_t period_ms)
   {
     if (g_timerfd < 0) return;
+    if (period_ms == g_armed_period_ms) return;   // already correct - don't re-phase
+    g_armed_period_ms = period_ms;
     struct itimerspec its; std::memset(&its, 0, sizeof its);
-    if (on) {
-      its.it_interval.tv_nsec = 16 * 1000 * 1000;  // 16 ms
+    if (period_ms > 0) {
+      its.it_interval.tv_sec  = period_ms / 1000;
+      its.it_interval.tv_nsec = (long)(period_ms % 1000) * 1000 * 1000;
       its.it_value = its.it_interval;
     }
     timerfd_settime(g_timerfd, 0, &its, nullptr);
   }
+
+  bool any_window_animating();
+
+  // Single place that decides the heartbeat period from both demands. Every
+  // start/stop path routes through here so the two can never fight.
+  void refresh_timer_arm()
+  {
+    const uint32_t client = client_timer_min_ms();
+    const uint32_t anim   = any_window_animating() ? 16u : 0u;
+    uint32_t period = 0;
+    if (client && anim) period = (client < anim) ? client : anim;
+    else                period = client ? client : anim;
+    arm_timer_ms(period);
+  }
+
+  // Back-compat shim for the animation call sites: they only ever meant
+  // "animation wants / no longer wants the heartbeat".
+  void arm_timer(bool /*on*/) { refresh_timer_arm(); }
 
   bool any_window_animating()
   {
@@ -392,16 +555,43 @@ namespace
       if (g_windows.count(lw->win)) paint_window(lw);
   }
 
+  // flush_pending_paints restricted to ONE session's windows. The embedded pump
+  // needs this and cannot use the unrestricted form: a DAW may host several
+  // plugin instances, each with its own session, its own Display and its own
+  // pump - possibly on its own thread - so one instance's tick must never paint
+  // another instance's window.
+  void flush_pending_paints_for_session(Session* s)
+  {
+    if (!s) return;
+    // Snapshot first: a paint callback can create / destroy windows.
+    std::vector<LinuxWindow*> todo;
+    todo.reserve(g_windows.size());
+    for (auto& kv : g_windows)
+      if (kv.second->session == s && kv.second->needs_paint)
+        todo.push_back(kv.second);
+    for (auto* lw : todo)
+      if (g_windows.count(lw->win)) paint_window(lw);
+  }
+
   void tick_animations()
   {
     for (auto& kv : g_windows) {
       if (kv.second->toast_anim) kv.second->needs_paint = true;
       step_scroll_bounce(kv.second);
     }
-    // Once nothing is animating, drop back to a blocking select() (no 60 Hz
-    // wakeups). Toast start/stop also touch arm_timer; this catches the
-    // bounce-settled case.
-    if (!any_window_animating()) arm_timer(false);
+    // Client timers ride the same heartbeat. Snapshot first: a handler may
+    // add or remove a session's timers, which mutates the map we are walking.
+    if (!client_timer_sessions().empty()) {
+      std::vector<Session*> due;
+      due.reserve(client_timer_sessions().size());
+      for (auto& kv : client_timer_sessions()) due.push_back(kv.first);
+      for (Session* s : due)
+        if (client_timer_sessions().count(s)) s->tick_client_timers();
+    }
+    // Drop back to a blocking select() once NEITHER demand is live (no 60 Hz
+    // wakeups). Catches the bounce-settled case; the client-timer paths call
+    // refresh_timer_arm themselves.
+    refresh_timer_arm();
   }
 
   // ---- Window teardown ------------------------------------------------------
@@ -419,7 +609,7 @@ namespace
     // Drop any cached cursor for it first (XCloseDisplay frees the resource,
     // but a stale Display* key could collide with a later XOpenDisplay reuse).
     if (lw->owns_display && lw->dpy) {
-      g_ew_cursors.erase(lw->dpy);
+      g_cursors.erase(lw->dpy);
       XCloseDisplay(lw->dpy);
       lw->dpy = nullptr;
     }
@@ -469,6 +659,15 @@ namespace
   void dispatch_wheel(LinuxWindow* lw, XButtonEvent& be, float scale)
   {
     Session* s = lw->session;
+    // An open tree popup absorbs the wheel. Without this a scrolling SECTION
+    // or GRID *under* the visible menu scrolls away beneath it, which no OS
+    // menu does. No scroll-the-menu behaviour yet - a cascade taller than the
+    // frame clamps (see docs/deferred-issues.md).
+    if (s->_tree_popup_active) return;
+    // Same for an open popup surface. X delivers to the window under the pointer,
+    // so a wheel over the popup arrives against the popup's own window and passes
+    // the gate - which is what lets popup content scroll.
+    if (s->popup_gate_wheel(lw->widget_index)) return;
     float lx = static_cast<float>(be.x) / scale, ly = static_cast<float>(be.y) / scale;
     int  delta = 0;
     bool horizontal = false;
@@ -490,15 +689,37 @@ namespace
     ev.data.wheel.widget        = { hw->widget_id };
     ev.data.wheel.x             = static_cast<int>(lx);
     ev.data.wheel.y             = static_cast<int>(ly);
+    // is_flipped stays 0: libinput applies natural-scroll in the input stack
+    // before XI2 valuators reach us, so we cannot tell (see events.h).
     ev.data.wheel.delta         = delta;
     ev.data.wheel.is_horizontal = horizontal ? 1 : 0;
+    ev.data.wheel.buttonmap     = neui_detail::x11_buttonmap(be.state);
     s->dispatch_wheel_event(hit, &ev);   // bubbles to scrolling ancestors
+  }
+
+  // True when a press reported against THIS window actually landed outside it.
+  //
+  // Only ever true for a popup-surface window, and only because of the pointer
+  // grab: with owner_events=True a press over one of our own windows is
+  // delivered to that window normally, while a press over anything else - the
+  // desktop, another application, another window of the DAW's - is reported
+  // against the GRAB window (this popup) with coordinates outside its bounds.
+  // That is precisely the press no other mechanism would tell us about.
+  bool popup_press_landed_outside(Session* s, LinuxWindow* lw, float lx, float ly)
+  {
+    if (!s->popup_surface_open()) return false;
+    if (s->popup_surface_depth(lw->widget_index) < 0) return false;
+    auto* wd = s->get_widget(lw->widget_index);
+    if (!wd) return false;
+    return lx < 0.0f || ly < 0.0f ||
+           lx >= static_cast<float>(wd->width) ||
+           ly >= static_cast<float>(wd->height);
   }
 
   void dispatch_button_press(LinuxWindow* lw, XButtonEvent& be)
   {
     Session* s = lw->session;
-    float scale = client_scale(lw);
+    float scale = window_scale(lw);
     // Wheel (legacy core Button 4-7): the stepped fallback. Once XI2 scroll has
     // proven it delivers on this server, the same physical scroll also arrives
     // as XI2 valuators, so drop the legacy buttons to avoid double-counting.
@@ -515,6 +736,19 @@ namespace
 
     if (be.button == 1) {
       // Overlay pre-checks (mirror macOS mouseDown: order).
+      // Standalone tree popup first, and BEFORE the double-click detection
+      // below, so a double-click inside an open menu picks the row it lands on
+      // instead of bypassing the menu entirely.
+      s->tree_popup_discard_pending_release();
+      if (s->_tree_popup_active && s->handle_tree_popup_click(lw->widget_index, lx, ly))
+        return;   // release swallowed via Session::tree_popup_take_release below
+      // A press outside an open popup-surface stack dismisses it and is
+      // SWALLOWED - it must not also actuate the widget underneath. With the
+      // pointer grab below, a press anywhere on the screen arrives here.
+      s->popup_discard_pending_release();
+      if (popup_press_landed_outside(s, lw, lx, ly) &&
+          s->popup_gate_press_outside()) return;
+      if (s->popup_gate_press(lw->widget_index)) return;
       if (s->_popup_active) { s->handle_popup_click(lx, ly); return; }
       if (s->handle_toast_click(lw->widget_index, lx, ly)) return;
       if (s->handle_combo_click(lx, ly)) return;
@@ -549,6 +783,10 @@ namespace
 
     if (be.button == 2) {
       // Middle-click paste (X PRIMARY): into the text widget under the cursor.
+      // An open menu owns the button first - otherwise the paste lands in a text
+      // widget UNDER the visible menu and the menu stays up.
+      s->tree_popup_discard_pending_release();
+      if (s->_tree_popup_active) { s->close_tree_popup(); return; }
       if (s->_menu_open) { s->close_menubar_menu(); return; }
       uint32_t hit = s->widget_at(lx, ly, lw->widget_index);
       auto* hw = s->get_widget(hit);
@@ -566,6 +804,15 @@ namespace
     }
 
     if (be.button == 3) {
+      // A right-click while a tree popup is open goes to the menu (pick /
+      // descend / dismiss) rather than stacking a second one on top.
+      s->tree_popup_discard_pending_release();
+      if (s->_tree_popup_active && s->handle_tree_popup_click(lw->widget_index, lx, ly))
+        return;   // release swallowed via Session::tree_popup_take_release below
+      s->popup_discard_pending_release();
+      if (popup_press_landed_outside(s, lw, lx, ly) &&
+          s->popup_gate_press_outside()) return;
+      if (s->popup_gate_press(lw->widget_index)) return;
       if (s->_popup_active) { s->handle_popup_click(lx, ly); return; }
       if (s->_menu_open) { s->close_menubar_menu(); return; }
       uint32_t hit = s->widget_at(lx, ly, lw->widget_index);
@@ -577,10 +824,14 @@ namespace
   {
     if (be.button >= 4 && be.button <= 7) return;  // wheel: press carried it
     Session* s = lw->session;
-    float scale = client_scale(lw);
+    float scale = window_scale(lw);
     float lx = static_cast<float>(be.x) / scale, ly = static_cast<float>(be.y) / scale;
 
     if (be.button == 1) {
+      // A press the tree popup consumed owns its release too, or the widget
+      // under the dismissed menu sees an UP with no DOWN (and a CLICK).
+      if (s->tree_popup_take_release()) return;
+      if (s->popup_take_release()) return;
       if (lw->swallow_release) { lw->swallow_release = false; return; }
       if (s->_combo_sb_dragging) { s->_combo_sb_dragging = false; return; }
       uint32_t hit     = s->widget_at(lx, ly, lw->widget_index);
@@ -602,6 +853,14 @@ namespace
       return;
     }
     if (be.button == 3) {
+      if (s->tree_popup_take_release()) return;
+      // The popup-surface peer, which the right-button path was missing while
+      // BOTH its own press path and the other two platforms had it. Two costs,
+      // not one: the widget under a just-dismissed popup saw an RBUTTON_UP with
+      // no DOWN, and because popup_take_release() is button-agnostic the stale
+      // flag was then consumed by the next unrelated LEFT release - silently
+      // eating that click.
+      if (s->popup_take_release()) return;
       uint32_t hit = s->widget_at(lx, ly, lw->widget_index);
       if (hit == 0) return;
       auto* hw = s->get_widget(hit);
@@ -629,6 +888,8 @@ namespace
     // Button1Mask and drag-driven widgets (SLIDER / KNOB) see it as a hover and
     // end the drag. Harmless on the core path (the bit is already set there).
     if (s->_pressed_widget != 0) state |= Button1Mask;
+    if (s->_tree_popup_active && s->handle_tree_popup_hover(lw->widget_index, lx, ly))
+      return;
     if (s->_popup_active) { s->handle_popup_hover(lx, ly); return; }
     if (s->_menu_open) {
       if (s->handle_menubar_hover(lw->widget_index, lx, ly)) return;
@@ -649,7 +910,58 @@ namespace
 
   void dispatch_motion(LinuxWindow* lw, XMotionEvent& me)
   {
-    float scale = client_scale(lw);
+    // Relative (unbounded) pointer mode. Like win32 and unlike macOS, X11 has no
+    // decouple-cursor-from-device primitive, so the pointer is warped back to
+    // the anchor after every move - and XWarpPointer generates a fresh
+    // MotionNotify for the warp itself, which must be dropped or the handler
+    // sees delta then -delta and the drag sits still.
+    //
+    // The anchor is in ROOT (screen) coordinates because that is what
+    // XWarpPointer takes; me.x_root/y_root are the matching space.
+    if (g_relative_active && lw == g_relative_window) {
+      if (neui_detail::relative_is_warp_echo(me.x_root, me.y_root,
+                                               g_relative_anchor_x,
+                                               g_relative_anchor_y)) {
+        // Our own warp-back landed. Rebase so the next real event measures from
+        // the anchor rather than from wherever the pointer was before the warp.
+        g_relative_last_x = g_relative_anchor_x;
+        g_relative_last_y = g_relative_anchor_y;
+        return;
+      }
+
+      // Delta is measured EVENT-TO-EVENT, not from the anchor. XWarpPointer is
+      // asynchronous (no round-trip), so several MotionNotify can be queued
+      // before the warp takes effect - routine during a fast drag, and certain
+      // whenever the client lags a paint behind, since every relative move
+      // repaints the knob. Anchor-relative deltas then double-count: queued
+      // events at a+d1 and a+d1+d2 would report d1 and then d1+d2, so d1 lands
+      // twice and the control over-travels in proportion to queue depth.
+      const float scale = window_scale(lw);
+      if (Session* s = lw->session) {
+        s->dispatch_relative_motion(
+          static_cast<float>(me.x_root - g_relative_last_x) / scale,
+          static_cast<float>(me.y_root - g_relative_last_y) / scale,
+          neui_detail::x11_buttonmap(me.state));
+      }
+      g_relative_last_x = me.x_root;
+      g_relative_last_y = me.y_root;
+
+      // Warp back onto the anchor. Uses the EVENT's own root window, not
+      // DefaultRootWindow: an embedded frame runs on the DAW's Display, where
+      // the default screen's root may not be the one this pointer is on.
+      XWarpPointer(lw->dpy, None, me.root, 0, 0, 0, 0,
+                    g_relative_anchor_x, g_relative_anchor_y);
+      XFlush(lw->dpy);
+      return;
+    }
+
+    // A popup surface open over this frame suppresses hover in everything under
+    // it. The pointer grab delivers motion normally over our own windows
+    // (owner_events=True), so a popup's own rows still highlight - this only
+    // silences the widgets underneath.
+    if (lw->session->popup_gate_hover(lw->widget_index)) return;
+
+    float scale = window_scale(lw);
     do_motion(lw, static_cast<float>(me.x) / scale, static_cast<float>(me.y) / scale, me.state);
   }
 
@@ -670,12 +982,19 @@ namespace
     uint32_t mods    = neui_detail::x11_modifiers_to_neui(ke.state);
     uint32_t keycode = neui_detail::x11_keysym_to_neui(ks);
 
-    // A popup menu absorbs Esc / Enter / Space / arrow keys (win32 parity).
-    if (s->_popup_active && s->handle_popup_key(keycode)) return;
+    // Esc dismisses an open tree popup, before anything else claims the key.
+    if (s->handle_tree_popup_key(keycode)) return;
+    // ...and an open popup-surface stack. The key arrives at the OWNER: a popup
+    // surface is override-redirect and never takes the input focus. The gate
+    // retargets it - see Session::popup_gate_key. Returning here also skips the
+    // KEYCHAR tail below, which is what keeps a swallowed press from still
+    // inserting its character underneath.
+    if (s->popup_gate_key(NEUI_EVENT_KEYDOWN, keycode, mods)) return;
 
     // Tab cycles logical focus (hand-rolled traversal, like win32/macOS).
     if (keycode == NEUI_KEY_TAB) {
-      s->focus_next(!(mods & NEUI_KMOD_SHIFT));
+      // Pass the frame that received the key (see Session::focus_next).
+      s->focus_next(!(mods & NEUI_KMOD_SHIFT), lw->widget_index);
       return;
     }
 
@@ -707,6 +1026,11 @@ namespace
     // KEYCHAR for printable input. Skip when Ctrl is held (command shortcuts
     // were already routed via on_keydown above), matching macOS.
     if (mods & NEUI_KMOD_CTRL) return;
+    // The gate above already returned for a diverted key, so reaching here
+    // normally means the stack is not diverting - except when a client handler
+    // OPENED a popup on this very keystroke, in which case its character must not
+    // also land in the owner behind the popup that just appeared.
+    if (s->popup_diverts_keys()) return;
     bool have_chars = (status == XLookupChars || status == XLookupBoth) ||
                       (!lw->ic && n > 0);
     if (!have_chars) return;
@@ -741,6 +1065,9 @@ namespace
     uint32_t keycode = neui_detail::x11_keysym_to_neui(ks);
     if (keycode == 0) return;
     uint32_t mods = neui_detail::x11_modifiers_to_neui(ke.state);
+    // The release peer of the KEYDOWN gate: a press the popup swallowed must not
+    // have its release land on the widget underneath.
+    if (s->popup_gate_key(NEUI_EVENT_KEYUP, keycode, mods)) return;
     uint32_t fw = s->_focused_widget;
     if (fw == 0 || !s->_widgets.exists(fw)) return;
     auto& wd = s->_widgets[fw];
@@ -1184,10 +1511,21 @@ namespace
   // logical (lx, ly). Mirrors platform_win32's WM_MOUSEWHEEL routing: combo
   // overlay first, then GRID-smooth / SECTION kinetics (pixel-precise), else a
   // classic line-quantised MOUSE_WHEEL event for stepped surfaces.
-  void feed_scroll(LinuxWindow* lw, float lx, float ly, double dv, double dh)
+  // `state` is an X11 modifier/button mask (ShiftMask / ControlMask /
+  // Button1Mask ...) forwarded into the wheel payload's NEUI_MK_* buttonmap.
+  // The XI2 caller passes XIModifierState::effective, which shares the core
+  // modifier bit layout but carries no button bits - a wheel notch mid-drag
+  // therefore reports modifiers only on that path.
+  void feed_scroll(LinuxWindow* lw, float lx, float ly, double dv, double dh,
+                    unsigned int state)
   {
     using namespace neui_detail;
+    const uint32_t mk = x11_buttonmap(state);
     Session* s = lw->session;
+    // The popup-surface gate, before the accumulators: a swallowed glide must not
+    // bank fractional deltas that would then fire as a jump once the popup closes.
+    // This is the XI2 smooth path, the second of Linux's two wheel entries.
+    if (s->popup_gate_wheel(lw->widget_index)) return;
     int vline = take_lines(lw->scroll_v_accum, dv);
     int hline = take_lines(lw->scroll_h_accum, dh);
 
@@ -1225,6 +1563,7 @@ namespace
         ev.type          = NEUI_EVENT_MOUSE_WHEEL;
         ev.data.wheel.x  = (int)lx;
         ev.data.wheel.y  = (int)ly;
+        ev.data.wheel.buttonmap = mk;
         if (vline != 0) {
           ev.data.wheel.delta = vline; ev.data.wheel.is_horizontal = 0;
           if (s->dispatch_wheel_event(hit, &ev, sec_idx)) return;
@@ -1246,6 +1585,7 @@ namespace
       ev.type = NEUI_EVENT_MOUSE_WHEEL;
       ev.data.wheel.x = (int)lx; ev.data.wheel.y = (int)ly;
       ev.data.wheel.delta = vline; ev.data.wheel.is_horizontal = 0;
+      ev.data.wheel.buttonmap = mk;
       s->dispatch_wheel_event(hit, &ev);
     }
     if (hline != 0) {
@@ -1253,6 +1593,7 @@ namespace
       ev.type = NEUI_EVENT_MOUSE_WHEEL;
       ev.data.wheel.x = (int)lx; ev.data.wheel.y = (int)ly;
       ev.data.wheel.delta = hline; ev.data.wheel.is_horizontal = 1;
+      ev.data.wheel.buttonmap = mk;
       s->dispatch_wheel_event(hit, &ev);
     }
   }
@@ -1286,8 +1627,12 @@ namespace
     if (dv == 0.0 && dh == 0.0) return;
     g_xi2_scroll_seen = true;   // XI2 scroll works here -> suppress core Button 4-7
 
-    float scale = client_scale(lw);
-    feed_scroll(lw, static_cast<float>(de->event_x) / scale, static_cast<float>(de->event_y) / scale, dv, dh);
+    // window_scale() folds the frame zoom into the DPI factor (the zoom work
+    // replaced every open-coded dpi/96 with it); mods.effective carries the
+    // NEUI_MK_* modifier bits for the wheel payload.
+    float scale = window_scale(lw);
+    feed_scroll(lw, static_cast<float>(de->event_x) / scale, static_cast<float>(de->event_y) / scale, dv, dh,
+                 static_cast<unsigned int>(de->mods.effective));
   }
 
   // Unpack an XI2 GenericEvent cookie and dispatch XI_Motion scroll. Returns
@@ -1312,7 +1657,7 @@ namespace
           // then to avoid double-dispatching the move.
           if (lw->session->_pressed_widget == 0) {
             unsigned int state = static_cast<unsigned int>(de->mods.effective);
-            float scale = client_scale(lw);
+            float scale = window_scale(lw);
             do_motion(lw, static_cast<float>(de->event_x) / scale, static_cast<float>(de->event_y) / scale, state);
           }
         }
@@ -1338,6 +1683,27 @@ namespace
         XSetInputFocus(lw->dpy, lw->win, RevertToParent, CurrentTime);
       }
     }
+  }
+
+  // True when a FocusIn / FocusOut reports an actual change of who holds the
+  // input focus, rather than one of X11's PSEUDO focus events.
+  //
+  // X sends a FocusOut/FocusIn pair around any keyboard grab taken by ANOTHER
+  // client (mode NotifyGrab / NotifyUngrab) - a window-manager keybinding, a
+  // screen locker, another application opening its own menu. Nobody switched
+  // applications, and the focus returns the moment the grab ends. It also sends
+  // events whose detail is NotifyPointer (the window is merely being tracked by
+  // the pointer) or NotifyInferior (focus moved to a DESCENDANT of this window,
+  // so it is still ours).
+  //
+  // Treating those as a deactivation closes every menu and popup surface for no
+  // reason: a popup would vanish seconds after opening because something,
+  // somewhere, briefly grabbed the keyboard. NotifyWhileGrabbed IS real - the
+  // focus genuinely moved, it just moved while a grab was active.
+  bool is_real_focus_change(const XFocusChangeEvent& fe)
+  {
+    return (fe.mode == NotifyNormal || fe.mode == NotifyWhileGrabbed) &&
+           fe.detail != NotifyPointer && fe.detail != NotifyInferior;
   }
 
   void dispatch_x_event(XEvent& ev)
@@ -1383,14 +1749,38 @@ namespace
         break;
 
       case ConfigureNotify: {
+        // The owner being moved or resized dismisses any open popup surface -
+        // what every OS menu does. Skipped for the popup's own windows, which
+        // are configured because WE placed them.
+        if (!popup_placing() && s->popup_surface_open() &&
+            s->popup_surface_depth(lw->widget_index) < 0)
+          s->close_all_popup_surfaces(NEUI_POPUP_DISMISS_OWNER_MOVED);
+        // That dismissal dispatched POPUP_DISMISSED into client code, and the
+        // documented answer to that event is "drop the state you opened the
+        // popup with" - which routinely means destroying the owner frame.
+        // destroy_native then does `delete lw`, so every read below (starting
+        // with lw->widget_index) would be a use-after-free. Re-resolve from
+        // g_windows and bail if the window is gone: exactly what win32 does with
+        // get_wud(hwnd) after its own dismissal hooks.
+        lw = find_window(ev.xany.window);
+        if (!lw) return;
         uint32_t wphys = static_cast<uint32_t>(ev.xconfigure.width);
         uint32_t hphys = static_cast<uint32_t>(ev.xconfigure.height);
         s->resize_render_ctx(lw->widget_index, wphys, hphys);
         auto* wd = s->get_widget(lw->widget_index);
         if (wd) {
-          float scale = client_scale(lw);
+          float scale = window_scale(lw);
           int wlog = static_cast<int>(static_cast<float>(wphys) / scale + 0.5f);
           int hlog = static_cast<int>(static_cast<float>(hphys) / scale + 0.5f);
+          // Snap back to what we asked for when this notify is the echo of our
+          // own request, so a fractional-zoom round-trip cannot drift the
+          // logical size (and so a zoom change reports no resize at all).
+          if (lw->expect_w > 0 && wlog >= lw->expect_w - 1 && wlog <= lw->expect_w + 1 &&
+              hlog >= lw->expect_h - 1 && hlog <= lw->expect_h + 1) {
+            wlog = lw->expect_w;
+            hlog = lw->expect_h;
+            lw->expect_w = lw->expect_h = 0;   // consumed
+          }
           if (wd->width != wlog || wd->height != hlog) {
             wd->width  = wlog;
             wd->height = hlog;
@@ -1406,6 +1796,11 @@ namespace
             s->dispatch_event(&re);
           }
         }
+        // The RESIZE dispatch is client code too, and "the window was resized,
+        // tear this frame down" is an ordinary handler - so the same re-resolve
+        // applies before the last read of lw.
+        lw = find_window(ev.xany.window);
+        if (!lw) return;
         lw->needs_paint = true;
         break;
       }
@@ -1430,8 +1825,33 @@ namespace
       case KeyPress:      dispatch_key_press(lw, ev.xkey);          break;
       case KeyRelease:    dispatch_key_release(lw, ev.xkey);        break;
 
-      case FocusIn:  s->_os_focused = true;  lw->needs_paint = true; break;
-      case FocusOut: s->_os_focused = false; s->close_menubar_menu(); lw->needs_paint = true; break;
+      case FocusIn:
+        if (!is_real_focus_change(ev.xfocus)) break;
+        s->_os_focused = true;  lw->needs_paint = true; break;
+      case FocusOut: {
+        // A grab-induced or pointer-induced pseudo event is not a deactivation.
+        if (!is_real_focus_change(ev.xfocus)) break;
+        s->_os_focused = false;
+        // Snapshot the frame slot BEFORE any of the three closes below: each one
+        // can dispatch into client code that destroys this frame, which frees
+        // this LinuxWindow - so lw must not be read again afterwards.
+        const uint32_t frame_idx = lw->widget_index;
+        // Both menu surfaces must go, and close_tree_popup explicitly: the popup
+        // borrows _menu_path, so close_menubar_menu would CLEAR the path while
+        // leaving _tree_popup_active set - a popup with no cascade to build.
+        s->close_menubar_menu();
+        s->close_tree_popup();
+        // Same for a popup surface: focus leaving our frame means another
+        // application came forward, and a menu does not survive that. Skipped
+        // while WE are placing one (an override-redirect map can shuffle focus).
+        if (!popup_placing() && s->popup_surface_depth(frame_idx) < 0)
+          s->close_all_popup_surfaces(NEUI_POPUP_DISMISS_DEACTIVATED);
+        // Re-resolve like ConfigureNotify does, for the one remaining read.
+        lw = find_window(ev.xany.window);
+        if (!lw) return;
+        lw->needs_paint = true;
+        break;
+      }
 
       case LeaveNotify:
         s->set_hovered(0);
@@ -1485,10 +1905,12 @@ namespace
 
     uint32_t dpi   = query_display_dpi(dpy);
     float    scale = static_cast<float>(dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
-    // The client at the frame's zoom (NEUI_ATTR_ZOOM); the position unzoomed.
-    float cscale = scale * wd.zoom;
-    int w_phys = static_cast<int>(static_cast<float>(wd.width)  * cscale + 0.5f); if (w_phys < 1) w_phys = 1;
-    int h_phys = static_cast<int>(static_cast<float>(wd.height) * cscale + 0.5f); if (h_phys < 1) h_phys = 1;
+    // Fold in the frame's zoom (the window doesn't exist yet, so window_scale
+    // isn't usable here - read the attr straight off the frame).
+    scale *= wd.ui_scale();
+    if (!(scale > 0.0f)) scale = 1.0f;
+    int w_phys = static_cast<int>(static_cast<float>(wd.width)  * scale + 0.5f); if (w_phys < 1) w_phys = 1;
+    int h_phys = static_cast<int>(static_cast<float>(wd.height) * scale + 0.5f); if (h_phys < 1) h_phys = 1;
     int x_phys = static_cast<int>(static_cast<float>(wd.x) * scale + 0.5f);
     int y_phys = static_cast<int>(static_cast<float>(wd.y) * scale + 0.5f);
 
@@ -1569,7 +1991,7 @@ namespace
     lw->dpy = dpy; lw->owns_display = embedded;
     lw->win = win; lw->visual = vis; lw->depth = depth;
     lw->ic = ic; lw->session = session; lw->widget_index = widget_index;
-    lw->is_appwindow = is_appwindow; lw->dpi = dpi; lw->zoom = wd.zoom;
+    lw->is_appwindow = is_appwindow; lw->dpi = dpi;
     g_windows[win] = lw;
 
     wd.native_handle = lw;
@@ -1582,7 +2004,7 @@ namespace
       wd.render_ctx = backend->create_context(&ns,
                                               static_cast<uint32_t>(w_phys),
                                               static_cast<uint32_t>(h_phys));
-      if (wd.render_ctx) backend->update_dpi(wd.render_ctx, client_dpi(lw));
+      if (wd.render_ctx) backend->update_dpi(wd.render_ctx, dpi);
     }
 
     // Pre-show attribute-driven size constraints + window icon.
@@ -1871,6 +2293,790 @@ namespace
     return result;
   }
 
+  // ---- File dialog ---------------------------------------------------------
+  //
+  // Two paths, tried in order:
+  //
+  //   1. The XDG desktop portal (file_dialog_portal.h). The user's own file
+  //      chooser, with their bookmarks and recent files. Optional at build
+  //      time (NEUI_HAS_DBUS) and at run time (a portal implementation has to
+  //      be installed), so any failure falls through to (2). Only an explicit
+  //      "cancelled" stops the fall-through.
+  //
+  //   2. A neui-drawn browser over the Cairo backend, in the same shape as
+  //      run_message_box above: own X window, own nested modal loop, owner
+  //      input blocked, palette scoped to the owner's session. Deliberately
+  //      plain - a path bar, an Up button, a scrolling list, a name field for
+  //      save, a filter chip that cycles the type list, and OK / Cancel. It
+  //      is the no-desktop fallback, not a file manager.
+  //
+  // All the fiddly logic (glob matching, listing order, extension completion)
+  // lives in hosts/shared/file_dialog_model.h and is Tier-1 tested; what is
+  // left here is X11, Cairo, and readdir.
+
+  // Read one directory. Returns false when it cannot be opened at all, so the
+  // caller can refuse to navigate into it rather than showing an empty folder
+  // that looks like a folder with no files in it.
+  bool fd_read_dir(const std::string& dir, std::vector<neui_detail::FileEntry>& out)
+  {
+    DIR* d = opendir(dir.c_str());
+    if (!d) return false;
+    while (struct dirent* e = readdir(d)) {
+      neui_detail::FileEntry fe;
+      fe.name = e->d_name;
+      // d_type is not filled in on every filesystem (notably some network
+      // mounts report DT_UNKNOWN); stat() is the fallback so directories
+      // stay navigable there.
+      if (e->d_type == DT_DIR)          fe.is_dir = true;
+      else if (e->d_type == DT_UNKNOWN || e->d_type == DT_LNK) {
+        struct stat st;
+        std::string full = neui_detail::path_join(dir, fe.name);
+        fe.is_dir = (stat(full.c_str(), &st) == 0) && S_ISDIR(st.st_mode);
+      }
+      out.push_back(fe);
+    }
+    closedir(d);
+    return true;
+  }
+
+  bool fd_path_exists(const std::string& p)
+  {
+    struct stat st;
+    return stat(p.c_str(), &st) == 0;
+  }
+
+  // Where to start when the client named no directory: $HOME, then the passwd
+  // entry, then "/" - never the process CWD, which for a plugin is wherever
+  // the DAW happened to be launched from.
+  std::string fd_default_dir()
+  {
+    if (const char* h = getenv("HOME")) {
+      if (*h && fd_path_exists(h)) return h;
+    }
+    if (struct passwd* pw = getpwuid(getuid())) {
+      if (pw->pw_dir && *pw->pw_dir && fd_path_exists(pw->pw_dir)) return pw->pw_dir;
+    }
+    return "/";
+  }
+
+  // The neui-drawn browser. Appends the chosen path(s) to `out`; returns the
+  // count, 0 on cancel.
+  int run_file_browser(LinuxWindow* owner, bool save,
+                       const neui_file_dialog_t* desc,
+                       std::vector<std::string>& out)
+  {
+    if (!g_display) return -1;
+    Display* d = g_display;
+    auto* backend = platform_get_backend();
+    if (!backend) return -1;
+
+    using namespace neui_detail;
+
+    const uint32_t fdflags  = desc ? desc->flags : 0u;
+    const bool dir_mode     = !save && (fdflags & NEUI_FD_DIRECTORY) != 0;
+    const bool multi        = !save && (fdflags & NEUI_FD_MULTISELECT) != 0;
+    bool       show_hidden  = (fdflags & NEUI_FD_SHOW_HIDDEN) != 0;
+
+    std::vector<FileFilter> filters = parse_filters(desc);
+    size_t filter_index = clamp_default_filter(desc, filters);
+    // A folder picker filters nothing.
+    if (dir_mode) filters.clear();
+
+    std::string cwd = (desc && desc->initial_dir && *desc->initial_dir &&
+                       fd_path_exists(desc->initial_dir))
+                      ? desc->initial_dir : fd_default_dir();
+
+    TextEditState name;
+    if (save && desc && desc->initial_name) name.text = desc->initial_name;
+    name.cursor = name.sel_anchor = (int)name.text.size();
+
+    std::vector<FileEntry> rows;
+    std::vector<bool>      picked;      // multi-select marks, parallel to rows
+    int  sel = -1;                      // focused row, -1 = none
+    int  scroll = 0;                    // first visible row
+
+    auto active_filter = [&]() -> const FileFilter* {
+      if (filters.empty()) return nullptr;
+      return &filters[filter_index < filters.size() ? filter_index : 0];
+    };
+    // Forward-declared so reload() can clear it: without that, entering a
+    // directory by double-click leaves the second click armed, and the NEXT
+    // single click on the same row index within the interval counts as a
+    // double-click - navigating again, or confirming a file outright.
+    int  last_click_row  = -1;
+    auto reload = [&]() {
+      std::vector<FileEntry> raw;
+      fd_read_dir(cwd, raw);
+      rows = list_directory_view(raw, active_filter(), show_hidden);
+      picked.assign(rows.size(), false);
+      sel = rows.empty() ? -1 : 0;
+      scroll = 0;
+      last_click_row = -1;
+    };
+    reload();
+
+    uint32_t dpi  = owner ? owner->dpi : query_display_dpi(d);
+    float   scale = (float)dpi / 96.0f; if (scale <= 0.0f) scale = 1.0f;
+
+    neui_detail::ScopedPaletteOverride scope(
+      (owner && owner->session) ? owner->session->effective_palette_ptr() : nullptr);
+    auto C = [](neui_detail::ColorRole r) {
+      return neui_detail::current_palette().colors[(size_t)r];
+    };
+    using neui_detail::shade;
+
+    // Layout, logical px. Fixed size: a resizable browser would need a real
+    // layout pass, and the fallback does not earn one.
+    const int WIN_W = 560, WIN_H = 420;
+    const int PAD = 12, ROW_H = 20, BTN_H = 26, BTN_W = 92, BTN_GAP = 8;
+    const int BAR_H = 24, FLD_H = 24;
+    const int UP_W = 40;
+    const float SZ = 13.0f;
+
+    const int bar_y  = PAD;
+    const int list_y = bar_y + BAR_H + 8;
+    const int btn_y  = WIN_H - PAD - BTN_H;
+    const int fld_y  = btn_y - 8 - FLD_H;
+    // Open mode has no name field, so the list takes that row's space rather
+    // than leaving a blank strip above the buttons.
+    const int list_h = (save ? fld_y : btn_y) - 8 - list_y;
+    const int visible_rows = list_h / ROW_H;
+    const int list_x = PAD, list_w = WIN_W - PAD * 2;
+
+    const int ok_x     = WIN_W - PAD - BTN_W;
+    const int cancel_x = ok_x - BTN_GAP - BTN_W;
+    const int up_x     = WIN_W - PAD - UP_W;
+    const int chip_x   = PAD, chip_w = 200;
+
+    auto clamp_scroll = [&]() {
+      int max_scroll = (int)rows.size() - visible_rows;
+      if (max_scroll < 0) max_scroll = 0;
+      if (scroll > max_scroll) scroll = max_scroll;
+      if (scroll < 0) scroll = 0;
+    };
+    auto scroll_to_sel = [&]() {
+      if (sel < 0) return;
+      if (sel < scroll) scroll = sel;
+      else if (sel >= scroll + visible_rows) scroll = sel - visible_rows + 1;
+      clamp_scroll();
+    };
+
+    // The set of paths the OK button would return right now. Empty = OK is
+    // not actionable (nothing selected / nothing typed), which is also what
+    // greys the button out.
+    auto collect_result = [&](std::vector<std::string>& res) {
+      res.clear();
+      if (save) {
+        std::string leaf = name.text;
+        if (leaf.empty()) return;
+        if (!filters.empty()) leaf = complete_extension(leaf, filters[filter_index]);
+        res.push_back(path_join(cwd, leaf));
+        return;
+      }
+      if (multi) {
+        for (size_t i = 0; i < rows.size(); ++i)
+          if (picked[i] && rows[i].is_dir == dir_mode)
+            res.push_back(path_join(cwd, rows[i].name));
+        if (!res.empty()) return;
+      }
+      if (sel >= 0 && sel < (int)rows.size() &&
+          rows[(size_t)sel].is_dir == dir_mode) {
+        res.push_back(path_join(cwd, rows[(size_t)sel].name));
+        return;
+      }
+      // Folder mode with nothing selected picks the folder the browser is
+      // currently IN. Without this, a directory with no subdirectories is a
+      // dead end: no row can be selected, so OK would never enable and the
+      // only way out is Cancel.
+      if (dir_mode) res.push_back(cwd);
+    };
+
+    // Centre over the owner (or the screen) - same as the message box.
+    int scr = DefaultScreen(d);
+    Window root = RootWindow(d, scr);
+    Visual* vis = DefaultVisual(d, scr);
+    int depth = DefaultDepth(d, scr);
+    int ox = 0, oy = 0;
+    unsigned ow = (unsigned)DisplayWidth(d, scr), oh = (unsigned)DisplayHeight(d, scr);
+    if (owner) {
+      Window ch; XTranslateCoordinates(d, owner->win, root, 0, 0, &ox, &oy, &ch);
+      XWindowAttributes oa;
+      if (XGetWindowAttributes(d, owner->win, &oa)) {
+        ow = (unsigned)oa.width; oh = (unsigned)oa.height;
+      }
+    }
+    int wpx = (int)((float)WIN_W * scale + 0.5f), hpx = (int)((float)WIN_H * scale + 0.5f);
+    int wx = ox + ((int)ow - wpx) / 2, wy = oy + ((int)oh - hpx) / 2;
+    if (wx < 0) wx = 0;
+    if (wy < 0) wy = 0;
+
+    XSetWindowAttributes swa; std::memset(&swa, 0, sizeof swa);
+    swa.background_pixmap = None; swa.bit_gravity = NorthWestGravity;
+    swa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
+                     PointerMotionMask | KeyPressMask | StructureNotifyMask;
+    Window win = XCreateWindow(d, root, wx, wy, (unsigned)wpx, (unsigned)hpx, 0,
+                               depth, InputOutput, vis,
+                               CWBackPixmap | CWEventMask | CWBitGravity, &swa);
+    if (!win) return -1;
+
+    const char* title = (desc && desc->title && *desc->title)
+                        ? desc->title
+                        : (save ? "Save File" : (dir_mode ? "Choose Folder" : "Open File"));
+    set_window_title(d, win, title);
+    if (owner) XSetTransientForHint(d, win, owner->win);
+    if (g_wm_delete != None) XSetWMProtocols(d, win, &g_wm_delete, 1);
+    {
+      Atom st = XInternAtom(d, "_NET_WM_STATE", False);
+      Atom md = XInternAtom(d, "_NET_WM_STATE_MODAL", False);
+      if (st != None && md != None)
+        XChangeProperty(d, win, st, XA_ATOM, 32, PropModeReplace,
+                        reinterpret_cast<unsigned char*>(&md), 1);
+    }
+    if (XSizeHints* sh = XAllocSizeHints()) {
+      sh->flags = PMinSize | PMaxSize | USPosition;
+      sh->min_width = sh->max_width = wpx;
+      sh->min_height = sh->max_height = hpx;
+      sh->x = wx; sh->y = wy;
+      XSetWMNormalHints(d, win, sh); XFree(sh);
+    }
+
+    neui_cairo_backend::LinuxNativeSurface ns;
+    ns.dpy = d; ns.win = win; ns.visual = vis; ns.depth = depth;
+    neui_render_ctx_t ctx = backend->create_context(&ns, (uint32_t)wpx, (uint32_t)hpx);
+    if (!ctx) { XDestroyWindow(d, win); return -1; }
+    backend->update_dpi(ctx, dpi);
+
+    // Overwrite-confirmation overlay. The API documents the prompt as ON by
+    // default for save (NEUI_FD_NO_OVERWRITE_PROMPT turns it off), and this
+    // browser is the whole dialog on a portal-less box - so it has to ask
+    // rather than hand back a path the client will silently clobber. Drawn as
+    // an in-window overlay instead of nesting run_message_box: that helper
+    // takes a LinuxWindow* owner to disable, and the browser's X window is not
+    // one, so a nested box would leave the browser itself clickable
+    // underneath.
+    const bool  want_overwrite_prompt = save && !(fdflags & NEUI_FD_NO_OVERWRITE_PROMPT);
+    bool        confirming = false;      // overlay is up
+    std::string confirm_path;            // the path it is asking about
+    // Which overlay button the keyboard is on: 0 = Cancel, 1 = Replace. Starts
+    // on Cancel so Enter answers non-destructively, but Tab / Left / Right can
+    // reach Replace - without a focus index the overlay was mouse-only, and a
+    // keyboard-driven user could never overwrite a file at all.
+    int         conf_focus = 0;
+    const int   CONF_W = 360, CONF_H = 130;
+    const int   conf_x = (WIN_W - CONF_W) / 2, conf_y = (WIN_H - CONF_H) / 2;
+    const int   conf_btn_y = conf_y + CONF_H - 12 - BTN_H;
+    const int   conf_no_x  = conf_x + CONF_W - 12 - BTN_W;
+    const int   conf_yes_x = conf_no_x - BTN_GAP - BTN_W;
+
+    // Hit regions. Kept as an enum + one hit() so paint and input cannot
+    // disagree about where a control is.
+    enum Hit { H_NONE, H_LIST, H_UP, H_OK, H_CANCEL, H_CHIP, H_FIELD,
+               H_CONF_YES, H_CONF_NO };
+    auto hit = [&](int lx, int ly, int* row_out) -> Hit {
+      if (row_out) *row_out = -1;
+      // While the overlay is up it swallows everything: the controls behind it
+      // must not react to a click aimed at Yes/No.
+      if (confirming) {
+        if (ly >= conf_btn_y && ly < conf_btn_y + BTN_H) {
+          if (lx >= conf_yes_x && lx < conf_yes_x + BTN_W) return H_CONF_YES;
+          if (lx >= conf_no_x  && lx < conf_no_x  + BTN_W) return H_CONF_NO;
+        }
+        return H_NONE;
+      }
+      if (ly >= btn_y && ly < btn_y + BTN_H) {
+        if (lx >= ok_x && lx < ok_x + BTN_W)         return H_OK;
+        if (lx >= cancel_x && lx < cancel_x + BTN_W) return H_CANCEL;
+        if (!filters.empty() && lx >= chip_x && lx < chip_x + chip_w) return H_CHIP;
+        return H_NONE;
+      }
+      if (ly >= bar_y && ly < bar_y + BAR_H) {
+        if (lx >= up_x && lx < up_x + UP_W) return H_UP;
+        return H_NONE;
+      }
+      if (save && ly >= fld_y && ly < fld_y + FLD_H) return H_FIELD;
+      if (ly >= list_y && ly < list_y + list_h &&
+          lx >= list_x && lx < list_x + list_w) {
+        // list_h is not an exact multiple of ROW_H, so the last ~18 px are a
+        // dead strip below the final DRAWN row. Bounding by visible_rows as
+        // well as by rows.size() keeps a click there from selecting - or
+        // double-click-activating - a row the user cannot see.
+        int slot = (ly - list_y) / ROW_H;
+        int r    = scroll + slot;
+        if (slot < visible_rows && r >= 0 && r < (int)rows.size()) {
+          if (row_out) *row_out = r;
+        }
+        return H_LIST;
+      }
+      return H_NONE;
+    };
+
+    int  hover_row = -1;
+    Hit  hover     = H_NONE;
+    Hit  pressed   = H_NONE;
+    bool done = false, need_paint = true, focused = false, cancelled = false;
+    // Click-to-open needs a double click; last_click_row is declared above so
+    // reload() can reset it on navigation.
+    Time last_click_time = 0;
+
+    int (*old_err)(Display*, XErrorEvent*) = XSetErrorHandler(drag_xerror);
+
+    auto text_w = [&](const char* s, float sz) -> int {
+      if (!s || !*s) return 0;
+      return (int)backend->measure_text(ctx, s, -1, sz);
+    };
+    // Middle-elide a string to fit `maxw` ("/very/long/…/dir").
+    auto elide = [&](const std::string& s, int maxw) -> std::string {
+      if (text_w(s.c_str(), SZ) <= maxw) return s;
+      std::string tail = s;
+      while (!tail.empty() && text_w(("..." + tail).c_str(), SZ) > maxw)
+        tail.erase(0, 1);
+      return "..." + tail;
+    };
+
+    auto draw_button = [&](int bx, int by, int bw, int bh, const char* label,
+                           bool is_default, bool enabled, bool is_hover, bool is_pressed) {
+      uint32_t fill = C(neui_detail::ColorRole::control_bg);
+      if (!enabled)        fill = shade(fill, -6);
+      else if (is_pressed) fill = shade(fill, -18);
+      else if (is_hover)   fill = shade(fill, +14);
+      backend->fill_rect(ctx, (float)bx, (float)by, (float)bw, (float)bh, fill);
+      backend->draw_rect(ctx, (float)bx, (float)by, (float)bw, (float)bh,
+                         is_default ? 2.0f : 1.0f,
+                         is_default ? C(neui_detail::ColorRole::accent)
+                                    : C(neui_detail::ColorRole::border));
+      int lw = text_w(label, SZ);
+      backend->draw_text(ctx, (float)(bx + (bw - lw) / 2), (float)by,
+                         (float)(lw + 4), (float)bh, label, SZ,
+                         C(enabled ? neui_detail::ColorRole::text_primary
+                                   : neui_detail::ColorRole::text_disabled));
+    };
+
+    auto render = [&]() {
+      std::vector<std::string> preview;
+      collect_result(preview);
+      const bool ok_enabled = !preview.empty();
+
+      backend->begin_frame(ctx, C(neui_detail::ColorRole::frame_bg));
+
+      // Path bar + Up.
+      backend->fill_rect(ctx, (float)PAD, (float)bar_y,
+                         (float)(WIN_W - PAD * 2 - UP_W - 8), (float)BAR_H,
+                         shade(C(neui_detail::ColorRole::frame_bg), +18));
+      {
+        std::string shown = elide(cwd, WIN_W - PAD * 2 - UP_W - 8 - 12);
+        backend->draw_text(ctx, (float)(PAD + 6), (float)bar_y,
+                           (float)(WIN_W - PAD * 2 - UP_W - 20), (float)BAR_H,
+                           shown.c_str(), SZ,
+                           C(neui_detail::ColorRole::text_primary));
+      }
+      draw_button(up_x, bar_y, UP_W, BAR_H, "Up", false,
+                  cwd != path_parent(cwd), hover == H_UP, pressed == H_UP);
+
+      // List.
+      backend->fill_rect(ctx, (float)list_x, (float)list_y, (float)list_w, (float)list_h,
+                         shade(C(neui_detail::ColorRole::frame_bg), +10));
+      backend->draw_rect(ctx, (float)list_x, (float)list_y, (float)list_w, (float)list_h,
+                         1.0f, C(neui_detail::ColorRole::border));
+      for (int i = 0; i < visible_rows; ++i) {
+        int r = scroll + i;
+        if (r < 0 || r >= (int)rows.size()) break;
+        int ry = list_y + i * ROW_H;
+        bool is_sel  = (r == sel);
+        bool is_mark = multi && picked[(size_t)r];
+        if (is_sel || is_mark)
+          backend->fill_rect(ctx, (float)(list_x + 1), (float)ry,
+                             (float)(list_w - 2), (float)ROW_H,
+                             is_sel ? C(neui_detail::ColorRole::accent)
+                                    : shade(C(neui_detail::ColorRole::accent), -40));
+        else if (r == hover_row)
+          backend->fill_rect(ctx, (float)(list_x + 1), (float)ry,
+                             (float)(list_w - 2), (float)ROW_H,
+                             shade(C(neui_detail::ColorRole::frame_bg), +22));
+        // A trailing '/' is the whole folder affordance - no icon set here.
+        std::string label = rows[(size_t)r].is_dir ? rows[(size_t)r].name + "/"
+                                                   : rows[(size_t)r].name;
+        // A file that cannot be picked in this mode (any file in folder mode)
+        // is still listed, greyed, so the folder does not look empty.
+        bool pickable = (rows[(size_t)r].is_dir == dir_mode) || rows[(size_t)r].is_dir;
+        backend->draw_text(ctx, (float)(list_x + 8), (float)ry,
+                           (float)(list_w - 16), (float)ROW_H, label.c_str(), SZ,
+                           is_sel ? C(neui_detail::ColorRole::accent_text)
+                                  : C(pickable ? neui_detail::ColorRole::text_primary
+                                               : neui_detail::ColorRole::text_disabled));
+      }
+      if (rows.empty()) {
+        const char* empty = "(no matching files)";
+        backend->draw_text(ctx, (float)(list_x + 8), (float)(list_y + 6),
+                           (float)(list_w - 16), (float)ROW_H, empty, SZ,
+                           C(neui_detail::ColorRole::text_disabled));
+      }
+      // Scroll indicator: a plain proportional thumb, no dragging (the wheel
+      // and the arrow keys are the scroll affordances here).
+      if ((int)rows.size() > visible_rows) {
+        float frac_h = (float)visible_rows / (float)rows.size();
+        float frac_y = (float)scroll / (float)rows.size();
+        float tb_h = (float)list_h * frac_h; if (tb_h < 16.0f) tb_h = 16.0f;
+        backend->fill_rect(ctx, (float)(list_x + list_w - 6),
+                           (float)list_y + (float)list_h * frac_y,
+                           4.0f, tb_h, C(neui_detail::ColorRole::border));
+      }
+
+      // Name field (save only).
+      if (save) {
+        backend->fill_rect(ctx, (float)PAD, (float)fld_y, (float)(WIN_W - PAD * 2),
+                           (float)FLD_H, C(neui_detail::ColorRole::control_bg));
+        backend->draw_rect(ctx, (float)PAD, (float)fld_y, (float)(WIN_W - PAD * 2),
+                           (float)FLD_H, 1.0f, C(neui_detail::ColorRole::accent));
+        backend->draw_text(ctx, (float)(PAD + 6), (float)fld_y,
+                           (float)(WIN_W - PAD * 2 - 12), (float)FLD_H,
+                           name.text.c_str(), SZ,
+                           C(neui_detail::ColorRole::text_primary));
+        // Caret at the cursor byte offset (the field always has focus - there
+        // is nothing else here that takes typing).
+        std::string upto = name.text.substr(0, (size_t)name.cursor);
+        int cx = PAD + 6 + text_w(upto.c_str(), SZ);
+        backend->fill_rect(ctx, (float)cx, (float)(fld_y + 4), 1.0f,
+                           (float)(FLD_H - 8),
+                           C(neui_detail::ColorRole::text_primary));
+      }
+
+      // Filter chip (click cycles) + buttons.
+      if (!filters.empty()) {
+        const FileFilter& f = filters[filter_index];
+        std::string label = f.label;
+        if (filters.size() > 1) label += "  \xE2\x96\xBE";   // ▾
+        draw_button(chip_x, btn_y, chip_w, BTN_H,
+                    elide(label, chip_w - 12).c_str(), false,
+                    filters.size() > 1, hover == H_CHIP, pressed == H_CHIP);
+      }
+      draw_button(cancel_x, btn_y, BTN_W, BTN_H, "Cancel", false, true,
+                  hover == H_CANCEL, pressed == H_CANCEL);
+      draw_button(ok_x, btn_y, BTN_W, BTN_H, save ? "Save" : "Open", true,
+                  ok_enabled, hover == H_OK, pressed == H_OK);
+
+      // Overwrite confirmation, on top of everything and modal to the browser.
+      if (confirming) {
+        // Scrim first, so it reads as blocking rather than as a floating panel.
+        backend->fill_rect(ctx, 0.0f, 0.0f, (float)WIN_W, (float)WIN_H, 0x60000000u);
+        backend->fill_rect(ctx, (float)conf_x, (float)conf_y, (float)CONF_W, (float)CONF_H,
+                           C(neui_detail::ColorRole::frame_bg));
+        backend->draw_rect(ctx, (float)conf_x, (float)conf_y, (float)CONF_W, (float)CONF_H,
+                           1.0f, C(neui_detail::ColorRole::border));
+        std::string leaf = path_leaf(confirm_path);
+        backend->draw_text(ctx, (float)(conf_x + 16), (float)(conf_y + 16),
+                           (float)(CONF_W - 32), 20.0f,
+                           elide("\"" + leaf + "\" already exists.", CONF_W - 32).c_str(),
+                           SZ, C(neui_detail::ColorRole::text_primary));
+        backend->draw_text(ctx, (float)(conf_x + 16), (float)(conf_y + 40),
+                           (float)(CONF_W - 32), 20.0f,
+                           "Replace it?", SZ,
+                           C(neui_detail::ColorRole::text_primary));
+        // Cancel starts focused, so a stray Enter never picks the destructive
+        // answer; the ring follows conf_focus once the user Tabs.
+        draw_button(conf_yes_x, conf_btn_y, BTN_W, BTN_H, "Replace",
+                    conf_focus == 1, true,
+                    hover == H_CONF_YES, pressed == H_CONF_YES);
+        draw_button(conf_no_x, conf_btn_y, BTN_W, BTN_H, "Cancel",
+                    conf_focus == 0, true,
+                    hover == H_CONF_NO, pressed == H_CONF_NO);
+      }
+
+      backend->end_frame(ctx);
+    };
+
+    // The OK/Enter path for save: ask before handing back a path that already
+    // names an existing file. Returns true when the caller should finish.
+    auto try_accept = [&]() -> bool {
+      std::vector<std::string> res;
+      collect_result(res);
+      if (res.empty()) return false;
+      if (want_overwrite_prompt && fd_path_exists(res[0])) {
+        confirming   = true;
+        confirm_path = res[0];
+        conf_focus   = 0;          // always re-arm on the safe answer
+        pressed      = H_NONE;
+        hover        = H_NONE;
+        need_paint   = true;
+        return false;
+      }
+      return true;
+    };
+
+    // Enter the directory under `r`, or pick it in folder mode.
+    auto activate_row = [&](int r) {
+      if (r < 0 || r >= (int)rows.size()) return;
+      if (rows[(size_t)r].is_dir) {
+        std::string next = path_join(cwd, rows[(size_t)r].name);
+        std::vector<FileEntry> probe;
+        if (!fd_read_dir(next, probe)) return;   // unreadable: stay put
+        cwd = next;
+        reload();
+        need_paint = true;
+        return;
+      }
+      if (save) {
+        name.text = rows[(size_t)r].name;
+        name.cursor = name.sel_anchor = (int)name.text.size();
+        need_paint = true;
+        return;
+      }
+      // A file double-clicked in FILE mode confirms outright. In folder mode a
+      // file row is drawn greyed and unpickable, so activating it must do
+      // nothing at all - without this guard the gesture fell through to
+      // `done = true`, and collect_result's "nothing selected -> pick cwd"
+      // fallback then returned the current directory as if the user had chosen
+      // it, from a double-click on a row the UI says cannot be chosen.
+      if (!dir_mode) done = true;
+    };
+
+    XMapRaised(d, win);
+
+    bool prev_disabled = owner ? owner->input_disabled : false;
+    if (owner) owner->input_disabled = true;
+    Window prev_box = g_modal_box_win;
+    g_modal_box_win = win;
+
+    while (!done) {
+      if (need_paint) { render(); need_paint = false; }
+      flush_pending_paints();
+      XFlush(d);
+      XEvent e; XNextEvent(d, &e);
+      if (e.xany.window != win) { dispatch_x_event(e); continue; }
+      switch (e.type) {
+        case Expose:
+          if (e.xexpose.count == 0) {
+            need_paint = true;
+            if (!focused) { XSetInputFocus(d, win, RevertToParent, CurrentTime); focused = true; }
+          }
+          break;
+        case ConfigureNotify:
+          backend->resize(ctx, (uint32_t)e.xconfigure.width, (uint32_t)e.xconfigure.height);
+          need_paint = true;
+          break;
+        case MotionNotify: {
+          int r = -1;
+          Hit h = hit((int)((float)e.xmotion.x / scale), (int)((float)e.xmotion.y / scale), &r);
+          if (h != hover || r != hover_row) { hover = h; hover_row = r; need_paint = true; }
+          break;
+        }
+        case ButtonPress: {
+          int lx = (int)((float)e.xbutton.x / scale), ly = (int)((float)e.xbutton.y / scale);
+          if (e.xbutton.button == Button4 || e.xbutton.button == Button5) {
+            // Absorbed while the overwrite overlay is up - scrolling the list
+            // out from under a modal question is the same bug the popup-menu
+            // wheel gate fixes.
+            if (!confirming) {
+              scroll += (e.xbutton.button == Button4) ? -3 : 3;
+              clamp_scroll();
+              need_paint = true;
+            }
+            break;
+          }
+          if (e.xbutton.button != Button1) break;
+          int r = -1;
+          Hit h = hit(lx, ly, &r);
+          pressed = h;
+          if (h == H_LIST && r >= 0) {
+            // Ctrl-click toggles a mark in multi-select; a plain click moves
+            // the focus row and clears the marks.
+            if (multi && (e.xbutton.state & ControlMask)) {
+              picked[(size_t)r] = !picked[(size_t)r];
+              sel = r;
+            } else {
+              picked.assign(rows.size(), false);
+              sel = r;
+              if (save && !rows[(size_t)r].is_dir) {
+                name.text = rows[(size_t)r].name;
+                name.cursor = name.sel_anchor = (int)name.text.size();
+              }
+            }
+            // Double click within 400 ms on the same row activates it.
+            if (r == last_click_row && e.xbutton.time - last_click_time < 400)
+              activate_row(r);
+            last_click_row = r;
+            last_click_time = e.xbutton.time;
+          }
+          need_paint = true;
+          break;
+        }
+        case ButtonRelease: {
+          if (e.xbutton.button != Button1) break;
+          int lx = (int)((float)e.xbutton.x / scale), ly = (int)((float)e.xbutton.y / scale);
+          int r = -1;
+          Hit h = hit(lx, ly, &r);
+          if (h == pressed) {
+            switch (h) {
+              case H_CANCEL: cancelled = true; done = true; break;
+              case H_OK:
+                if (try_accept()) done = true;
+                break;
+              // "Replace" accepts the path that is already in the name field;
+              // "Cancel" only dismisses the overlay, leaving the browser up so
+              // the user can pick a different name.
+              case H_CONF_YES: confirming = false; done = true; break;
+              case H_CONF_NO:  confirming = false; break;
+              case H_UP: {
+                std::string up = path_parent(cwd);
+                if (up != cwd) { cwd = up; reload(); }
+                break;
+              }
+              case H_CHIP:
+                if (filters.size() > 1) {
+                  filter_index = (filter_index + 1) % filters.size();
+                  reload();
+                }
+                break;
+              default: break;
+            }
+          }
+          pressed = H_NONE;
+          need_paint = true;
+          break;
+        }
+        case KeyPress: {
+          KeySym ks = 0;
+          char   buf[32] = {0};
+          int    n = XLookupString(&e.xkey, buf, sizeof buf - 1, &ks, nullptr);
+          const bool ctrl = (e.xkey.state & ControlMask) != 0;
+          // The overwrite overlay owns the keyboard while it is up, and its
+          // default (Enter) is the NON-destructive answer - as is Esc. Typing
+          // into the name field behind it would be worse than useless, since
+          // the overlay is asking about a path already computed from it.
+          if (confirming) {
+            if (ks == XK_Escape) {              // always the safe answer
+              confirming = false;
+              need_paint = true;
+            } else if (ks == XK_Tab || ks == XK_Left || ks == XK_Right) {
+              conf_focus = conf_focus ? 0 : 1;
+              need_paint = true;
+            } else if (ks == XK_Return || ks == XK_KP_Enter || ks == XK_space) {
+              if (conf_focus == 1) done = true;   // Replace: accept the path
+              confirming = false;
+              need_paint = true;
+            }
+            break;
+          }
+          if (ks == XK_Escape) { cancelled = true; done = true; break; }
+          if (ks == XK_Return || ks == XK_KP_Enter) {
+            // On a focused directory, Enter navigates rather than confirming -
+            // otherwise a folder row would return a path the client cannot use.
+            if (!save && sel >= 0 && sel < (int)rows.size() &&
+                rows[(size_t)sel].is_dir && !dir_mode) {
+              activate_row(sel);
+            } else if (try_accept()) {
+              done = true;
+            }
+            break;
+          }
+          if (ks == XK_Up || ks == XK_Down) {
+            if (!rows.empty()) {
+              if (sel < 0) sel = 0;
+              else sel += (ks == XK_Up) ? -1 : 1;
+              if (sel < 0) sel = 0;
+              if (sel >= (int)rows.size()) sel = (int)rows.size() - 1;
+              scroll_to_sel();
+              need_paint = true;
+            }
+            break;
+          }
+          if (ks == XK_Page_Up || ks == XK_Page_Down) {
+            scroll += (ks == XK_Page_Up ? -visible_rows : visible_rows);
+            clamp_scroll();
+            need_paint = true;
+            break;
+          }
+          if (ks == XK_BackSpace && !save) {
+            // No name field to edit in open mode, so Backspace goes up a level
+            // (the shell convention).
+            std::string up = path_parent(cwd);
+            if (up != cwd) { cwd = up; reload(); need_paint = true; }
+            break;
+          }
+          if (ctrl && (ks == XK_h || ks == XK_H)) {
+            show_hidden = !show_hidden;
+            reload();
+            need_paint = true;
+            break;
+          }
+          if (save) {
+            // The name field is the only typing target in the browser, so it
+            // always has the keyboard - no focus ring to manage.
+            if (ks == XK_BackSpace) {
+              te_backspace(name.text, name.cursor, name.sel_anchor, ctrl, nullptr);
+              need_paint = true;
+            } else if (ks == XK_Delete) {
+              te_delete_forward(name.text, name.cursor, name.sel_anchor, ctrl, nullptr);
+              need_paint = true;
+            } else if (ks == XK_Left) {
+              te_move_left(name.text, name.cursor, name.sel_anchor, ctrl, false, nullptr);
+              need_paint = true;
+            } else if (ks == XK_Right) {
+              te_move_right(name.text, name.cursor, name.sel_anchor, ctrl, false, nullptr);
+              need_paint = true;
+            } else if (ks == XK_Home) {
+              te_move_home(name.text, name.cursor, name.sel_anchor, false, nullptr);
+              need_paint = true;
+            } else if (ks == XK_End) {
+              te_move_end(name.text, name.cursor, name.sel_anchor, false, nullptr);
+              need_paint = true;
+            } else if (n > 0 && (unsigned char)buf[0] >= 0x20 && !ctrl) {
+              // XLookupString returns LATIN-1, not UTF-8 (the frames' real text
+              // widgets go through XIM / Xutf8LookupString; this field does
+              // not). Feeding its bytes straight to te_insert_utf8 put a bare
+              // 0xA0-0xFF byte into the name for any ordinary European key -
+              // typing "e" with an acute accent produced a garbled field and a
+              // returned path that was not valid UTF-8, which the public API
+              // promises it is. Transcode the high bytes to two-byte UTF-8.
+              char utf8[64];
+              int  m = 0;
+              for (int i = 0; i < n && m + 2 < (int)sizeof utf8; ++i) {
+                unsigned char b = (unsigned char)buf[i];
+                if (b < 0x80) utf8[m++] = (char)b;
+                else {
+                  utf8[m++] = (char)(0xC0 | (b >> 6));
+                  utf8[m++] = (char)(0x80 | (b & 0x3F));
+                }
+              }
+              if (m > 0) {
+                te_insert_utf8(name.text, name.cursor, name.sel_anchor, false,
+                               utf8, m, nullptr);
+                need_paint = true;
+              }
+            }
+          }
+          break;
+        }
+        case ClientMessage:
+          if (e.xclient.message_type == g_wm_protocols &&
+              (Atom)e.xclient.data.l[0] == g_wm_delete) {
+            cancelled = true; done = true;
+          }
+          break;
+        default: break;
+      }
+    }
+
+    if (owner) owner->input_disabled = prev_disabled;
+    g_modal_box_win = prev_box;
+    backend->destroy_context(ctx);
+    XDestroyWindow(d, win);
+    XSync(d, False);
+    XSetErrorHandler(old_err);
+
+    if (cancelled) return 0;
+    collect_result(out);
+    return (int)out.size();
+  }
+
+  // Keep the app's own windows alive while the portal dialog (another
+  // process) is up. Passed to file_dialog_portal as its pump callback.
+  void fd_portal_pump(void*)
+  {
+    drain_events();
+    flush_pending_paints();
+    if (g_display) XFlush(g_display);
+  }
+
 } // namespace
 
 // ===========================================================================
@@ -1990,8 +3196,23 @@ namespace
       step_scroll_bounce(lw);   // advance any GRID/SECTION spring-back
       neui_detail::theme_dbus_dispatch();   // pick up system dark/light changes
     }
-    if (lw->needs_paint) paint_window(lw);
-    XFlush(lw->dpy);
+    // Client timers (NEUI_API_TIMER) are NOT gated by the 16 ms animation
+    // window: their own deadlines already decide what is due, and a plugin
+    // asking for 8 ms must not be halved. There is no timerfd in the picture
+    // here - the DAW's cadence is the tick source.
+    if (lw->session && client_timer_sessions().count(lw->session))
+      lw->session->tick_client_timers();
+    // Every window of THIS session that needs painting, not just this one. A
+    // popup surface is a second LinuxWindow, and in embedded mode this pump is
+    // the only thing that ever runs - every non-embedded loop calls
+    // flush_pending_paints, this called paint_window on one window - so a picker
+    // opened from a plugin editor mapped as a permanently blank rectangle.
+    const Window self_win = lw->win;
+    Session* const self_sess = lw->session;
+    flush_pending_paints_for_session(self_sess);
+    // A WIDGET_PAINT handler is client code and can destroy this frame, which in
+    // embedded mode closes the dedicated Display this was about to flush.
+    if (LinuxWindow* alive = find_window(self_win)) XFlush(alive->dpy);
   }
 
   void platform_destroy_window(WidgetData& wd)
@@ -2007,8 +3228,11 @@ namespace
     // owner_index + the FrameWidget are still valid.
     if (s && wd.is_dialog() && wd.owner_index != 0 &&
         s->_widgets.exists(wd.owner_index)) {
-      if (auto* fw = dynamic_cast<FrameWidget*>(&wd))
-        fw->modal_pump_active = false;
+      // Session::end_modal, not a bare flag clear: it also restores the focus the
+      // dialog took from its owner, so a user-driven close and a client destroy
+      // end the same way on all three platforms.
+      if (dynamic_cast<FrameWidget*>(&wd))
+        s->end_modal(wd.index);
       auto& owner = s->_widgets[wd.owner_index];
       if (owner.native_handle) {
         platform_set_window_enabled(owner.native_handle, true);
@@ -2082,38 +3306,31 @@ namespace
   {
     if (!native_handle) return;
     auto* lw = static_cast<LinuxWindow*>(native_handle);
-    float scale = static_cast<float>(dpi ? dpi : lw->dpi) / 96.0f; if (scale <= 0.0f) scale = 1.0f;
-    float cscale = scale * lw->zoom;   // w / h are the logical client size
-    XMoveResizeWindow(lw->dpy, lw->win,
-                      static_cast<int>(static_cast<float>(x) * scale + 0.5f),
-                      static_cast<int>(static_cast<float>(y) * scale + 0.5f),
-                      static_cast<unsigned int>(static_cast<float>(w) * cscale + 0.5f),
-                      static_cast<unsigned int>(static_cast<float>(h) * cscale + 0.5f));
-    XFlush(lw->dpy);
-  }
-
-  void platform_apply_zoom(WidgetData& wd)
-  {
-    if (!wd.native_handle) return;
-    auto* lw = static_cast<LinuxWindow*>(wd.native_handle);
-    lw->zoom = wd.zoom;
-    auto* backend = platform_get_backend();
-    if (backend && wd.render_ctx) backend->update_dpi(wd.render_ctx, client_dpi(lw));
-    auto dt = g_drop_targets.find(lw->win);
-    if (dt != g_drop_targets.end()) dt->second.dpi = client_dpi(lw);
-    if (wd.attrs) {
-      platform_apply_size_constraints(lw,
-                                      wd.attrs->get_int(NEUI_ATTR_MIN_WIDTH,  0),
-                                      wd.attrs->get_int(NEUI_ATTR_MIN_HEIGHT, 0),
-                                      wd.attrs->get_int(NEUI_ATTR_MAX_WIDTH,  0),
-                                      wd.attrs->get_int(NEUI_ATTR_MAX_HEIGHT, 0));
+    // w/h are the logical client size; grow by DPI ratio AND the frame's zoom
+    // so a zoomed frame occupies proportionally more of the screen while the
+    // client keeps thinking in logical units. `dpi` is honoured as an override
+    // for the ratio part (callers pass wd.dpi); the zoom always comes from the
+    // frame's live attr via window_scale.
+    float scale = window_scale(lw);
+    if (dpi && lw->dpi && dpi != lw->dpi)
+      scale *= static_cast<float>(dpi) / static_cast<float>(lw->dpi);
+    if (!(scale > 0.0f)) scale = 1.0f;
+    // Record the logical size we are asking for so the asynchronous
+    // ConfigureNotify can recognise its own echo (see LinuxWindow::expect_w).
+    lw->expect_w = w;
+    lw->expect_h = h;
+    const unsigned int pw = static_cast<unsigned int>(static_cast<float>(w) * scale + 0.5f);
+    const unsigned int ph = static_cast<unsigned int>(static_cast<float>(h) * scale + 0.5f);
+    if (x == NEUI_WINDOW_POS_KEEP || y == NEUI_WINDOW_POS_KEEP) {
+      // Size-only: XResizeWindow leaves the position to the window manager,
+      // which is exactly "keep where the user put it".
+      XResizeWindow(lw->dpy, lw->win, pw, ph);
+    } else {
+      XMoveResizeWindow(lw->dpy, lw->win,
+                        static_cast<int>(static_cast<float>(x) * scale + 0.5f),
+                        static_cast<int>(static_cast<float>(y) * scale + 0.5f),
+                        pw, ph);
     }
-    // ConfigureNotify maps the new size back to the unchanged logical size.
-    float cscale = client_scale(lw);
-    XResizeWindow(lw->dpy, lw->win,
-                  static_cast<unsigned int>(static_cast<float>(wd.width)  * cscale + 0.5f),
-                  static_cast<unsigned int>(static_cast<float>(wd.height) * cscale + 0.5f));
-    lw->needs_paint = true;
     XFlush(lw->dpy);
   }
 
@@ -2136,6 +3353,16 @@ namespace
   {
     if (!native_handle) return;
     static_cast<LinuxWindow*>(native_handle)->needs_paint = true;
+  }
+
+  void platform_force_paint(void* native_handle)
+  {
+    if (!native_handle) return;
+    // Paint straight into the window's Cairo surface, bypassing the needs_paint
+    // / run-loop round trip so the layout caches exist by the time this returns.
+    // paint_window self-guards on the frame having a render context, which is
+    // exactly the "no usable surface yet" best-effort case.
+    paint_window(static_cast<LinuxWindow*>(native_handle));
   }
 
   bool platform_run()
@@ -2172,6 +3399,18 @@ namespace
   {
     if (!g_display) return true;
     drain_events();
+    // Service the heartbeat non-blockingly: platform_run() reads the timerfd
+    // out of its select(), but a client driving the loop by hand never gets
+    // there, and client timers are documented to work under pump_once too.
+    if (g_timerfd >= 0) {
+      fd_set rfds; FD_ZERO(&rfds); FD_SET(g_timerfd, &rfds);
+      struct timeval zero; zero.tv_sec = 0; zero.tv_usec = 0;
+      if (select(g_timerfd + 1, &rfds, nullptr, nullptr, &zero) > 0 &&
+          FD_ISSET(g_timerfd, &rfds)) {
+        uint64_t exp = 0; ssize_t rd = read(g_timerfd, &exp, sizeof(exp)); (void)rd;
+        tick_animations();
+      }
+    }
     flush_pending_paints();
     XFlush(g_display);
     return !g_quit;
@@ -2281,7 +3520,7 @@ namespace
   {
     if (!native_handle) return;
     auto* lw = static_cast<LinuxWindow*>(native_handle);
-    float scale = client_scale(lw);
+    float scale = window_scale(lw);
     XSizeHints* sh = XAllocSizeHints();
     if (!sh) return;
     sh->flags = 0;
@@ -2339,7 +3578,7 @@ namespace
   {
     if (!native_handle || !g_display) return false;
     auto* lw = static_cast<LinuxWindow*>(native_handle);
-    xdnd_register(lw->dpy ? lw->dpy : g_display, lw->win, session_ptr, frame_widget_id, client_dpi(lw));
+    xdnd_register(lw->dpy ? lw->dpy : g_display, lw->win, session_ptr, frame_widget_id, lw->dpi);
     return true;
   }
   void platform_dnd_unregister_window(void* native_handle)
@@ -2586,23 +3825,321 @@ namespace
     return result;
   }
 
+  // linux: window_scale folds the zoom into every conversion.
+  bool platform_supports_ui_scale() { return true; }
+  bool platform_supports_tree_popup() { return true; }
+
+  // -------------------------------------------------------------------------
+  // Popup surfaces (NEUI_W_POPUPSURFACE) - the desktop backing.
+
+  bool platform_supports_popup_surface() { return true; }
+
+  // The scale a screen-coordinate conversion uses. Screen POSITIONS are in
+  // unzoomed logical px (only sizes carry the frame zoom), so this is the
+  // display DPI ratio alone - deliberately not window_scale(), which folds the
+  // zoom in.
+  static float screen_scale()
+  {
+    if (!g_display) return 1.0f;
+    float s = static_cast<float>(query_display_dpi(g_display)) / 96.0f;
+    return (s > 0.0f) ? s : 1.0f;
+  }
+
+  void platform_get_work_area(void* /*near_native*/,
+                              int* x, int* y, int* w, int* h)
+  {
+    if (x) *x = 0;
+    if (y) *y = 0;
+    if (w) *w = 1024;
+    if (h) *h = 768;
+    if (!g_display) return;
+    const int screen = DefaultScreen(g_display);
+    const float sc   = screen_scale();
+
+    // _NET_WORKAREA first: it is the screen minus panel struts, which is what a
+    // menu must stay inside. Falls back to the whole screen on a WM that does
+    // not publish it (and on a multi-head setup, where the property describes
+    // the union rather than one monitor - a per-monitor answer wants RandR and
+    // is deferred).
+    Atom wa = XInternAtom(g_display, "_NET_WORKAREA", True);
+    if (wa != None) {
+      Atom actual_type = None;
+      int actual_format = 0;
+      unsigned long nitems = 0, bytes_after = 0;
+      unsigned char* data = nullptr;
+      if (XGetWindowProperty(g_display, RootWindow(g_display, screen), wa,
+                             0, 4, False, XA_CARDINAL, &actual_type,
+                             &actual_format, &nitems, &bytes_after,
+                             &data) == Success && data) {
+        if (actual_format == 32 && nitems >= 4) {
+          const long* v = reinterpret_cast<const long*>(data);
+          if (x) *x = static_cast<int>(static_cast<float>(v[0]) / sc);
+          if (y) *y = static_cast<int>(static_cast<float>(v[1]) / sc);
+          if (w) *w = static_cast<int>(static_cast<float>(v[2]) / sc);
+          if (h) *h = static_cast<int>(static_cast<float>(v[3]) / sc);
+          XFree(data);
+          return;
+        }
+        XFree(data);
+      }
+    }
+    if (w) *w = static_cast<int>(static_cast<float>(DisplayWidth(g_display, screen))  / sc);
+    if (h) *h = static_cast<int>(static_cast<float>(DisplayHeight(g_display, screen)) / sc);
+  }
+
+  void platform_client_to_screen(void* native_handle, int lx, int ly,
+                                 int* sx, int* sy)
+  {
+    if (sx) *sx = lx;
+    if (sy) *sy = ly;
+    auto* lw = static_cast<LinuxWindow*>(native_handle);
+    if (!lw || !lw->dpy || !lw->win) return;
+    // Into the window's own physical space (which DOES carry the zoom), then out
+    // to root, then back to unzoomed logical.
+    const float wsc = window_scale(lw);
+    int child_x = 0, child_y = 0;
+    Window child = 0;
+    if (!XTranslateCoordinates(lw->dpy, lw->win,
+                               DefaultRootWindow(lw->dpy),
+                               static_cast<int>(static_cast<float>(lx) * wsc + 0.5f),
+                               static_cast<int>(static_cast<float>(ly) * wsc + 0.5f),
+                               &child_x, &child_y, &child))
+      return;
+    const float ssc = screen_scale();
+    if (sx) *sx = static_cast<int>(static_cast<float>(child_x) / ssc);
+    if (sy) *sy = static_cast<int>(static_cast<float>(child_y) / ssc);
+  }
+
+  void platform_get_pointer_pos(int* sx, int* sy)
+  {
+    if (sx) *sx = 0;
+    if (sy) *sy = 0;
+    if (!g_display) return;
+    Window root_ret = 0, child_ret = 0;
+    int rx = 0, ry = 0, wx = 0, wy = 0;
+    unsigned int mask = 0;
+    const int screen = DefaultScreen(g_display);
+    if (!XQueryPointer(g_display, RootWindow(g_display, screen),
+                       &root_ret, &child_ret, &rx, &ry, &wx, &wy, &mask))
+      return;
+    const float sc = screen_scale();
+    if (sx) *sx = static_cast<int>(static_cast<float>(rx) / sc);
+    if (sy) *sy = static_cast<int>(static_cast<float>(ry) / sc);
+  }
+
+  void platform_create_popup_surface(Session* session, uint32_t widget_index,
+                                     WidgetData& wd, void* /*owner_native*/)
+  {
+    PopupPlacingScope placing;
+    // Borderless + no quit-count + no owner: create_frame gives all of that.
+    // The override-redirect flag and the window-type hint are applied below,
+    // because they are the two things no other frame kind wants.
+    //
+    // create_frame folds the frame ZOOM into the create-time position, which is
+    // wrong for a popup (wd.x/wd.y are screen coordinates, and screen positions
+    // never carry the zoom - only sizes do). Harmless here because the window is
+    // created UNMAPPED and platform_show_popup_surface re-places it before the
+    // map, which is the only placement the user ever sees.
+    create_frame(session, widget_index, wd, /*borderless*/true,
+                 /*is_appwindow*/false, /*owner*/nullptr, /*embed*/0);
+
+    auto* lw = static_cast<LinuxWindow*>(wd.native_handle);
+    if (!lw || !lw->dpy || !lw->win) return;
+
+    // OVERRIDE-REDIRECT is the load-bearing one: it takes the window manager out
+    // of decoration, focus and stacking entirely, which is how every X11 menu is
+    // built. Without it the WM may give the popup focus (deactivating the
+    // editor), reparent it, or animate it.
+    XSetWindowAttributes swa;
+    std::memset(&swa, 0, sizeof(swa));
+    swa.override_redirect = True;
+    XChangeWindowAttributes(lw->dpy, lw->win, CWOverrideRedirect, &swa);
+
+    // Advisory for compositors (shadow / no animation); harmless where ignored.
+    Atom wt  = XInternAtom(lw->dpy, "_NET_WM_WINDOW_TYPE", False);
+    Atom pop = XInternAtom(lw->dpy, "_NET_WM_WINDOW_TYPE_POPUP_MENU", False);
+    if (wt != None && pop != None)
+      XChangeProperty(lw->dpy, lw->win, wt, XA_ATOM, 32, PropModeReplace,
+                      reinterpret_cast<unsigned char*>(&pop), 1);
+  }
+
+  void platform_show_popup_surface(void* popup_native, void* /*owner_native*/,
+                                   int sx, int sy, int w, int h, float zoom)
+  {
+    auto* lw = static_cast<LinuxWindow*>(popup_native);
+    if (!lw || !lw->dpy || !lw->win) return;
+    PopupPlacingScope placing;
+    if (!(zoom > 0.0f)) zoom = 1.0f;
+
+    // Position in screen space (no zoom), size in the window's own space (zoom).
+    const float ssc = screen_scale();
+    const int x_phys = static_cast<int>(static_cast<float>(sx) * ssc + 0.5f);
+    const int y_phys = static_cast<int>(static_cast<float>(sy) * ssc + 0.5f);
+    int w_phys = static_cast<int>(static_cast<float>(w) * ssc * zoom + 0.5f);
+    int h_phys = static_cast<int>(static_cast<float>(h) * ssc * zoom + 0.5f);
+    if (w_phys < 1) w_phys = 1;
+    if (h_phys < 1) h_phys = 1;
+
+    // Tell the ConfigureNotify handler this size is ours, so it snaps rather
+    // than deriving a drifted logical size back out of it.
+    lw->expect_w = w;
+    lw->expect_h = h;
+    XMoveResizeWindow(lw->dpy, lw->win, x_phys, y_phys,
+                      static_cast<unsigned int>(w_phys),
+                      static_cast<unsigned int>(h_phys));
+    XMapRaised(lw->dpy, lw->win);
+    lw->needs_paint = true;
+    // XSync, not XFlush: platform_popup_grab_begin runs straight after this and
+    // XGrabPointer fails with GrabNotViewable if the map has not been processed
+    // yet. A flush only pushes the request out; this waits for it to land.
+    XSync(lw->dpy, False);
+  }
+
+  void platform_hide_popup_surface(void* popup_native, void* /*owner_native*/)
+  {
+    auto* lw = static_cast<LinuxWindow*>(popup_native);
+    if (!lw || !lw->dpy || !lw->win) return;
+    PopupPlacingScope placing;
+    XUnmapWindow(lw->dpy, lw->win);
+    XFlush(lw->dpy);
+  }
+
+  // The outside-press watch. An XGrabPointer with owner_events=True IS the menu
+  // mechanism on X11, and it has none of the properties that make win32's
+  // SetCapture the wrong tool: events over OUR OWN windows are still delivered
+  // to the window they would normally go to, so hover and clicks inside the
+  // popup work untouched, and only events outside our client are redirected to
+  // the grab window - which is exactly the notification the session gate needs.
+  //
+  // GrabModeAsync on both so the pointer and keyboard are never frozen if we
+  // are slow; a failed grab is not fatal (the popup then behaves like a plain
+  // window and is still dismissed by any press that reaches our frames).
+  void platform_popup_grab_begin(Session* session, void* popup_native)
+  {
+    (void)session;
+    auto* lw = static_cast<LinuxWindow*>(popup_native);
+    if (!lw || !lw->dpy || !lw->win) return;
+    XGrabPointer(lw->dpy, lw->win, True,
+                 ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+                 GrabModeAsync, GrabModeAsync,
+                 None, None, CurrentTime);
+    XFlush(lw->dpy);
+  }
+
+  void platform_popup_grab_end(Session* /*session*/)
+  {
+    if (!g_display) return;
+    XUngrabPointer(g_display, CurrentTime);
+    XFlush(g_display);
+  }
+
+  void platform_timer_start(Session* session, uint32_t interval_ms)
+  {
+    if (!session || interval_ms == 0) return;
+    ensure_timerfd();
+    client_timer_sessions()[session] = interval_ms;
+    refresh_timer_arm();
+  }
+
+  void platform_timer_stop(Session* session)
+  {
+    if (!session) return;
+    client_timer_sessions().erase(session);
+    refresh_timer_arm();
+  }
+
+  // Accessibility: Linux has NO provider yet - AT-SPI is its own wave (see
+  // plans/accessibility.md 6.5), so a neui window stays opaque to Orca. Both
+  // seams are no-ops rather than absent so the shared host code has one shape
+  // on every platform; a client's declarations are stored and cost nothing,
+  // and start being read the day the AT-SPI provider lands.
+  void platform_a11y_notify(void* /*frame_native_handle*/,
+                            uint32_t /*widget_id*/, int /*change*/) {}
+  void platform_a11y_announce(void* /*frame_native_handle*/,
+                              const char* /*utf8*/, bool /*assertive*/) {}
+  // No AT-SPI provider, so nothing can be listening to us.
+  bool platform_a11y_is_listening() { return false; }
+
+  // -------------------------------------------------------------------------
+  // Relative (unbounded) pointer mode. Warp-back model, same as win32; see
+  // dispatch_motion for the echo filtering and platform.h for why macOS differs.
+  //
+  // The hide uses the cached empty-pixmap cursor directly rather than going
+  // through platform_set_cursor, so a drag does not clobber the widget's
+  // NEUI_ATTR_CURSOR shape - g_cursor_kind is left alone and re-asserted on end.
+
+  bool platform_supports_relative_pointer() { return true; }
+
+  bool platform_begin_relative_pointer(void* native_handle,
+                                        int* out_anchor_x, int* out_anchor_y)
+  {
+    auto* lw = static_cast<LinuxWindow*>(native_handle);
+    if (!lw || !lw->dpy || !lw->win) return false;
+
+    // Current pointer position in ROOT coordinates - the space XWarpPointer and
+    // MotionNotify's x_root/y_root use.
+    Window       root = None, child = None;
+    int          rx = 0, ry = 0, wx = 0, wy = 0;
+    unsigned int mask = 0;
+    if (!XQueryPointer(lw->dpy, lw->win, &root, &child, &rx, &ry, &wx, &wy, &mask))
+      return false;
+
+    g_relative_active   = true;
+    g_relative_window   = lw;
+    g_relative_anchor_x = rx;
+    g_relative_anchor_y = ry;
+    g_relative_last_x   = rx;   // first delta is measured from the press point
+    g_relative_last_y   = ry;
+    if (out_anchor_x) *out_anchor_x = rx;
+    if (out_anchor_y) *out_anchor_y = ry;
+
+    if (Cursor hidden = x11_cursor_for(lw->dpy, lw->win, NEUI_CURSOR_NONE)) {
+      XDefineCursor(lw->dpy, lw->win, hidden);
+      XFlush(lw->dpy);
+    }
+    return true;
+  }
+
+  void platform_end_relative_pointer(void* native_handle,
+                                      int anchor_x, int anchor_y)
+  {
+    auto* lw = static_cast<LinuxWindow*>(native_handle);
+    g_relative_active = false;
+    g_relative_window = nullptr;
+    if (!lw || !lw->dpy || !lw->win) return;
+
+    XWarpPointer(lw->dpy, None, DefaultRootWindow(lw->dpy), 0, 0, 0, 0,
+                  anchor_x, anchor_y);
+    // Re-assert the widget's own shape. platform_set_cursor short-circuits when
+    // the kind is unchanged, and g_cursor_kind was never touched by the hide, so
+    // the cached value has to be cleared to force the re-apply.
+    const int restore = g_cursor_kind;
+    g_cursor_kind = -1;
+    platform_set_cursor(restore);
+  }
+
   void platform_set_cursor(int kind)
   {
-    // Called from the GRID header-divider hover on every motion event; an
-    // XDefineCursor is a round-trip, so no-op when the shape hasn't changed.
+    // Called from the hover walk on every motion event; XDefineCursor is a
+    // server round-trip, so no-op when the shape hasn't changed. (Session
+    // already dedupes, but this is the seam an internal caller could reach
+    // directly and the round-trip is worth guarding twice.)
     if (kind == g_cursor_kind) return;
     g_cursor_kind = kind;
-    // X cursors are sticky per window until changed, so set it on every one of
-    // our windows (small count) rather than tracking which is under the pointer.
+    // Unlike win32/macOS, X cursors are sticky per WINDOW until changed - there
+    // is no per-message reset to fight. So set it on every one of our windows
+    // (small count) rather than tracking which one is under the pointer.
     for (auto& kv : g_windows) {
       LinuxWindow* lw = kv.second;
       if (!lw->dpy || !lw->win) continue;
-      if (kind == NEUI_CURSOR_EW_RESIZE) {
-        Cursor& c = g_ew_cursors[lw->dpy];
-        if (!c) c = XCreateFontCursor(lw->dpy, XC_sb_h_double_arrow);
+      if (kind == NEUI_CURSOR_DEFAULT || kind == NEUI_CURSOR_ARROW) {
+        // Inherit from the parent / root rather than pinning our own arrow;
+        // this is what restores the WM's cursor at the frame edges.
+        XUndefineCursor(lw->dpy, lw->win);
+      } else if (Cursor c = x11_cursor_for(lw->dpy, lw->win, kind)) {
         XDefineCursor(lw->dpy, lw->win, c);
       } else {
-        XUndefineCursor(lw->dpy, lw->win);   // revert to the inherited arrow
+        XUndefineCursor(lw->dpy, lw->win);   // creation failed: don't pin junk
       }
       XFlush(lw->dpy);
     }
@@ -2634,6 +4171,67 @@ namespace
                            const char* caption, uint32_t flags)
   {
     return run_message_box(static_cast<LinuxWindow*>(native_handle), text, caption, flags);
+  }
+
+  // File dialog: XDG portal first, neui-drawn browser as the fallback.
+  //
+  // The fall-through condition is deliberately narrow. `unavailable` means no
+  // dialog reached the user (no libdbus, no bus, no portal, malformed reply,
+  // timeout) and the browser runs. `cancelled` means the portal DID show a
+  // chooser and the user said no - showing a second dialog on top of that
+  // would be worse than having no portal path at all.
+  int platform_file_dialog(void* native_handle, int save,
+                           const neui_file_dialog_t* desc,
+                           neui_file_path_cb cb, void* userdata)
+  {
+    auto* owner = static_cast<LinuxWindow*>(native_handle);
+
+    // The portal wants an "x11:<hex window id>" parent so it can set the
+    // dialog transient for our window. An unrealised frame just gets "",
+    // which the portal accepts as "no parent".
+    std::string parent;
+    if (owner && owner->win) {
+      char buf[64];
+      std::snprintf(buf, sizeof buf, "x11:%lx", (unsigned long)owner->win);
+      parent = buf;
+    }
+
+    std::vector<std::string> paths;
+    // Block the owner for the portal dialog too - it is modal from the user's
+    // point of view, and fd_portal_pump keeps our windows repainting, which
+    // would otherwise let them accept clicks behind the chooser.
+    bool prev_disabled = owner ? owner->input_disabled : false;
+    if (owner) owner->input_disabled = true;
+    neui_detail::PortalResult pr =
+      neui_detail::file_dialog_portal(save != 0, parent, desc, paths,
+                                      &fd_portal_pump, nullptr);
+    if (owner) owner->input_disabled = prev_disabled;
+
+    if (pr == neui_detail::PortalResult::cancelled) return 0;
+    if (pr == neui_detail::PortalResult::unavailable) {
+      paths.clear();
+      int n = run_file_browser(owner, save != 0, desc, paths);
+      if (n <= 0) return n;
+    } else if (save) {
+      // Apply the documented completion rule to a portal SAVE result. The
+      // portal has no equivalent of SetDefaultExtension, and a GTK-style
+      // backend does not append the active filter's extension itself - so
+      // without this the primary Linux path was the one platform that quietly
+      // ignored the rule ("lead" + Presets(*.preset) came back as ".../lead").
+      // The drawn browser completes in collect_result and does not come here.
+      std::vector<neui_detail::FileFilter> filters = neui_detail::parse_filters(desc);
+      if (!paths.empty() && !filters.empty()) {
+        size_t fi = neui_detail::clamp_default_filter(desc, filters);
+        std::string leaf      = neui_detail::path_leaf(paths[0]);
+        std::string completed = neui_detail::complete_extension(leaf, filters[fi]);
+        if (completed != leaf)
+          paths[0] = neui_detail::path_join(neui_detail::path_parent(paths[0]), completed);
+      }
+    }
+
+    if (cb)
+      for (const auto& p : paths) cb(userdata, p.c_str());
+    return (int)paths.size();
   }
 
 } // namespace xpl_host

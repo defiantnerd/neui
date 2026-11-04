@@ -379,7 +379,7 @@ namespace neui_lvgl_backend
   }
 
   // `c` may be null: measure_text is called from the host's non-painting
-  // sizing paths (ComboBoxWidget::drop_width, popup_text_widths), which have no
+  // sizing paths (ComboBoxWidget::drop_width, popup_total_width), which have no
   // bound context. Those get the default selection (family "", weight 0) and an
   // identity CTM - the same thing d2d_measure_text does with a null ctx.
   static const lv_font_t* resolve_font(LvglCtx* c, float font_size)
@@ -659,7 +659,7 @@ namespace neui_lvgl_backend
                                         float font_size)
   {
     // NOTE: raw may legitimately be null - the host's non-painting sizing paths
-    // (ComboBoxWidget::drop_width, popup_text_widths) measure without a bound
+    // (ComboBoxWidget::drop_width, popup_total_width) measure without a bound
     // context, exactly as they do against d2d_measure_text. Returning 0 there
     // collapses combo drop widths and popup menu widths to their minimums.
     auto* c = static_cast<LvglCtx*>(raw);

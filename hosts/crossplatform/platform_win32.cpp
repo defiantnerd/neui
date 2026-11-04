@@ -10,6 +10,10 @@
 
 #include "host.h"
 #include "platform.h"
+// UI Automation provider (NEUI_API_A11Y). Its own TU, like the macOS provider -
+// see a11y_win32.h for its verification status (run on Windows, never heard by a
+// screen reader).
+#include "a11y_win32.h"
 #include "../../backends/d2d/d2d_backend.h"
 #include "../shared/win32/image_loader_win32.h"
 #include "../shared/win32/icon_win32.h"
@@ -21,6 +25,10 @@
 #include "../shared/win32/clipboard_win32.h"
 #include "../shared/win32/dnd_target_win32.h"
 #include "../shared/win32/dnd_source_win32.h"
+#include "../shared/win32/keys_win32.h"
+#include "../shared/win32/cursor_win32.h"
+#include "../shared/win32/file_dialog_win32.h"
+#include "../shared/relative_pointer.h"
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
 
@@ -43,6 +51,13 @@ namespace xpl_host
     Session* session;
     uint32_t widget_index;
     bool     tracking_mouse    = false;  // true while TrackMouseEvent is active
+    // Set while WE are applying geometry (platform_set_window_pos,
+    // platform_menubar_attach). The resulting WM_SIZE must not re-derive the
+    // logical size from the physical one - `logical -> physical -> logical` is
+    // lossy once a fractional zoom is involved - and must not report a RESIZE
+    // the client just asked for. wd.width/height are already authoritative on
+    // those paths (widget_set_size / the zoom handler set them first).
+    bool     self_resizing     = false;
     WCHAR    pending_surrogate = 0;      // high surrogate waiting for its low pair
     // SMOOTH-scroll grid bounce timer: when a grid overscrolls in SMOOTH mode
     // we SetTimer the FRAME's HWND (grids on xpl have no HWND of their own)
@@ -78,14 +93,25 @@ namespace xpl_host
   static inline int mouse_x(LPARAM lp) { return static_cast<int>(static_cast<short>(LOWORD(lp))); }
   static inline int mouse_y(LPARAM lp) { return static_cast<int>(static_cast<short>(HIWORD(lp))); }
 
-  // Convert a physical pixel coordinate to logical (96 DPI baseline).
-  // dpi == 0 is normalised to 96: GetDpiForWindow returns 0 on failure, and a
-  // frame's dpi is only populated once its HWND exists - neither may divide
-  // by zero.
-  static inline float phys_to_log(int phys, uint32_t dpi)
+  // Convert a physical pixel coordinate to logical, for a FRAME - divides by
+  // the frame's full logical->physical factor,
+  // i.e. DPI ratio AND user zoom (NEUI_ATTR_UI_SCALE). Every mouse coordinate
+  // and the WM_SIZE client size go through this, which is what keeps input in
+  // the same logical space the widget tree and the paint walk use at any zoom.
+  // A frame dpi of 0 (GetDpiForWindow failed, or no HWND yet) gives a factor of
+  // 0 and the coordinate passes through as 1:1 - never a division by zero.
+  static inline float phys_to_log(int phys, const WidgetData& frame)
   {
-    if (dpi == 0) dpi = 96;
-    return static_cast<float>(phys) * 96.0f / static_cast<float>(dpi);
+    const float s = frame.logical_to_physical();
+    return (s > 0.0f) ? static_cast<float>(phys) / s : static_cast<float>(phys);
+  }
+
+  // Logical -> physical for a frame (the inverse). Used where we hand native
+  // APIs a pixel rect built from logical widget coords (IME caret, window
+  // sizing).
+  static inline int log_to_phys(float logical, const WidgetData& frame)
+  {
+    return static_cast<int>(logical * frame.logical_to_physical() + 0.5f);
   }
 
   static WindowUserData* get_wud(HWND hwnd)
@@ -185,16 +211,13 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // Keyboard helpers
 
-  // Build a modifier bitmask from current key state.
-  // Bit layout matches a simple convention (not yet exposed in the public API):
-  //   bit 0 = Shift, bit 1 = Ctrl, bit 2 = Alt/Menu
+  // Build a NEUI_KMOD_* bitmask from the current key state. The bits ARE the
+  // public ones (<neui/d/keys.h>) - the old comment here claimed a private
+  // convention that merely happened to have the same values, which would have
+  // broken silently if the enum were ever reordered.
   static uint32_t build_modifiers()
   {
-    uint32_t m = 0;
-    if (GetKeyState(VK_SHIFT)   & 0x8000) m |= 1;
-    if (GetKeyState(VK_CONTROL) & 0x8000) m |= 2;
-    if (GetKeyState(VK_MENU)    & 0x8000) m |= 4;
-    return m;
+    return neui_detail::win32_kmod_from_state();
   }
 
   // Dispatch a key event: client gets first chance; if it returns false the
@@ -230,6 +253,12 @@ namespace xpl_host
   static WidgetData* focused_text_widget(Session* sess)
   {
     if (!sess) return nullptr;
+    // No composition target while a popup surface is diverting keys: the
+    // WM_IME_* messages arrive at the OWNER's HWND, so without this an IME would
+    // compose into the field behind an open menu - the same leak the WM_CHAR gate
+    // closes for plain typing. Every caller already handles nullptr by falling
+    // through to DefWindowProcW.
+    if (sess->popup_diverts_keys()) return nullptr;
     uint32_t fw = sess->_focused_widget;
     if (fw == 0 || !sess->_widgets.exists(fw)) return nullptr;
     return &sess->_widgets[fw];
@@ -332,10 +361,12 @@ namespace xpl_host
     // cached frame-local position (recomputed during the paint walk).
     float lx_in_frame = lx + static_cast<float>(wd->abs_x);
     float ly_in_frame = ly + static_cast<float>(wd->abs_y);
-    UINT  dpi          = frame_wd->client_dpi();
-    int   px_x         = MulDiv(static_cast<int>(lx_in_frame), static_cast<int>(dpi), 96);
-    int   px_y         = MulDiv(static_cast<int>(ly_in_frame), static_cast<int>(dpi), 96);
-    int   px_h         = MulDiv(static_cast<int>(lh),          static_cast<int>(dpi), 96);
+    // Via the frame's full factor (DPI ratio * zoom) - the caret is drawn
+    // through the zoom transform, so the IME window has to follow it or the
+    // candidate list detaches from the text at any zoom != 100%.
+    int   px_x         = log_to_phys(lx_in_frame, *frame_wd);
+    int   px_y         = log_to_phys(ly_in_frame, *frame_wd);
+    int   px_h         = log_to_phys(lh,          *frame_wd);
 
     HIMC himc = ImmGetContext(hwnd);
     if (!himc) return;
@@ -362,6 +393,38 @@ namespace xpl_host
     ImmReleaseContext(hwnd, himc);
     (void)sess;
   }
+
+  // -------------------------------------------------------------------------
+  // Mouse cursor state.
+  //
+  // Declared HERE, above XplWndProc, because the WM_SETCURSOR case reads it -
+  // and the rest of the cursor code lives ~1400 lines further down next to
+  // platform_set_cursor. A definition down there would not be in scope at the
+  // point of use, which is a hard compile error on MSVC (C2065) that this
+  // macOS-only build cannot catch.
+  //
+  // Win32 cursor management is per-message: WM_SETCURSOR fires every time the
+  // pointer moves over a window, and unless we answer it the OS reverts to
+  // whatever the window class registered (wc.hCursor, an arrow). So the active
+  // kind is tracked here and reapplied from the WM_SETCURSOR case;
+  // platform_set_cursor also applies it immediately, for the case where the
+  // pointer is already inside and no WM_SETCURSOR is due until it next moves.
+  //
+  // Process-wide rather than per-window: only one window can be under the
+  // pointer at a time, and Session::refresh_cursor is the single writer.
+  static int s_cursor_kind = NEUI_CURSOR_DEFAULT;
+
+  // Relative (unbounded) pointer mode - see platform_begin_relative_pointer
+  // further down for the rationale. Declared here for the same reason
+  // s_cursor_kind is: both the WM_SETCURSOR and the WM_MOUSEMOVE cases below
+  // read them, and a definition next to their implementation would not be in
+  // scope at the point of use.
+  //
+  // Process-wide, not per-window: only one pointer, so only one drag can be in
+  // relative mode at a time. The anchor is in SCREEN px, which is what both
+  // GetCursorPos and SetCursorPos speak.
+  static bool  s_relative_active = false;
+  static POINT s_relative_anchor = { 0, 0 };
 
   // -------------------------------------------------------------------------
   // Window procedure
@@ -417,7 +480,19 @@ namespace xpl_host
       // plugin editor must not yank focus out of whatever the host had
       // focused. An embedded frame takes focus on click instead
       // (WM_LBUTTONDOWN below), matching the macOS embedded path.
-      if (!(static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)) & WS_CHILD))
+      //
+      // ...and NOT for a WS_EX_NOACTIVATE window - a popup surface. That style
+      // only stops Windows from activating a window when it is CLICKED; it does
+      // nothing about a programmatic SetFocus, and SetFocus on a top-level
+      // window also makes it the active one. So this line took the foreground,
+      // the activation and the thread's keyboard focus away from the editor the
+      // instant a picker opened, which is exactly the "editor appears to lose
+      // focus" bug the non-activating style exists to prevent. Testing the ex-
+      // style rather than the widget type keeps it right for any later
+      // non-activating window kind.
+      const DWORD cs_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+      const DWORD cs_ex    = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+      if (!(cs_style & WS_CHILD) && !(cs_ex & WS_EX_NOACTIVATE))
         SetFocus(hwnd);
       return 0;
     }
@@ -457,8 +532,9 @@ namespace xpl_host
     case WM_DESTROY: {
       auto* wud = get_wud(hwnd);
       if (wud) {
+        const uint32_t self_idx = wud->widget_index;
         // Release the D2D render context before the HWND is gone.
-        auto* wd = wud->session->get_widget(wud->widget_index);
+        auto* wd = wud->session->get_widget(self_idx);
         if (wd) {
           auto* backend = platform_get_backend();
           if (backend && wd->render_ctx) {
@@ -477,7 +553,6 @@ namespace xpl_host
           // "re-enable owner" path. DestroyWindow re-enters WM_DESTROY
           // synchronously for each owned frame.
           {
-            uint32_t self_idx = wud->widget_index;
             wd->native_handle = nullptr;
             for (uint32_t idx : wud->session->_widgets.release_order()) {
               if (idx == 0 || idx == self_idx) continue;
@@ -490,6 +565,15 @@ namespace xpl_host
               }
             }
           }
+          // Re-resolve before going on: the DestroyWindow calls above re-entered
+          // this same WM_DESTROY for each owned frame, and an owned modal dialog's
+          // teardown runs Session::end_modal -> set_focus, which dispatches
+          // WIDGET_FOCUS synchronously. So client code has run and may have
+          // destroyed THIS widget (freeing the slot, and with it the WidgetData
+          // `wd` points at). Everything below dereferences it.
+          wd = wud->session->get_widget(self_idx);
+          if (!wd) return 0;
+
           // Dialog teardown: re-enable and re-activate the owner so input
           // returns there. Must happen before native_handle is cleared, since
           // owner_index is read from this widget's state. Skip when the
@@ -505,17 +589,30 @@ namespace xpl_host
               EnableWindow(static_cast<HWND>(owner_native), TRUE);
               SetForegroundWindow(static_cast<HWND>(owner_native));
             }
-            // Drop the modal pump so widget_show unwinds and returns.
-            if (auto* fw = dynamic_cast<FrameWidget*>(wd))
-              fw->modal_pump_active = false;
+            // Drop the modal pump so widget_show unwinds and returns, and give
+            // back the focus the dialog took from its owner. Shared with the
+            // macOS / Linux teardown paths (Session::end_modal), so a user-driven
+            // close and a client destroy behave the same way.
+            if (dynamic_cast<FrameWidget*>(wd))
+              wud->session->end_modal(self_idx);
+            // NOTHING may dereference `wd` after this point. end_modal restores
+            // the owner's focus, which dispatches WIDGET_FOCUS to the client, and
+            // "the dialog closed -> destroy it" is the ordinary handler to write:
+            // that frees this slot and leaves `wd` dangling. Nothing needs to run
+            // here anyway - native_handle was already cleared above, before the
+            // owned-frame loop - so the clear that used to sit at the end of this
+            // block was both redundant and a write into freed memory.
           }
-          wd->native_handle = nullptr;
         }
       }
       return 0;
     }
 
     case WM_NCDESTROY: {
+      // Drop this window's UIA provider. A client can still hold element
+      // references afterwards; the provider's teardown makes them answer "gone"
+      // instead of reaching into a destroyed Session.
+      a11y_win32_window_destroyed(hwnd);
       // Free WindowUserData allocated in create_appwindow / create_plugwindow.
       auto* wud = get_wud(hwnd);
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -567,20 +664,77 @@ namespace xpl_host
       if (!fwd || !fwd->attrs) break;
 
       MINMAXINFO* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-      UINT dpi = fwd->client_dpi();   // the limits are logical client px
+      UINT dpi = fwd->dpi ? fwd->dpi : 96;
 
       int min_w = fwd->attrs->get_int(NEUI_ATTR_MIN_WIDTH,  0);
       int min_h = fwd->attrs->get_int(NEUI_ATTR_MIN_HEIGHT, 0);
       int max_w = fwd->attrs->get_int(NEUI_ATTR_MAX_WIDTH,  0);
       int max_h = fwd->attrs->get_int(NEUI_ATTR_MAX_HEIGHT, 0);
 
-      if (min_w > 0) mmi->ptMinTrackSize.x = MulDiv(min_w, static_cast<int>(dpi), 96);
-      if (min_h > 0) mmi->ptMinTrackSize.y = MulDiv(min_h, static_cast<int>(dpi), 96);
+      // Constraints are LOGICAL, but they bound the ZOOMED native window, so
+      // they need the same zoom factor the sizing paths use - otherwise a
+      // MIN_WIDTH of 400 at zoom 2 lets the user drag down to logical 200.
+      float mm_zoom = 1.0f;
+      if (auto* zwud = get_wud(hwnd))
+        if (zwud->session)
+          if (auto* zfwd = zwud->session->get_widget(zwud->widget_index))
+            mm_zoom = zfwd->ui_scale();
+      if (min_w > 0) mmi->ptMinTrackSize.x = static_cast<int>(MulDiv(min_w, static_cast<int>(dpi), 96) * mm_zoom + 0.5f);
+      if (min_h > 0) mmi->ptMinTrackSize.y = static_cast<int>(MulDiv(min_h, static_cast<int>(dpi), 96) * mm_zoom + 0.5f);
       if (max_w > 0 && (min_w <= 0 || max_w >= min_w))
-        mmi->ptMaxTrackSize.x = MulDiv(max_w, static_cast<int>(dpi), 96);
+        mmi->ptMaxTrackSize.x = static_cast<int>(MulDiv(max_w, static_cast<int>(dpi), 96) * mm_zoom + 0.5f);
       if (max_h > 0 && (min_h <= 0 || max_h >= min_h))
-        mmi->ptMaxTrackSize.y = MulDiv(max_h, static_cast<int>(dpi), 96);
+        mmi->ptMaxTrackSize.y = static_cast<int>(MulDiv(max_h, static_cast<int>(dpi), 96) * mm_zoom + 0.5f);
       return 0;
+    }
+
+    // Another APPLICATION came forward. This is win32's ONLY notification that a
+    // press landed somewhere we do not own - we hold no activation to lose when
+    // the press goes to another window of the DAW's own UI, which is the
+    // documented gap in the outside-press coverage (docs/popup-surfaces.md).
+    case WM_ACTIVATEAPP: {
+      if (wParam == FALSE && !popup_placing()) {
+        if (auto* wud = get_wud(hwnd))
+          wud->session->close_all_popup_surfaces(NEUI_POPUP_DISMISS_DEACTIVATED);
+      }
+      break;
+    }
+
+    // Another window of OURS came forward. WM_ACTIVATEAPP does NOT fire for that
+    // - it is an application-level change and both windows belong to the same
+    // process - so without this a click into a second session's frame (two plugin
+    // editors in one DAW, or an app with two windows) left the first session's
+    // popup floating over it. macOS gets this from its in-process NSEvent monitor
+    // and X11 from the pointer grab; win32 has to be told. Distinct from the
+    // documented WM_ACTIVATEAPP gap, which is about another PROCESS's UI.
+    //
+    // The DEACTIVATION side is the one handled, because it is local to the session
+    // that owns the popup and needs no cross-session walk. A popup surface is
+    // WS_EX_NOACTIVATE and shown with SW_SHOWNOACTIVATE, so opening one moves no
+    // activation and this never fires for our own placement; popup_placing()
+    // covers the rest. Falls through to DefWindowProc - activation needs its
+    // default processing.
+    case WM_ACTIVATE: {
+      if (LOWORD(wParam) == WA_INACTIVE && !popup_placing()) {
+        if (auto* wud = get_wud(hwnd)) {
+          if (wud->session->popup_surface_open() &&
+              wud->session->popup_surface_depth(wud->widget_index) < 0)
+            wud->session->close_all_popup_surfaces(NEUI_POPUP_DISMISS_DEACTIVATED);
+        }
+      }
+      break;
+    }
+
+    // The owner being dragged dismisses any open popup surface - what every OS
+    // menu does; re-placing one mid-drag is worse than closing it. Skipped for
+    // the popup's own windows (they move because WE moved them).
+    case WM_MOVE: {
+      if (auto* wud = get_wud(hwnd)) {
+        if (!popup_placing() && wud->session->popup_surface_open() &&
+            wud->session->popup_surface_depth(wud->widget_index) < 0)
+          wud->session->close_all_popup_surfaces(NEUI_POPUP_DISMISS_OWNER_MOVED);
+      }
+      break;
     }
 
     case WM_SIZE: {
@@ -589,6 +743,13 @@ namespace xpl_host
       // want clients to see spurious zero-sized resize events.
       if (wParam == SIZE_MINIMIZED) return 0;
 
+      // Same for a resize (and for minimise, which arrives here first).
+      if (auto* wud0 = get_wud(hwnd)) {
+        if (!popup_placing() && wud0->session->popup_surface_open() &&
+            wud0->session->popup_surface_depth(wud0->widget_index) < 0)
+          wud0->session->close_all_popup_surfaces(NEUI_POPUP_DISMISS_OWNER_MOVED);
+      }
+
       auto* wud = get_wud(hwnd);
       if (wud) {
         UINT w_phys = LOWORD(lParam);
@@ -596,17 +757,22 @@ namespace xpl_host
         wud->session->resize_render_ctx(wud->widget_index, w_phys, h_phys);
 
         auto* fwd = wud->session->get_widget(wud->widget_index);
-        if (fwd) {
+        // Our own geometry application: wd.width/height are authoritative and
+        // the client did not "get resized". Skipping also avoids the lossy
+        // round-trip below - truncation used to drift a 401-wide frame at zoom
+        // 1.25 down to 400 (501 physical / 1.25 = 400.8 -> 400).
+        if (fwd && !wud->self_resizing) {
           // WM_CREATE seeded fwd->dpi before the first WM_SIZE; fall back to
-          // the live HWND in case this frame was never routed through there.
-          // A zoomed frame's client maps by its client_dpi.
-          UINT dpi = fwd->dpi ? fwd->client_dpi() : GetDpiForWindow(hwnd);
-          if (dpi == 0) dpi = 96;
-          // MulDiv (round-to-nearest) is the exact inverse of the
-          // MulDiv(logical, dpi, 96) used when sizing the window; truncating
-          // here loses a pixel (logical 941 -> 1176 phys -> 940 at 125%).
-          int w_log = MulDiv(static_cast<int>(w_phys), 96, static_cast<int>(dpi));
-          int h_log = MulDiv(static_cast<int>(h_phys), 96, static_cast<int>(dpi));
+          // the live HWND in case this frame was never routed through there,
+          // or the first RESIZE would report physical px.
+          if (fwd->dpi == 0) {
+            UINT hwnd_dpi = GetDpiForWindow(hwnd);
+            fwd->dpi = hwnd_dpi ? hwnd_dpi : 96;
+          }
+          // Round, don't truncate: phys_to_log divides by (dpi/96 * zoom), so
+          // truncation loses up to a pixel on every externally-driven resize.
+          int w_log = static_cast<int>(phys_to_log(static_cast<int>(w_phys), *fwd) + 0.5f);
+          int h_log = static_cast<int>(phys_to_log(static_cast<int>(h_phys), *fwd) + 0.5f);
           fwd->width  = w_log;
           fwd->height = h_log;
 
@@ -646,6 +812,22 @@ namespace xpl_host
     // host; no widget has its own HWND. When the user switches to / from
     // another app, replay WIDGET_FOCUS for the logically-focused widget so
     // clients see the same event timing as on the win32 host.
+
+    case WM_GETOBJECT: {
+      // The UI Automation entry point: a client asking a window "what is in you".
+      // Only UiaRootObjectId is ours; an MSAA (IAccessible) request falls through
+      // to DefWindowProc, since there is no MSAA bridge here and answering one
+      // with a UIA provider would be worse than not answering.
+      auto* wud = get_wud(hwnd);
+      if (wud && wud->session) {
+        intptr_t lr = 0;
+        if (a11y_win32_handle_get_object(hwnd, wud->session, wud->widget_index,
+                                         static_cast<intptr_t>(wParam),
+                                         static_cast<intptr_t>(lParam), &lr))
+          return static_cast<LRESULT>(lr);
+      }
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
 
     case WM_KILLFOCUS: {
       auto* wud = get_wud(hwnd);
@@ -688,6 +870,28 @@ namespace xpl_host
     }
 
     // -----------------------------------------------------------------
+    // Cursor. Win32 cursor state is per-message, not per-window: the window
+    // class registers an arrow in wc.hCursor and DefWindowProc reapplies it on
+    // EVERY WM_SETCURSOR, which the OS sends on every pointer move over the
+    // window. Without this handler a cursor set from platform_set_cursor is
+    // reverted before the next frame - the GRID's column-resize cursor only
+    // ever "worked" because WM_MOUSEMOVE re-set it immediately afterwards, so
+    // it flickered and it never stuck when the pointer stopped moving.
+    //
+    // Only the CLIENT area is ours. Handing back the non-client hit-test codes
+    // to DefWindowProc keeps the OS's own resize-border and title-bar cursors,
+    // which a client would otherwise lose the moment it set any cursor.
+    case WM_SETCURSOR: {
+      if (LOWORD(lParam) != HTCLIENT) break;   // -> DefWindowProc
+      // In relative mode the pointer is deliberately hidden for the duration of
+      // the drag. Re-applying the widget's shape here would un-hide it on the
+      // very first move and defeat the whole mode.
+      if (s_relative_active) { SetCursor(nullptr); return TRUE; }
+      neui_detail::win32_apply_cursor(s_cursor_kind);
+      return TRUE;                             // "I handled it, don't reset"
+    }
+
+    // -----------------------------------------------------------------
     // Mouse input
 
     case WM_MOUSEMOVE: {
@@ -703,8 +907,49 @@ namespace xpl_host
         wud->tracking_mouse = true;
       }
 
-      float lx = phys_to_log(mouse_x(lParam), fwd->client_dpi());
-      float ly = phys_to_log(mouse_y(lParam), fwd->client_dpi());
+      // Relative (unbounded) pointer mode: consume the raw screen-space delta,
+      // warp back to the anchor, and let Session report an accumulated virtual
+      // position instead of this event's clamped one.
+      //
+      // The echo check is essential: our own SetCursorPos below generates
+      // another WM_MOUSEMOVE, landing exactly on the anchor. Without dropping it
+      // the handler would see delta, then -delta, and the drag would sit still.
+      if (s_relative_active) {
+        POINT sp{};
+        if (GetCursorPos(&sp)) {
+          if (neui_detail::relative_is_warp_echo((int)sp.x, (int)sp.y,
+                                                   (int)s_relative_anchor.x,
+                                                   (int)s_relative_anchor.y))
+            return 0;                                   // our own warp-back
+          // Deltas are DEVICE px; divide by the frame's full logical->physical
+          // factor (DPI ratio AND NEUI_ATTR_UI_SCALE) so the virtual position
+          // stays in logical px like every other mouse coordinate. This is the
+          // same factor phys_to_log applies, just to a delta rather than a
+          // point, so no origin is involved.
+          const float f  = fwd->logical_to_physical();
+          const float sc = (f > 0.0f) ? f : 1.0f;
+          wud->session->dispatch_relative_motion(
+            (float)(sp.x - s_relative_anchor.x) / sc,
+            (float)(sp.y - s_relative_anchor.y) / sc,
+            neui_detail::win32_buttonmap(wParam));
+          SetCursorPos(s_relative_anchor.x, s_relative_anchor.y);
+        }
+        return 0;
+      }
+
+      float lx = phys_to_log(mouse_x(lParam), *fwd);
+      float ly = phys_to_log(mouse_y(lParam), *fwd);
+
+      // A popup surface open over this frame suppresses hover in everything
+      // underneath. Without it, moving off the popup lights up every widget the
+      // pointer passes, which is the one thing that reads as "not a menu".
+      if (wud->session->popup_gate_hover(wud->widget_index)) return 0;
+
+      // Standalone tree popup (widgets->popup_tree_menu) owns hover while open:
+      // that is what drives cascade open/collapse and row highlighting.
+      if (wud->session->_tree_popup_active &&
+          wud->session->handle_tree_popup_hover(wud->widget_index, lx, ly))
+        return 0;
 
       // Popup-menu overlay (right-click context menu) takes priority over
       // everything else. While active it absorbs all hover updates inside
@@ -737,8 +982,13 @@ namespace xpl_host
           ev.data.mouse.widget = { hw->widget_id };
           ev.data.mouse.x      = static_cast<int>(lx);
           ev.data.mouse.y      = static_cast<int>(ly);
-          ev.data.mouse.buttonmap = static_cast<uint32_t>(wParam)
-                                    & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON);
+          // Was masked to the three button bits only, which dropped MK_SHIFT /
+          // MK_CONTROL on every MOUSE_MOVE - so Shift-for-fine on a KNOB /
+          // SLIDER drag saw the modifier on the initial DOWN and then lost it
+          // for the rest of the drag. The shared helper keeps all five
+          // documented bits (and, unlike a raw wParam forward, drops
+          // MK_XBUTTON1 = 0x0020, which would otherwise read as NEUI_MK_ALT).
+          ev.data.mouse.buttonmap = neui_detail::win32_buttonmap(wParam);
           wud->session->dispatch_mouse_event(target, &ev);
         }
       }
@@ -769,8 +1019,21 @@ namespace xpl_host
           && GetFocus() != hwnd)
         SetFocus(hwnd);
 
-      float lx = phys_to_log(mouse_x(lParam), fwd->client_dpi());
-      float ly = phys_to_log(mouse_y(lParam), fwd->client_dpi());
+      float lx = phys_to_log(mouse_x(lParam), *fwd);
+      float ly = phys_to_log(mouse_y(lParam), *fwd);
+
+      // Standalone tree popup: picks / descends / dismisses. Not consumed only
+      // when the popup belongs to another frame (it dismisses and the click
+      // proceeds here).
+      wud->session->tree_popup_discard_pending_release();
+      if (wud->session->_tree_popup_active &&
+          wud->session->handle_tree_popup_click(wud->widget_index, lx, ly))
+        return 0;
+
+      // A press that lands outside an open popup-surface stack dismisses it and
+      // is SWALLOWED - it must not also actuate the widget underneath.
+      wud->session->popup_discard_pending_release();
+      if (wud->session->popup_gate_press(wud->widget_index)) return 0;
 
       // Popup menu overlay absorbs the click - picks an item or dismisses.
       // The nested message pump in open_popup_menu will see _popup_running
@@ -811,7 +1074,7 @@ namespace xpl_host
           ev.data.mouse.widget = { hw->widget_id };
           ev.data.mouse.x      = static_cast<int>(lx);
           ev.data.mouse.y      = static_cast<int>(ly);
-          ev.data.mouse.buttonmap = static_cast<uint32_t>(wParam);
+          ev.data.mouse.buttonmap = neui_detail::win32_buttonmap(wParam);
           wud->session->dispatch_mouse_event(hit, &ev);
         }
       }
@@ -824,8 +1087,26 @@ namespace xpl_host
       auto* fwd = wud->session->get_widget(wud->widget_index);
       if (!fwd) break;
 
-      float lx = phys_to_log(mouse_x(lParam), fwd->client_dpi());
-      float ly = phys_to_log(mouse_y(lParam), fwd->client_dpi());
+      float lx = phys_to_log(mouse_x(lParam), *fwd);
+      float ly = phys_to_log(mouse_y(lParam), *fwd);
+
+      // A double-click inside an open tree popup must pick the row it lands on,
+      // not bypass the menu and DBLCLICK the widget underneath.
+      wud->session->tree_popup_discard_pending_release();
+      if (wud->session->_tree_popup_active &&
+          wud->session->handle_tree_popup_click(wud->widget_index, lx, ly))
+        return 0;
+
+      // ...and the popup-surface gate for exactly the same reason, which win32
+      // needs stated separately because the OS gives the second press of a rapid
+      // pair its OWN message: when a popup opens on the CLICK synthesised from
+      // UP(1), the next press arrives here and ONLY here, so a gate on
+      // WM_LBUTTONDOWN alone never sees it. Without this the popup stays open
+      // while focus / pressed / DBLCLICK all land on the widget underneath, and
+      // because the swallow flag was never set the following UP synthesises a
+      // CLICK there too. macOS gates before its clickCount branch for this.
+      wud->session->popup_discard_pending_release();
+      if (wud->session->popup_gate_press(wud->widget_index)) return 0;
 
       uint32_t hit = wud->session->widget_at(lx, ly, wud->widget_index);
 
@@ -847,7 +1128,7 @@ namespace xpl_host
           ev.data.mouse.widget    = { hw->widget_id };
           ev.data.mouse.x         = static_cast<int>(lx);
           ev.data.mouse.y         = static_cast<int>(ly);
-          ev.data.mouse.buttonmap = static_cast<uint32_t>(wParam);
+          ev.data.mouse.buttonmap = neui_detail::win32_buttonmap(wParam);
           wud->session->dispatch_mouse_event(hit, &ev);
         }
       }
@@ -860,6 +1141,20 @@ namespace xpl_host
       auto* fwd = wud->session->get_widget(wud->widget_index);
       if (!fwd) break;
 
+      // Swallow the release that pairs with a press the tree popup consumed -
+      // otherwise the widget under the just-dismissed menu sees an UP with no
+      // DOWN and synthesises a CLICK.
+      if (wud->session->tree_popup_take_release()) {
+        ReleaseCapture();
+        return 0;
+      }
+
+      // Same for a press the popup-surface gate swallowed.
+      if (wud->session->popup_take_release()) {
+        ReleaseCapture();
+        return 0;
+      }
+
       // End a combo overlay scrollbar drag if one was active.
       if (wud->session->_combo_sb_dragging) {
         wud->session->_combo_sb_dragging = false;
@@ -869,8 +1164,8 @@ namespace xpl_host
 
       ReleaseCapture();
 
-      float lx = phys_to_log(mouse_x(lParam), fwd->client_dpi());
-      float ly = phys_to_log(mouse_y(lParam), fwd->client_dpi());
+      float lx = phys_to_log(mouse_x(lParam), *fwd);
+      float ly = phys_to_log(mouse_y(lParam), *fwd);
 
       uint32_t hit     = wud->session->widget_at(lx, ly, wud->widget_index);
       uint32_t pressed = wud->session->_pressed_widget;
@@ -883,7 +1178,7 @@ namespace xpl_host
           ev.data.mouse.widget    = { hw->widget_id };
           ev.data.mouse.x         = static_cast<int>(lx);
           ev.data.mouse.y         = static_cast<int>(ly);
-          ev.data.mouse.buttonmap = 0;
+          ev.data.mouse.buttonmap = neui_detail::win32_buttonmap(wParam);
 
           ev.type = NEUI_EVENT_MOUSE_BUTTON_UP;
           wud->session->dispatch_mouse_event(hit, &ev);
@@ -903,8 +1198,16 @@ namespace xpl_host
       if (!wud) break;
       auto* fwd = wud->session->get_widget(wud->widget_index);
       if (!fwd) break;
-      float lx = phys_to_log(mouse_x(lParam), fwd->client_dpi());
-      float ly = phys_to_log(mouse_y(lParam), fwd->client_dpi());
+      float lx = phys_to_log(mouse_x(lParam), *fwd);
+      float ly = phys_to_log(mouse_y(lParam), *fwd);
+      // A right-click while a tree popup is open goes to the menu (pick /
+      // descend / dismiss) rather than stacking a second one on top.
+      wud->session->tree_popup_discard_pending_release();
+      if (wud->session->_tree_popup_active &&
+          wud->session->handle_tree_popup_click(wud->widget_index, lx, ly))
+        return 0;
+      wud->session->popup_discard_pending_release();
+      if (wud->session->popup_gate_press(wud->widget_index)) return 0;
       // If a popup is up, a right-click outside dismisses it.
       if (wud->session->_popup_active) {
         wud->session->handle_popup_click(lx, ly);
@@ -919,7 +1222,7 @@ namespace xpl_host
       ev.data.mouse.widget    = { hw->widget_id };
       ev.data.mouse.x         = static_cast<int>(lx);
       ev.data.mouse.y         = static_cast<int>(ly);
-      ev.data.mouse.buttonmap = 0;
+      ev.data.mouse.buttonmap = neui_detail::win32_buttonmap(wParam);
       wud->session->dispatch_mouse_event(hit, &ev);
       return 0;
     }
@@ -929,8 +1232,10 @@ namespace xpl_host
       if (!wud) break;
       auto* fwd = wud->session->get_widget(wud->widget_index);
       if (!fwd) break;
-      float lx = phys_to_log(mouse_x(lParam), fwd->client_dpi());
-      float ly = phys_to_log(mouse_y(lParam), fwd->client_dpi());
+      if (wud->session->tree_popup_take_release()) return 0;
+      if (wud->session->popup_take_release()) return 0;
+      float lx = phys_to_log(mouse_x(lParam), *fwd);
+      float ly = phys_to_log(mouse_y(lParam), *fwd);
       uint32_t hit = wud->session->widget_at(lx, ly, wud->widget_index);
       if (hit == 0) return 0;
       auto* hw = wud->session->get_widget(hit);
@@ -940,7 +1245,7 @@ namespace xpl_host
       ev.data.mouse.widget    = { hw->widget_id };
       ev.data.mouse.x         = static_cast<int>(lx);
       ev.data.mouse.y         = static_cast<int>(ly);
-      ev.data.mouse.buttonmap = 0;
+      ev.data.mouse.buttonmap = neui_detail::win32_buttonmap(wParam);
       wud->session->dispatch_mouse_event(hit, &ev);
       return 0;
     }
@@ -951,11 +1256,49 @@ namespace xpl_host
       auto* fwd = wud->session->get_widget(wud->widget_index);
       if (!fwd) break;
 
+      // An open tree popup absorbs the wheel. Without this a scrolling SECTION
+      // or GRID *under* the visible menu scrolls away beneath it, which no OS
+      // menu does. No scroll-the-menu behaviour yet - a cascade taller than the
+      // frame clamps (see docs/deferred-issues.md).
+      if (wud->session->_tree_popup_active) return 0;
+
+      // A popup surface never holds focus (WS_EX_NOACTIVATE), and win32 delivers
+      // WM_MOUSEWHEEL to the FOCUSED window - so a wheel the user aimed at an
+      // open popup arrives HERE, at the owner, and would scroll whatever sits
+      // under the popup. macOS and X11 both deliver by pointer location and need
+      // none of this; win32 has to route by position itself.
+      if (wud->session->popup_surface_open()) {
+        const POINT sp = { mouse_x(lParam), mouse_y(lParam) };   // already screen
+        HWND under = WindowFromPoint(sp);
+        // WindowFromPoint can name ANY window on the desktop, including another
+        // process's, and GWLP_USERDATA on a foreign window is whatever that app
+        // put there - so the class name is checked before get_wud() is allowed to
+        // interpret it as ours.
+        if (under && under != hwnd) {
+          wchar_t cls[64] = {};
+          if (GetClassNameW(under, cls, 64) && wcscmp(cls, k_wndclass) == 0) {
+            if (auto* uwud = get_wud(under)) {
+              if (uwud->session == wud->session &&
+                  uwud->session->popup_surface_depth(uwud->widget_index) >= 0)
+                // Re-deliver to the popup rather than duplicating the whole wheel
+                // path against a second window. lParam stays in screen
+                // coordinates, so the receiving handler converts for itself, and
+                // there WindowFromPoint resolves to that same window - so this
+                // forwards at most once.
+                return SendMessageW(under, WM_MOUSEWHEEL, wParam, lParam);
+            }
+          }
+        }
+        // Not over a popup: the widgets under an open stack must stop behaving
+        // like a live UI.
+        if (wud->session->popup_gate_wheel(wud->widget_index)) return 0;
+      }
+
       // WM_MOUSEWHEEL gives screen coordinates - convert to client.
       POINT pt = { mouse_x(lParam), mouse_y(lParam) };
       ScreenToClient(hwnd, &pt);
-      float lx = phys_to_log(pt.x, fwd->client_dpi());
-      float ly = phys_to_log(pt.y, fwd->client_dpi());
+      float lx = phys_to_log(pt.x, *fwd);
+      float ly = phys_to_log(pt.y, *fwd);
 
       // Scale raw wheel delta to lines using the system scroll preference.
       int raw_delta = GET_WHEEL_DELTA_WPARAM(wParam);
@@ -1004,8 +1347,16 @@ namespace xpl_host
       // fallback. Flip the sign so positive delta = scroll-left, matching
       // the WM_MOUSEHWHEEL convention.
       bool shift_held = (wParam & MK_SHIFT) != 0;
+      // is_flipped stays 0: Windows applies the Precision-Touchpad "reverse
+      // scrolling direction" setting in the DRIVER, with no API to query it, so
+      // "not inverted or unknown" is the only honest answer (see events.h).
       ev.data.wheel.delta         = shift_held ? -delta : delta;
       ev.data.wheel.is_horizontal = shift_held ? 1 : 0;
+      // The wheel messages pack the key/button state in the LOW word (the
+      // HIGH word is the delta), so unlike the mouse messages this needs
+      // GET_KEYSTATE_WPARAM first. Masking matters: the low word can carry
+      // MK_XBUTTON1 = 0x0020, which collides with NEUI_MK_ALT.
+      ev.data.wheel.buttonmap     = neui_detail::win32_buttonmap(GET_KEYSTATE_WPARAM(wParam));
 
       // Scrolling SECTION (the hit itself or its nearest ancestor): widgets
       // below the section get first refusal via a bounded bubble; when
@@ -1047,8 +1398,8 @@ namespace xpl_host
 
       POINT pt = { mouse_x(lParam), mouse_y(lParam) };
       ScreenToClient(hwnd, &pt);
-      float lx = phys_to_log(pt.x, fwd->client_dpi());
-      float ly = phys_to_log(pt.y, fwd->client_dpi());
+      float lx = phys_to_log(pt.x, *fwd);
+      float ly = phys_to_log(pt.y, *fwd);
 
       int raw_delta = GET_WHEEL_DELTA_WPARAM(wParam);
       UINT scroll_chars = 3;
@@ -1067,6 +1418,7 @@ namespace xpl_host
       ev.data.wheel.y             = static_cast<int>(ly);
       ev.data.wheel.delta         = delta;
       ev.data.wheel.is_horizontal = 1;
+      ev.data.wheel.buttonmap     = neui_detail::win32_buttonmap(GET_KEYSTATE_WPARAM(wParam));
 
       // Scrolling SECTION: bounded bubble below, kinetics on the section -
       // same shape as the WM_MOUSEWHEEL branch above.
@@ -1153,6 +1505,16 @@ namespace xpl_host
     case WM_KEYDOWN: {
       auto* wud = get_wud(hwnd);
       if (!wud) break;
+      // Esc dismisses an open tree popup.
+      if (wud->session->handle_tree_popup_key(static_cast<uint32_t>(wParam)))
+        return 0;
+      // ...and an open popup-surface stack. The key arrives at the OWNER: a
+      // popup surface is WS_EX_NOACTIVATE and never holds focus. The gate
+      // retargets it - see Session::popup_gate_key.
+      if (wud->session->popup_gate_key(NEUI_EVENT_KEYDOWN,
+                                       static_cast<uint32_t>(wParam),
+                                       build_modifiers()))
+        return 0;
       // Popup menu absorbs Esc / Enter / Space / arrow keys.
       if (wud->session->_popup_active &&
           wud->session->handle_popup_key(static_cast<uint32_t>(wParam))) {
@@ -1160,7 +1522,8 @@ namespace xpl_host
       }
       if (wParam == VK_TAB) {
         bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        wud->session->focus_next(!shift);
+        // Pass the frame that received the key (see Session::focus_next).
+        wud->session->focus_next(!shift, wud->widget_index);
         return 0;  // consumed - do not feed to DefWindowProc
       }
       dispatch_key_to_focused(wud->session, NEUI_EVENT_KEYDOWN,
@@ -1171,6 +1534,12 @@ namespace xpl_host
     case WM_KEYUP: {
       auto* wud = get_wud(hwnd);
       if (!wud) break;
+      // The release peer of the KEYDOWN gate: a press the popup swallowed must
+      // not have its release land on the widget underneath.
+      if (wud->session->popup_gate_key(NEUI_EVENT_KEYUP,
+                                       static_cast<uint32_t>(wParam),
+                                       build_modifiers()))
+        return 0;
       dispatch_key_to_focused(wud->session, NEUI_EVENT_KEYUP,
                                static_cast<uint32_t>(wParam));
       break;
@@ -1206,6 +1575,14 @@ namespace xpl_host
         codepoint = static_cast<uint32_t>(ch);
       }
 
+      // Text aimed at the owner is DIVERTED while a popup surface is open and
+      // focus is outside it: the stack gets it as type-ahead, the widget
+      // underneath must not. WM_CHAR is a message of its own, so the WM_KEYDOWN
+      // gate above never sees it - this is the path that let typing edit the
+      // field behind an open menu.
+      if (wud->session->popup_gate_key(NEUI_EVENT_KEYCHAR, codepoint,
+                                       build_modifiers()))
+        return 0;
       dispatch_key_to_focused(wud->session, NEUI_EVENT_KEYCHAR, codepoint);
       break;
     }
@@ -1451,13 +1828,15 @@ namespace xpl_host
       if (mb && mb->hmenu) { has_menu = true; break; }
     }
 
-    // The client at the frame's zoom (NEUI_ATTR_ZOOM); the non-client chrome
-    // and the position at the monitor's DPI.
+    // The frame's user zoom scales the CLIENT area only - the non-client
+    // chrome (title bar, borders, menu row) is OS-drawn at the monitor's DPI
+    // and must not be zoomed, which is why the zoom multiplies before
+    // AdjustWindowRectExForDpi rather than after.
+    const float zoom = wd.ui_scale();
     auto outer_for_dpi = [&](UINT dpi) -> SIZE {
-      UINT client = static_cast<UINT>(static_cast<float>(dpi) * wd.zoom + 0.5f);
       RECT wr = { 0, 0,
-                  MulDiv(wd.width,  static_cast<int>(client), 96),
-                  MulDiv(wd.height, static_cast<int>(client), 96) };
+                  static_cast<int>(MulDiv(wd.width,  static_cast<int>(dpi), 96) * zoom + 0.5f),
+                  static_cast<int>(MulDiv(wd.height, static_cast<int>(dpi), 96) * zoom + 0.5f) };
       AdjustWindowRectExForDpi(&wr, style, has_menu ? TRUE : FALSE, ex_style, dpi);
       return SIZE{ wr.right - wr.left, wr.bottom - wr.top };
     };
@@ -1546,9 +1925,6 @@ namespace xpl_host
         hwnd,
         static_cast<uint32_t>(rc.right  - rc.left),
         static_cast<uint32_t>(rc.bottom - rc.top));
-      // The context reads the window's DPI; a zoomed frame draws at its own.
-      if (wd.render_ctx && wd.zoom != 1.0f)
-        backend->update_dpi(wd.render_ctx, wd.client_dpi());
     }
   }
 
@@ -1669,12 +2045,6 @@ namespace xpl_host
     HWND hwnd = static_cast<HWND>(native_handle);
     if (!hwnd) return;
     if (dpi == 0) dpi = 96;
-    // A zoomed frame's client maps by its client DPI (NEUI_ATTR_ZOOM).
-    uint32_t client_dpi = dpi;
-    if (WindowUserData* wud = get_wud(hwnd)) {
-      if (WidgetData* fwd = wud->session ? wud->session->get_widget(wud->widget_index) : nullptr)
-        client_dpi = static_cast<uint32_t>(static_cast<float>(dpi) * fwd->zoom + 0.5f);
-    }
     // w/h are the logical (96 DPI base) CLIENT size - this seam is frame-only
     // in the xpl host (child widgets are painted, not HWNDs), so grow the
     // requested client rect to the OUTER window size the same way
@@ -1682,41 +2052,37 @@ namespace xpl_host
     // usable client by the title bar / border / menu chrome. Style, ex-style
     // and menu presence are read back from the live HWND. Position (x, y) is
     // kept as the outer top-left, matching the create path.
+    // The client area is additionally scaled by the frame's user zoom (the
+    // chrome is not - see create_native_window). The zoom is read off the
+    // frame widget via the HWND's user data, since this seam only gets a
+    // native handle.
+    float zoom = 1.0f;
+    if (auto* wud = get_wud(hwnd)) {
+      if (wud->session) {
+        if (auto* fwd = wud->session->get_widget(wud->widget_index))
+          zoom = fwd->ui_scale();
+      }
+    }
     RECT wr = { 0, 0,
-                MulDiv(w, static_cast<int>(client_dpi), 96),
-                MulDiv(h, static_cast<int>(client_dpi), 96) };
+                static_cast<int>(MulDiv(w, static_cast<int>(dpi), 96) * zoom + 0.5f),
+                static_cast<int>(MulDiv(h, static_cast<int>(dpi), 96) * zoom + 0.5f) };
     DWORD style    = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
     DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
     BOOL  has_menu = GetMenu(hwnd) != nullptr;
     AdjustWindowRectExForDpi(&wr, style, has_menu, ex_style, dpi);
+    // Bracket the call so the resulting WM_SIZE knows this resize is ours (see
+    // WindowUserData::self_resizing). SetWindowPos dispatches WM_SIZE
+    // synchronously, so the flag is live for exactly the right window.
+    auto* wud_flag = get_wud(hwnd);
+    if (wud_flag) wud_flag->self_resizing = true;
+    const bool keep_pos = (x == NEUI_WINDOW_POS_KEEP || y == NEUI_WINDOW_POS_KEEP);
     SetWindowPos(hwnd, nullptr,
-      MulDiv(x, static_cast<int>(dpi), 96),
-      MulDiv(y, static_cast<int>(dpi), 96),
+      keep_pos ? 0 : MulDiv(x, static_cast<int>(dpi), 96),
+      keep_pos ? 0 : MulDiv(y, static_cast<int>(dpi), 96),
       wr.right - wr.left,
       wr.bottom - wr.top,
-      SWP_NOZORDER | SWP_NOACTIVATE);
-  }
-
-  void platform_apply_zoom(WidgetData& wd)
-  {
-    HWND hwnd = static_cast<HWND>(wd.native_handle);
-    if (!hwnd) return;
-    // The render target first: SetWindowPos sends WM_SIZE, which maps the
-    // new client size back to the (unchanged) logical size by client_dpi.
-    auto* backend = platform_get_backend();
-    if (backend && wd.render_ctx)
-      backend->update_dpi(wd.render_ctx, wd.client_dpi());
-    UINT dpi = wd.dpi ? wd.dpi : 96;
-    UINT client_dpi = wd.client_dpi();
-    RECT wr = { 0, 0,
-                MulDiv(wd.width,  static_cast<int>(client_dpi), 96),
-                MulDiv(wd.height, static_cast<int>(client_dpi), 96) };
-    DWORD style    = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
-    DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
-    AdjustWindowRectExForDpi(&wr, style, GetMenu(hwnd) != nullptr, ex_style, dpi);
-    SetWindowPos(hwnd, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top,
-                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-    InvalidateRect(hwnd, nullptr, FALSE);
+      SWP_NOZORDER | SWP_NOACTIVATE | (keep_pos ? SWP_NOMOVE : 0u));
+    if (wud_flag) wud_flag->self_resizing = false;
   }
 
   void platform_post_close(void* native_handle)
@@ -1747,6 +2113,16 @@ namespace xpl_host
   {
     if (native_handle)
       InvalidateRect(static_cast<HWND>(native_handle), nullptr, FALSE);
+  }
+
+  void platform_force_paint(void* native_handle)
+  {
+    if (!native_handle) return;
+    // RDW_UPDATENOW sends WM_PAINT immediately rather than posting it, so the
+    // paint has happened by the time this returns. A hidden window is skipped
+    // by the OS - the documented best-effort case.
+    RedrawWindow(static_cast<HWND>(native_handle), nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_UPDATENOW);
   }
 
   static void dispatch_one(MSG& msg)
@@ -1846,16 +2222,25 @@ namespace xpl_host
     auto& wd = wud->session->_widgets[wud->widget_index];
     UINT dpi = wd.dpi ? wd.dpi : GetDpiForWindow(hwnd);
     if (dpi == 0) dpi = 96;
-    UINT client_dpi = static_cast<UINT>(static_cast<float>(dpi) * wd.zoom + 0.5f);
+    // MUST include the frame zoom, exactly like create_native_window and
+    // platform_set_window_pos. Without it, attaching a menubar to a zoomed
+    // frame resizes the window back to the UNZOOMED client size, and the
+    // resulting WM_SIZE then divides that by the full factor - so a 400-wide
+    // frame at zoom 2 ends up storing wd.width = 200 and the layout is
+    // destroyed, not merely mis-sized. This runs at widget_show for any frame
+    // with a MENUBAR child and again on every menubar rebuild.
+    const float zoom = wd.ui_scale();
     RECT wr = { 0, 0,
-                MulDiv(wd.width,  static_cast<int>(client_dpi), 96),
-                MulDiv(wd.height, static_cast<int>(client_dpi), 96) };
+                static_cast<int>(MulDiv(wd.width,  static_cast<int>(dpi), 96) * zoom + 0.5f),
+                static_cast<int>(MulDiv(wd.height, static_cast<int>(dpi), 96) * zoom + 0.5f) };
     DWORD style    = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
     DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
     AdjustWindowRectExForDpi(&wr, style, TRUE, ex_style, dpi);
+    wud->self_resizing = true;
     SetWindowPos(hwnd, nullptr, 0, 0,
                  wr.right - wr.left, wr.bottom - wr.top,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    wud->self_resizing = false;
   }
 
   void platform_menubar_refresh(void* frame_hwnd)
@@ -2054,11 +2439,6 @@ namespace xpl_host
 
     neui_detail::DndDispatchSeam seam = neui_detail::make_dnd_dispatch_seam(
       static_cast<Session*>(session_ptr), frame_widget_id);
-    seam.client_dpi = [](void* sp, uint32_t fid) -> uint32_t {
-      auto* s = static_cast<Session*>(sp);
-      WidgetData* fwd = s ? s->get_widget(fid & 0xFFFFu) : nullptr;
-      return fwd ? fwd->client_dpi() : 96;
-    };
 
     auto* target = new neui_detail::DropTargetImpl(hwnd, seam);
     HRESULT hr = RegisterDragDrop(hwnd, target);
@@ -2113,28 +2493,284 @@ namespace xpl_host
   }
 
   // -------------------------------------------------------------------------
-  // Mouse cursor. Win32 cursor management is per-message: WM_SETCURSOR
-  // fires every time the cursor moves over a window, and unless we set
-  // the cursor ourselves the OS reverts to whatever the window class
-  // registered. We track the active kind in a thread-local and use a
-  // hook in WM_SETCURSOR to reapply it; for now we set immediately
-  // (good enough for the GRID's drag-resize feedback, which is active
-  // for the duration of the hover + drag).
+  // Client timers (NEUI_API_TIMER). A THREAD timer - SetTimer(NULL, ...) with a
+  // TIMERPROC - rather than a window timer, because timers are session-scoped
+  // and a session may own several frames (or, embedded, a frame whose lifetime
+  // the DAW controls).
+  //
+  // The payoff is that one mechanism covers all three loops: WM_TIMER with a
+  // NULL hwnd lands on the THREAD queue, so PeekMessage/GetMessage picks it up
+  // and DispatchMessageW invokes the TIMERPROC - which is exactly what
+  // platform_run, platform_pump_once, AND a DAW's own pump all do. No extra
+  // plumbing per loop.
+  static std::unordered_map<UINT_PTR, Session*>& w32_session_timers()
+  {
+    // Immortal: ~Session (global `sessions` in host.cpp, destroyed last) calls
+    // platform_timer_stop during static teardown, after this TU's statics would
+    // already be gone.
+    static auto* m = new std::unordered_map<UINT_PTR, Session*>();
+    return *m;
+  }
 
-  static int s_cursor_kind = NEUI_CURSOR_DEFAULT;
+  static void CALLBACK w32_client_timer_proc(HWND, UINT, UINT_PTR id, DWORD)
+  {
+    auto& m = w32_session_timers();
+    auto it = m.find(id);
+    // Re-check membership: a session torn down between fires would otherwise
+    // be a dangling pointer.
+    if (it == m.end() || !it->second) return;
+    it->second->tick_client_timers();
+  }
+
+  // win32: phys_to_log divides every input coord by the zoom.
+  bool platform_supports_ui_scale() { return true; }
+  bool platform_supports_tree_popup() { return true; }
+
+  // -------------------------------------------------------------------------
+  // Popup surfaces (NEUI_W_POPUPSURFACE) - the desktop backing.
+
+  bool platform_supports_popup_surface() { return true; }
+
+  void platform_get_work_area(void* near_native, int* x, int* y, int* w, int* h)
+  {
+    if (x) *x = 0;
+    if (y) *y = 0;
+    if (w) *w = 1024;
+    if (h) *h = 768;
+    HMONITOR mon = near_native
+      ? MonitorFromWindow((HWND)near_native, MONITOR_DEFAULTTONEAREST)
+      : MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(mon, &mi)) return;
+    // Physical -> logical. The work area is in device pixels; every neui
+    // coordinate is logical px at 96 DPI, so a 150 % display would otherwise
+    // report a box 1.5x too large and clamping would let a popup off-screen.
+    float scale = near_native ? platform_get_scale_factor(near_native) : 1.0f;
+    if (!(scale > 0.0f)) scale = 1.0f;
+    if (x) *x = (int)((float)mi.rcWork.left / scale);
+    if (y) *y = (int)((float)mi.rcWork.top  / scale);
+    if (w) *w = (int)((float)(mi.rcWork.right  - mi.rcWork.left) / scale);
+    if (h) *h = (int)((float)(mi.rcWork.bottom - mi.rcWork.top)  / scale);
+  }
+
+  void platform_client_to_screen(void* native_handle, int lx, int ly,
+                                 int* sx, int* sy)
+  {
+    if (sx) *sx = lx;
+    if (sy) *sy = ly;
+    if (!native_handle) return;
+    HWND hwnd = (HWND)native_handle;
+    float scale = platform_get_scale_factor(native_handle);   // DPI only
+    if (!(scale > 0.0f)) scale = 1.0f;
+    // (lx, ly) is UNZOOMED logical px inside a client that is painted at the
+    // frame's zoom, so its physical offset is lx * dpi * zoom. Screen space itself
+    // is unzoomed - frame POSITIONS never scale by the zoom, only sizes do - so
+    // the zoom goes in and only the DPI comes back out. That asymmetry is what
+    // macOS and Linux already do (frameZoom / window_scale in, points /
+    // screen_scale out); win32 applied no zoom at all, which understated every
+    // anchor offset by the zoom factor and put a popup partway up its own anchor
+    // on a zoomed editor.
+    float zoom = 1.0f;
+    if (auto* wud = get_wud(hwnd)) {
+      if (auto* fwd = wud->session->get_widget(wud->widget_index))
+        zoom = fwd->ui_scale();
+    }
+    if (!(zoom > 0.0f)) zoom = 1.0f;
+    POINT p = { (LONG)((float)lx * scale * zoom),
+                (LONG)((float)ly * scale * zoom) };
+    if (!ClientToScreen(hwnd, &p)) return;
+    if (sx) *sx = (int)((float)p.x / scale);
+    if (sy) *sy = (int)((float)p.y / scale);
+  }
+
+  void platform_get_pointer_pos(int* sx, int* sy)
+  {
+    if (sx) *sx = 0;
+    if (sy) *sy = 0;
+    POINT p = {};
+    if (!GetCursorPos(&p)) return;
+    // Physical -> logical, with the SYSTEM dpi as the divisor: there is no
+    // window here to ask for a per-monitor one, and the alternative
+    // (GetDpiForMonitor) would pull in Shcore for one call. The error is
+    // confined to a mixed-DPI setup with the pointer on the non-primary
+    // monitor, where an AT_POINTER menu lands off by the DPI ratio; the
+    // work-area clamp still keeps it on screen.
+    float scale = (float)GetDpiForSystem() / 96.0f;
+    if (!(scale > 0.0f)) scale = 1.0f;
+    if (sx) *sx = (int)((float)p.x / scale);
+    if (sy) *sy = (int)((float)p.y / scale);
+  }
+
+  void platform_create_popup_surface(Session* session, uint32_t widget_index,
+                                     WidgetData& wd, void* owner_native)
+  {
+    // The OWNER, not the parent: for WS_POPUP the hwndParent slot of
+    // CreateWindowEx is the owner, which is what gives z-order-follows-owner and
+    // hide-on-owner-minimize from the OS for free.
+    //
+    // GA_ROOT because an embedded plugin frame is a WS_CHILD inside the DAW's
+    // window - the thing our popup must sit above is that top-level window, which
+    // we did not create. That is the documented best-effort part of the feature.
+    PopupPlacingScope placing;
+    HWND owner = static_cast<HWND>(owner_native);
+    if (owner) owner = GetAncestor(owner, GA_ROOT);
+
+    // WS_EX_NOACTIVATE: clicking the popup must not deactivate the editor.
+    // WS_EX_TOOLWINDOW: keeps it out of the taskbar and the Alt+Tab list, which
+    // is what every menu-like window does.
+    create_native_window(session, widget_index, wd,
+      WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+      WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+      owner);
+  }
+
+  void platform_show_popup_surface(void* popup_native, void* owner_native,
+                                   int sx, int sy, int w, int h, float zoom)
+  {
+    HWND hwnd = static_cast<HWND>(popup_native);
+    if (!hwnd) return;
+    PopupPlacingScope placing;
+    if (!(zoom > 0.0f)) zoom = 1.0f;
+
+    // Re-own on every show: the owner can differ between opens. GWLP_HWNDPARENT
+    // is the documented way to change a window's owner after creation.
+    HWND owner = static_cast<HWND>(owner_native);
+    if (owner) owner = GetAncestor(owner, GA_ROOT);
+    if (owner && GetWindow(hwnd, GW_OWNER) != owner)
+      SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(owner));
+
+    UINT dpi = GetDpiForWindow(hwnd);
+    if (dpi == 0) dpi = 96;
+    // WS_POPUP with no border: the client rect IS the window rect, so unlike
+    // create() there is no AdjustWindowRectExForDpi round-trip to do here.
+    const int phys_x = MulDiv(sx, static_cast<int>(dpi), 96);
+    const int phys_y = MulDiv(sy, static_cast<int>(dpi), 96);
+    const int phys_w = static_cast<int>(MulDiv(w, static_cast<int>(dpi), 96) * zoom + 0.5f);
+    const int phys_h = static_cast<int>(MulDiv(h, static_cast<int>(dpi), 96) * zoom + 0.5f);
+
+    // SWP_NOACTIVATE + SW_SHOWNOACTIVATE, never ShowWindow(SW_SHOW): taking
+    // activation is the one thing this window must never do.
+    SetWindowPos(hwnd, HWND_TOP, phys_x, phys_y, phys_w, phys_h,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+  }
+
+  void platform_hide_popup_surface(void* popup_native, void* /*owner_native*/)
+  {
+    PopupPlacingScope placing;
+    if (HWND hwnd = static_cast<HWND>(popup_native)) ShowWindow(hwnd, SW_HIDE);
+  }
+
+  // Deliberately NOT SetCapture. Capture's product is suppression of the UI
+  // underneath, and Session::popup_gate_* does that portably; what is left is
+  // only the notification of a press we would never see, and on win32 that is
+  // WM_ACTIVATEAPP in the WndProc - which needs no setup and no teardown.
+  //
+  // The gap that leaves is documented (docs/popup-surfaces.md): a press in the
+  // DAW's own UI outside our child HWND raises no activation change, because we
+  // never held activation to lose, so the popup stays open until the user's next
+  // click reaches one of our windows. A thread-level WH_MOUSE hook would close
+  // it, but installing a hook inside a host process is not something to ship by
+  // default.
+  void platform_popup_grab_begin(Session*, void*) {}
+  void platform_popup_grab_end(Session*) {}
+
+  void platform_timer_start(Session* session, uint32_t interval_ms)
+  {
+    if (!session || interval_ms == 0) return;
+    platform_timer_stop(session);   // idempotent re-arm at the new interval
+    // id 0 asks the system to allocate one; the return value is the real id.
+    // Note SetTimer clamps interval_ms up to USER_TIMER_MINIMUM (10 ms), so a
+    // 4..9 ms request ticks at ~10 ms here - within the API's documented
+    // "interval is a minimum" contract, and called out in <neui/d/timer.h>.
+    UINT_PTR id = SetTimer(nullptr, 0, interval_ms, w32_client_timer_proc);
+    if (id) w32_session_timers()[id] = session;
+    // On failure leave nothing registered; Session::sync_timer_tick's cached
+    // interval would otherwise claim "armed" and the timers would be silently
+    // dead. Clearing the cache makes the next add_timer retry the arm.
+    else if (session) session->notify_timer_arm_failed();
+  }
+
+  void platform_timer_stop(Session* session)
+  {
+    if (!session) return;
+    auto& m = w32_session_timers();
+    for (auto it = m.begin(); it != m.end(); ) {
+      if (it->second == session) { KillTimer(nullptr, it->first); it = m.erase(it); }
+      else                        ++it;
+    }
+  }
+
+  // Accessibility. A frame's native handle IS its HWND on win32 (there is no
+  // embedded-view special case as on macOS), so these forward directly.
+  void platform_a11y_notify(void* frame_native_handle, uint32_t widget_id,
+                            int change)
+  {
+    a11y_win32_notify(frame_native_handle, widget_id, change);
+  }
+  void platform_a11y_announce(void* frame_native_handle, const char* utf8,
+                              bool assertive)
+  {
+    a11y_win32_announce(frame_native_handle, utf8, assertive);
+  }
+  // UIA is the one platform API that will say whether a client is attached, and
+  // it answers BEFORE the first query - which is why is_active consults it as
+  // well as the "has anything queried us" flag.
+  bool platform_a11y_is_listening() { return a11y_win32_clients_listening(); }
+
+  // -------------------------------------------------------------------------
+  // Relative (unbounded) pointer mode.
+  //
+  // win32 has no "decouple cursor from device" primitive the way macOS does, so
+  // the cursor is warped back to the anchor after every move. SetCursorPos
+  // generates a fresh WM_MOUSEMOVE for the warp itself, which the motion handler
+  // recognises via relative_is_warp_echo and drops - without that filter the
+  // echo reads as an equal-and-opposite delta and the pointer looks frozen.
+  //
+  // The hide goes through SetCursor(NULL) directly rather than
+  // platform_set_cursor, so a drag doesn't clobber the widget's NEUI_ATTR_CURSOR
+  // shape; s_cursor_kind is left alone and simply re-applied on end. The
+  // WM_SETCURSOR handler would otherwise undo the hide on the very next move, so
+  // s_relative_active gates it - which is why both statics are declared up with
+  // s_cursor_kind, above XplWndProc, rather than here.
+
+  bool platform_supports_relative_pointer() { return true; }
+
+  bool platform_begin_relative_pointer(void* native_handle,
+                                        int* out_anchor_x, int* out_anchor_y)
+  {
+    (void)native_handle;
+    POINT p{};
+    if (!GetCursorPos(&p)) return false;    // screen px, what SetCursorPos wants
+    s_relative_anchor  = p;
+    s_relative_active  = true;
+    if (out_anchor_x) *out_anchor_x = (int)p.x;
+    if (out_anchor_y) *out_anchor_y = (int)p.y;
+    SetCursor(nullptr);                     // hide for the duration of the drag
+    return true;
+  }
+
+  void platform_end_relative_pointer(void* native_handle,
+                                      int anchor_x, int anchor_y)
+  {
+    (void)native_handle;
+    s_relative_active = false;
+    SetCursorPos(anchor_x, anchor_y);
+    // Re-assert the widget's own cursor now the pointer is visible again: the
+    // hide above bypassed platform_set_cursor, so s_cursor_kind still holds
+    // whatever the widget asked for.
+    neui_detail::win32_apply_cursor(s_cursor_kind);
+  }
 
   void platform_set_cursor(int kind)
   {
     s_cursor_kind = kind;
-    HCURSOR cur = nullptr;
-    // IDC_* are LPCSTR resource ids; cast keeps them usable with the W
-    // LoadCursor variant. The resource-id form ignores the char width.
-    switch (kind) {
-      case NEUI_CURSOR_EW_RESIZE: cur = LoadCursorW(nullptr, (LPCWSTR)IDC_SIZEWE); break;
-      case NEUI_CURSOR_DEFAULT:
-      default:                    cur = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);  break;
-    }
-    if (cur) SetCursor(cur);
+    // Apply now for the common case (the pointer is already inside the client
+    // area, so no WM_SETCURSOR is coming until it moves again), and let the
+    // WM_SETCURSOR handler reapply it from then on. The kind->HCURSOR table is
+    // shared with the native win32 host: ../shared/win32/cursor_win32.h.
+    neui_detail::win32_apply_cursor(kind);
   }
 
   // -------------------------------------------------------------------------
@@ -2174,6 +2810,27 @@ namespace xpl_host
                          wtext.c_str(),
                          caption ? wcaption.c_str() : nullptr,
                          mb, MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL));
+  }
+
+  // -------------------------------------------------------------------------
+  // Modal file dialogs - IFileDialog via the shared helper.
+
+  int platform_file_dialog(void* native_handle, int save,
+                           const neui_file_dialog_t* desc,
+                           neui_file_path_cb cb, void* userdata)
+  {
+    // Unlike NSOpenPanel, IFileDialog::Show takes the owner HWND as what
+    // makes it modal, so a frame with no window yet cannot host one.
+    if (!native_handle) return -1;
+    HWND owner = static_cast<HWND>(native_handle);
+
+    std::vector<std::string> paths;
+    int n = save ? neui_detail::file_dialog_save_win32(owner, desc, paths)
+                 : neui_detail::file_dialog_open_win32(owner, desc, paths);
+    if (n <= 0) return n;   // 0 = cancelled, -1 = CoCreateInstance failed
+    if (cb)
+      for (const auto& p : paths) cb(userdata, p.c_str());
+    return static_cast<int>(paths.size());
   }
 
 } // namespace xpl_host

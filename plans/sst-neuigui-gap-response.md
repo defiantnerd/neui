@@ -1,0 +1,1084 @@
+# Plan: response to the `sst-neuigui` gap analysis
+
+**Status**: active. This document is the verified reply to
+`baconpaul/neui-noodle/doc/sst-neuigui-gap-analysis.md` and the work plan
+derived from it.
+
+The analysis was read at neui `0077fe0`. Verified here at `7683adb`
+(`bp-review`). Every claim below was re-checked against the tree; `file:line`
+references are the evidence. Section numbers in **§** refer to the analysis;
+**#N** refers to its §9 ask list.
+
+## TL;DR
+
+- **His #1 blocker is already closed.** §2.2 / cross-platform DAW embedding
+  shipped in `edf5f9c` as `NEUI_API_EMBED` (`include/neui/d/embed.h`) on
+  win32 / macOS / Linux, and the README now explicitly points plugin authors at
+  the crossplatform host. He was reading a tree from before that landed.
+- **One item is falsely marked done in our own history.** Commit `7683adb` is
+  titled *"add user UI zoom (NEUI_ATTR_UI_SCALE)"* but has a **tree identical
+  to `edf5f9c`** (`git diff edf5f9c 7683adb` is empty) and no `UI_SCALE` symbol
+  exists anywhere in the repo. #9 is **not** implemented. Fix the history
+  confusion before anything else, then implement it (Wave 3).
+- **Choosing the xpl host resolves #11 and re-shapes #12.** His §5.4 (a DXGI
+  swap chain per painted widget) is real — but only in the **win32 native**
+  host. The xpl host already paints one frame through one context
+  (`Session::paint_frame`, `hosts/crossplatform/host.cpp:2200`) and has no child
+  HWND/NSView at all, which *is* the architecture he asks for in #11. Since
+  plugins are already routed to xpl, **#11 is not on the plugin path** and we
+  should not do it now. The flip side: on xpl the platform cannot hand him an
+  accessibility tree either, so **#12 must be built inside the xpl host** — one
+  implementation serving all three platforms, over a widget tree that already
+  carries bounds, focus, tab order and values.
+- **Everything in Tier 1 and Tier 2 is confirmed open and small.** Three of them
+  are smaller than he thinks (#6 needs zero backend work), one is bigger (#4
+  needs a new platform seam, not just exposure), and one of his premises is
+  wrong in a way that changes the API design (#5 — see Corrections).
+- Two items he did not raise belong in the same programme: **win32-native key
+  modifiers are hardcoded to 0** (same bug family as #1), and **xpl `invalidate`
+  repaints the whole frame**, which is the perf item his §5.4 was reaching for,
+  translated to the host he will actually use.
+
+---
+
+## 1. Verified status of every ask
+
+### Already shipped (since his read)
+
+| Ask | State | Evidence |
+|---|---|---|
+| §2.2 / **#2-equivalent** — cross-platform embedding into a host-provided parent | **DONE** | `include/neui/d/embed.h` — `NEUI_API_EMBED` with `set_parent` / `event_fd` / `pump_and_tick`; parent travels as `void*` (HWND / `NSView*` / X11 `Window`). xpl host only, by design. |
+| Plugin host guidance | **DONE** | `README.md:24-26` — prefer `neui_get_api("neui.host.crossplatform")` for VST3/CLAP/AU; native hosts are standalone-only. |
+| Host automation begin/end edits (not in his list, plugin-critical) | **DONE** | `NEUI_EVENT_GESTURE_BEGIN` / `_END` with `{ widget, attr_key, value }`; wired on xpl, macOS-native, win32-native, iOS. Maps directly to VST3 `beginEdit`/`endEdit` and CLAP gestures. |
+
+Known follow-ups on embedding are already tracked in
+`docs/deferred-issues.md:19` (no auto-track of parent resize, no `WM_DPICHANGED`
+for embedded win32 frames, click-to-focus only). None block him.
+
+### Tier 1 — parity bugs
+
+| # | Claim | Verified | Detail |
+|---|---|---|---|
+| 1 | `buttonmap` hardcoded `0` on win32-native `MOUSE_MOVE` | **CONFIRMED, and worse** | `hosts/win32/window.cpp:1343` MOUSE_MOVE `= 0`; `:1337` MOUSE_ENTER `= 0`; `:1352` MOUSE_LEAVE `= 0`; `:1385` **RBUTTONDOWN `= 0`** (should be `NEUI_MK_RBUTTON`). LBUTTONDOWN/DBLCLK pass a literal `1`, which is accidentally `NEUI_MK_LBUTTON`. xpl forwards the real `wParam` (`platform_win32.cpp:714,788,824`), so this is native-host-only. |
+| 1b | **not in his list** — win32-native `KEYDOWN`/`KEYUP` `modifiers` hardcoded `0` | **CONFIRMED** | `hosts/win32/window.cpp:1399,1406` — `event.data.key = { wid, wParam, 0 }`. Same bug family; kills his 26 `KeyPress` + 13 `ModifierKeys` uses on the native host exactly as #1 kills drag detection. |
+| 2 | No `NEUI_EVENT_RESIZE` from xpl on macOS | **CONFIRMED** | Fires from `platform_win32.cpp:588` and `platform_linux.cpp:1385`, and from macOS-**native** `hosts/macos/window.mm:2554` (`windowDidResize:`). Nothing in `platform_macos.mm`. Since plugins are told to use xpl, this sits **on the plugin path** — promote it above #1. |
+| 3 | Wheel events carry no modifier bits | **CONFIRMED** | `include/neui/d/events.h` — `neui_event_wheel_t` is `{ widget, x, y, delta, is_horizontal }`. Already tracked at `docs/deferred-issues.md:17`. |
+
+### Tier 2 — API additions
+
+| # | Claim | Verified | Correction / detail |
+|---|---|---|---|
+| 4 | No public timer / idle | **CONFIRMED**, but **harder than "exposure"** | Nothing timer-shaped in `include/neui/`. Internally the tickers are **per-feature, not a general seam**: Linux has a general 16 ms `timerfd` (`platform_linux.cpp:291`), macOS/iOS use one `NSTimer` per feature (`platform_macos.mm:412,453,487` — grid bounce, section bounce, toast), win32 xpl uses distinct `SetTimer` ids (`XPL_TOAST_TIMER_ID`, `XPL_SECTION_BOUNCE_TIMER_ID`, `XPL_GRID_BOUNCE_TIMER_ID`). A public timer needs a **new `platform_timer_*` seam** plus per-platform impls, then the public API on top. Still small, but it is implementation, not just plumbing. |
+| 5 | Text metrics / `draw_text` alignment | **CONFIRMED, premise wrong** | `draw_text` **already vertically centres** in the rect on every backend, from real font metrics: d2d `DWRITE_PARAGRAPH_ALIGNMENT_CENTER` (`backends/d2d/d2d_backend.cpp:578`), CG via `CTLineGetTypographicBounds` (`backends/cg/cg_backend.mm:427-432`), cairo via `cairo_font_extents` (`backends/cairo/cairo_backend.cpp:546-553`). So "you cannot vertically centre text correctly" is inverted — **centred is the only thing you can get**. The real gaps: (a) no way to select top / baseline / bottom or left / centre / right, (b) no metrics query. Both numbers already exist inside every backend → plumbing. This changes the API: it is an **alignment enum + a metrics struct**, not "add centring". |
+| 6 | Rounded rect, ellipse, `draw_line` | **CONFIRMED, cheaper than stated** | Absent from **both** `include/neui/d/painter.h` and `include/neui/d/renderer.h`. His "the backends can already do rounded rects" is not right — no backend has a rounded-rect primitive; compound `corner_radius` is **emulated on the path API** by `build_rounded_rect_path()` (`hosts/shared/widget_paint_compound.h:36-44`, used at `:707,716`). Consequence: **all three ship as painter-level helpers over the existing path API — zero backend changes, one file.** Ellipse = arc inside a scale sandwich; line = 2-point path. |
+| 6b | §3.5 no italic | **CONFIRMED** | `push_font(p, family, weight)` — family + weight only, no style axis (`painter.h:137`). |
+| 6c | §3.6 no measured / wrapped multi-line at painter level | **CONFIRMED** | Backends split on `'\n'` only. The wrap algorithm does exist one layer up — MULTILINE's `NEUI_ATTR_LINE_WRAP` / `cached_line_starts()` — so it is liftable. |
+| 7 | No cursor API | **CONFIRMED** | `hosts/crossplatform/platform.h:382-385` — `CursorKind` has exactly two values (`NEUI_CURSOR_DEFAULT`, `NEUI_CURSOR_EW_RESIZE`); `platform_set_cursor(int)` at `:387` is host-private. No hide-cursor, no warp / unbounded movement. `docs/deferred-issues.md:17` already blocks the behavior asset's `cursor` prop on this. |
+| 8 | Popup menus too weak | **CONFIRMED** | `include/neui/d/widgets.h:88` — `popup_menu(sess, anchor, x, y, const char* const*)`, blocking, 1-based index, `"-"` = separator. Submenus / `set_checked` / shortcuts / `NEUI_API_MENU_CLIENT::validate` all exist but only for `MENUBAR`. |
+| 9 | Per-frame client UI scale | **NOT IMPLEMENTED** (despite the commit title) | No `NEUI_ATTR_UI_SCALE` / `set_ui_scale` / `frame_zoom` anywhere. `NEUI_API_METRICS::ui_scale` exists and is documented process-global and read-only (`include/neui/d/metrics.h:54-71`). **Cheaper than his estimate on xpl**: xpl is one surface per frame and DPI enters at exactly two kinds of place — `backend->update_dpi` (D2D `SetDpi`, CG/cairo CTM) and the platform layer's input/window conversions. There is no 81-call-site `get_dpi_for_widget` fan-out to audit unless we also do the win32 **native** host. |
+| 10 | No file dialog | **CONFIRMED** | `include/neui/d/notify.h` exposes only `toast` (`:70`) and `message_box` (`:94`). |
+
+### Tier 3 — architectural
+
+| # | Claim | Verified | Assessment |
+|---|---|---|---|
+| 11 | A DXGI swap chain per painted widget | **CONFIRMED for win32 native; MOOT for the plugin path** | `hosts/win32/window.cpp:259` creates one render context per painted widget → `d2d_build_hwnd_target` → `CreateSwapChainForHwnd` (`backends/d2d/d2d_backend.cpp:649`). His cost analysis is right. **But the xpl host already is the fix he proposes**: `Session::paint_frame` (`host.cpp:2200`) does one `begin_frame`/`end_frame` per *frame* over one context, walking the tree with per-widget transform + clip from cached `abs_x/abs_y` — and xpl has **no child native windows at all**, so there is nothing to make render-passive. Plugins are already on xpl. **Recommendation: do not do #11 now.** It becomes worth doing only if standalone *native*-host apps need dozens of painted widgets. |
+| 12 | No accessibility seam | **CONFIRMED**, and **his §5.2 reasoning inverts on xpl** | No `WM_GETOBJECT`, no `IAccessible`/UIA, no `NSAccessibility` overrides, no client API (only unrelated `accessibilityDescription:` on two `NSImage`s). Tracked as "Tier B focus parity" at `docs/deferred-issues.md:8`. **On xpl there is one native view per frame**, so widget count buys nothing from the platform — the provider tree must be synthetic regardless of granularity. That is *better* for scoping: build it **once in the xpl host** and it serves win32 + macOS + Linux from one walk. The substrate is already in place — per-widget bounds (`abs_x/abs_y`), a `tab_stop` flag plus real traversal (`collect_tab_stops` / `focus_next`, `host.cpp:2283-2326`), hit-testing, enabled/visible, and `NEUI_PARAM_VALUE` on KNOB/SLIDER. Role/name/value/state/bounds/focus are all **derivable**; what is missing is the two platform provider shims and one client declaration API. |
+
+### Additions not in his list
+
+| Item | Why it belongs | Evidence |
+|---|---|---|
+| **xpl `invalidate` repaints the whole frame** | `w_invalidate` → `platform_invalidate(frame)` — no dirty rect. A 60 Hz VU meter repaints the entire editor every tick, at 2× DPI. This is the perf ceiling that actually applies to him, in place of #11. | `hosts/crossplatform/widgets.cpp:692-702` |
+| **`metrics->measure_text` is a desktop estimate** | Documented as "best-effort … a font-metric-based average advance … not pixel-exact" on desktop. He will size labels outside paint constantly. Worth making exact while we are in the text code for #5. | `include/neui/d/metrics.h:82-87` |
+| **No capability-query API** (`NEUI_API_CAPS`) | Interface-level feature detection works (`get_interface` → null), but there is no way to ask whether a host honours a given **attribute**. `NEUI_ATTR_UI_SCALE` is the case in hand: zoom is xpl-only *by design*, yet on a native host the client's `set_float` succeeds, `get_float` reads it back, and nothing zooms — silently. A client cannot grey out a zoom menu it cannot support. The host already knows internally (`platform_supports_ui_scale()`, `platform_menubar_in_frame()`, `NEUI_HAS_XI2`/`_DBUS`); none of it is reachable. Wanted: `bool supports(session, const char* feature_key)`. **Deferred to its own wave** — cross-cutting, and best designed once Waves 4–6 have added the features whose support actually varies. | `docs/deferred-issues.md` (No capability-query API) |
+| **No layout-on-resize** | Deferred by design; examples deliberately omit it. Plugin editors resize, so the client owns relayout. Not a gap to close — a thing to **document** alongside his §5.1 `place()` discipline. | `CLAUDE.md` (Writing client code) |
+
+---
+
+## 2. What to tell him
+
+Four things, in this order:
+
+1. **Embedding is done** — `NEUI_API_EMBED`, all three platforms, plus
+   `GESTURE_BEGIN`/`_END` for automation edits. His Phase 3 is unblocked
+   ahead of his Phase 2.
+2. **Target the xpl host, explicitly.** `neui_get_api("neui.host.crossplatform")`.
+   That deletes #11 from his critical path entirely, makes zoom (#9) cheap,
+   makes his §5.1 `set_pos` "flash" concern a non-issue (no HWNDs to move), and
+   removes the win32-native `buttonmap`/modifier bugs (#1, #1b) from his path
+   too — they are native-host-only. We will still fix them.
+3. **Accessibility changes shape, not size.** On xpl the platform gives him
+   nothing regardless of widget count, so #12 is neui's to build — and we would
+   rather build it once in the xpl host than twice in the native hosts. His
+   granularity recommendation still stands (widget per accessible element,
+   decoration painted by the parent), and it is still the right shape for the
+   provider walk. It just is not "free from the OS".
+4. **#5's premise, corrected.** Vertical centring already works and is
+   metric-correct. What he needs is explicit alignment control plus a metrics
+   query — which is what we will ship, and it is a different signature than
+   "add centring" would have been.
+
+---
+
+## 3. Work plan
+
+Ordered by what unblocks his Phase 0b / Phase 1 soonest, then by leverage.
+Waves 0-4 are independent of each other and can land in any order; 5 and 6 want
+the earlier waves in place.
+
+### Wave 0 — parity bugs (no design work) — **DONE**
+
+Small, mechanical, and two of them are on the plugin path.
+
+- **0.1 — xpl macOS `NEUI_EVENT_RESIZE`.** **Done.** Hooked on
+  `NEUIView -setFrameSize:` (`platform_macos.mm`) rather than the window
+  delegate: NEUIView is the content view of a standalone frame *and* the root
+  subview of a DAW-embedded PLUGWINDOW, so one hook covers both — an embedded
+  frame has no `NSWindow` of ours to take `windowDidResize:` from. Reports the
+  height below `frame_top_inset` for parity with Linux (0 on macOS). Verified
+  on both a programmatic `set_size` and an **AppKit-initiated** resize
+  (`performZoom:`, which streams ~21 events through the zoom animation, the same
+  shape a live drag produces), with neui's cached size agreeing with the view.
+- **0.2 — win32-native mouse `buttonmap`.** **Done.** `ChildSubclassProc`
+  (`hosts/win32/window.cpp`) now forwards masked `wParam` on MOVE / ENTER /
+  L+R DOWN / UP / DBLCLK; WM_MOUSELEAVE carries no key state in its message, so
+  it reads the live state instead (a drag leaving the widget still reports its
+  held button).
+- **0.3 — win32-native key `modifiers`.** **Done.** `WM_KEYDOWN` / `WM_KEYUP`
+  populate `NEUI_KMOD_*` from the live key state.
+- **0.4 — wheel modifiers.** **Done.** `neui_event_wheel_t` grew a `buttonmap`,
+  populated on win32 native + xpl, macOS native + xpl, and Linux xpl (core +
+  XI2). iOS synthesises the wheel from touch pans and reports 0, which is
+  accurate there.
+  - **Fine-on-wheel now ships too** (the thing this unblocked). It was wired,
+    backed out after review found it incoherent, then re-landed once you ruled
+    that **the Shift->horizontal flip belongs in the platform layer**. That
+    ruling makes the consumer responsible for undoing it: a value handler has no
+    horizontal axis, so `hosts/shared/behavior_runtime.h` un-negates an
+    `is_horizontal + NEUI_MK_SHIFT` notch to recover the physical direction
+    (a genuine tilt-wheel horizontal notch is untouched). The second blocker -
+    fine starving against `steps` snapping - is solved by the native KNOB's own
+    rule: with detents a notch advances exactly one detent and fine is ignored,
+    so there is no sub-quantum change to round away. 6 Tier-1 cases, including
+    the exact config that used to go dead.
+
+**Four additional fixes the wave surfaced** (all real, all beyond the four
+items — back them out if the waves should stay strictly scoped):
+
+- **A shared `hosts/shared/win32/keys_win32.h`**, completing the set alongside
+  `keys_macos.h` / `keys_linux.h`, so both win32 hosts share one mask
+  translation. It exists because forwarding a raw `wParam` is actively unsafe:
+  **`MK_XBUTTON1` is `0x0020`, which collides with `NEUI_MK_ALT`** — a 5-button
+  mouse was making `behavior_runtime`'s Alt-fine modifier fire spuriously. The
+  helper masks to the five documented bits. Applied to the xpl host too, where
+  it fixed a second live bug: `MOUSE_MOVE` was masking to the three *button*
+  bits only, so Shift-for-fine on a KNOB / SLIDER drag saw the modifier on the
+  initial DOWN and then lost it for the rest of the drag.
+- **`platform_set_window_pos` on macOS xpl sized the OUTER window** to the
+  requested `(w, h)` instead of the client area, contradicting both `create()`
+  (which passes the same rect to `initWithContentRect:`) and win32 (which
+  maintains the client size via `AdjustWindowRectExForDpi`). `set_size(520, 300)`
+  produced a **520x268** client. Now converted through
+  `frameRectForContentRect:`, which also preserves create()'s position
+  semantics. Found only because 0.1 made the reported size honest.
+- **The macOS hosts never reported `NEUI_MK_SHIFT` / `_CONTROL` on mouse events
+  at all** — the same defect class as item 1 (which was about win32), on the
+  plugin path. macOS native hardcoded `buttonmap` to `0` / `1` /
+  `NEUI_MK_LBUTTON` across ENTER / LEAVE / MOVE / DOWN / UP / RBUTTON
+  (`hosts/macos/window.mm`), so behavior DRAG Shift-fine was dead there; macOS
+  xpl left `BUTTON_UP` / `CLICK` / `RBUTTON_UP` at `0` while win32 xpl populated
+  the same events. All now route through the existing `mac_buttonmap` helper.
+  The two control-action CLICK paths (win32 `BN_CLICKED`, macOS `NSControl`
+  action) deliberately stay `0` — the keyboard can raise them with no mouse
+  involved — and now carry a comment saying so.
+- **The xpl KNOB and SLIDER were reading the wheel delta as a modifier mask.**
+  `host.cpp` tested `event->data.mouse.buttonmap & NEUI_MK_SHIFT` inside its
+  `MOUSE_WHEEL` branch, but `neui_event_mouse_t::buttonmap` and
+  `neui_event_wheel_t::delta` sit at the **same offset (12)** in the event union
+  — verified with `offsetof`. So "fine" was `(delta & 0x4)`: a negative delta
+  (wheel-down) sign-extends to `0xFFFFFFF...` and always read as fine, while
+  wheel-up never did. Undiagnosable before this wave because the wheel payload
+  had no `buttonmap` to read; now a one-word fix at both sites.
+
+Verified: `cmake --build` clean and warning-free on macOS (Xcode/Debug);
+`ctest` green — 317 cases, 1843 checks, 0 failures. The win32 and Linux edits
+are **compile-unverified locally** (authored on macOS), matching the
+established convention for this repo's cross-machine flow.
+
+### Wave 1 — painter completeness — **DONE** (1.4 deferred)
+
+- **1.1 — text metrics + alignment.** **Done.** The design question was where the
+  numbers live, and the answer shaped the API: ascent/descent/line-height are
+  properties of the **font at a size**, not of a string, so they became a
+  separate `font_metrics(p, size, &a, &d, &lh)` rather than an extension of the
+  string-level `measure_text` (whose "pen advance" meaning the grid caret math
+  and compound centring already depend on).
+  - Backend gets **one** new method. `line_height` is contractually *the
+    per-line advance that backend's own `draw_text` uses* (CoreGraphics counts
+    leading, cairo does not) — and that equivalence is the trick: because every
+    backend derives the block position **from the rect it is handed**,
+    `draw_text_aligned` needs **zero** backend work. Alignment is implemented in
+    `hosts/shared/painter.h` by passing a tightened rect.
+  - Overflow degrades deliberately: horizontal alignment keeps the rect's right
+    edge (so over-wide text clips to the *widget*, not to the text box) and
+    clamps so text never draws left of `x`; an over-tall block pins to the top.
+  - No `BASELINE` mode — with a rect to align in it has no unambiguous meaning.
+    `font_metrics` + `VALIGN_TOP` is the documented recipe.
+  - Verified two ways: 22 Tier-1 cases with a mock backend recording the exact
+    rect that reaches `draw_text`, plus an on-device check of the real
+    CoreGraphics numbers (at 20 px: ascent 19.34 / descent 4.22 / line_height
+    23.55, scaling exactly 2.0× to 40 px).
+- **1.2 — rounded rect / ellipse / line.** **Done**, and confirmed to need **no
+  backend or `renderer.h` change at all**: `build_rounded_rect_path` and
+  `append_elliptical_arc` moved from `widget_paint_compound.h` into
+  `hosts/shared/painter.h`, so the compound layers and the five new public
+  entries share one implementation (a value ring and a `fill_ellipse` agree on
+  their outline). 10 Tier-1 cases, including the radius clamp and the
+  deliberately-open `draw_line` path.
+- **1.3 — italic.** **Done.** `push_font_styled(family, weight, italic)` on both
+  the backend interface and the painter; `push_font` is now exactly
+  `push_font_styled(..., false)` and pops the same way. Italic is **resolved,
+  never synthesised** — `DWRITE_FONT_STYLE_ITALIC`, `NSFontManager
+  convertFont:toHaveTrait:` / `UIFontDescriptorTraitItalic`, `FC_SLANT_ITALIC`
+  — and a family with no italic member stays upright rather than being sheared
+  (so no `_OBLIQUE`). The style is part of every backend's font-cache key, so
+  upright and italic at the same (family, weight, size) cannot collide. The
+  painter forwarder degrades to plain `push_font` on a backend predating the
+  append, which matters for stack balance: the client calls `pop_font`
+  regardless. Verified on the real CG backend (Times upright 184.86 vs italic
+  182.65 — genuinely different advances) plus 5 Tier-1 cases.
+- **1.4 — wrapped text at painter level** — deferred unless asked; the wrap
+  algorithm exists in the MULTILINE widget and is liftable.
+
+### Wave 2 — timer / idle — **DONE**
+
+- **2.1 — platform seam.** `platform_timer_start(Session*, interval_ms)` /
+  `platform_timer_stop(Session*)`, implemented on win32 / macOS / Linux / iOS /
+  null. The design point: **one native tick per session at the shortest live
+  interval**, not one native timer per client timer — the portable
+  `hosts/shared/timer_table.h` owns ids, deadlines and multiplexing, so each
+  platform layer is ~30 lines and everything error-prone is Tier-1 tested.
+  - win32 uses a **thread** timer (`SetTimer(NULL, …, TIMERPROC)`) rather than a
+    window timer, because timers are session-scoped and a session may own
+    several frames (or, embedded, a frame the DAW owns). The payoff: `WM_TIMER`
+    with a NULL hwnd lands on the thread queue, so `platform_run`,
+    `platform_pump_once` **and a DAW's own pump** all dispatch it with no
+    per-loop plumbing.
+  - macOS / iOS use an `NSTimer` in `NSRunLoopCommonModes` (not the default
+    mode) so a client animation keeps running during AppKit/UIKit tracking
+    loops instead of freezing while a button is held.
+  - Linux multiplexes the existing 16 ms `timerfd` heartbeat rather than adding
+    an fd — but the heartbeat is **shared with animations**, so `arm_timer`
+    became interval-aware (`refresh_timer_arm` takes the min of both demands):
+    a client asking for 8 ms must not be slowed to the animation's 16 ms, and an
+    animation must not be starved by a client's 1000 ms timer.
+  - Two paths needed fixing to honour the documented contract:
+    `platform_pump_once` never read the timerfd (so timers would have worked
+    only under `run()`), and `platform_embed_pump_and_tick` gated everything
+    behind its 16 ms animation window (which would have halved an 8 ms plugin
+    timer). Client timers now bypass that gate — their own deadlines already
+    decide what is due.
+- **2.2 — public API.** `NEUI_API_TIMER` (`include/neui/d/timer.h`):
+  `add_timer` / `remove_timer` / `set_timer_interval` + `NEUI_EVENT_TIMER`.
+  Chosen over an `on_idle` callback because a plugin wants a *stated rate*,
+  and idle has no defined frequency. Session-scoped, and deliberately the **only
+  event with no `.widget`** — a timer does not belong to a widget, and omitting
+  the field stops a handler being written as though it did.
+  - `interval_ms` is a minimum, clamped up to `NEUI_TIMER_MIN_INTERVAL_MS` (4);
+    0 is rejected rather than becoming a spin loop. A late tick fires **once**
+    rather than catching up, so a slow handler cannot accumulate a backlog of
+    its own events.
+  - Mutation from inside a handler is safe (the table tombstones rather than
+    erases, so the dispatch walk stays valid), including a timer removing
+    itself.
+- **2.3 — embedded contract.** Documented and honoured: no thread, no `run()`
+  from a plugin; the DAW's pump services win32/macOS and `pump_and_tick` drives
+  Linux.
+- **Review found three real bugs, two reproduced under ASan; all fixed.**
+  (1) The per-platform timer registries were function-local statics, so they
+  were destroyed *before* the global `sessions` vector whose `~Session` calls
+  `platform_timer_stop` — a **SEGV at exit for any client that uses a timer and
+  never calls `destroy(session)`, which is what CLAUDE.md's own canonical usage
+  does**. All four are now immortal (leaked) maps. (2) The due list was a
+  Session *member*, and every nested pump in the tree services timers, so a
+  handler opening a modal dialog re-entered the walk and reallocated the vector
+  the outer frame was iterating — a use-after-free. Fixed by moving the whole
+  walk into `TimerTable::tick_and_dispatch` with a local vector *and* a
+  re-entrancy guard (nested ticks are suppressed, not nested). (3)
+  Destroying the session from a handler is a use-after-free; documented as
+  illegal rather than papered over. Also fixed: a Linux phase-reset regression
+  (`timerfd_settime` every tick turned the period into `period + handler time`),
+  and a win32 path where a failed `SetTimer` still cached "armed" so timers went
+  silently dead.
+- The review's sharpest process point: the mutation-during-dispatch tests
+  *simulated* the caller's loop, so the suite passed **with the re-entrancy bug
+  shipped**. Moving the walk into the portable table made it Tier-1 testable;
+  8 new cases now exercise the real walk, including the nesting case.
+- Verified: 25 Tier-1 cases over the table (clamping, deadlines, late-tick
+  coalescing, shortest-interval arming, self-removal, add-during-tick,
+  tombstone reaping) plus an end-to-end run on macOS under a **hand-rolled
+  `pump_once` loop** — the standalone case the review called out as impossible:
+  16 ms fired 23× and 100 ms 5× over ~600 ms, a self-removing timer fired
+  exactly once, retiming took effect, and the tick went silent after the last
+  removal.
+
+### Wave 3 — per-frame UI scale (#9) — **DONE, by RECOVERING the lost commit**
+
+The "history problem" flagged in the TL;DR turned out to be recoverable, and the
+lost work was **better than the plan**. `20f2b04` was sitting dangling in the
+reflog — *"add user UI zoom (NEUI_ATTR_UI_SCALE) to the crossplatform host"*,
+874 insertions across 23 files, parented on `edf5f9c`. PR #19 merged the title
+and dropped the content. Cherry-picked rather than reimplemented.
+
+Why it beat the plan: this document proposed feeding `real_dpi × ui_scale` into
+`backend->update_dpi`. That commit had already **rejected** that approach for a
+reason the plan missed — it works on D2D and Cairo but **not CoreGraphics**,
+where a window context applies no CTM scale of its own (AppKit hands `drawRect:`
+an already-point-based context), so macOS simply would not have zoomed. It uses
+one CTM scale in `Session::paint_frame` instead, needing **zero** backend
+changes, and goes beyond the plan with `scale` on `neui_event_paint_t` plus
+`NEUI_ATTR_PAINT_DEVICE_PIXELS` (real device pixels for meters / scopes) and
+`extra_scale` on the painter so `get_scale_factor` stops under-reporting — which
+would otherwise have made the QR compound layer bake at 1/Z resolution.
+
+Cherry-pick resolution — two conflicts, both where earlier waves overlapped:
+- `platform_macos.mm`: both sides had independently fixed the **same**
+  `platform_set_window_pos` client-vs-outer-frame bug. Kept the zoom-aware
+  `(zw, zh)` geometry with the fuller explanation.
+- `platform_linux.cpp`: orthogonal — its `window_scale(lw)` (which folds zoom
+  into the DPI factor, replacing every open-coded `dpi/96`) plus Wave 0.4's XI2
+  modifier `buttonmap`. Kept both.
+
+**One real interaction bug this surfaced**, caught by the recovered commit's own
+smoke test rather than by reasoning: Wave 0.1's `-setFrameSize:` RESIZE hook
+stored the **native** size in `wd.width/height`, but the zoom design's core
+invariant is that those stay **logical** at every zoom. At zoom 2.0 a 400×240
+frame reported `get_client_rect` as 800×480, and resetting the zoom did not
+restore the original. The hook now divides out `frameZoom`. Its suppression test
+also had to change: comparing against `wd.width/height` is wrong because
+`widget_set_size` updates those *before* calling the platform layer (every
+programmatic resize would suppress itself), and comparing the view's previous
+frame is wrong because a pure zoom change moves the native frame while the
+logical size is unchanged. It now tracks the last **reported logical** size on
+the view, seeded at creation.
+
+Verified together: the recovered `neui_zoom_smoke_macos` passes (native content
+grows by the zoom, `get_client_rect` stays logical, CUSTOMDRAW gets logical size
+with a zoom-inclusive scale, device-pixel mode gets pre-multiplied dimensions,
+plus live change / METRICS_CHANGED / reset), both Wave 0.1 resize harnesses still
+pass (programmatic *and* the 21-event AppKit `performZoom` stream), and the suite
+is 385 cases / 2081 checks green.
+
+**Its review found seven findings; all addressed.** Four were exactly the
+"recovered code vs. newer waves" disagreements the cherry-pick was warned about:
+- **win32 `platform_menubar_attach` was not zoom-aware** while both sibling
+  sizing seams in the same file were — so attaching a menubar to a zoomed frame
+  resized it back to the *unzoomed* client size, and the resulting `WM_SIZE`
+  then divided that by the full factor: a 400-wide frame at zoom 2 stored
+  `wd.width = 200`. That destroys the layout, and it fires at `widget_show` for
+  every frame with a MENUBAR plus on every menubar rebuild. Fixed.
+- **Fractional-zoom drift, reproduced empirically.** `logical -> native ->
+  logical` double-rounds: 402 px at zoom 0.75 became 403 and fired a spurious
+  RESIZE, so the commit's own stated invariant broke at z < 1 (and win32
+  *truncated*, drifting down at z > 1). Root fix: stop round-tripping at all
+  when *we* set the size — `wd.width/height` are already authoritative then.
+  macOS/win32 bracket the call with a self-resize flag; Linux records an
+  expected size instead, because X11's `ConfigureNotify` is asynchronous and a
+  flag would never still be live. win32's `WM_SIZE` also now rounds instead of
+  truncating, and got the RESIZE suppression macOS had (it was asymmetric).
+- **A live zoom change teleported a user-moved window** to its create position,
+  because no xpl platform tracks moves back into `wd.x/y`. Added a documented
+  `NEUI_WINDOW_POS_KEEP` sentinel; the zoom only ever wanted to change the size.
+- **iOS scaled paint but not input.** `paint_frame`'s CTM is
+  platform-unconditional, but the iOS layer (which landed *after* this commit
+  was authored) divides no touch coordinates — a zoomed iOS frame would have
+  drawn in one space and hit-tested in another. New
+  `platform_supports_ui_scale()` gate makes the attr inert on iOS and null.
+Plus: min/max constraints ignored the zoom on win32 and macOS (a MIN_WIDTH of
+400 at zoom 2 let the user shrink to logical 200) and went stale on every zoom
+change everywhere — both fixed; and two public contracts were simply false —
+`NEUI_ATTR_PAINT_DEVICE_PIXELS` claims *physical* pixels but only undoes the
+zoom, and `events.h` equated `METRICS_CHANGED.ui_scale` with
+`metrics_api->ui_scale` when the two now differ *and imply opposite responses*
+(iOS Dynamic Type says "re-scale your layout", zoom says "do not"). Documented
+honestly rather than papered over.
+
+Verified after the fixes: the fractional-zoom harness passes at 0.75 / 1.25 /
+1.5 / 0.5 / 2.0 / 1.0 with the client rect pinned at 402x302 and **zero**
+spurious RESIZEs, a genuine `set_size` while zoomed still lands exactly, and a
+user-moved window keeps its top-left across three zoom changes while its
+min-size constraint tracks the zoom.
+
+Remaining documented gaps in `docs/deferred-issues.md`: baked SURFACEs and `@Nx`
+assets are not re-baked on a zoom change (client's call, as for DPI), scroll
+deltas are not zoom-divided, DnD drop coords are not zoom-divided on
+win32/Linux, and Linux scales window position while win32/macOS do not.
+
+### Wave 4 — cursor, popups, file dialog
+
+**4.1 status: DONE**, with one deliberate deviation from what this plan specified.
+
+The plan called for `set_cursor(session, widget, kind)` on an interface. It shipped
+as a **string attribute, `NEUI_ATTR_CURSOR`**, instead. Reasons:
+
+- A per-widget sticky cursor is *state*, not an action, and every comparable
+  enum-ish knob in the framework is already a string attr (`NEUI_ATTR_ORIENTATION`,
+  `_POLARITY`, `_KNOB_MODE`, `_SCROLL_MODE`, `_ALIGN_TEXT`). An interface method
+  would have been the only stateful setter outside the attr bag.
+- It gets a `k_well_known_attrs` row, `docs/attributes.md` documentation, and
+  reachability from JSON components for free.
+- The behavior asset's `cursor` prop is *already a string*, so wiring it later is a
+  pass-through rather than a name->enum translation at the boundary.
+
+Pointer warping stays an interface (4.1b) — that genuinely is an action with
+begin/end bracketing.
+
+What landed:
+
+- `hosts/shared/cursor_kind.h` — the 17-shape `enum neui_cursor_kind` plus the
+  name<->kind parse, replacing **two** hand-kept copies of a two-value list
+  (`xpl_host::CursorKind` and an unnamed-namespace mirror in
+  `hosts/win32/widgets.cpp` commented "Mirrors xpl_host::CursorKind values"). CSS
+  aliases accepted; an unrecognised name means *inherit*, not arrow. Tier-1 tested
+  (`tests/test_cursor_kind.cpp`, 10 cases).
+- `hosts/shared/win32/cursor_win32.h` — one kind->HCURSOR table for both win32 hosts.
+- Inheritance resolved in portable host code (`Session::resolve_cursor_for` walks
+  ancestors; `refresh_cursor` dedupes before touching the platform, which matters on
+  X11 where each push is a round-trip per window).
+- All five platforms implement the full set; `platform_supports_ui_scale`-style
+  degradation is documented per shape in `docs/deferred-issues.md`.
+- **Two latent defects fixed on the way**, both of which meant there was no
+  stickiness to build an API on:
+  - win32 never handled `WM_SETCURSOR`, and the class registers `IDC_ARROW`, so
+    `DefWindowProc` reverted the cursor on every pointer move. The GRID resize
+    cursor only appeared because `WM_MOUSEMOVE` re-set it immediately afterwards.
+  - macOS never implemented `-cursorUpdate:` and its tracking area lacked
+    `NSTrackingCursorUpdate`, so AppKit reset the cursor from cursor rects on every
+    mouse-moved. Same "works by accident" mechanism.
+- The GRID's positional override now carries an owner widget, so it cannot leak
+  outside the GRID, survives a column-resize drag that leaves the widget, and
+  yields to (rather than stomps) a client's `NEUI_ATTR_CURSOR` off the divider.
+- `tests/cursor_smoke_macos.mm` — 12-check acceptance harness driving **real**
+  `-mouseMoved:` events and reading `[NSCursor currentCursor]`. Negative-probed:
+  removing the `-cursorUpdate:` body makes the stickiness check fail.
+
+**Review follow-up** (7 findings, all fixed):
+
+1. **The Windows build did not compile.** `s_cursor_kind` was read by the new
+   `WM_SETCURSOR` case at `platform_win32.cpp:713` but defined ~1400 lines later at
+   2130 — MSVC C2065. Exactly the class of error a macOS-only machine cannot catch;
+   the definition moved above `XplWndProc`.
+2. **A public contract was false**: `<neui/d/attrs.h>` promised `get_string` returns
+   the canonical name, and nothing canonicalised — `set_string("pointer")` read back
+   `"pointer"`. The unit test only round-tripped the *parser*, never the attr API, so
+   it passed with the claim false. Normalisation now happens on write.
+3. **"Applies to ANY widget" was false.** Resolution starts from the hovered widget
+   and `widget_at` only returns `emit_events && enabled && !input_transparent`
+   widgets, so the attr is inert on a LABEL, an IMAGE, or a non-scrolling SECTION's
+   bare background. Documented accurately instead of over-claimed — and it is the
+   *right* semantics: for a non-interactive widget the pointer is interacting with
+   whatever lies beneath, so that widget's cursor should win.
+4. **`attrs->remove` was not live**, though the header says clearing restores
+   inheritance — only `set_string(key, "")` re-resolved. Same operation to a client.
+5. **A hidden pointer could leak process-wide.** Nothing cleared hover when a widget
+   was destroyed under a stationary pointer (no leave event arrives), and
+   `[NSCursor hide]`/`unhide` is a balanced counter — so an embedded plugin editor
+   torn down while the pointer was over a `cursor="none"` widget left **the DAW with
+   no pointer** for the rest of its process life. Added `forget_dead_hover` on widget
+   destroy and `release_cursor` in `~Session`.
+6. **A "no public API" claim was stale**: macOS 15 added public
+   `+frameResizeCursorFromPosition:inDirections:`, now used for the diagonals with
+   the private selector as the pre-15 fallback. (The reviewer also confirmed all five
+   private selectors exist on current macOS and that the `respondsToSelector:` guard
+   is sound.) Noted that `+resizeLeftRightCursor`/`+resizeUpDownCursor` are
+   soft-deprecated in favour of `+columnResizeCursor`/`+rowResizeCursor`; not migrated
+   yet because it would change the existing GRID divider appearance.
+7. A markdown table row in `docs/attributes.md` was detached from its header.
+
+Harness grew 12 → 21 checks, one per fixed finding. Negative-probed three of them
+(`-cursorUpdate:`, `forget_dead_hover`, canonicalisation): each removal makes the
+corresponding check fail. The review also independently cleared X11 cursor lifetime,
+the GRID override ownership logic against the real capture code, and `set_hovered`
+re-entrancy.
+
+**4.1b status: DONE** (pointer warping). `NEUI_API_POINTER` (`include/neui/d/pointer.h`):
+`begin_relative` / `end_relative` / `is_relative`, bracketed around a drag exactly as
+the plan wanted so it pairs 1:1 with the gesture events.
+
+The design decision that matters: relative mode does **not** switch the event payload
+to deltas. It keeps reporting ordinary absolute widget-local `x`/`y` that simply stop
+being screen-bounded, seeded from the press point and advanced by each raw device
+delta while the platform pins the visible cursor. Every existing drag handler
+(KnobWidget, the behavior runtime's `DRAG_*`, scrollbar drags) already computes its own
+delta from the press point, so all of them gain unbounded travel with **zero** changes -
+where delta-valued events would have required touching every one and would have made
+`x`/`y` mean two different things depending on invisible state.
+
+The three platforms are deliberately not the same shape: macOS uses
+`CGAssociateMouseAndMouseCursorPosition(false)`, which decouples cursor from device
+*without* moving it, so there is no warp and no echo event; win32 (`SetCursorPos`) and
+X11 (`XWarpPointer`) must warp back on every move and filter the synthetic motion event
+each warp generates, or the handler reads delta then -delta and the drag sits still.
+iOS / null report unsupported so `begin_relative` fails honestly instead of pinning
+nothing.
+
+Kept opt-in: the built-in KNOB / SLIDER and the behavior `DRAG_*` handlers do not enter
+the mode themselves, because hiding the cursor is a visible change and a client drawing
+a readout at the pointer should not have it forced on.
+
+Two bugs caught during implementation rather than after:
+- I reintroduced the **exact** declaration-order defect the 4.1 review had just found -
+  `s_relative_active` read by `WM_SETCURSOR` far above its definition. Caught by
+  remembering the lesson, not by a compiler, since win32 still cannot be built here.
+- `dispatch_mouse_event` takes FRAME-local coordinates and subtracts `abs_x/abs_y`
+  itself, so passing it the widget-local virtual position **double-subtracted**. The
+  harness pins the test widget at a non-zero offset specifically so this cannot hide;
+  negative-probed, and removing the `+ wd.abs_x` makes two checks fail.
+
+Verification: 8 new Tier-1 cases (403 total) over the accumulator - including that
+sub-pixel deltas accumulate rather than truncate, and that rounding is symmetric so an
+upward drag travels exactly as far as an identical downward one; plus a 17-check macOS
+harness injecting real deltas via `CGEvent` -> `+[NSEvent eventWithCGEvent:]`. That
+harness **cannot** test sub-pixel accumulation - AppKit quantises `kCGMouseEventDelta*`
+to an integer (measured: 2.5 -> 2.0, 0.3 -> 0.0) - so it proves exact integer
+accumulation and the float path stays Tier-1 only. Recorded in
+`docs/deferred-issues.md` rather than left as an unstated gap.
+
+**4.1b review follow-up** (7 findings, all fixed):
+
+1. **The commit message's own claim was wrong.** It said `dispatch_relative_motion`
+   bails out if the owner is destroyed mid-drag — but that check only runs when a
+   motion event arrives, and once the owning frame's view is gone no motion ever
+   arrives again. Destroying a frame mid-drag left the mode ON: on macOS the cursor
+   stayed decoupled from the device **and hidden, machine-wide**, with nothing left
+   that could un-stick it; on Linux the stale `LinuxWindow*` was then dereferenced
+   by `end_relative_pointer` — a use-after-free reachable from the very
+   `end_relative` call the header tells clients to make unconditionally. Fixed with
+   `end_relative_pointer_if_within` before the subtree is freed, plus a liveness
+   re-check inside `end_relative_pointer` for teardown routes that skip widget
+   destroy.
+2. **macOS ignored `NEUI_ATTR_UI_SCALE`** on relative deltas while win32 and Linux
+   both divided — so a drag's sensitivity jumped by the zoom factor the instant
+   relative mode began, relative to the absolute moves the same handler had been
+   seeding from. Now divided by `frameZoom`.
+3. **Linux double-counted queued motion.** `XWarpPointer` is asynchronous, so
+   several `MotionNotify` can arrive before the warp lands — routine in a drag that
+   repaints per move. Anchor-relative deltas then report d1, then d1+d2, landing d1
+   twice and over-travelling in proportion to queue depth. Switched to
+   event-to-event deltas. Also switched the warp target from `DefaultRootWindow` to
+   the event's own root, which is what an embedded frame on the DAW's Display needs.
+4. **My teardown check was vacuous.** It warped the cursor and asserted it moved —
+   but a warp moves the cursor even while the association is off, as
+   `platform_end_relative_pointer`'s own comment states. It passed whether or not
+   the fix existed. Replaced with checks on the observable that actually
+   distinguishes them (does the mode end), covering owner-widget destroy, frame
+   destroy, and session teardown.
+5. **macOS restore ordering**: warp then re-associate, so the ~250 ms local-events
+   suppression interval doesn't leave the pointer dead after every drag.
+6. The header overstated seeding ("the current pointer position"): it is the last
+   mouse event the host dispatched — that press inside a DOWN handler, but possibly
+   another frame's event, or the widget centre if none. Documented precisely.
+
+Harness 17 → 22 checks. Negative-probed the three new ones (zoom division,
+`end_relative_pointer_if_within`, and the destroy paths): each removal fails the
+corresponding check, and removing the destroy hook cascades exactly as the real bug
+does — once the mode sticks on, every later `begin_relative` fails too.
+
+The review independently cleared what I was most worried about: win32 and Linux
+declaration order (no repeat of the 4.1 build break), the win32 echo filter, and the
+macOS Cocoa→Quartz anchor flip for multi-monitor / negative coordinates.
+
+**Deferred out of 4.1 into 4.1b**: the behavior asset's per-handler `cursor` prop is
+still a no-op. The infrastructure it was blocked on now exists, but wiring it needs a
+per-handler hit-region hover track plus a new `BehaviorDispatchCtx` callback across
+all five platforms. Its TODO in `docs/deferred-issues.md` is therefore **kept**, not
+deleted — deleting it while the prop is inert would be a false claim.
+
+Original plan text for 4.1 follows.
+
+- **4.1 — cursor (his #7).** Widen `xpl_host::CursorKind`
+  (`platform.h:382`) to a real set (arrow, ibeam, crosshair, hand, EW/NS/NESW/NWSE
+  resize, move, none/hidden, wait), implement on all platforms, then expose
+  publicly — a `set_cursor(session, widget, kind)` on `NEUI_API_WIDGETS` (or a
+  small `NEUI_API_CURSOR`) with per-widget stickiness so hover changes work.
+  Unblocks the behavior asset's `cursor` prop; delete that TODO
+  (`docs/deferred-issues.md:17`).
+  - **Pointer warping / unbounded movement** is a separate call in the same
+    interface (`set_pointer_capture_relative` or similar):
+    `SetCursorPos` + hide on win32,
+    `CGAssociateMouseAndMouseCursorPosition(false)` +
+    `CGWarpMouseCursorPosition` on macOS, `XWarpPointer` on Linux. Needed for
+    good knob feel; design it as begin/end bracketing so it pairs with the
+    existing gesture events.
+The original plan text is the bullet that follows this status block.
+
+**4.2 status: DONE on the second attempt.** `NEUI_W_POPUPMENU` +
+`widgets->popup_tree_menu(session, anchor, x, y, menu)`, exactly the shape the plan
+asked for: the menu is a MENUBAR-shaped tree the client fills with `tree->add` /
+`set_shortcut` / `set_checked` / `set_menu_cmd`, dispatched **async by item id** via
+`NEUI_EVENT_ITEM_SELECTED` on the menu widget, with `NEUI_API_MENU_CLIENT::validate`
+applying unchanged. The flat `popup_menu` is untouched. Section headers are a disabled
+item, as planned. Custom components in menus remain out of scope.
+
+Almost entirely reuse, and the reuse point was one branch: `mb_build_columns` already
+handled row sizing, arbitrary-depth cascade placement, edge clamping, the submenu
+left-flip, checkmark gutters, shortcut columns and validate-driven enabling - all
+origin-agnostic - so an empty `band` now means "standalone popup: level 0 at
+`(root_x, root_y)`", and the column painter came out of `paint_menubar` as
+`paint_menu_columns`, shared verbatim.
+
+**The first attempt was reverted (`98c7bf4`), and the reason is the lesson.** It made
+`PopupMenuWidget : MenubarWidget` without overriding `is_menubar()`. The rationale for
+a separate widget TYPE - "a popup must never be mistaken for the frame's menu bar" -
+was written into three files and **implemented in none**: every one of the ~15
+`is_menubar()` call sites, none of which the diff touched, still said yes. So a
+POPUPMENU child of a frame replaced the app's real menu bar on `show()`, its root rows
+silently ignored `set_menu_cmd` / `set_checked` / `"-"`, and a pick routed through
+`dispatch_menu_event`'s `_menubars` scan to whichever menu bar held the same
+(per-widget, restarting at `0x8000`) cmd id. Seven confirmed findings. The generalisable
+part: **when a design's whole justification is a distinction, the distinction has to be
+a code change, not a comment** - and a predicate that already has many call sites is
+never a safe thing to inherit silently.
+
+The redo splits it into three predicates, which is what the feature actually needed:
+`is_menubar()` = "IS the frame's menu bar" (MENUBAR only - gates the native menu,
+`SetMenu` / `setMainMenu:`, the Linux band, `frame_menubar_index`, `_menubars`);
+`is_menu_model()` = "stores the MenubarWidget item model" (both - gates the tree API's
+`dynamic_cast` and the layout / paint / hit-test / tab walks); and
+`uses_native_menu()` = "owns an HMENU / NSMenu the `platform_menubar_*` seam mutates"
+(MENUBAR only). A popup therefore keeps the item model and owns no native menu at all.
+
+Two behaviours changed from the first attempt on their own merits, not just to fix
+findings. A popup pick now fires **one** `ITEM_SELECTED` and no `TREE_ITEM_ACTIVATED`:
+routing through `dispatch_menu_command` would have fired the menubar's pick event for
+*every* row, since every leaf carries a cmd_id whether bound or not, making
+`ITEM_SELECTED` a redundant second event. Built-in commands (`< NEUI_CMD_USER_BASE`)
+still reach the focused widget via `invoke_focused_command`, so a "Copy" row works with
+no client code; USER-range bindings do nothing and the header says so. And a popup's
+per-item shortcut is documented as a **label**, because the widget is deliberately
+absent from `_menubars` and nothing can translate it.
+
+Verification: `tests/popup_tree_smoke_macos.mm`, 39 checks driving real
+`-mouseDown:`/`-mouseUp:` pairs, aimed at the seams rather than the happy path -
+`[NSApp mainMenu]` still holding the app's own titles, a per-pixel map of the column
+proving the separator is short and unpickable (the earlier harness added a separator
+and never clicked it, which is precisely why that bug shipped), a `NEUI_CMD_PASTE` row
+verified end-to-end through the clipboard, and no DOWN/UP/CLICK/DBLCLICK leaking to a
+BUTTON deliberately placed under the menu. **Every** check negative-probed: reinstating
+`is_menubar() → true` fails 2, `uses_native_menu() → true` fails 5, routing by cmd_id
+fails 3, dropping the release swallow fails 2, moving the dblclick branch back ahead of
+the popup fails 2, and dropping the empty-menu guard fails 2. The stuck-grab check needs
+**all three** teardown guards removed before it fails - recorded in the harness as
+defence-in-depth rather than left implying any one is load-bearing.
+
+Honest limitation: **only macOS is verified at runtime.** win32 and Linux are wired at
+the same call sites as the existing `_popup_active` overlay (press / move / release /
+Esc, plus the release swallow), and Linux additionally has no native host to fall back
+on - but neither can be compiled here, so that is plumbing-by-inspection, not a tested
+claim.
+
+Still open: `popup_tree_menu` is an explicit `nullptr` on the native win32 / macOS / iOS
+hosts (each with a comment naming what it would need - `TrackPopupMenuEx` /
+`popUpMenuPositioningItem` / `UIMenu`).
+
+**4.2 review follow-up** (7 findings, all fixed). The predicate split itself came back
+clean at every call site, and all seven original findings were confirmed fixed - but two
+new ones were real:
+
+1. **Stale release-swallow, win32-only.** A press consumed by the popup armed the
+   swallow flag but took **no mouse capture**, so dragging off the window and releasing
+   outside delivered no `WM_LBUTTONUP` at all. The flag then ate the UP of the *next*,
+   unrelated click: that widget got a DOWN with no UP and no CLICK, `_pressed_widget`
+   stayed stuck, and on a KNOB / SLIDER it would have left a `GESTURE_BEGIN` with no
+   `GESTURE_END` - a stuck `beginEdit` for a DAW automation client. Fixed with
+   `tree_popup_discard_pending_release()` at the top of every button-DOWN path on all
+   three platforms, which is stronger than taking capture: the flag now cannot outlive
+   its own gesture on any platform, for any reason. Exactly the blind spot the commit
+   admitted to - win32 is the platform that cannot be compiled here.
+2. **iOS xpl painted an unpickable, undismissable menu.** `paint_frame` paints the
+   cascade platform-independently and `w_popup_tree_menu` was in the shared xpl vtable,
+   but `platform_ios.mm` has no tree-popup input path at all - so the menu went up,
+   taps fell *through* it to the widgets underneath, and nothing could dismiss it (no
+   Esc on iOS). This is the same defect class as the first review's finding 6, recurring
+   on the fourth platform the commit never mentioned, with the header and all three docs
+   silent about iOS. Fixed with a `platform_supports_tree_popup()` seam (the same shape
+   as `platform_supports_ui_scale`) that `show_tree_popup` checks, so the API fails
+   honestly on iOS / null instead of painting something inert.
+
+The rest: the harness had an out-of-bounds subscript evaluated *before* its own bounds
+check (benign today, UB after any row-height change); Linux `FocusOut` called
+`close_menubar_menu`, which clears the `_menu_path` the popup borrows while leaving
+`_tree_popup_active` set; Linux middle-click and the wheel on all three platforms
+bypassed an open popup (so a SECTION under the visible menu scrolled away beneath it);
+and two comments described code that does something else - `tp_claim` does **not** catch
+an emptied menu (`tree->clear` does), and right-click **picks** rather than dismisses.
+
+One genuinely new fix rather than a correction: `t_set_shortcut` now uses
+`format_shortcut_label` (Cocoa glyphs on macOS, `Ctrl+`/`Alt+`/`Shift+` elsewhere). The
+Windows-style string was never macOS-visible before, because the native NSMenu path
+strips the `"	Shortcut"` suffix and shows `keyEquivalent` - the POPUPMENU cascade is the
+first macOS surface that draws the label itself, so it would have shown "Win+Z" on a Mac.
+5 new Tier-1 cases (408 total, 2340 checks) cover the glyph order, that CTRL stays
+Control rather than becoming Command, and that the platform picker resolves to exactly
+one style.
+
+Harness 39 -> 41 checks; the new stale-release check is negative-probed (removing the
+press-time clear fails it). Also recorded: the stuck-grab check needs **all three**
+teardown guards removed before it fails, so the harness now says outright that it asserts
+the outcome and pins no single mechanism.
+
+- **4.2 — rich popups (his #8).** Reuse the tree model rather than inventing a
+  second one: build the popup as a `MENUBAR`-shaped tree (a widget the client
+  populates with `tree->add` / `set_shortcut` / `set_checked` / `set_menu_cmd`),
+  then `popup_tree_menu(session, anchor, x, y, menu_widget)` dispatching
+  **async by item id** through an event (`NEUI_EVENT_ITEM_SELECTED` on the menu
+  widget) with `NEUI_API_MENU_CLIENT::validate` already applying. Keep the
+  existing flat `popup_menu` for compatibility. Section headers = a disabled
+  item kind. **Custom components in menus: explicitly out of scope** — agree
+  with his own suggestion that a type-in overlay drawn on the surface is the
+  better answer.
+
+**4.3 STATUS: SHIPPED.** `open_file` / `save_file` appended to `neui_notify_api_t`
+(`include/neui/d/notify.h`) with `neui_file_filter_t` / `neui_file_dialog_t` /
+`neui_file_path_cb`. Blocking + modal like `message_box`; results delivered
+through a per-path callback rather than an out-parameter (no allocation
+ownership question, no size-query round trip - impossible for an interactive
+dialog - and multi-select falls out free). **`-1` and `0` are deliberately
+distinct**: `-1` = no dialog was shown (bad/unrealised/non-frame widget, or a
+host without the surface), `0` = the user cancelled. A client that falls back
+to its own path entry must do so only on `-1`.
+
+`hosts/shared/file_dialog_model.h` owns everything easy to get subtly wrong -
+`glob_match`, `parse_filters`, `clamp_default_filter`, `complete_extension`,
+`path_join`/`_parent`/`_leaf`, `list_directory_view` - and is used by **all
+three real platforms**, not just the drawn fallback: it feeds
+`COMDLG_FILTERSPEC`, `allowedContentTypes`, and the portal's `a(sa(us))`.
+25 Tier-1 cases (`tests/test_file_dialog_model.cpp`, 433 total / 2468 checks).
+Two invariants worth the tests: a type filter **never hides directories** (you
+must be able to navigate into a folder to reach its files - the obvious
+"filter everything" implementation gets this wrong), and the listing sort is a
+*total* order over case variants.
+
+Per host: win32 `IFileOpenDialog`/`IFileSaveDialog`
+(`hosts/shared/win32/file_dialog_win32.h`; note `SetFileTypeIndex` is
+**one-based**), macOS `NSOpenPanel`/`NSSavePanel` via `UTType`
+(`hosts/shared/macos/file_dialog_macos.h`), Linux XDG portal
+(`hosts/shared/linux/file_dialog_portal.h`) falling through to a neui-drawn
+browser (`run_file_browser` in `platform_linux.cpp`). Both macOS hosts and both
+win32 hosts are wired; iOS and null return `-1`.
+
+The Linux design de-risks its own untestable part on purpose: the portal is
+best-effort and **any** failure (no libdbus, no bus, no portal, malformed
+reply, timeout) falls through to the drawn browser, so a D-Bus marshalling bug
+degrades to a working dialog instead of breaking the feature. Only an explicit
+`cancelled` stops the fall-through - the chooser was already on screen, so a
+second dialog on top of a dismissed first is worse than no portal path at all.
+
+**Honest limitation: only macOS is verified at runtime.**
+`tests/file_dialog_smoke_macos.mm` (38 checks) drives real modal panels on
+*both* macOS hosts - including the native one, which is what
+`examples/main.cpp` actually uses there - resolving them from
+`[NSApp modalWindow]`. Cancel goes through the panel's own `-cancel:`; confirm
+cannot, because modern NSSavePanel runs out of process and `-ok:` raises "not
+implemented", so confirm ends the modal session with `NSModalResponseOK` and
+the helper reads `[panel URL]` as it would after a click. Negative-probed:
+disabling the completion pass fails 3 checks. The win32 and Linux paths are
+inspection only - no MSVC, and no X11/Cairo/D-Bus/pkg-config on this machine.
+
+Two things the harness itself caught, neither of which inspection would have:
+`/tmp` is a symlink to `/private/tmp` and AppKit canonicalises the panel's
+`directoryURL` at a moment of its own choosing, so the original literal
+path comparisons were passing by luck (now `realpath`-based, asserting *same
+directory, same leaf*); and the drawn browser had a **folder-picker dead end** -
+a directory with no subdirectories left no row selectable, so OK never
+enabled and Cancel was the only way out (folder mode with nothing selected now
+picks the folder currently open).
+
+Also implemented rather than documented away: the drawn browser **asks before
+overwriting**. The API promises the prompt is default-on, and shipping a path
+where it silently does not happen is a data-loss footgun. It is an in-window
+overlay (scrim + panel, non-destructive answer on both Enter and Esc, wheel
+absorbed) rather than a nested `run_message_box`, because that helper disables
+a `LinuxWindow*` owner and the browser's X window is not one - a nested box
+would leave the browser clickable underneath.
+
+**4.3 REVIEW FOLLOW-UP.** The fable review found 11 issues; 7 confirmed, and
+the two that mattered were both in the Linux path inspection had signed off on.
+
+**A folder-picker double-click returned a path the user never chose.**
+`activate_row` had no `dir_mode` guard on its non-directory branch, so
+double-clicking one of the greyed, explicitly-unpickable file rows set
+`done = true`; `collect_result`'s "nothing selected -> pick cwd" fallback (added
+in the *first* pass to fix a different dead end) then handed back the current
+directory as a successful pick. Two fixes composing into a bug neither had
+alone - the exact failure mode a reviewer catches and an author does not.
+
+**The primary Linux path silently ignored the documented completion rule.** The
+portal has no `SetDefaultExtension` equivalent and a GTK-style backend does not
+append the active filter's extension, so `save_file("lead")` under
+`Presets (*.preset)` returned `.../lead` on a normal Linux desktop. win32,
+macOS and the *drawn browser* all completed correctly, which is precisely why it
+was invisible: every path I could reason about locally was right. Now applied in
+`platform_file_dialog` after a portal save.
+
+The rest, all real: **win32 reported every `Show()` failure as "user cancelled"**
+(0), so a bad owner HWND suppressed the client's fallback path entry that -1
+exists to trigger - now keyed on `ERROR_CANCELLED`. **win32 completed against
+the *default* filter rather than the active one**, so "All files" as default plus
+a user-switched "Presets" combo returned no extension - now reads
+`GetFileTypeIndex` after `Show`. **`default_filter` selected the wrong filter**
+whenever `parse_filters` dropped a malformed entry ahead of it (index 2 of
+{bad,B,C} picked B, not C) - `FileFilter` now carries `source_index` and
+`clamp_default_filter` matches on it. **The list's bottom ~18 px dead strip**
+mapped to a row `render` never drew, so a click there selected - or
+double-click-activated - an invisible entry. **Double-click state survived
+navigation**, so a single click after entering a directory could count as the
+second click of a double. **The overwrite overlay was mouse-only** - Enter and
+Esc both answered "Cancel" and nothing reached "Replace", so a keyboard-driven
+user could never overwrite a file; it now has a focus index (Tab / arrows,
+starting on the safe answer). And **`XLookupString` returns Latin-1, not UTF-8**,
+so typing any accented character put a bare 0xA0-0xFF byte into the name and
+returned a path that was not valid UTF-8 - the one thing `notify.h` promises
+about it; now transcoded.
+
+Also corrected: three comments that described behaviour the code does not have
+(the `.bashrc` completion rationale asserted the opposite of the shipped and
+tested result; the portal header claimed only "cancelled" stops the
+fall-through when `response == 2` does too - and the "the chooser was on screen"
+justification for that is an assumption the spec does not support, now stated as
+the judgement call it is; a macOS comment described an accommodation the caller
+forbids), the `NEUI_FD_NO_OVERWRITE_PROMPT` no-op list (the Linux *portal* also
+cannot honour it), the `0` return's meaning (it also covers a confirmed pick the
+host could not resolve to a path), and a likely GCC `-Wformat-truncation` in the
+new example code.
+
+**One coverage gap the reviewer was right about**: every open panel in the
+harness was *cancelled*, so `[panel URLs]` and the per-path callback fan-out had
+never executed on any platform - "drives real modal panels end to end" was true
+of save only. Now covered by a confirmed folder pick (the one open flavour whose
+result can be produced without clicking a real file row), negative-probed:
+disabling the URLs loop fails 2 checks. 38 harness checks, 434 Tier-1 cases.
+
+Two of the three uncompilable files changed here, so all three stub-header parse
+checks were re-run: clean under `-Wall -Wextra`. Worth noting what that exercise
+is and is not - it caught nothing this round, but it is the only thing standing
+between a typo and a broken Windows or Linux build, and it verifies every symbol
+referenced is one I accounted for (it flagged `XK_Tab` / `XK_space` /
+`GetFileTypeIndex` / `ERROR_CANCELLED` as unaccounted-for the moment I used
+them). It cannot verify real API signatures.
+
+- **4.3 — file dialog (his #10).** Append `open_file` / `save_file` to
+  `NEUI_API_NOTIFY` alongside `message_box`: filter list, initial dir/name,
+  multi-select flag, returns paths. `IFileDialog` on win32, `NSOpenPanel` /
+  `NSSavePanel` on macOS, XDG portal on Linux (D-Bus is already an optional
+  dep via `NEUI_HAS_DBUS`) with a neui-drawn fallback when absent — same
+  graceful-degradation shape as the existing message box.
+
+### Wave 5 — xpl partial repaint
+
+**MEASURED FIRST, per this plan's own instruction - and the number changes the
+recommendation.** `tests/repaint_bench.cpp` (new, xpl host, built not
+ctest-registered) times one full-frame repaint of an NxN CUSTOMDRAW mesh
+against a 60 Hz budget. Apple M-series, Release, macOS / CG backend:
+
+| CUSTOMDRAW widgets | ms per full repaint | % of a 60 Hz frame | fps ceiling |
+|---|---|---|---|
+| 100  | 0.84  | 5 %  | ~1200 |
+| 400  | 3.33  | 20 % | ~300  |
+| 900  | 8.44  | 51 % | ~118  |
+| 1600 | 13.73 | 82 % | ~73   |
+
+**A 100-widget CUSTOMDRAW frame repaints entirely in 5 % of a 60 Hz budget.**
+Cost is linear in widget count, and partial repaint only starts to matter
+somewhere past ~900 widgets - far above any realistic plugin UI.
+
+**Scope that honestly: this is one backend on one machine.** The result is a
+property of the *backend*, not of neui, and only macOS / CoreGraphics was
+measured. It answers the granularity question **for GPU-backed CG**; it does
+not answer it for software Cairo on Linux, where `begin_frame` clears the whole
+surface and `end_frame` blits it through XShm, so cost scales with **pixels** as
+well as with widget count and a large window at high DPI can dominate. The
+benchmark is now wired into the Linux test block (`tests/CMakeLists.txt`, the
+`UNIX AND NOT APPLE` branch) using the same source, so re-checking it there is
+a `cmake --build` away on any X desktop - that number is the one still missing,
+and it is the one that could change the recommendation. Windows is worse than
+missing: the D2D backend presents with a sync interval of 1, so this loop would
+report ~16.7 ms/frame regardless of true cost - the vsync period, not a
+measurement. The benchmark header says all of this so nobody quotes the macOS
+figure as a cross-platform fact.
+
+Two further findings that redirect the effort:
+
+- **Release ≈ Debug** (0.86 vs 0.93 ms at 100 widgets). neui's own paint walk
+  and event dispatch are *not* the cost; the platform draw calls are. So a
+  dirty-rect optimisation would remove platform calls, not framework overhead -
+  there is no cheap C++ win hiding here.
+- **Text is ~58 % of a repaint** (0.49 ms of 0.83 ms at 100 widgets; shapes are
+  the other ~42 %). If anything deserves optimising first it is text, not the
+  widget walk - a per-widget cached text layout would buy more than partial
+  repaint does at every widget count below ~900. Note this is a **lower bound**:
+  every cell draws the same short string at the same size, which is the best
+  case for the platform glyph cache, so a real UI with varied labels pays more.
+
+Known biases, all disclosed in the benchmark header rather than left for a
+reader to discover: the text figure is a floor (glyph-cache best case); the
+900/1600-widget rows may be *understated* because the frame exceeds the screen
+and the WM clips some fills away (text layout cost is clip-independent, fills
+are not); each figure is a single timed window with no variance, so differences
+under ~20 % are noise; and "% of a 60 Hz budget" is generous for an embedded
+plugin, which shares that budget with the DAW and with other instances.
+
+**One real bug the benchmark found on its first run**, unrelated to perf:
+`widgets->invalidate()` on a **top-level frame was a silent no-op**.
+`w_invalidate` resolved the target through `find_parent_native_handle`, which
+walks *parents only* - so a client asking for "repaint everything" the obvious
+way (invalidate the APPWINDOW / PLUGWINDOW) got nothing at all, with no error.
+The documented contract only excuses a no-op before `show()` or for a widget
+that does not exist. Fixed in `w_invalidate` (own handle first, then
+ancestors') rather than in `find_parent_native_handle`, whose other callers
+genuinely mean the *containing* frame - a DIALOG asking that question means its
+owner, not itself. Worth noting the benchmark caught this because it measured
+zero paints where it expected 100; no test covered invalidating a frame, and
+the benchmark's warm-up now hard-fails on it, which is the only guard there is.
+
+The **same blind spot sat in all four attribute setters** (`a_set_int` /
+`_float` / `_string` / `a_remove`), which shared an `if (!wd.is_frame())` gate
+over `find_parent_native_handle`. The reasoning in the comment - "frames handle
+their own side effects" - is true of the size constraints and the window icon
+but *not* of the frame's own paint-time attrs: `Session::paint_frame` reads
+`NEUI_ATTR_BACKGROUND` off the frame at clear time, so changing a window's
+background colour at runtime left it stale until some unrelated repaint. All
+four now route through one `invalidate_owning_frame()` helper that checks the
+widget's own handle first, which also removes four copies of the same block.
+(Found by the reviewer as an adjacent residual, not by the benchmark.)
+
+**Recommendation: bank the measurement and do NOT build the dirty-rect
+machinery yet.** Beyond the payoff being ~0 at realistic widget counts, the
+implementation is not the small change the original bullet implies:
+`begin_frame` clears the whole surface on every backend, so a clipped repaint
+needs a clipped clear plus a guarantee that the previous frame's pixels
+persisted - and that guarantee differs per backend (Cairo renders into a
+retained in-memory image and blits, so it holds; CG's context lives only for
+the duration of `drawRect:` and AppKit's own clip already narrows it; D2D
+depends on the present model). It also needs the accumulated dirty rect
+reconciled with the platform's *own* damage region, or a genuine expose after
+occlusion paints only the dirty part and leaves stale pixels. **50**
+`platform_invalidate` call sites (37 in `host.cpp`, 13 in `widgets.cpp`) would
+each need classifying as rect-or-full, plus the ~11 direct `setNeedsDisplay:`
+sites in `platform_macos.mm` and the `needs_paint` flags in
+`platform_linux.cpp` that bypass the seam entirely. That is a real project with
+a real stale-pixel risk, in exchange for headroom that is already there.
+
+The original plan text follows, unchanged, for when a case for it does appear
+(a very large grid, or a low-power target where 5 % becomes 25 %).
+
+
+
+Not in his list; it is the perf item that actually applies to him.
+
+- Accumulate a per-frame dirty rect union from `w_invalidate`
+  (`hosts/crossplatform/widgets.cpp:692`) instead of invalidating the whole
+  frame, pass it to `platform_invalidate`, and have `Session::paint_frame`
+  `push_clip` it and skip subtrees whose `abs_*` rect misses it.
+- Keep the existing "one repaint per event-loop tick at most" coalescing
+  promise; this only narrows *what* gets painted.
+- Measure before and after with a 100-widget CUSTOMDRAW grid at 60 Hz — which
+  doubles as **his Phase 0a measurement, on the host he should actually use**.
+  Worth running early and handing him the number: it may well retire his
+  granularity anxiety outright.
+
+### Wave 6 — accessibility (his #12) — **COMPLETE** (2026-08-11)
+
+The one real programme. Build it in the **xpl host**, once.
+
+> **SHIPPED.** `NEUI_API_A11Y` + the portable node model + the xpl adapter + the
+> macOS NSAccessibility and win32 UI Automation providers are all in. macOS is
+> verified against VoiceOver; win32 is verified programmatically through the real
+> UIA client stack but **no screen reader has heard it**; **Linux (AT-SPI) was split
+> out into its own future wave.** Status table: `docs/accessibility.md`.
+>
+> **The worked-out plan now lives in `plans/accessibility.md`** — read that, not
+> this section, before implementing. It is implementation-ready where the sketch
+> below is a scoping outline, and it **supersedes** it on seven points (its §9
+> lists them): the shared model takes POD input rather than walking
+> `Tree<WidgetData>`; nodes are `{widget, sub_kind, sub_index}` because LISTBOX /
+> TREEVIEW / GRID / MENUBAR sub-elements are model state, not widgets; macOS
+> lands before win32 for verifiability; a new 6.0 prerequisite phase fixes
+> paint-dependent `abs_x/abs_y` and cross-frame Tab; AT-SPI is proposed as its
+> own wave; `set_labelled_by` is added; and value formatting is specified
+> (`NEUI_PARAM_VALUE` is normalized and useless to a screen reader on its own).
+
+- **6.1 — client seam.** `NEUI_API_A11Y` (`include/neui/d/a11y.h`): per-widget
+  `set_role` (button / slider / knob-as-slider / checkbox / text / list /
+  group / static-decorative), `set_name`, `set_description`, plus value
+  reporting for continuous controls (min / max / current / display string) and
+  a state mask (disabled / focused / selected / expanded / readonly). Default
+  role derives from widget type, so a client that declares nothing still gets
+  a usable tree; `static-decorative` is the opt-**out** for the parent-painted
+  decoration in his §5.
+- **6.2 — the shared provider model.** A portable `hosts/shared/a11y_tree.h`
+  that walks the widget tree once and yields nodes: id, parent, ordered
+  children, bounds (from `abs_x/abs_y` + size), role, name, value, state,
+  tab index (reusing `collect_tab_stops` ordering, `host.cpp:2283`). This is
+  Tier-1 testable with no platform code — the same trick `hosts/shared/*.h`
+  already uses everywhere.
+- **6.3 — win32 provider.** `WM_GETOBJECT` on the frame HWND, UIA fragment
+  provider over the shared model (`IRawElementProviderFragmentRoot` on the
+  frame, `IRawElementProviderFragment` + `IValueProvider` /
+  `IRangeValueProvider` / `IInvokeProvider` per node), and
+  `UiaRaiseAutomationEvent` on focus / value change.
+- **6.4 — macOS provider.** `NSAccessibility` overrides on the frame view
+  returning `NSAccessibilityElement` children from the shared model, with
+  `NSAccessibilityPostNotification` on focus / value change.
+- **6.5 — Linux.** AT-SPI over D-Bus, gated on `NEUI_HAS_DBUS`, graceful no-op
+  when absent. Lowest priority of the three.
+- **6.6 — focus parity prerequisites.** Accessibility needs deterministic
+  focus, so fold in the open items: KNOB is not a keyboard tab-stop on macOS
+  and macOS Tab participation follows Full Keyboard Access
+  (`docs/deferred-issues.md:6-7`). On xpl this is our own traversal, so it is
+  tractable; on the native hosts it is OS policy. Another reason 6.x lives in
+  xpl.
+- Retire the "Tier B focus parity" line (`docs/deferred-issues.md:8`) when this
+  lands — it and #12 are the same request from two directions, exactly as he
+  observed.
+
+### Explicitly not doing now
+
+- **#11 — render-passive child widgets in the win32 native host.** Correct
+  analysis, wrong host for this use case. The xpl host already has the
+  architecture. Revisit only if a standalone native-host app needs many painted
+  widgets; if it ever happens, his §9.11 sketch (shared device context, per-child
+  `{offset, size, clip}`, one `Present` per frame, children no-op'ing
+  `WM_PAINT`/`WM_ERASEBKGND`, and the `WS_CLIPCHILDREN` subtlety) is the right
+  spec and should be kept.
+- **Custom components inside popup menus.** Out of scope, per §2.3 and his own
+  recommendation.
+- **UI scale on the native hosts.** Wave 3 is xpl-only by design.
+
+---
+
+## 4. Sequencing against his phases
+
+| His phase | What he needs from us | Ready when |
+|---|---|---|
+| 0a — measure the widget ceiling | Nothing. Re-target the measurement at the xpl host; we will run it as Wave 5's baseline and hand him the number. | now |
+| 0b — prove the `Graphics` shim | Wave 1 (metrics + alignment, round rect / ellipse / line). Everything else in the shim already maps. | Wave 1 |
+| 1 — the `Component` adapter | Wave 0 (RESIZE on xpl macOS is the one that would actually break him). | Wave 0 |
+| 2 — the neui asks | Waves 2, 3, 4. | Waves 2-4 |
+| 3 — two-filters | Embedding: **already shipped**. Plus Wave 4.2 (preset menu) and 4.3 (patch load/save). | Wave 4 |
+| accessibility parity with JUCE | Wave 6. | Wave 6 |
+
+## 5. House rules that apply to this work
+
+- Every new `NEUI_ATTR_*` needs a `k_well_known_attrs` row
+  (`hosts/shared/attrs.h`) — see `docs/attributes.md`.
+- Public struct evolution is **vtable-append only**; do not reorder slots.
+  `neui_event_wheel_t` (0.4) is a payload struct, not a vtable — growing it
+  still requires all hosts to rebuild, so land it as one commit across every
+  host.
+- Portable logic goes in `hosts/shared/*.h` with Tier-1 tests in `tests/`
+  (this is what makes 6.2 testable without a screen reader).
+- Keep the build warning-clean at `/W4` / `-Wall -Wextra`.
+- Document each landed item in the matching `docs/` file and prune the
+  corresponding `docs/deferred-issues.md` entry.

@@ -65,6 +65,9 @@ extern "C" {
     NEUI_EVENT_METRICS_CHANGED          = DEF_WIDGET_EVENT(0xA),// platform layout metrics changed (iOS Dynamic Type / rotation / safe-area)
     NEUI_EVENT_GESTURE_BEGIN            = DEF_WIDGET_EVENT(0xB),// user grabbed a value control (see neui_event_gesture_t)
     NEUI_EVENT_GESTURE_END              = DEF_WIDGET_EVENT(0xC),// user released it (always paired with a BEGIN)
+    NEUI_EVENT_POPUP_DISMISSED          = DEF_WIDGET_EVENT(0xD),// a NEUI_W_POPUPSURFACE closed (see neui_event_popup_t)
+
+    NEUI_EVENT_TIMER                    = DEF_APP_EVENT(2),   // a NEUI_API_TIMER timer elapsed (session-scoped; see neui_event_timer_t)
 
     NEUI_EVENT_ITEM_SELECTED            = DEF_ITEM_EVENT(1),  // fired when selection changes in listbox/combobox
 
@@ -110,13 +113,16 @@ extern "C" {
     NEUI_CHECK_INDETERMINATE = 2,
   } neui_check_state_t;
 
-  // Bit values for neui_event_mouse_t::buttonmap. Numeric values match the
-  // Win32 MK_* constants so the win32 platform layer forwards wParam
-  // unmodified; other hosts populate the same bits explicitly.
-  // Note: NEUI_MK_ALT is not produced by the Win32 / current macOS layers
-  // today (Win32 MK_* has no ALT bit; the macOS host doesn't populate
-  // modifier bits at all). It is reserved so behavior handlers can opt
-  // into ALT-fine semantics when hosts later plumb it through.
+  // Bit values for neui_event_mouse_t::buttonmap and
+  // neui_event_wheel_t::buttonmap. Numeric values match the Win32 MK_*
+  // constants, but a host must still MASK rather than forward a raw wParam:
+  // Win32's MK_XBUTTON1 is 0x0020, which collides with NEUI_MK_ALT, and
+  // MK_XBUTTON2 (0x0040) is not in this enum at all. The per-OS translations
+  // in hosts/shared/{win32,macos,linux}/keys_*.h do the masking - use them.
+  // Note: NEUI_MK_ALT is not produced by any host layer today (Win32 MK_* has
+  // no ALT bit and the macOS / Linux layers do not populate it). It is
+  // reserved so behavior handlers can opt into ALT-fine semantics when hosts
+  // later plumb it through.
   enum {
     NEUI_MK_LBUTTON = 0x0001,
     NEUI_MK_RBUTTON = 0x0002,
@@ -153,6 +159,13 @@ extern "C" {
   // neui_event_mouse_t): relative to the widget named by .widget, which on a
   // bubbling wheel is the actual recipient (an inner widget or the scrolling
   // ancestor that consumed it).
+  // buttonmap carries the same NEUI_MK_* bits as neui_event_mouse_t, so a
+  // client can implement Shift-for-fine / Ctrl-for-page on the wheel without
+  // tracking key state itself. Note the platform layer may already have
+  // consumed Shift to synthesise a horizontal wheel (see is_horizontal above);
+  // when it does, is_horizontal = 1 AND NEUI_MK_SHIFT is set, so a handler
+  // that wants Shift purely as a fine modifier should check is_horizontal
+  // first.
   typedef struct neui_event_wheel
   {
     neui_widget_t widget;
@@ -160,6 +173,27 @@ extern "C" {
     int y;
     int delta;
     int is_horizontal;
+    uint32_t buttonmap;
+    // 1 when the OS ALREADY INVERTED this delta relative to the user's physical
+    // gesture - macOS "Natural scrolling", which is on by default.
+    //
+    // Why you may need it: for CONTENT scrolling the delta is right as delivered
+    // (moving the content with your fingers is the point of the preference), so a
+    // scrolling consumer should ignore this field. For a VALUE control there is no
+    // content to move and the user's mental model is the direction their fingers
+    // travelled - so a knob or fader wants `is_flipped ? -delta : delta`, or the
+    // same physical swipe raises the value with the preference on and lowers it
+    // with the preference off.
+    //
+    // NOT UNIFORM ACROSS PLATFORMS, and the field is named for what it can
+    // actually promise: 1 means "definitely inverted", 0 means "not inverted, OR
+    // this platform cannot tell". Only macOS can answer
+    // (NSEvent.isDirectionInvertedFromDevice). Windows applies the
+    // Precision-Touchpad "reverse scrolling direction" setting in the driver with
+    // no queryable API, and on Linux libinput applies natural-scroll in the input
+    // stack before XI2 valuators reach us - on both, a user who inverts scrolling
+    // system-wide inverts neui's value controls with it, and neui cannot know.
+    int is_flipped;
   } neui_event_wheel_t;
 
   // event_key for all events like keydown/keyup/emitted key
@@ -348,15 +382,38 @@ extern "C" {
   // when the Dynamic Type content-size category changes, or on rotation /
   // safe-area change. Desktop hosts do not fire this today (metrics are
   // static there). `widget` is the frame whose client should re-run its
-  // responsive layout; `ui_scale` is the new painted/text UI scale (the same
-  // value metrics_api->ui_scale returns), provided inline so a handler that
-  // only scales its own layout need not call back into the API.
+  // responsive layout; `ui_scale` is the new UI scale, inline so a handler need
+  // not call back into the API.
+  //
+  // CAUTION - two different scales reach this field, and they ask for OPPOSITE
+  // responses:
+  //   - iOS Dynamic Type (the value metrics_api->ui_scale returns): the client's
+  //     logical space is unchanged but default text got bigger, so a handler
+  //     that lays out by hand SHOULD re-scale.
+  //   - a frame's NEUI_ATTR_UI_SCALE zoom (crossplatform host): everything
+  //     already scales through the paint transform, so a handler MUST NOT
+  //     re-scale - doing so double-applies it.
+  // A handler that multiplies its layout by this value therefore breaks under
+  // zoom. Distinguish by source: the zoom is per-frame and readable from the
+  // frame's own attr, while metrics_api->ui_scale stays 1.0 on desktop.
   typedef struct neui_event_metrics
   {
     neui_widget_t widget;     // the frame
     float         ui_scale;   // new painted / text UI scale
   } neui_event_metrics_t;
 
+  // Timer-elapsed event (NEUI_API_TIMER, <neui/d/timer.h>). Deliberately the
+  // ONLY event with no `.widget`: a timer belongs to the session, not to a
+  // widget, and omitting the field keeps a handler from being written as though
+  // it did. Gate on `timer_id` instead - the same discipline, one field over.
+  //
+  // A tick that arrives late fires once rather than catching up on missed
+  // periods, so a slow handler cannot accumulate a backlog of its own events.
+  typedef struct neui_event_timer
+  {
+    uint32_t timer_id;        // the id add_timer returned
+    uint32_t interval_ms;     // the timer's configured interval (as clamped)
+  } neui_event_timer_t;
   // iOS environment change (NEUI_EVENT_IOS_ENVIRONMENT_CHANGED). Fired by the
   // two iOS hosts only, when something the NEUI_API_IOS interface reports has
   // moved: device orientation, Low Power Mode, thermal state, battery, one of
@@ -400,6 +457,20 @@ extern "C" {
     neui_widget_t page;
   } neui_event_tab_t;
 
+  // A NEUI_W_POPUPSURFACE closed (NEUI_EVENT_POPUP_DISMISSED). `widget` is the
+  // popup surface; `reason` is a neui_popup_dismiss_reason_t (see
+  // <neui/d/popup.h>). Fired for every close - host-driven (outside press,
+  // deactivation, owner moved, Escape) and client-driven (popup->close) alike -
+  // so a client has exactly one place to drop the state it opened the popup
+  // with. Purely a notification: the close has already happened and cannot be
+  // vetoed, because a popup that could refuse to close is a window stuck over
+  // someone's DAW. When a cascade closes, the deepest level is reported first.
+  typedef struct neui_event_popup
+  {
+    neui_widget_t widget;
+    uint32_t      reason;
+  } neui_event_popup_t;
+
   // Forward-declarations for the curated paint surface. Clients that
   // handle NEUI_EVENT_WIDGET_PAINT include <neui/d/painter.h> (or just
   // <neui/neui.h>) to call painter_api->* functions on the handle.
@@ -425,9 +496,22 @@ extern "C" {
     neui_widget_t              widget;
     struct neui_painter_api*   painter_api;  // curated drawing surface
     struct neui_painter*       p;             // opaque handle (paint-call scoped)
-    float                      width;         // widget size, logical pixels
+    float                      width;         // widget size (see `scale`)
     float                      height;
     bool                       focused;
+    // Physical pixels per unit drawn: the monitor's DPI ratio times the
+    // frame's NEUI_ATTR_UI_SCALE zoom. 1.0 on a 96-DPI display at 100 % zoom.
+    //
+    // width/height are LOGICAL pixels by default and the framework scales what
+    // you draw - so ignoring `scale` entirely is correct, and your rendering
+    // follows DPI and zoom for free. Read it when you need the device grid:
+    // to keep a hairline exactly one physical pixel (`1.0f / scale` units
+    // wide), to pick a bitmap or bake resolution, or to snap to whole pixels.
+    //
+    // With NEUI_ATTR_PAINT_DEVICE_PIXELS set on the widget, width/height
+    // instead arrive already multiplied by the zoom and one unit is one
+    // device-side pixel - see that attribute in <neui/d/attrs.h>.
+    float                      scale;
   } neui_event_paint_t;
 
   typedef struct neui_event {
@@ -455,6 +539,8 @@ extern "C" {
       neui_event_scroll_t             scroll;
       neui_event_tab_t                tab;
       neui_event_metrics_t            metrics;
+      neui_event_timer_t              timer;
+      neui_event_popup_t              popup;
       neui_event_ios_env_t            ios_env;
     } data;
 

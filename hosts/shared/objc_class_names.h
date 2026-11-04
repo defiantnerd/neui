@@ -35,6 +35,8 @@
 #define NEUIViewController          NEUI_OBJC_NAME(NEUIViewController)
 #define NEUIWindowDelegate          NEUI_OBJC_NAME(NEUIWindowDelegate)
 #define NEUIMenuTarget              NEUI_OBJC_NAME(NEUIMenuTarget)
+#define NEUIA11yElement             NEUI_OBJC_NAME(NEUIA11yElement)     // a11y_macos.mm
+#define NEUIA11yProvider            NEUI_OBJC_NAME(NEUIA11yProvider)
 
 // native macOS host (hosts/macos)
 #define NEUINativeWindowDelegate    NEUI_OBJC_NAME(NEUINativeWindowDelegate)

@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>   // push_font_styled takes a bool
 #include "api.h"
 #include "gradient.h"
 #include "path_style.h"
@@ -336,6 +337,36 @@ typedef struct neui_render_backend {
   void (NEUI_ABI *stroke_path_gradient)(neui_render_ctx_t ctx, float stroke_width,
                                         const neui_gradient_t* grad,
                                         const neui_stroke_style_t* style);
+
+  // Vertical metrics of the ACTIVE font (family + weight from the font stack,
+  // see push_font) at `font_size`, in logical pixels. Any out-pointer may be
+  // NULL. Unlike measure_text these are properties of the FONT, not of a
+  // string, so no text is passed.
+  //
+  // `line_height` is specifically the per-line advance THIS backend uses when
+  // draw_text lays out its block, so a caller can reproduce draw_text's own
+  // vertical placement exactly: the block is `line_height * line_count` tall
+  // and is centred in the rect. Backends legitimately differ in whether that
+  // includes leading (CoreGraphics counts it, cairo does not) - each reports
+  // what its own draw_text uses, which is what makes the reproduction exact.
+  //
+  // This is the only text information the client could not reach before: it is
+  // what makes explicit top / bottom alignment and baseline-accurate layout
+  // possible on top of draw_text's fixed vertical centring.
+  void (NEUI_ABI *font_metrics)(neui_render_ctx_t ctx, float font_size,
+                                float* ascent, float* descent,
+                                float* line_height);
+
+  // push_font plus an italic axis. push_font(family, weight) is exactly
+  // push_font_styled(family, weight, false), and both pop via pop_font.
+  //
+  // Italic is resolved, never synthesised: the backend asks the platform for a
+  // real italic face in the family and KEEPS THE UPRIGHT FONT if there is none,
+  // rather than shearing the glyphs. That matches the font system's
+  // "push, not pull" policy - a client that needs italic ships an italic face.
+  void (NEUI_ABI *push_font_styled)(neui_render_ctx_t ctx,
+                                    const char* family_utf8,
+                                    int weight, bool italic);
 
 } neui_render_backend_t;
 

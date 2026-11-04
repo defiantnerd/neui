@@ -2,6 +2,10 @@
 
 #include <stdint.h>
 #include "api.h"
+// neui_widget_t (every entry point here is anchored to a frame). Pulled in
+// directly rather than relying on neui.h's include order, so this header is
+// usable standalone - hosts/shared/file_dialog_model.h includes just this one.
+#include "events.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +55,72 @@ extern "C" {
 #define NEUI_ID_TRYAGAIN  10
 #define NEUI_ID_CONTINUE  11
 
+// ---------------------------------------------------------------------------
+// File dialogs (open_file / save_file)
+// ---------------------------------------------------------------------------
+
+// One entry in the dialog's file-type list.
+//
+// `label` is what the user reads ("PNG images"); `patterns` is a
+// semicolon-separated glob list ("*.png;*.PNG"). Only `*` (any run,
+// including empty) and `?` (exactly one character) are special - the
+// matcher is deliberately simpler than a shell glob (no character
+// classes, no brace expansion) because every native dialog reduces the
+// pattern to an extension set anyway. Matching is ASCII
+// case-INSENSITIVE on every platform, so "*.png" also accepts "IMG.PNG"
+// on Linux; this is a deliberate divergence from the case-sensitive
+// filesystem, matching what users expect of a file-type filter.
+//
+// `"*"` (or `"*.*"`) means "every file" and is the conventional way to
+// offer an escape hatch alongside the typed entries.
+typedef struct neui_file_filter
+{
+  const char* label;
+  const char* patterns;
+} neui_file_filter_t;
+
+// open_file / save_file flags.
+//
+// MULTISELECT is open-only (save_file ignores it - a save dialog has
+// exactly one destination). DIRECTORY makes the dialog pick an existing
+// folder rather than a file; it is open-only, and the filter list is
+// ignored while it is set. NO_OVERWRITE_PROMPT is save-only and turns
+// OFF the default "file exists, replace it?" confirmation. SHOW_HIDDEN
+// asks for dot-files to be listed; native dialogs may ignore it (the
+// user's own shell setting wins on macOS and Windows), so treat it as a
+// hint rather than a guarantee.
+#define NEUI_FD_MULTISELECT          0x0001u
+#define NEUI_FD_DIRECTORY            0x0002u
+#define NEUI_FD_NO_OVERWRITE_PROMPT  0x0004u
+#define NEUI_FD_SHOW_HIDDEN          0x0008u
+
+// Dialog description. Every pointer field may be NULL, in which case the
+// host default applies. Zero-initialise and set only what you need:
+//
+//   neui_file_filter_t f[] = { { "Presets", "*.preset" }, { "All files", "*" } };
+//   neui_file_dialog_t d = {0};
+//   d.title = "Load preset"; d.filters = f; d.filter_count = 2;
+//
+// `initial_name` is the pre-filled file name (save_file) and is ignored
+// by open_file. `default_filter` indexes `filters`; out-of-range values
+// clamp to 0.
+typedef struct neui_file_dialog
+{
+  const char* title;               // NULL = host default caption
+  const char* initial_dir;         // NULL = host default / last used
+  const char* initial_name;        // save_file only
+  const neui_file_filter_t* filters;
+  uint32_t    filter_count;
+  uint32_t    default_filter;      // index into filters
+  uint32_t    flags;               // NEUI_FD_* combination
+} neui_file_dialog_t;
+
+// Per-path result callback. Invoked once per chosen path, in the order
+// the dialog reports them, BEFORE open_file / save_file returns. `path`
+// is an absolute UTF-8 filesystem path owned by the framework and valid
+// only for the duration of the call - copy it if you need to keep it.
+typedef void (NEUI_ABI *neui_file_path_cb)(void* userdata, const char* path);
+
 typedef struct neui_notify_api
 {
   uint32_t neui_version;
@@ -95,6 +165,52 @@ typedef struct neui_notify_api
                                neui_widget_t parent_window,
                                const char* text, const char* caption,
                                uint32_t flags);
+
+  /* ---- appended in a later version: null-check before calling ---- */
+
+  // Run a modal "open" dialog owned by `parent_window` (APPWINDOW,
+  // PLUGWINDOW, or DIALOG). Blocks the calling thread until the user
+  // confirms or cancels - the same modal contract as message_box - then
+  // invokes `cb` once per chosen path before returning.
+  //
+  // Returns the number of paths delivered: 0 = the user cancelled, N>0 =
+  // that many callbacks fired, -1 = the dialog could not be shown at all
+  // (bad widget, cross-session handle, host without a file-dialog
+  // surface). Distinguishing -1 from 0 matters: a client that wants to
+  // offer its own path entry as a fallback should do so only on -1.
+  // Passing a NULL `cb` still runs the dialog and still returns the
+  // count, which is a cheap way to ask "does this host have a file
+  // dialog?" - but it also means the user's choice is discarded, so
+  // prefer feature-detecting on the slot being non-NULL.
+  //
+  // Per host: win32 = IFileDialog (IFileOpenDialog); macOS = NSOpenPanel
+  // run modally; Linux = the XDG desktop portal when D-Bus and a portal
+  // implementation are both present, otherwise a neui-drawn browser over
+  // the Cairo backend (same graceful degradation as the message box, and
+  // the portal falls through to it on any error). The null platform and
+  // iOS return -1.
+  int  (NEUI_ABI *open_file)(neui_session_t session,
+                             neui_widget_t parent_window,
+                             const neui_file_dialog_t* desc,
+                             neui_file_path_cb cb, void* userdata);
+
+  // Run a modal "save" dialog. Same contract and return values as
+  // open_file, except that at most one path is ever delivered (so the
+  // return is 0 or 1, or -1 for unsupported) and the path names a file
+  // that may not exist yet - the client creates it.
+  //
+  // The chosen name is completed against the active filter when the user
+  // typed no extension: picking "Presets (*.preset)" and typing "lead"
+  // yields ".../lead.preset". A name that already carries an extension
+  // is left alone, even if it does not match the filter.
+  //
+  // Per host: win32 = IFileSaveDialog; macOS = NSSavePanel; Linux =
+  // portal SaveFile or the neui-drawn browser. Overwrite confirmation is
+  // on by default (NEUI_FD_NO_OVERWRITE_PROMPT turns it off).
+  int  (NEUI_ABI *save_file)(neui_session_t session,
+                             neui_widget_t parent_window,
+                             const neui_file_dialog_t* desc,
+                             neui_file_path_cb cb, void* userdata);
 } neui_notify_api_t;
 
 #ifdef __cplusplus
