@@ -1,0 +1,450 @@
+# Handoff: neui-on-LVGL host - Approach C prototype & evaluation
+
+Status: **EXPERIMENTAL - built and evaluated 2026-07-30, work PAUSED pending real hardware.**
+All milestones (M0-M3) are done and the results are appended at the bottom of this file, but this
+was always a **prototype + evaluation, not production**: the host is opt-in
+(`-DNEUI_WITH_LVGL=ON`), several features are stubbed, and the two remaining items that matter (a
+per-widget appearance cache and an embedded display driver / VGLite path) cannot be judged on a
+desktop stand-in. They resume when target hardware is available.
+Reader-facing status + build instructions: `docs/host-lvgl.md`.
+Audience for the rest of this file: whoever picks that work up.
+
+## Goal (what "done" means for this handoff)
+
+Get neui's **crossplatform (xpl) host** rendering through **LVGL** using the retained-`lv_obj`
+approach (Option C), **running on Windows on this dev machine**, so we can measure real FPS/CPU
+and refine the performance estimate. The concrete deliverable is a running `neui_lvgl_example`
+plus reported measurements (see Milestone 3). It does not need to be complete or embedded-ready.
+
+## How to work (important)
+
+- **Ask, don't guess.** When you reach an item in "Open questions" below (or any other real
+  fork), stop and ask the user with AskUserQuestion. Ask early rather than assuming.
+- **Read first, in order:** this repo's `CLAUDE.md` (auto-loaded); **`lvgl.txt` section 1** (the
+  primitive-by-primitive backend spec + the D/W/G gaps - this is the real spec for the backend
+  work) and **section 6** (why Option C); `docs/rendering-and-assets.md` (the
+  `neui_render_backend_t` contract); `docs/host-linux.md` (the closest platform model - it draws
+  its own chrome); `plans/lvgl-port.md` (feature comparison + impedance mismatches);
+  `include/neui/d/renderer.h` and `painter.h` (the interfaces you implement/consume).
+- **Measure in Release / RelWithDebInfo, not Debug** - Debug FPS is meaningless for estimation.
+- Keep the build warning-clean (MSVC `/W4`, `C4100` suppressed), per `CLAUDE.md`.
+
+## Why Option C (brief; full detail in lvgl.txt sec 2 + 6)
+
+neui's xpl host is redraw-the-world immediate mode - whole-window invalidation, full surface
+clear, full recursive tree walk, no dirty-rect, no widget cache - which is the dominant cost on
+constrained hardware. Option C backs each neui widget with a **passive** `lv_obj` so LVGL owns
+invalidation / dirty-rect / compositing while neui still owns widget logic, input, and pixels
+(each object's draw event calls neui's existing per-widget paint). This prototype validates the
+mechanism and measures it. (Rejected alternatives: A = one flat canvas, neui keeps whole-window
+redraw, inherits the problem; B = map neui widgets onto `lv_button`/`lv_slider`/..., which
+discards neui's widget set and hits severe feature gaps.)
+
+## Architecture - get this framing right
+
+LVGL is **not** a new registered host. It is three things:
+1. a new backend `backends/lvgl/` -> `neui-backend-lvgl` implementing `neui_render_backend_t`;
+2. a new xpl platform `hosts/crossplatform/platform_lvgl.cpp` implementing `xpl_host::*`;
+3. **conditional retained-mode logic inside the shared xpl host** (`host.cpp`), active only on the
+   LVGL platform.
+
+The registered host stays `neui.host.crossplatform` (`neui_register_xplhost`). Backend + platform
+are paired per build, exactly like Linux = `neui-backend-cairo` + `platform_linux.cpp`. Do not
+invent a new host-registry id.
+
+## Build / CMake requirements (from the user)
+
+- Gate everything behind a CMake option: `option(NEUI_WITH_LVGL "Build the LVGL host + backend" OFF)`.
+- When ON, pull LVGL via **FetchContent from git main** (`GIT_REPOSITORY https://github.com/lvgl/lvgl.git`,
+  `GIT_TAG master`); version pin is deferred - note it as a follow-up. Provide a repo-local
+  `lv_conf.h` (via `LV_CONF_PATH` or `LV_CONF_INCLUDE_SIMPLE`) enabling: a scalable font engine
+  (see Open questions), `LV_USE_PERF_MONITOR`, and the Windows display driver.
+- **Configuration must FAIL (`message(FATAL_ERROR ...)`) if the LVGL host cannot run on the build
+  platform** - no silent fallback. On this Windows machine it must succeed.
+- Windows display + input: prefer LVGL's native Windows backend (`LV_USE_WINDOWS`) to avoid an SDL
+  dependency (SDL2 is the fallback - ask if you'd rather). Drive `lv_tick` + `lv_timer_handler`.
+- Add a prototype example target `neui_lvgl_example` that builds a representative measurement
+  screen (Milestone 3) and uses the crossplatform host (select via
+  `neui_get_api("neui.host.crossplatform")`, or link only the xpl host in this target). Existing
+  builds must be unaffected when `NEUI_WITH_LVGL=OFF` (the default).
+
+## The core mechanism (Phase 3) - the #1 risk, spike it FIRST
+
+**M0 spike (throwaway):** prove neui's backend can render into an LVGL per-object draw event.
+In an `lv_obj`'s draw event (v9: `LV_EVENT_DRAW_MAIN`, get the target via `lv_event_get_layer(e)`
+-> `lv_layer_t*`; verify against current main), wrap that layer as a `neui_render_ctx` and have
+`neui-backend-lvgl` issue a `fill_rect` + `draw_text` at the object's coords. If clean, C is
+viable. If not, **ask the user** before proceeding (documented fallback: draw all widgets into one
+full-screen canvas = Approach A, still useful for estimation).
+
+Then build the retained layer:
+- **Mirror tree:** each `WidgetData` gets a matching `lv_obj` (store the handle on `WidgetData` or
+  a side map keyed by widget id). Parent obj = parent widget's obj; z-order follows sibling order
+  (already matches neui's paint + hit-test order). Lifecycle choke points: `w_create` ->
+  `Tree::add_child` and `w_destroy` -> `Tree::remove` (`widgets.cpp:120-161, 166, 247`).
+- **Per-object draw:** on the widget obj's draw event, bind the ctx to the event layer, set the
+  palette override, translate to the object's content origin, and call
+  `wd.paint(backend, ctx, is_focused)` then `paint_after_children`. Precedent: `CustomDrawWidget::paint`
+  already isolates via `translate(x,y)` + `push_clip` + a `neui_painter` (`host.cpp:2813-2855`).
+- **Move parent-applied mechanics** out of `paint_widgets_recursive`/`paint_frame` onto the obj
+  layer: SECTION clip+scroll (`host.cpp:2133-2165`), disabled-dim alpha (`2107-2110`), the
+  `paint_after_children` compound pass (`2161-2163`). Keep abs-coord recompute (`2092-2093`) - it
+  is still needed for hit-testing.
+- **Per-widget invalidation:** reroute `w_invalidate` (`widgets.cpp:692-703`) and
+  `WidgetData::repaint()` (`host.cpp:1464-1470`) - today both collapse to whole-window
+  `platform_invalidate` - to `lv_obj_invalidate(<that widget's obj>)` on the LVGL platform.
+- **Geometry/visibility:** hook `w_set_pos`/`w_set_size`/`w_show`/`w_hide` (`widgets.cpp:382-410,
+  294/368`) plus the ad-hoc mutators (`TabViewWidget::apply_page_geometry` `host.cpp:1279-1282`;
+  the Windows WM_SIZE resize path) to move/resize/show the mirror obj. Reparenting: none exists
+  (`Tree` has add/remove only) - destroy+recreate is fine for the prototype.
+- **Overlays as LVGL top-layer objects**, not per-widget canvases: combo drop
+  (`host.cpp:3635-3665`), popup menu (`3918-...`), toast (`4869-...`). In-frame menubar
+  (`4301-...`) is Linux-only; on Windows the native menu path is used, so it is out of scope here.
+  Modal dialogs already map to separate native windows.
+- **Input stays neui's.** Keep `widget_at` / `dispatch_mouse_event` (`host.cpp:483-533,
+  2329-2351`); the LVGL indev feeds frame-local pointer/keys into `platform_lvgl`, which calls the
+  existing session methods. Keep the `lv_obj`s passive - do **not** enable LVGL's own
+  widget input/focus/scroll behaviours on them (except where you deliberately use obj scroll for
+  SECTION).
+
+## Backend scope for the prototype (lvgl.txt sec 1 is the full spec)
+
+- **Needed to render the example:** begin/end_frame + clear, `fill_rect`/`draw_rect`,
+  `draw_text`/`measure_text`, `push/pop_clip`, `push/pop_alpha`, `push/pop_font`, `draw_bitmap`,
+  and the **path API** (`begin_path`/`move_to`/`line_to`/`arc`/`close_path`/`fill_path`/`stroke_path`)
+  which the KNOB needs. `get_scale_factor`/`update_dpi` can return a fixed scale.
+- **Text** needs a scalable font engine for arbitrary sizes (Open question: FreeType vs Tiny TTF).
+- **Paths:** KNOB arcs must render for a meaningful measurement. A small scanline rasteriser or
+  LVGL's own arc/line primitives may suffice for the prototype; ThorVG/VGLite is the production
+  path (Open question). A minimal `fill_path` stub is OK to get first pixels, but land real KNOB
+  arcs before Milestone 3.
+- **Defer/stub:** offscreen surfaces, gradients, font registration, the filter graph. Compile out
+  DnD/clipboard/IME.
+
+## Milestones (each independently verifiable)
+
+- **M0 - Spike:** per-object draw-into-event bridge proven (throwaway code).
+- **M1 - Bring-up / baseline:** `NEUI_WITH_LVGL=ON` configures + builds on Windows; neui paints
+  the whole frame into a single LVGL surface (de-facto Approach A) in a window with working mouse
+  + keyboard. This is the measurement **baseline**.
+- **M2 - Option C:** retained `lv_obj` per widget + per-widget invalidation + overlays on the top
+  layer. Verify a hover / knob-drag invalidates **only that object's rect** (use
+  `LV_USE_REFR_DEBUG` / the perf monitor, or log invalidated area); an idle screen = **0 repaints**.
+- **M3 - Evaluation:** `neui_lvgl_example` renders a representative screen (buttons, labels, a
+  SECTION, an INPUTBOX, one or two KNOBs, a block of text, optionally a small GRID) with
+  `LV_USE_PERF_MONITOR` on. Record FPS + CPU for (a) idle, (b) a knob drag, (c) a full-screen
+  change, for **both M1 (baseline) and M2 (Option C)**, in Release/RelWithDebInfo. Report the
+  numbers back so we can refine the estimate.
+
+## Verification
+
+- Configure fails cleanly with `NEUI_WITH_LVGL=ON` on an unsupported platform; succeeds here.
+- `neui_lvgl_example` runs, shows a window, responds to mouse + keyboard.
+- M2 dirty-rect proof: idle = 0 repaints; hover/knob-drag repaints only that widget's rect.
+- Tier-1 header tests (`neui_tests`) still pass; win32/macOS/Linux builds unaffected with
+  `NEUI_WITH_LVGL=OFF`.
+
+## Open questions - ASK the user when you reach these (do not guess)
+
+1. **Font engine:** FreeType vs Tiny TTF.
+2. **Path fill:** scanline rasteriser vs LVGL vector (ThorVG) for the prototype (VGLite is later /
+   embedded-only).
+3. **Windows LVGL driver:** native `LV_USE_WINDOWS` (no SDL) vs SDL2. (Recommend native Windows.)
+4. **Framebuffer depth for measurement:** XRGB8888 (matches desktop) vs RGB565 (matches MCU), or
+   measure both.
+5. **If the M0 spike shows per-object draw-into-event is impractical:** fall back to Approach A for
+   the prototype, or rethink?
+6. **Representative screen:** which widgets/layout best mirror the real product, so the measured
+   numbers transfer to the estimate?
+
+---
+
+## RESULTS (executed 2026-07-30)
+
+Open questions were resolved with the user before implementation: **Tiny TTF** (font engine),
+**ThorVG** via `LV_USE_VECTOR_GRAPHIC` (path fill), **native `LV_USE_WINDOWS`** driver (no SDL),
+**XRGB8888**, and a **knob-heavy audio panel** as the M3 screen. LVGL fetched from git master
+(9.6.0-dev, commit 066d8db0, 2026-07-30); `FetchContent_Declare` now **pins that commit hash**
+rather than tracking `master` (post-review follow-up, done - see the code-review pass below).
+
+### What was built
+
+- `backends/lvgl/` - `neui-backend-lvgl`: full `neui_render_backend_t` over LVGL draw tasks.
+  Rects/borders via `lv_draw_fill`/`lv_draw_border`; text via `lv_draw_label` over per-(file,
+  size) Tiny TTF instances resolved from `C:\Windows\Fonts` by family+weight (registration API
+  stubbed); the whole path model (arcs flattened to cubics, fill rules, styled strokes,
+  linear/radial gradients on fill+stroke) via the ThorVG vector pipeline, with consecutive
+  path ops batched into a single vector task (see the RGB565 findings); clip stack by
+  save/intersect/restore of `layer->_clip_area`; SW 2x3 CTM (axis-aligned fast path, general
+  affine through the vector matrix); bitmaps as `ARGB8888_PREMULTIPLIED` image dscs (sub-rect
+  draws via a per-ctx arena that outlives the deferred draw tasks). Off-screen surfaces return
+  null (SURFACE assets degrade to `asset_none`), so the filter graph is unreachable - per plan.
+- `hosts/crossplatform/platform_lvgl.cpp` - one LVGL display (own Win32 window+thread, driver-
+  managed) per neui frame; input captured by subclassing the driver HWND and queueing raw
+  messages to the main thread (the driver thread takes `lv_lock()` in its WndProc, so Session
+  calls must stay on the `lv_timer_handler` thread); drain replicates platform_win32's dispatch
+  (hit-test -> hover -> focus/pressed -> events, popup/toast/combo hooks, Tab traversal,
+  surrogate assembly, synthesized double-click - the LVGL window class lacks CS_DBLCLKS).
+  Clipboard/DnD/IME/menubar/message-box are stubs per plan; images decode via stb_image.
+- **Option C retained layer** (runtime switch `NEUI_LVGL_RETAINED`, default ON; `0` = the M1
+  whole-frame baseline in the same binary): a passive `lv_obj` mirror per widget, synced from
+  the widget tree by a dirty-flag walk that also maintains `abs_x/abs_y` (hit-testing) and gives
+  SECTION/TABVIEW a clipped body container obj (children positioned body-relative minus scroll).
+  Mirrors draw via `LV_EVENT_DRAW_MAIN` (`Session::paint_widget_retained` - palette bracket +
+  PREUPDATE + disabled-dim identical to the walk) and `LV_EVENT_DRAW_POST`
+  (`paint_after_children`); the screen obj paints frame bg below and overlays (combo drop, popup
+  menu, toast) above everything. Per-widget invalidation is routed through two `#ifdef
+  NEUI_PLATFORM_LVGL` seams (`platform_retained_widget_invalidate` / `_tree_changed`) called
+  from `WidgetData::repaint`, set_focus/hovered/pressed, set_text/set_asset/attr setters,
+  w_invalidate, and the structural mutators (create/destroy/show/hide/set_pos/set_size,
+  tab-page reflow, section scroll). Invalidations arriving inside a draw dispatch are deferred
+  (LVGL forbids invalidating while rendering) and flushed after `lv_timer_handler`.
+- `neui_lvgl_example` (`examples/lvgl_example.cpp`) - the measurement screen: 8 KNOBs with live
+  value labels in a SECTION, channel buttons, checkbox, inputbox, text block; 'S' toggles a
+  full-screen all-knobs animation driven from WIDGET_PREUPDATE.
+
+### Milestone outcomes
+
+- **M0 spike: PASS.** Per-object draw-into-event works; deferred draw tasks require copying
+  transient data (`text_local=1`; vector paths are deep-copied at `add_path`); ThorVG arcs and
+  `_clip_area` clipping work inside draw events; `lv_obj_invalidate` bounds the dirty AREA to
+  the object (a disjoint sibling never repainted). Note: LVGL is not a retained pixel cache -
+  ancestors overlapping the dirty rect re-issue draw tasks clipped to it (correct compositing).
+- **M1: PASS.** Whole-frame Approach A renders the full panel through LVGL; real mouse (drag,
+  click, hover), keyboard (typing into INPUTBOX incl. caret), and clean APP_QUIT close verified.
+- **M2: PASS.** Pixel-parity with M1. Idle = 0 redraws; a knob drag repaints only the knob +
+  label rects; the KNOB right-click "Reset to default" popup renders above the mirrors, its
+  nested modal pump runs, and the item click resets the value.
+- **M3 measurements** below.
+
+### M3 measurements
+
+RelWithDebInfo, 800x480, LVGL SW renderer + ThorVG, `LV_DEF_REFR_PERIOD 16` (~60 FPS cap; the
+pump waits in 10 ms slices, so ~45 FPS is the practical ceiling), Windows 11 ARM64
+(Snapdragon-class desktop core). Numbers from `LV_USE_PERF_MONITOR` LOG_MODE; `render` is the
+average per-refresh render time - the platform-transferable figure. Framebuffer depth is a
+configure option (`-DNEUI_LVGL_COLOR_DEPTH=32|16`, template `backends/lvgl/lv_conf.h.in`); both
+depths were measured with the same binary layout and the same screen (8 KNOBs + labels +
+buttons + INPUTBOX + one IMAGE widget + font-check labels), with the backend's vector-task
+batching (below) in place.
+
+**XRGB8888 (LV_COLOR_DEPTH 32):**
+
+| Scenario                      | M1 baseline (whole-frame)     | M2 Option C (retained)      |
+|-------------------------------|-------------------------------|-----------------------------|
+| (a) idle                      | 0 redraws, render 0 ms        | 0 redraws, render 0 ms      |
+| (b) knob drag (rotational)    | render ~21 ms, CPU ~67%       | render **~1.4 ms**, CPU ~31% |
+| (c) full-screen (8-knob anim) | render ~15 ms, ~54 FPS        | render ~16 ms, ~54 FPS      |
+
+**RGB565 (LV_COLOR_DEPTH 16):**
+
+| Scenario                      | M1 baseline (whole-frame)     | M2 Option C (retained)      |
+|-------------------------------|-------------------------------|-----------------------------|
+| (a) idle                      | 0 redraws, render 0 ms        | 0 redraws, render 0 ms      |
+| (b) knob drag (rotational)    | render ~31 ms, CPU ~79%       | render **~3.0 ms**, CPU ~31% |
+| (c) full-screen (8-knob anim) | render ~25 ms, ~36 FPS        | render ~26 ms, ~34 FPS      |
+
+Reading of the numbers:
+
+- **The Option C mechanism does what it exists to do at both depths**: a local interaction
+  costs the widget's rect, not the screen - drag render is ~15x cheaper than the whole-frame
+  baseline at 32 bpp and ~10x at 565. The dirty AREA ratio is ~26x (knob+label ~15 k px^2 vs
+  384 k px^2); per-refresh fixed overhead dominates at small areas on a fast desktop CPU, and
+  on an MCU where per-pixel fill is the bottleneck the win scales toward the area ratio. This
+  is the bound that makes 200 MHz-tier local interactions tractable (lvgl.txt sec 3).
+- **Full-screen cost is mode-independent** at both depths, as expected - Option C bounds what
+  must repaint; it cannot reduce the price of genuinely repainting everything.
+- **Idle is free in both modes and both depths** (0 redraws).
+- **RGB565's real cost is the vector fallback, not the pixel format.** LVGL's SW vector path
+  (`lv_draw_sw_vector.c`) renders ThorVG only into ARGB8888/XRGB8888 targets; on any other
+  format EVERY vector draw task allocates, clears, renders into and blends down a temporary
+  ARGB8888 buffer sized to the LAYER - and in direct render mode the layer is the full
+  framebuffer, so even a knob-sized repaint pays an 800x480 round-trip per task. Measured
+  before mitigation: 565 full-frame ~52 ms, 565 knob drag 10-17 ms.
+- **Backend mitigation (implemented): vector-task batching.** The backend now coalesces
+  consecutive `fill_path` / `stroke_path` calls into ONE `lv_draw_vector` task (per-path
+  fill/stroke state set before each `add_path`; flushed at any non-path draw, clip change, or
+  end of dispatch, preserving z-order and clip semantics). A KNOB paint becomes 1 vector task
+  instead of ~6. Result: 565 full-frame ~52 -> ~25 ms, 565 knob drag ~10-17 -> ~3 ms. 32 bpp is
+  largely indifferent (no temp buffer on that path).
+- The remaining 565-vs-32 drag gap (~3.0 vs ~1.4 ms) is the one leftover per-task full-
+  framebuffer round-trip; it would shrink if LVGL sized the temp buffer to the task clip
+  (upstream improvement opportunity), and disappears entirely on VGLite-class hardware - which
+  remains the production answer for path chrome on 565 targets (lvgl.txt sec 5). Text / rects /
+  images are unaffected by the 565 fallback, and the flush is ~2x cheaper (half the bytes).
+- **IMAGE widget cost (measured by adding one to the screen)**: an LVGL SW downscale blit of a
+  500x375 ARGB source into a 96x72 box costs ~10 ms per full-frame repaint at 32 bpp (stress
+  drops 16 -> ~5 ms with the image hidden; the pre-image tables measured ~6 ms full-frame).
+  Scaled image draws are per-frame transform work in LVGL's SW renderer - production wants
+  pre-scaled / cached blits (part of the appearance-cache recommendation below). Option C
+  already avoids the cost for local interactions (the image repaints only when its rect is
+  touched).
+- Anchor for the tier table in lvgl.txt: a knob-heavy 800x480 full frame through the LVGL SW
+  renderer + ThorVG costs ~5-6 ms at 32 bpp on this desktop-class ARM core (~15 ms with a
+  naively-scaled photo on screen); ~25 ms at RGB565 due to the vector fallback. The M1-vs-M2
+  *ratios* (not the absolute times) are the transferable result.
+
+### Post-evaluation verification additions (same session)
+
+- **IMAGE widget verified** (`neui_lvgl_example` bottom strip): myimage.png (500x375) drawn
+  into an exactly-4:3 96x72 box fills it edge to edge with correct colours + alpha - the
+  backend's `draw_bitmap` scaling and premultiplied-BGRA conversion are correct. This test
+  caught a real retained-mode bug: per-draw sub-image descriptors were arena-freed at the next
+  `bind_layer`, but retained mode binds per WIDGET while LVGL's deferred draw tasks from the
+  same refresh still reference them (use-after-free -> noise). Fixed by freeing them only
+  after the refresh completes (`neui_lvgl_backend::collect_deferred`, called from the
+  platform's loop turn after `lv_timer_handler`).
+- **Font sizes verified em-accurate**: labels at NEUI_ATTR_FONT_SIZE 12/16/22/32 measure ink
+  (cap) heights of 8/11/15/24 px against the Segoe UI cap-height expectation of 0.70 em =
+  8.4/11.2/15.4/22.4 px (+-1 px AA fringe) - Tiny TTF's `ScaleForMappingEmToPixels` matches
+  the DirectWrite em-size semantics. `NEUI_ATTR_FONT_FAMILY` resolves (Consolas renders
+  visibly monospaced). Caveat: Tiny TTF instances are cached per integer pixel size, so
+  fractional neui sizes quantize to <=0.5 px.
+
+### Known prototype limitations (deliberate)
+
+- Windows-only; configure hard-fails elsewhere (`NEUI_WITH_LVGL` + `message(FATAL_ERROR)`).
+- Closing a frame hides its window instead of destroying it - the LVGL Windows driver's display
+  watchdog `exit(0)`s the process when the last display dies mid-loop. Fine for the prototype;
+  a production port would run its own display driver (as an embedded target would anyway).
+- Clipboard / DnD / IME / native menubar / message boxes stubbed; off-screen surfaces (SURFACE /
+  filter graph) unavailable; font registration API returns false (family names resolve from the
+  Windows fonts directory instead); no DPI scaling (logical px == LVGL px == physical px);
+  dialogs are resizable. (Smooth-scroll kinetics ARE wired now - see the follow-up pass below.)
+- Overlay changes (combo/popup/toast) still invalidate the whole frame - transient, acceptable.
+- LVGL is pinned to commit `066d8db0` (the revision measured here). Move to a release tag when
+  one carrying the `lv_draw_vector_dsc_*` API lands.
+- Synthetic-input note for test automation: PostMessage'd mouse input to the driver window works
+  fine, but the *sender* must set the same DPI awareness as the app
+  (`SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`) - otherwise Windows DPI-virtualizes the
+  message coordinates on the way in and a click at (310, 42) arrives as (465, 63) at 150%
+  scaling. (An earlier note here blamed PostMessage itself; the cause was the missing awareness.)
+
+### Suggested next steps (if the direction is pursued)
+
+1. ~~Move the retained layer from prototype to reviewed design (reparenting, mid-order sibling
+   inserts)~~ **done** - mirror teardown, the LVGL commit pin, reparenting and child paint order
+   are all closed; see "Retained-layer + kinetics pass" below.
+2. Per-widget appearance cache (render-once-to-image for static-but-expensive chrome) - the
+   biggest remaining MCU win per lvgl.txt sec 7. **Still open, and now the top item**: it is a
+   design change (per-widget canvas + an invalidation contract for what counts as "appearance"),
+   not a wiring job, so it wants its own plan rather than an incremental patch.
+3. An embedded display driver (fbdev / vendor flush_cb) replacing the Windows driver, and a
+   VGLite draw-unit path for the vector half on RT1176-class silicon. **Still open**, and
+   unverifiable on a desktop - it needs the target hardware in the loop.
+4. ~~Wire smooth-scroll kinetics (the shared `scroll_kinetics` on a 16 ms lv_timer)~~ **done** for
+   the scrolling SECTION and the GRID; the remaining stubs (clipboard / DnD / IME / native
+   menubar / message boxes / off-screen surfaces) are untouched, per the product's needs.
+
+### Retained-layer + kinetics pass (2026-07-31, after the code-review pass)
+
+- **Child paint order is now maintained** (`sync_children`). LVGL paints a container's children in
+  child-list order and both `lv_obj_create` and `lv_obj_set_parent` APPEND, so any object that
+  arrives in the middle of an existing sibling row used to draw on top of the siblings after it.
+  The walk already visits objects in paint order, so each one claims the next index in its
+  container (`lv_obj_move_to_index`, compared against `lv_obj_get_index` first so a steady-state
+  sync costs nothing and triggers no invalidation). Hidden mirrors count too - they stay in the
+  child list, so skipping them would shift every later sibling. Note the widget API cannot insert
+  mid-order today (`Tree::add_child` appends and nothing calls `add_after`); what made this live is
+  the hand-up path, where a widget that stops painting gives its children to its own container
+  mid-list.
+- **Reparenting** now uses `lv_obj_set_parent` instead of delete + rebuild, which also removed a
+  latent use-after-free: `lv_obj_delete` takes the subtree with it, leaving every descendant's
+  `MirrorEntry::obj` dangling for the rest of that pass (and the sweep would delete it again).
+- **Smooth-scroll kinetics wired** through the same shared integrators the other platforms use:
+  `section_kinetic_wheel_lvgl` (twin of `section_kinetic_wheel_w32` / `_linux`, including the
+  asymmetric single-axis fallback and the `NEUI_ATTR_SCROLL_KINETICS` gate) plus the GRID
+  SMOOTH-mode branch, with one 16 ms `lv_timer` per window driving spring-back for whichever of the
+  two is overscrolled (the toast timer's shape; it self-deletes when nothing is moving and is torn
+  down with the window). Invalidation from inside the timer goes through
+  `invalidate_widget_in_timer` - the LVGL lock is already held there, so it must not take
+  `LvLockGuard`, and `t_inside_lv` is raised so a client SCROLL_CHANGED handler that writes attrs
+  defers its invalidate instead of re-locking.
+- **Verified by synthetic input** against `neui_section_scroll_example` temporarily pinned to the
+  xpl host (the LVGL-pinned example has no scrolling SECTION): stepped mode scrolls exactly
+  4 notches x 3 lines x `SECTION_WHEEL_LINE_PX` = 240 px; smooth mode rubber-bands to
+  `Scroll: (0, -33)` on an overscroll at the top and springs back to `(0, 0)`, with the client's
+  SCROLL_CHANGED label updating throughout. Note for future automation: WM_MOUSEWHEEL's lParam is
+  in SCREEN coords while the button messages carry CLIENT coords, and `PrintWindow` renders the
+  whole window (title bar included) into the target DC - so a client-sized bitmap is offset by the
+  non-client frame. Derive click targets from the example's `create()` coordinates, not from
+  measured screenshot pixels.
+
+---
+
+## CODE-REVIEW PASS (2026-07-31)
+
+A review of the prototype branch found 15 issues; all were fixed. Verified by rebuilding both
+`neui_lvgl_example` and `neui_example` against the LVGL host (warning-clean) and comparing the
+rendered result side by side with the D2D build of the same example.
+
+**Rendering parity (`backends/lvgl/lvgl_backend.cpp`)** - all four were visible in every frame:
+
+- `draw_text` drew at the TOP of the passed rect while D2D
+  (`DWRITE_PARAGRAPH_ALIGNMENT_CENTER`), Cairo and CG all vertically center the text block in it -
+  and the widget paints pass the full widget rect and rely on that. Now measures the block and
+  positions a tight box centered in the rect.
+- `draw_text` word-wrapped at the rect width; D2D is explicitly `NO_WRAP` and Cairo / CG break only
+  on an explicit `\n`. Now sets `LV_TEXT_FLAG_EXPAND` (which also keeps the draw-task area tight,
+  so the label never wraps regardless of the box width) and clips at the rect.
+- `measure_text` returned 0 for a null ctx, but two host sizing paths pass null deliberately
+  (`ComboBoxWidget::drop_width`, `popup_total_width`) exactly as they do to `d2d_measure_text` -
+  collapsing combo drop widths and popup menu widths to their minimums. `resolve_font` now
+  tolerates a null ctx (default family / weight, identity CTM).
+- `draw_bitmap` mapped the tint's ALPHA byte to LVGL's recolor *mix weight* and never folded it
+  into the draw opacity, so a translucent tint rendered fully opaque and "no colour change"
+  became a 50% white wash. Alpha now scales `dsc.opa`; the RGB drives a full-strength recolor
+  (LVGL has no multiply - documented approximation).
+- Gradients were pushed with their full stop list while `LV_GRADIENT_MAX_STOPS` defaulted to 2, so
+  every 3+-stop gradient silently became a two-colour ramp plus a per-frame warning on stdout.
+  `lv_conf.h.in` raises it to 16 and the backend clamps rather than letting LVGL log.
+
+**Threading / lifetime (`hosts/crossplatform/platform_lvgl.cpp`)**:
+
+- The WndProc subclass was installed before `w->prev_proc` was stored. The window is already being
+  pumped by the driver's own thread, so `subclass_proc` could run with a null chained proc. The old
+  proc is now read with `GetWindowLongPtrW` and stored first.
+- `SetWindowTextW` / `SetWindowPos` / `EnableWindow` / `SetForegroundWindow` block until the target
+  window's thread processes the sent message, and that thread's WndProc takes `lv_lock` on entry -
+  so calling them from client code running inside a draw dispatch (which holds the lock for the
+  whole refresh) is a hard hang. They now queue through `defer_if_locked` and run from the main
+  loop after `lv_timer_handler` returns.
+- The backend performed LVGL allocations from unlocked paths (Tiny TTF instance + glyph-cache fills
+  on the first use of a font size, which can happen in a click handler; the vector deletes in
+  `destroy_context`). The platform layer now installs a re-entrant lock/unlock pair via
+  `neui_lvgl_backend::set_lock_hooks`.
+- `platform_destroy_window` only nulled `session`: the WndProc subclass and window prop stayed
+  installed, the `WindowData` stayed in `g_windows` with a stale hwnd, every mirror `lv_obj` leaked,
+  and for a still-open frame it dispatched `APP_QUIT` into a client being torn down. Added
+  `retire_window` (unsubclass, drop queued input for that window, `lv_obj_clean` the screen, remove
+  the screen draw callbacks, delete the toast timer, out of `g_windows`) plus
+  `close_window_silently` for the teardown path. The `WindowData` allocation is retired to a
+  graveyard rather than freed - an in-flight `subclass_proc` on the driver's thread may still hold
+  the pointer and there is no way to join that thread.
+
+**Build**:
+
+- The `WIN32 AND NEUI_WITH_LVGL` branch of `hosts/crossplatform/CMakeLists.txt` dropped the
+  `windowsapp` link that `host.cpp`'s C++/WinRT theme provider needs on every `_WIN32` build. It
+  linked only because `neui_lvgl_example` also pulls `neui-win32host`; a client linking just
+  `neui` + `neui-xplhost` got unresolved WinRT externals.
+- The directory-scope warning scrub in `backends/lvgl/CMakeLists.txt` removed `/W4 /wd4100` but not
+  `/WX`, so `-DNEUI_WERROR=ON -DNEUI_WITH_LVGL=ON` turned the first LVGL / ThorVG warning into a
+  hard error - the exact outcome the scrub exists to prevent.
+- `GIT_TAG master` pinned to the measured commit (see above).
+
+**Cleanups**:
+
+- `resolve_font` re-ran full font-file resolution (`GetWindowsDirectoryA` + string building + two
+  `std::map<std::string>` lookups) on *every* `draw_text` / `measure_text`, i.e. hundreds of times
+  per refresh on the paint hot path. Added a front cache on `(family, weight, size_px)` and hoisted
+  the fonts directory into a function-local static.
+- `platform_load_image` re-implemented the shared stb loader and dropped its size-overflow guard.
+  The Linux-only `hosts/shared/linux/image_loader_linux.h` was platform-neutral all along: moved to
+  `hosts/shared/image_loader_stb.h` (`load_image_bgra8_stb`), now used by both platform layers.
+  Note the LVGL host therefore cannot load `.rc`-embedded images the way the WIC-based native
+  Windows loader does (pre-existing; `neui_example`'s resource-only `lemur.jpg` shows the
+  failed-load placeholder).
+- The wheel handler computed `is_horiz` then re-tested the same predicate to negate the delta, and
+  negated *before* handing it to `handle_combo_wheel` - so shift+wheel scrolled an open combo drop
+  list backwards relative to a plain wheel.

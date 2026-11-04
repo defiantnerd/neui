@@ -20,8 +20,8 @@ neui has three composable layers. Decide which you're adding before opening any 
 
 - **Linux / X11**: new backend (Cairo or Skia) + new xpl platform layer (`platform_linux.cpp`). No native host — Linux has no single "native" toolkit.
 - **Linux / Wayland**: new backend (likely Skia or Cairo) + new xpl platform layer. May share backend with X11.
-- **iOS**: reuse `backends/cg/` (CoreGraphics works on iOS) + new xpl platform layer (`platform_ios.mm`) backed by UIKit. macOS-native-host port is not transferable to iOS.
-- **Android**: new backend (Skia is a natural fit; the AOSP Skia headers are public) + new xpl platform layer with a JNI bridge.
+- **iOS**: **DONE** - see `docs/host-ios.md`. It went further than this playbook predicted: `backends/cg/` was reused and `platform_ios.mm` written as expected, but a full native UIKit host (`hosts/ios/`) was built as well, so iOS ships two. Worth reading as the most recent worked example of everything below, including the two things this playbook does not cover: a platform-only public interface (`NEUI_API_IOS`, `include/neui/d/ios.h`) and what happens when two hosts for the same platform are linked into one binary (seams must be additive, not assigned).
+- **Android**: new backend (Skia is a natural fit; the AOSP Skia headers are public) + new xpl platform layer with a JNI bridge. Several of the iOS specialities in `NEUI_API_IOS` have direct Android counterparts and are marked as such per entry in `include/neui/d/ios.h` - safe-area insets (`WindowInsets`) should go through the existing portable `NEUI_API_METRICS` seam rather than a new interface.
 - **Embedded / framebuffer**: software backend (RGBA buffer writes) + tiny platform layer driving a kernel framebuffer or RTOS GUI service.
 
 If you're only adding a **new backend** on an already-supported platform (e.g. a Skia backend for Windows that swaps out d2d), you don't need to touch the platform layer — only the backend and the per-platform CMake selection.

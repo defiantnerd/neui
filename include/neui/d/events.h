@@ -32,6 +32,7 @@ extern "C" {
 #define DEF_GRID_EVENT(x)   (((x)<<16) | 0x0006)
 #define DEF_DND_EVENT(x)    (((x)<<16) | 0x0007)
 #define DEF_TAB_EVENT(x)    (((x)<<16) | 0x0008)
+#define DEF_IOS_EVENT(x)    (((x)<<16) | 0x000B)
 
   typedef enum neui_event_type
   {
@@ -90,6 +91,8 @@ extern "C" {
 
     NEUI_EVENT_TAB_DESELECTED           = DEF_TAB_EVENT(1),  // tabview: outgoing tab, fired before the page swap / repaint
     NEUI_EVENT_TAB_SELECTED             = DEF_TAB_EVENT(2),  // tabview: incoming tab, fired before the page swap / repaint
+
+    NEUI_EVENT_IOS_ENVIRONMENT_CHANGED  = DEF_IOS_EVENT(1),  // iOS only: orientation / power / thermal / battery / accessibility / keyboard moved (see neui_event_ios_env_t)
 
     NEUI_EVENT_CUSTOM                   = 0x1ffff,
   } neui_event_type_t;
@@ -411,6 +414,21 @@ extern "C" {
     uint32_t timer_id;        // the id add_timer returned
     uint32_t interval_ms;     // the timer's configured interval (as clamped)
   } neui_event_timer_t;
+  // iOS environment change (NEUI_EVENT_IOS_ENVIRONMENT_CHANGED). Fired by the
+  // two iOS hosts only, when something the NEUI_API_IOS interface reports has
+  // moved: device orientation, Low Power Mode, thermal state, battery, one of
+  // the accessibility switches, or the software keyboard. `changed` is an OR of
+  // NEUI_IOS_ENV_* (see d/ios.h) saying which - one event with a bitmask rather
+  // than six event types, because these change independently and rarely and a
+  // client re-reads only what it cares about.
+  //
+  // Dynamic Type is NOT here: a content-size change is a metrics change and
+  // arrives as NEUI_EVENT_METRICS_CHANGED, where it always has.
+  typedef struct neui_event_ios_env
+  {
+    neui_widget_t widget;     // the frame
+    uint32_t      changed;    // NEUI_IOS_ENV_* bitmask
+  } neui_event_ios_env_t;
 
   // Grid sort-changed event - fires after a user-driven header click that
   // mutates the sort stack (or removes a level). Carries the column that
@@ -523,6 +541,7 @@ extern "C" {
       neui_event_metrics_t            metrics;
       neui_event_timer_t              timer;
       neui_event_popup_t              popup;
+      neui_event_ios_env_t            ios_env;
     } data;
 
     // more event data can be added here

@@ -7,6 +7,7 @@
 #include "neui_test.h"
 #include "component_loader.h"
 
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -500,6 +501,56 @@ TEST_CASE("component_loader: asset resolution via env callback")
   CHECK(c.owned_assets.size() == 1);           // only the path-loaded one is owned
 }
 
+TEST_CASE("component_loader: the byte hook gets the raw name plus base_dir")
+{
+  // ComponentApis::bitmap_from_name is how a host reaches its client resource
+  // provider for a layer asset. The whole point is the name it receives: the raw
+  // "assets"-map entry with base_dir passed ALONGSIDE, never joined on - a client
+  // keying its container on "knob_bg.png" must not be asked for "res/knob_bg.png"
+  // (<neui/d/resource.h>). The hook fully replaces path mode, so create_from_file
+  // must not run at all.
+  static std::vector<std::pair<std::string, std::string>> asked;  // name, base_dir
+  asked.clear();
+
+  reset_recorders();
+  neui_asset_api_t a; neui_compound_api_t c; neui_behavior_api_t b;
+  ComponentApis apis = make_fake_apis(a, c, b);
+  apis.bitmap_from_name = [](void*, const char* name,
+                             const char* base_dir) -> neui_asset_t {
+    asked.emplace_back(name ? name : "", base_dir ? base_dir : "<null>");
+    if (std::string(name) == "knob_bg.png") { neui_asset_t r; r.id = 4242; return r; }
+    return asset_none;   // "indicator" declines -> stays unresolved
+  };
+
+  neui_component_env_t env{};
+  env.base_dir = "res";
+  neui_session_t sess; sess.session = 1;
+  BuiltComponent got = build_component(sess, kKnobJson,
+                                       (uint32_t)std::strlen(kKnobJson), &env, apis);
+
+  REQUIRE(asked.size() == 2);
+  CHECK(asked[0].first  == std::string("knob_bg.png"));    // raw, no "res/"
+  CHECK(asked[0].second == std::string("res"));            // passed separately
+  CHECK(asked[1].first  == std::string("knob_move.png"));
+  CHECK(g_loaded_files.empty());                 // path mode never ran
+  CHECK(got.owned_assets.size() == 1);           // the hook's handle is owned
+  CHECK(got.owned_assets[0].id == 4242u);
+
+  // env.resolve_asset still wins over the hook (order: resolve_asset -> provider
+  // -> filesystem), and a borrowed handle is not owned.
+  asked.clear();
+  reset_recorders();
+  env.resolve_asset = [](void*, const char* name, const char*) -> neui_asset_t {
+    if (std::string(name) == "bg") { neui_asset_t r; r.id = 7777; return r; }
+    return asset_none;
+  };
+  BuiltComponent got2 = build_component(sess, kKnobJson,
+                                        (uint32_t)std::strlen(kKnobJson), &env, apis);
+  REQUIRE(asked.size() == 1);                              // only "indicator"
+  CHECK(asked[0].first == std::string("knob_move.png"));
+  CHECK(got2.owned_assets.empty());                        // 7777 is borrowed
+}
+
 TEST_CASE("component_loader: malformed json fails gracefully")
 {
   BuiltComponent c = run_loader("{ this is : not valid ] ]");
@@ -530,6 +581,34 @@ TEST_CASE("component_loader: a group layer nests children via add_child_layer")
   CHECK(g_layers[1].parent == 0);
   CHECK(g_layers[2].kind == NEUI_COMPOUND_LAYER_TEXT);
   CHECK(g_layers[2].parent == 0);
+}
+
+TEST_CASE("component_loader: a stepped bind travels as the \"<prop>.step\" prop")
+{
+  // A value-driven clip window (a group whose width is bound) that snaps in
+  // eight steps - the shape asvglib's `reveal:` class emits.
+  const char* json = R"json({
+    "size": [220, 150],
+    "layers": [
+      { "kind": "group", "z": 0, "anchor": ["top_left","top_left"], "size": "fill",
+        "bind": { "width": { "attr": "neui.param.value", "scale": 140, "offset": 60,
+                             "step": 0.125 } },
+        "layers": [ { "kind": "rect", "z": 0, "fill_color": "#FF7CF29C" } ] },
+      { "kind": "group", "z": 1, "anchor": ["top_left","top_left"], "size": "fill",
+        "bind": { "width": { "attr": "neui.param.value", "scale": 188, "offset": 16 } },
+        "layers": [ { "kind": "rect", "z": 0, "fill_color": "#FFEDF2F7" } ] }
+    ]
+  })json";
+  run_loader(json);
+
+  REQUIRE(g_layers.size() == 4);
+  REQUIRE(g_layers[0].binds.count("width") == 1);
+  CHECK(g_layers[0].binds.at("width").attr == "neui.param.value");
+  CHECK_APPROX(g_layers[0].binds.at("width").scale, 140.0);
+  CHECK_APPROX(g_layers[0].flts.at("width.step"), 0.125);
+  // A smooth bind must not carry the prop at all - the default has to stay off.
+  REQUIRE(g_layers[2].binds.count("width") == 1);
+  CHECK(g_layers[2].flts.count("width.step") == 0);
 }
 
 TEST_CASE("build_component: arc layer props + value binding")
@@ -960,6 +1039,39 @@ TEST_CASE("serialize_component: nests a group's children under a layers array")
 // load (target_y was previously absent from the string-prop table, so it was
 // silently dropped at load while serialize still emitted it - a lossy
 // round-trip for any biaxial component).
+TEST_CASE("serialize_component: round-trips a stepped binding")
+{
+  // A stepped bind has to survive emit -> load, or a saved component loses the
+  // quantisation it was authored with.
+  CompoundAsset ca;
+  uint32_t g = compound_add_layer(ca, NEUI_COMPOUND_LAYER_GROUP, 0);
+  compound_get_layer(ca, g)->width  = NEUI_COMPOUND_FILL;
+  compound_get_layer(ca, g)->height = NEUI_COMPOUND_FILL;
+  apply_bind(*compound_get_layer(ca, g), "width", "neui.param.value", 140.0f, 60.0f);
+  apply_set_float(*compound_get_layer(ca, g), "width.step", 0.125f);
+  uint32_t c0 = compound_add_child_layer(ca, g, NEUI_COMPOUND_LAYER_RECT, 0);
+  apply_set_int(*compound_get_layer(ca, c0), "fill_color",
+                static_cast<int>(static_cast<uint32_t>(0xFF7CF29Cu)));
+
+  BehaviorAsset ba;
+  std::string nm = "seg";
+  std::vector<std::pair<std::string, std::string>> an;
+  std::vector<std::pair<uint32_t, std::string>>    hn;
+  ComponentSerializeInput in;
+  in.name = &nm; in.width = 220.0f; in.height = 150.0f;
+  in.asset_names = &an; in.asset_handle_names = &hn;
+  in.compound = &ca; in.behavior = &ba;
+
+  std::string json = serialize_component(in, 0);
+  CHECK(json.find("\"step\"") != std::string::npos);
+
+  run_loader(json);
+  REQUIRE(g_layers.size() == 2);
+  REQUIRE(g_layers[0].binds.count("width") == 1);
+  CHECK_APPROX(g_layers[0].binds.at("width").offset, 60.0);
+  CHECK_APPROX(g_layers[0].flts.at("width.step"), 0.125);
+}
+
 TEST_CASE("component_loader: drag_biaxial target_y survives load + round-trip")
 {
   const char* kBiaxial = R"json({

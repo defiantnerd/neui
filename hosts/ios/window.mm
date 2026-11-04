@@ -33,7 +33,9 @@
 #import <objc/runtime.h>   // objc_setAssociatedObject - keeps a UITableView's
                            // data source/delegate alive for the table's lifetime
 
+#include "../shared/objc_class_names.h"   // NEUI_OBJC_SUFFIX
 #include "host.h"
+#include "../shared/ios/ios_api.h"   // NEUI_API_IOS shared state + seams
 #include "../shared/compound.h"
 #include "../shared/widget_paint_section.h"
 #include "../shared/widget_paint_knob.h"
@@ -1545,6 +1547,11 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer*)other
   uint32_t           widget_index;
 @private
   int _last_w, _last_h, _last_inset;
+  // The other three safe-area edges. They do not move the client rect the way
+  // the top inset does, so they drive METRICS_CHANGED on their own rather than
+  // RESIZE - but they do move, and a client laying out inside the safe area has
+  // no other way to hear about it.
+  int _last_left, _last_right, _last_bottom;
 }
 @end
 
@@ -1579,6 +1586,47 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer*)other
 {
   return [self.view isKindOfClass:[NEUINativeIOSContentView class]] ? (NEUINativeIOSContentView*)self.view : nil;
 }
+
+// ---- NEUI_API_IOS chrome ---------------------------------------------------
+// The client's settings live in the shared iOS state table (hosts/shared/ios/
+// ios_api.h) keyed by this frame's widget id, so both iOS hosts read the same
+// state through the same accessor. No entry means the client never asked for
+// anything, and each override falls through to super.
+- (const neui_detail::IosFrameState*)neuiIosState
+{
+  if (!session || !session->_widgets.exists(widget_index)) return nullptr;
+  return neui_detail::ios_frame_state_if_present(
+      neui_widget_t{ session->_widgets[widget_index].widget_id });
+}
+- (UIStatusBarStyle)preferredStatusBarStyle
+{
+  const neui_detail::IosFrameState* st = [self neuiIosState];
+  return st ? neui_detail::ios_uikit_status_bar_style(st->status_style)
+            : [super preferredStatusBarStyle];
+}
+- (BOOL)prefersStatusBarHidden
+{
+  const neui_detail::IosFrameState* st = [self neuiIosState];
+  return st ? (st->status_hidden ? YES : NO) : [super prefersStatusBarHidden];
+}
+- (BOOL)prefersHomeIndicatorAutoHidden
+{
+  const neui_detail::IosFrameState* st = [self neuiIosState];
+  return st ? (st->home_indicator_auto_hidden ? YES : NO)
+            : [super prefersHomeIndicatorAutoHidden];
+}
+- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures
+{
+  const neui_detail::IosFrameState* st = [self neuiIosState];
+  return st ? neui_detail::ios_uikit_rect_edge(st->deferring_edges)
+            : [super preferredScreenEdgesDeferringSystemGestures];
+}
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations
+{
+  const neui_detail::IosFrameState* st = [self neuiIosState];
+  return st ? neui_detail::ios_uikit_orientation_mask(st->supported_orientations)
+            : [super supportedInterfaceOrientations];
+}
 - (void)reportResizeIfChanged
 {
   if (!session || !session->_widgets.exists(widget_index)) return;
@@ -1586,22 +1634,53 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer*)other
   int w = (int)sz.width, h = (int)sz.height;
   if (w <= 0 || h <= 0) return;
   int inset = ios_host::frame_top_inset_ios(session, widget_index);
-  if (w == _last_w && h == _last_h && inset == _last_inset) return;
+  // And the other three edges, read off the same view metrics_safe_area_ios
+  // reads so the gate and the answer cannot drift apart. Gating on the top
+  // alone swallowed a side- or bottom-only resolve entirely: the client was
+  // never told, and went on laying out to insets that had moved. In landscape
+  // those are the edges that matter - the rounded corners and the camera
+  // housing down the sides, the home indicator along the bottom.
+  int left = 0, right = 0, bottom = 0;
+  if (@available(iOS 11.0, *)) {
+    NEUINativeIOSContentView* cv = [self contentView];
+    if (cv) {
+      UIEdgeInsets ins = cv.safeAreaInsets;
+      left   = (int)(ins.left + 0.5);
+      right  = (int)(ins.right + 0.5);
+      bottom = (int)(ins.bottom + 0.5);
+    }
+  }
+  // The top inset is folded into the rect get_client_rect reports, so a change
+  // to it is a resize as far as a client is concerned even when the bounds held
+  // still. The other three are not, so they raise METRICS_CHANGED alone.
+  const bool client_rect_changed = (w != _last_w || h != _last_h || inset != _last_inset);
+  const bool edges_changed =
+      (left != _last_left || right != _last_right || bottom != _last_bottom);
+  if (!client_rect_changed && !edges_changed) return;
   _last_w = w; _last_h = h; _last_inset = inset;
+  _last_left = left; _last_right = right; _last_bottom = bottom;
   auto& wd = session->_widgets[widget_index];
-  wd.width = w; wd.height = h;
-  auto* backend = neui_cg_backend::get_backend();
-  if (backend && backend->resize && wd.render_ctx)
-    backend->resize(wd.render_ctx, (uint32_t)w, (uint32_t)h);
-  neui_event_t ev = {};
-  ev.type = NEUI_EVENT_RESIZE;
-  ev.data.resize.widget = { wd.widget_id };
-  ev.data.resize.width = w; ev.data.resize.height = h;
-  session->dispatch_event(&ev);
+  if (client_rect_changed) {
+    wd.width = w; wd.height = h;
+    auto* backend = neui_cg_backend::get_backend();
+    if (backend && backend->resize && wd.render_ctx)
+      backend->resize(wd.render_ctx, (uint32_t)w, (uint32_t)h);
+    neui_event_t ev = {};
+    ev.type = NEUI_EVENT_RESIZE;
+    ev.data.resize.widget = { wd.widget_id };
+    ev.data.resize.width = w; ev.data.resize.height = h;
+    session->dispatch_event(&ev);
+  }
   // The safe-area insets (and thus safe_area_insets / get_client_rect) change on
-  // rotation + when the notch/status-bar inset first resolves, so notify the
-  // client that the metrics changed too (alongside RESIZE).
+  // rotation, when the notch/status-bar inset first resolves, and when any of
+  // the other three edges moves. This fires for all of them - alongside RESIZE
+  // where the client rect moved too, on its own where only an edge did.
   ios_host::dispatch_metrics_changed_ios(session, widget_index);
+  // A rotation settles here too. Told from the layout pass rather than from
+  // UIDevice orientation notifications: no accelerometer, and this is the
+  // INTERFACE orientation, which is what NEUI_API_IOS reports. Only broadcasts
+  // on a real change.
+  neui_detail::ios_note_orientation_changed(self);
   // A bounds change can be a full-screen <-> windowed transition (entering/
   // leaving Stage Manager / Split View), which flips the hamburger-visibility
   // rule on iPad 26+. Re-evaluate so the hamburger appears when going full-screen
@@ -1758,18 +1837,21 @@ namespace ios_host
     return (int)(sz.width + 0.5f);
   }
 
-  static void metrics_safe_area_ios(neui_session_t /*session*/, neui_widget_t frame,
+  // Returns true only when this host owns `frame` - the shared seam tries each
+  // installed host in turn, so "not mine" must be distinguishable from "mine,
+  // and the insets are zero".
+  static bool metrics_safe_area_ios(neui_session_t /*session*/, neui_widget_t frame,
                                     int* left, int* top, int* right, int* bottom)
   {
+    Session* s = nullptr;
+    WidgetData* fw = widget_for_id(frame.id, &s);
+    if (!fw || !s || !fw->isroot) return false;
+    NEUINativeIOSContentView* cv = content_view_for_frame(*fw);
+    if (!cv) return false;
     if (left)   *left   = 0;
     if (top)    *top    = 0;
     if (right)  *right  = 0;
     if (bottom) *bottom = 0;
-    Session* s = nullptr;
-    WidgetData* fw = widget_for_id(frame.id, &s);
-    if (!fw || !s || !fw->isroot) return;
-    NEUINativeIOSContentView* cv = content_view_for_frame(*fw);
-    if (!cv) return;
     if (@available(iOS 11.0, *)) {
       UIEdgeInsets ins = cv.safeAreaInsets;
       if (left)   *left   = (int)(ins.left + 0.5);
@@ -1782,14 +1864,71 @@ namespace ios_host
         *top = frame_top_inset_ios(s, fidx);
       }
     }
+    return true;
   }
 
   // Install the iOS-real measure_text + safe_area seams. Called once from each
   // iOS host's register_host(); idempotent (overwrites with the same pointers).
   void install_metrics_seams_ios()
   {
-    neui_detail::metrics_measure_seam()   = &metrics_measure_text_ios;
-    neui_detail::metrics_safe_area_seam() = &metrics_safe_area_ios;
+    // ADD, not assign - see the seam note in hosts/shared/metrics.h.
+    neui_detail::metrics_add_measure_seam(&metrics_measure_text_ios);
+    neui_detail::metrics_add_safe_area_seam(&metrics_safe_area_ios);
+  }
+
+  // ---- NEUI_API_IOS seams --------------------------------------------------
+
+  // frame widget -> its root UIViewController. The shared implementation's
+  // default finds the key window's root, which is right only while one frame is
+  // up; this resolves the exact frame.
+  static UIViewController* ios_frame_controller_native(neui_session_t /*session*/,
+                                                       neui_widget_t frame)
+  {
+    Session* s = nullptr;
+    WidgetData* fw = widget_for_id(frame.id, &s);
+    if (!fw || !s || !fw->isroot || !fw->native_window) return nil;
+    UIWindow* w = (__bridge UIWindow*)fw->native_window;
+    return w.rootViewController;
+  }
+
+  // Deliver NEUI_EVENT_IOS_ENVIRONMENT_CHANGED to every live frame of every
+  // live session. Only a host knows its own registries, which is why this is a
+  // seam rather than shared code.
+  static void ios_broadcast_env_native(uint32_t changed)
+  {
+    for (auto& sp : sessions) {
+      Session* s = sp.get();
+      if (!s) continue;
+      for (uint32_t i : s->_widgets.release_order()) {
+        if (i == 0 || !s->_widgets.exists(i)) continue;
+        WidgetData& wd = s->_widgets[i];
+        if (!wd.isroot) continue;
+        neui_event_t ev = {};
+        ev.type                 = NEUI_EVENT_IOS_ENVIRONMENT_CHANGED;
+        ev.data.ios_env.widget  = { wd.widget_id };
+        ev.data.ios_env.changed = changed;
+        s->dispatch_event(&ev);
+      }
+    }
+  }
+
+  // Repaint after a forced appearance change, so painted widgets follow the
+  // native controls instead of keeping the old palette.
+  static void ios_theme_refresh_native()
+  {
+    neui_detail::refresh_theme_palette_ios();
+    for (auto& sp : sessions)
+      if (Session* s = sp.get()) s->invalidate_all_for_theme_change();
+  }
+
+  // Called once from register_host(); idempotent.
+  void install_ios_seams_ios()
+  {
+    // ADD, not assign: both iOS hosts can be linked into one binary and xpl
+    // registers last, so a single-slot seam would always end up holding xpl's.
+    neui_detail::ios_add_frame_controller_seam(&ios_frame_controller_native);
+    neui_detail::ios_add_broadcast_env_seam(&ios_broadcast_env_native);
+    neui_detail::ios_add_theme_refresh_seam(&ios_theme_refresh_native);
   }
 
   // Dispatch NEUI_EVENT_METRICS_CHANGED to a frame's client (same path as
@@ -4260,6 +4399,9 @@ namespace ios_host
 
   void release_native_window_ios(WidgetData& wd)
   {
+    // Drop any NEUI_API_IOS chrome recorded for this frame first: widget ids are
+    // recycled, and a new frame must not inherit the old one's status bar.
+    neui_detail::ios_frame_forget(neui_widget_t{ wd.widget_id });
     if (!wd.native_window) return;
     auto* backend = neui_cg_backend::get_backend();
     if (backend && wd.render_ctx) {

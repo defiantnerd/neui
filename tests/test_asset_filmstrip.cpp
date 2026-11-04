@@ -24,6 +24,8 @@ namespace {
 // so allocate_bitmap is used directly and the loader is never invoked. ------
 struct FakeLoader {
   static uint8_t* load(const char*, uint32_t*, uint32_t*) { return nullptr; }
+  static uint8_t* load_memory(const uint8_t*, size_t, uint32_t*, uint32_t*)
+  { return nullptr; }
   static void     free_pixels(uint8_t*) {}
 };
 
@@ -36,6 +38,9 @@ struct SizedLoader {
     if (w) *w = s_w;
     if (h) *h = s_h;
     return static_cast<uint8_t*>(std::calloc((size_t)s_w * s_h * 4u, 1));
+  }
+  static uint8_t* load_memory(const uint8_t*, size_t, uint32_t* w, uint32_t* h) {
+    return load(nullptr, w, h);
   }
   static void free_pixels(uint8_t* p) { std::free(p); }
 };

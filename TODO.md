@@ -146,8 +146,9 @@ Remaining:
 - **Multi-level redo on win32 native.** `NEUI_CMD_REDO` maps to
   `EM_UNDO` (single-level toggle). Clients that need multi-level
   redo should select the xpl host's text widgets (full `EditHistory`).
-- **Other platform ports** (Linux/X11, Linux/Wayland, iOS, Android,
-  embedded). Playbook in `plans/how-to-port.md`.
+- **Other platform ports** (Linux/Wayland, Android, embedded). Playbook
+  in `plans/how-to-port.md`. Linux/X11 and iOS/iPadOS are DONE - iOS ships
+  two hosts plus the `NEUI_API_IOS` extension; see `docs/host-ios.md`.
 
 ## Theme
 

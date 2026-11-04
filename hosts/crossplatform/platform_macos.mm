@@ -22,6 +22,7 @@
 #include <cstring>
 #include <cmath>
 
+#include "../shared/objc_class_names.h"   // NEUI_OBJC_SUFFIX
 #include "host.h"
 #include "platform.h"
 // NSAccessibility provider (NEUI_API_A11Y). Lives in its own TU - see the
@@ -2650,6 +2651,13 @@ namespace xpl_host
                                 uint32_t* width_out, uint32_t* height_out)
   {
     return neui_detail::load_image_bgra8_macos(path, width_out, height_out);
+  }
+
+  uint8_t* platform_load_image_bytes(const uint8_t* data, size_t len,
+                                      uint32_t* width_out, uint32_t* height_out)
+  {
+    return neui_detail::load_image_bgra8_macos_memory(data, len,
+                                                      width_out, height_out);
   }
 
   void platform_free_image(uint8_t* pixels) { delete[] pixels; }

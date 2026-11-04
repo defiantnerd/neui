@@ -32,13 +32,17 @@
 // Host-side component loader. Parses a JSON component document (neui::mujson)
 // and materializes it into a COMPOUND (visual) + a BEHAVIOR (input) by driving
 // the public compound / behavior / asset API vtables - the SAME calls a client
-// would make by hand. It is host-agnostic (it only touches the passed-in api
-// pointers, never a host's internal Session or asset store), so it lives once
-// in hosts/shared and is compiled into every host. The host wraps the returned
-// BuiltComponent in a NEUI_ASSET_KIND_COMPONENT store entry.
+// would make by hand. It is host-agnostic (it only touches what ComponentApis
+// hands it, never a host's internal Session or asset store type), so it lives
+// once in hosts/shared and is compiled into every host. The host wraps the
+// returned BuiltComponent in a NEUI_ASSET_KIND_COMPONENT store entry.
 //
-// build_component() does NOT touch the asset store, so it is unit-testable in
-// isolation with fake api vtables (see tests/test_component_loader.cpp).
+// The one non-vtable seam is ComponentApis::bitmap_from_name, an opaque host
+// callback for layer assets; it exists because the public asset API addresses
+// images by PATH and a component-referenced name must reach the client resource
+// provider unjoined (see the struct). It is optional, so build_component() is
+// still unit-testable in isolation with fake api vtables and no asset store at
+// all (see tests/test_component_loader.cpp).
 
 namespace neui_detail
 {
@@ -97,6 +101,24 @@ namespace neui_detail
     neui_asset_api_t*    asset    = nullptr;
     neui_compound_api_t* compound = nullptr;
     neui_behavior_api_t* behavior = nullptr;
+
+    // Optional byte hook for layer assets, installed by every host. It exists
+    // because the public asset API takes a PATH: without it the loader has to
+    // join base_dir onto the document's raw "assets" entry before the store (and
+    // therefore the client resource provider) ever sees the name, which breaks
+    // the contract in <neui/d/resource.h> that a client is asked for the name it
+    // itself wrote, with the document's directory passed alongside.
+    //
+    // Semantics: create an owned BITMAP asset for `name` exactly as written,
+    // scoped to `base_dir` (NULL when the document has none) - ask the client
+    // resource provider first, then fall back to base_dir-joined file resolution.
+    // Returns asset_none when neither has it. `user` is the host's session.
+    //
+    // When absent (the Tier-1 fakes, any other embedder) the loader falls back to
+    // asset->create_from_file on the joined path, which is what it always did.
+    neui_asset_t (*bitmap_from_name)(void* user, const char* name,
+                                     const char* base_dir) = nullptr;
+    void*        user = nullptr;
   };
 
   namespace cl_detail
@@ -375,8 +397,19 @@ namespace neui_detail
           return a; // borrowed - not owned by component
         }
       }
-      std::string full = join_path(base_dir, hint_path);
-      neui_asset_t a = apis.asset->create_from_file(session, full.c_str());
+      // Byte hook when the host installed one: it hands the RAW "assets" entry
+      // plus base_dir to the client resource provider and falls back to the
+      // joined file itself, so it fully replaces the path branch below (going on
+      // to try create_from_file as well would just re-probe the same miss under a
+      // second cache key).
+      neui_asset_t a = asset_none;
+      if (apis.bitmap_from_name) {
+        a = apis.bitmap_from_name(apis.user, hint_path.c_str(),
+                                  base_dir.empty() ? nullptr : base_dir.c_str());
+      } else {
+        const std::string full = join_path(base_dir, hint_path);
+        a = apis.asset->create_from_file(session, full.c_str());
+      }
       if (a.id != asset_none.id) {
         out.owned_assets.push_back(a); // component-owned
         out.asset_handle_names.emplace_back(a.id, name);
@@ -682,11 +715,17 @@ namespace neui_detail
             if (bkv.first == "asset") {
               apis.compound->bind_asset(session, cs, layer, "asset", attr->c_str());
             } else {
-              double scale = 1.0, offset = 0.0;
+              double scale = 1.0, offset = 0.0, step = 0.0;
               as_num(obj_get(*bo, "scale"),  scale);
               as_num(obj_get(*bo, "offset"), offset);
               apis.compound->bind(session, cs, layer, bkv.first.c_str(), attr->c_str(),
                                   static_cast<float>(scale), static_cast<float>(offset));
+              // Optional quantisation of the bound value, carried as the
+              // "<prop>.step" float prop (no bind-with-step in the vtable).
+              if (as_num(obj_get(*bo, "step"), step) && step > 0.0)
+                apis.compound->set_float(session, cs, layer,
+                                         (bkv.first + ".step").c_str(),
+                                         static_cast<float>(step));
             }
           }
         }
@@ -1015,6 +1054,7 @@ namespace neui_detail
             if (!b.is_asset) {
               one.emplace_back("scale", njson_num(b.scale));
               one.emplace_back("offset", njson_num(b.offset));
+              if (b.step > 0.0f) one.emplace_back("step", njson_num(b.step));
             }
             bo.emplace_back(k, njson_obj(std::move(one)));
           }

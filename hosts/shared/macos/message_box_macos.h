@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "../../../include/neui/d/notify.h"
+#include "symbol_image_macos.h"
 
 // Shared NSAlert-backed message box used by both the native macOS host
 // and the xpl macOS platform layer. Mimics Win32 MessageBoxEx semantics:
@@ -35,8 +36,8 @@ namespace neui_detail
   // divergence from native macOS convention (an NSAlert normally always
   // shows the app icon) to give the four Win32 icon classes a visibly
   // distinct, native-looking glyph. Mirrors the SF-Symbol approach in
-  // hosts/macos/checkbox_image.h. macOS 11+ (imageWithSystemSymbolName);
-  // older systems fall through to the app icon.
+  // hosts/macos/checkbox_image.h (symbol_image_macos.h). macOS 11+
+  // (imageWithSystemSymbolName); older systems fall through to the app icon.
   inline NSImage* message_box_icon_macos(uint32_t flags)
   {
     NSString* name = nil;
@@ -53,20 +54,8 @@ namespace neui_detail
       default:
         return nil;  // no icon bits -> keep the app icon
     }
-    if (@available(macOS 11.0, *)) {
-      NSImage* img = [NSImage imageWithSystemSymbolName:name
-                                accessibilityDescription:nil];
-      if (!img) return nil;
-      NSImageSymbolConfiguration* size =
-        [NSImageSymbolConfiguration configurationWithPointSize:64.0
-                                                          weight:NSFontWeightRegular
-                                                           scale:NSImageSymbolScaleLarge];
-      NSImageSymbolConfiguration* color =
-        [NSImageSymbolConfiguration configurationWithHierarchicalColor:tint];
-      NSImageSymbolConfiguration* cfg =
-        [size configurationByApplyingConfiguration:color];
-      return [img imageWithSymbolConfiguration:cfg];
-    }
+    if (@available(macOS 11.0, *))
+      return tinted_symbol_image_macos(name, 64.0, NSImageSymbolScaleLarge, tint);
     return nil;
   }
 
