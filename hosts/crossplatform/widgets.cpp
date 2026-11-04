@@ -4544,6 +4544,12 @@ namespace xpl_host {
         if (mimes[i]) w.accepted_mimes.emplace_back(mimes[i]);
       }
     }
+    // Once the frame is on screen the OS has been told what it may route to
+    // it; a MIME added now has to reach the OS too.
+    const uint32_t frame = s->frame_of(idx);
+    if (frame != 0 && s->_widgets[frame].native_handle)
+      platform_dnd_accepted_formats_changed(s->_widgets[frame].native_handle, s,
+                                            s->_widgets[frame].widget_id);
   }
 
   static void NEUI_ABI dnd_accept(neui_session_t session,

@@ -3567,11 +3567,15 @@ namespace macos_host
     // routes external drags into our NSDraggingDestination protocol
     // methods on NEUINativeContentView. The framework gates whether
     // any client event fires via the widget's drop_target flag.
-    [cv registerForDraggedTypes:@[
-      NSPasteboardTypeString,
-      NSPasteboardTypeHTML,
-      NSPasteboardTypeFileURL,
-    ]];
+    [cv registerForDraggedTypes:neui_detail::dnd_base_dragged_types_macos()];
+    {
+      // Plus the pasteboard type of every MIME a widget of the frame accepts:
+      // a drag that carries only a custom type is not offered to the view
+      // otherwise.
+      std::vector<std::string> mimes;
+      neui_detail::dnd_collect_accepted_mimes(s->_widgets, idx, mimes);
+      neui_detail::dnd_register_mimes_macos(cv, mimes);
+    }
 
     // Tab / Shift-Tab focus traversal: the key-view loop is built manually in
     // widget-creation order (see rebuild_key_view_loop_macos, called after the

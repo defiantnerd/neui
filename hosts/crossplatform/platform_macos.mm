@@ -2858,8 +2858,19 @@ namespace xpl_host
   // Drag & drop. The content NEUIView for each frame is the
   // NSDraggingDestination; registerForDraggedTypes lets AppKit start
   // routing drags to its protocol callbacks. We register a broad set
-  // of types; the framework hit-tests + format-matches against the
-  // drop_target widget's accepted_mimes list before firing events.
+  // of types - text, HTML, file URLs, and the pasteboard type of every MIME a
+  // widget of the frame accepts (a drag that carries only a custom type is not
+  // offered to the view otherwise); the framework hit-tests + format-matches
+  // against the drop_target widget's accepted_mimes list before firing events.
+
+  // The MIMEs accepted by the frame's tree, registered on its content view.
+  static void dnd_register_accepted_mimes(NEUIView* v)
+  {
+    if (!v->session) return;
+    std::vector<std::string> mimes;
+    neui_detail::dnd_collect_accepted_mimes(v->session->_widgets, v->widget_index, mimes);
+    neui_detail::dnd_register_mimes_macos(v, mimes);
+  }
 
   bool platform_dnd_register_window(void* native_handle, void* /*session_ptr*/,
                                      uint32_t /*frame_widget_id*/)
@@ -2867,12 +2878,22 @@ namespace xpl_host
     if (!native_handle) return false;
     NSView* cv = frame_content_view(native_handle);
     if (![cv isKindOfClass:[NEUIView class]]) return false;
-    [cv registerForDraggedTypes:@[
-      NSPasteboardTypeString,
-      NSPasteboardTypeHTML,
-      NSPasteboardTypeFileURL,
-    ]];
+    [cv registerForDraggedTypes:neui_detail::dnd_base_dragged_types_macos()];
+    dnd_register_accepted_mimes((NEUIView*)cv);
     return true;
+  }
+
+  void platform_dnd_accepted_formats_changed(void* native_handle,
+                                              void* /*session_ptr*/,
+                                              uint32_t /*frame_widget_id*/)
+  {
+    if (!native_handle) return;
+    NSView* cv = frame_content_view(native_handle);
+    // Only a view that is registered already: before platform_dnd_register_window
+    // (at show) it collects every widget's MIMEs itself, and after
+    // platform_dnd_unregister_window the frame is no longer a drop target.
+    if ([cv isKindOfClass:[NEUIView class]] && [[cv registeredDraggedTypes] count] > 0)
+      dnd_register_accepted_mimes((NEUIView*)cv);
   }
 
   void platform_dnd_unregister_window(void* native_handle)

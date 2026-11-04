@@ -13,6 +13,7 @@
 #include "../clipboard_item.h"
 #include "../../../include/neui/d/dnd.h"
 #include "dnd_helpers_macos.h"   // dnd_nsop_from_action
+#include "pasteboard_mime_macos.h"   // pb_type_for_mime_macos
 
 // Drag-source side of NEUI_API_DND on macOS. Mirror of the
 // NSDraggingDestination plumbing in NEUIView / NEUINativeContentView.
@@ -56,18 +57,20 @@ namespace neui_detail
 #ifdef NEUI_DND_SOURCE_MACOS_IMPLEMENTATION
 @implementation NEUIDataProviderDelegate
 {
-  // ivar: heap-allocated map mime -> (provider, userdata). The pasteboard
-  // type the OS hands back to us in provideDataForType: is the same string
-  // we registered with setDataProvider: (built via stringWithUTF8String
-  // from the MIME), so its UTF8String is a key into this map.
-  std::unordered_map<std::string,
-                      std::pair<neui_detail::DataProviderFn, void*>>* _mappings;
+  // ivar: heap-allocated map pasteboard type -> (mime, provider, userdata).
+  // The pasteboard type the OS hands back to us in provideDataForType: is the
+  // same string we registered with setDataProvider: (the UTI of the MIME,
+  // pb_type_for_mime_macos), so its UTF8String is a key into this map; the
+  // provider is called with the MIME it was registered for.
+  struct Mapping { std::string mime;
+                   neui_detail::DataProviderFn provider;
+                   void* userdata; };
+  std::unordered_map<std::string, Mapping>* _mappings;
 }
 - (instancetype)init
 {
   if ((self = [super init])) {
-    _mappings = new std::unordered_map<std::string,
-                                         std::pair<neui_detail::DataProviderFn, void*>>();
+    _mappings = new std::unordered_map<std::string, Mapping>();
   }
   return self;
 }
@@ -76,8 +79,8 @@ namespace neui_detail
           provider:(neui_detail::DataProviderFn)provider
           userdata:(void*)userdata
 {
-  (void)type;
-  if (_mappings) (*_mappings)[mime] = std::make_pair(provider, userdata);
+  const char* c = type ? [type UTF8String] : nullptr;
+  if (_mappings && c) (*_mappings)[std::string(c)] = Mapping{ mime, provider, userdata };
 }
 - (void)dealloc
 {
@@ -93,10 +96,10 @@ provideDataForType:(NSPasteboardType)type
   if (!c) return;
   auto it = _mappings->find(std::string(c));
   if (it == _mappings->end()) return;
-  auto  provider = it->second.first;
-  void* userdata = it->second.second;
+  auto  provider = it->second.provider;
+  void* userdata = it->second.userdata;
   uint32_t size = 0;
-  const uint8_t* p = provider ? provider(userdata, c, &size) : nullptr;
+  const uint8_t* p = provider ? provider(userdata, it->second.mime.c_str(), &size) : nullptr;
   if (p && size > 0) {
     NSData* d = [NSData dataWithBytes:p length:size];
     if (d) [item setData:d forType:type];
@@ -250,7 +253,7 @@ namespace neui_detail
     // materialise eagerly because the OS-side transformations need the
     // bytes). Held off shared_payloads so AppKit gets a setDataProvider:
     // call instead of setData:. The pasteboard type is built fresh from
-    // the MIME string at stamp time so the C++ vector stays free of
+    // the MIME string at stamp time (pb_type_for_mime_macos) so the C++ vector stays free of
     // Obj-C-pointer members (ARC + std::vector aggregate semantics are a
     // known footgun area).
     struct LazyMime { std::string mime;
@@ -322,7 +325,7 @@ namespace neui_detail
         lazy_mimes.push_back({ mime, provider, userdata });
         return;
       }
-      NSString* t = [NSString stringWithUTF8String:mime.c_str()];
+      NSString* t = pb_type_for_mime_macos(mime);
       if (!t) return;
       auto bytes = fetch_bytes(mime);
       NSData* d = [NSData dataWithBytes:bytes.data() length:bytes.size()];
@@ -346,7 +349,7 @@ namespace neui_detail
       lazy_delegate = [[NEUIDataProviderDelegate alloc] init];
       lazy_types    = [NSMutableArray array];
       for (auto& lm : lazy_mimes) {
-        NSString* t = [NSString stringWithUTF8String:lm.mime.c_str()];
+        NSString* t = pb_type_for_mime_macos(lm.mime);
         if (!t) continue;
         [lazy_delegate addMapping:t
                               mime:lm.mime

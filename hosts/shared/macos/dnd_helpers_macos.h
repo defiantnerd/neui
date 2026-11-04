@@ -4,10 +4,13 @@
 
 #import <AppKit/AppKit.h>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 #include "../dnd_modifier_suggest.h"
 #include "../../../include/neui/d/dnd.h"
 #include "keys_macos.h"
+#include "pasteboard_mime_macos.h"
 
 // Drop-target-side NSDragOperation <-> NEUI_DND_ACTION_* translation,
 // shared by the two macOS <NSDraggingDestination> implementations
@@ -27,6 +30,41 @@ namespace neui_detail
     if (action & NEUI_DND_ACTION_MOVE) mask |= NSDragOperationMove;
     if (action & NEUI_DND_ACTION_LINK) mask |= NSDragOperationLink;
     return mask;
+  }
+
+  // The pasteboard types a frame's content view is registered for from the start:
+  // the three the framework always routes. AppKit only offers a view a drag whose
+  // pasteboard carries one of its registered types.
+  inline NSArray<NSPasteboardType>* dnd_base_dragged_types_macos()
+  {
+    return @[ NSPasteboardTypeString, NSPasteboardTypeHTML, NSPasteboardTypeFileURL ];
+  }
+
+  // Add `widget`'s accepted MIMEs and those of everything below it to `out`.
+  // `Widgets` is a host's neui_detail::Tree<WidgetData>; both hosts keep the
+  // list the client gave set_accepted_formats in WidgetData::accepted_mimes.
+  template <class Widgets>
+  inline void dnd_collect_accepted_mimes(Widgets& widgets, uint32_t widget,
+                                          std::vector<std::string>& out)
+  {
+    if (!widgets.exists(widget)) return;
+    for (const std::string& m : widgets[widget].accepted_mimes) out.push_back(m);
+    for (uint32_t c = widgets.child(widget); c != 0; c = widgets.next(c))
+      dnd_collect_accepted_mimes(widgets, c, out);
+  }
+
+  // Register `view` for the pasteboard types of `mimes` on top of what it is
+  // registered for already (registerForDraggedTypes: adds). Without it a drag
+  // that carries ONLY a custom type is never offered to the view, so the widget
+  // that accepts that MIME would not see it. A MIME the system makes no type of
+  // is left out.
+  inline void dnd_register_mimes_macos(NSView* view,
+                                        const std::vector<std::string>& mimes)
+  {
+    NSMutableArray<NSPasteboardType>* types = [NSMutableArray array];
+    for (const std::string& m : mimes)
+      if (NSString* t = pb_dragged_type_for_mime_macos(m)) [types addObject:t];
+    if ([types count] > 0) [view registerForDraggedTypes:types];
   }
 
   // The NEUI_MK_* bits a DnD event carries in buttonmap: the live mouse buttons

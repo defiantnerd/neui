@@ -3609,6 +3609,7 @@ namespace
     xdnd_register(lw->dpy ? lw->dpy : g_display, lw->win, session_ptr, frame_widget_id, lw->dpi);
     return true;
   }
+  void platform_dnd_accepted_formats_changed(void*, void*, uint32_t) {}   // the OS needs no per-type registration
   void platform_dnd_unregister_window(void* native_handle)
   {
     if (!native_handle || !g_display) return;
