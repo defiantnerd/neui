@@ -55,6 +55,7 @@ namespace xpl_host
   bool platform_run() { return true; }
   bool platform_pump_once() { return true; }
   bool platform_run_modal_until(bool* /*keep_running*/) { return true; }
+  void platform_wake_event_pump() {}
 
   // DAW-embedding seams - no native windows, so nothing to embed into.
   void platform_set_embed_parent(Session* session, uint32_t widget_index,

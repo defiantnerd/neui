@@ -27,6 +27,10 @@
 //   F. LONG AND ZOOMED  - a 120-row menu in a frame at NEUI_ATTR_UI_SCALE 0.5
 //                         must keep its unzoomed row height and wrap into
 //                         columns, so every row can be picked.
+//   G. POPUP_MENU       - widgets->popup_menu (blocking) is the tree popup's
+//                         cascade in a popup surface: a window of its own,
+//                         keys, clicks, separators counted in its result, 0
+//                         when dismissed.
 //
 // Row geometry is DISCOVERED by probing, never hardcoded: probe_pick() reopens
 // the menu and clicks one point, so a whole column can be mapped a pixel row at
@@ -43,6 +47,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -228,6 +234,7 @@ bool titles_contain(const std::vector<std::string>& v, const char* needle)
 int main()
 {
   @autoreleasepool {
+    setvbuf(stdout, nullptr, _IONBF, 0);   // every line out before a hang or a crash
     neui_init();
 
     // The xpl host explicitly: popup_tree_menu is an xpl-host entry point, and
@@ -646,6 +653,79 @@ int main()
 
       // A pick still reports the item it shows: the last row.
       check(reached[(size_t)kRows - 1], "the last row is reachable and reports its own id");
+
+      // ---- G. widgets->popup_menu on a popup surface ------------------------
+      // The blocking popup_menu is the tree popup's cascade in a popup surface of
+      // the host's own: a window of its own (here a child window of the zoomed
+      // frame's), the cascade's layout (unzoomed, columns) and keys, its result
+      // the 1-based index of the picked string (separators counted), 0 when
+      // dismissed. It blocks in a nested loop, so each input comes from a timer
+      // that fires inside it; a last timer presses Escape so a failure can't hang.
+      auto popup_window = [&]() -> NSWindow* {
+        for (NSWindow* w in [g_window childWindows]) if ([w isVisible]) return w;
+        return nil;
+      };
+      auto key = [&](unsigned short code) {
+        NSEvent* e = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+                                 modifierFlags:0 timestamp:0 windowNumber:[g_window windowNumber]
+                                       context:nil characters:@"" charactersIgnoringModifiers:@""
+                                     isARepeat:NO keyCode:code];
+        [[g_window contentView] keyDown:e];
+      };
+      // a click at (x, y) in the menu's own window, top-left origin
+      auto click_menu = [&](float x, float y) {
+        NSWindow* w = popup_window();
+        if (!w) return;
+        NSView* v = [w contentView];
+        const CGFloat h = [v bounds].size.height;
+        for (NSEventType t : { NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp }) {
+          NSEvent* e = [NSEvent mouseEventWithType:t location:NSMakePoint(x, h - y) modifierFlags:0
+                                         timestamp:0 windowNumber:[w windowNumber] context:nil
+                                       eventNumber:0 clickCount:1 pressure:1.0];
+          if (t == NSEventTypeLeftMouseDown) [v mouseDown:e]; else [v mouseUp:e];
+        }
+      };
+      NSRect menu_frame = NSZeroRect;   // the last menu window's, in screen points
+      // inputs, 0.2 s apart, while popup_menu runs; then its result
+      auto run_menu = [&](const char* const* items, std::vector<std::function<void()>> inputs) {
+        __block size_t next = 0;
+        __block int ticks = 0;
+        auto steps = std::make_shared<std::vector<std::function<void()>>>(std::move(inputs));
+        NSTimer* t = [NSTimer timerWithTimeInterval:0.2 repeats:YES block:^(NSTimer*) {
+          if (NSWindow* w = popup_window()) menu_frame = [w frame];
+          if (next < steps->size()) (*steps)[next++]();
+          else if (++ticks > 15) key(0x35);   // Escape: never hang
+        }];
+        [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
+        const int picked = g_widgets->popup_menu(g_sess, zwin, 40, 60, items);
+        [t invalidate];
+        return picked;
+      };
+      enum : unsigned short { kDown = 0x7D, kUp = 0x7E, kReturn = 0x24, kEscape = 0x35, kEnd = 0x77 };
+      static const char* k_short[] = { "Alpha", "-", "Gamma", "Delta", nullptr };
+      check_eq((uint32_t)run_menu(k_short, { [&] { key(kDown); }, [&] { key(kDown); }, [&] { key(kReturn); } }), 3,
+               "popup_menu: Down, Down (over the separator), Return picks the 3rd string");
+      check(menu_frame.size.width > 0, "popup_menu: the menu is a window of its own (a child window of its frame's)");
+      check_eq((uint32_t)run_menu(k_short, { [&] { key(kUp); }, [&] { key(kReturn); } }), 4,
+               "popup_menu: Up from nothing wraps to the last string");
+      check_eq((uint32_t)run_menu(k_short, { [&] { key(kEscape); } }), 0,
+               "popup_menu: Escape dismisses it, 0");
+      check_eq((uint32_t)run_menu(k_short, { [&] { click_at(view.width - 4.0f, view.height - 4.0f); } }), 0,
+               "popup_menu: a press on its frame dismisses it, 0");
+      // the first row starts below the menu's top padding: a click a little inside it picks it
+      check_eq((uint32_t)run_menu(k_short, { [&] { click_menu(20.0f, 14.0f); } }), 1,
+               "popup_menu: a click on the first row picks it, 1");
+      // Unzoomed: rows of the font's size and more in a frame at 0.5, so 4 rows
+      // (one a separator) make a window taller than 4 * 11 pt.
+      check(menu_frame.size.height > 3 * 17.0f, "popup_menu: the menu keeps its unzoomed size");
+      std::vector<std::string> long_texts;
+      std::vector<const char*> long_items;
+      for (int i = 1; i <= kRows; ++i) long_texts.push_back("Target " + std::to_string(i));
+      for (const auto& s : long_texts) long_items.push_back(s.c_str());
+      long_items.push_back(nullptr);
+      check_eq((uint32_t)run_menu(long_items.data(), { [&] { key(kEnd); }, [&] { key(kReturn); } }), kRows,
+               "popup_menu: a 120-string menu reaches its last string (End, Return)");
+      std::printf("        the 120-string menu: %.0f x %.0f pt\n", menu_frame.size.width, menu_frame.size.height);
 
       g_widgets->destroy(g_sess, zwin);
       g_window = prev;

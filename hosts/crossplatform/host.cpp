@@ -5112,6 +5112,11 @@ namespace xpl_host
                                 const std::vector<std::string>& items)
   {
     if (items.empty() || !_widgets.exists(anchor_idx)) return 0;
+    // The tree popup is the menu where the platform routes its input (win32,
+    // macOS, Linux): unzoomed in a zoomed frame, a long list in columns, the
+    // keys. The overlay below remains for the platforms that don't (LVGL).
+    if (platform_supports_tree_popup())
+      return open_popup_menu_as_tree(anchor_idx, lx, ly, items);
     if (_popup_active) return 0;
 
     auto& anchor = _widgets[anchor_idx];
@@ -5155,6 +5160,40 @@ namespace xpl_host
     _popup_picked = 0;
 
     if (frame) platform_invalidate(frame);
+    return picked;
+  }
+
+  int Session::open_popup_menu_as_tree(uint32_t anchor_idx, int lx, int ly,
+                                        const std::vector<std::string>& items)
+  {
+    // One blocking menu at a time: a second would end the first's nested loop
+    // (show_tree_popup_model closes the open cascade) and return into it.
+    if (_popup_menu_model) return 0;
+    auto model = std::make_unique<PopupMenuWidget>();
+    for (size_t i = 0; i < items.size(); ++i) {
+      // row ids 1..n: a row's id is the 1-based index popup_menu returns
+      const uint32_t id = static_cast<uint32_t>(i + 1);
+      MenubarWidget::MenuItemData d;
+      d.text         = items[i];
+      d.is_separator = popup_item_is_separator(items[i]);
+      model->menu_items[id] = std::move(d);
+      model->menu_item_ids_ordered.push_back(id);
+    }
+    _popup_menu_model  = std::move(model);
+    _tree_popup_picked = 0;
+    // A window of its own where the platform has popup surfaces, else painted
+    // into the frame.
+    if (!show_tree_popup_on_surface(anchor_idx, lx, ly) &&
+        !show_tree_popup_model(anchor_idx, lx, ly, 0, true)) {
+      _popup_menu_model.reset();
+      return 0;
+    }
+    // Nested message loop until the popup closes: a pick, Escape, a press
+    // outside, its frame or menu going away - every way close_tree_popup runs.
+    platform_run_modal_until(&_tree_popup_active);
+    const int picked = static_cast<int>(_tree_popup_picked);
+    _tree_popup_picked = 0;
+    _popup_menu_model.reset();
     return picked;
   }
 
@@ -5275,7 +5314,8 @@ namespace xpl_host
     if (mi.menu_cmd != 0 && mi.menu_cmd < NEUI_CMD_USER_BASE &&
         !can_focused_perform_command(mi.menu_cmd))
       return false;
-    if (_menu_client && _menu_client->validate &&
+    // (popup_menu's own model has no widget, so there is nothing to validate)
+    if (_menu_client && _menu_client->validate && mb.widget_id != 0 &&
         !_menu_client->validate(_token, { mb.widget_id }, { item_id }, mi.menu_cmd))
       return false;
     return true;
@@ -5640,6 +5680,12 @@ namespace xpl_host
 
   bool Session::show_tree_popup(uint32_t anchor_idx, int x, int y, uint32_t menu_idx)
   {
+    return show_tree_popup_model(anchor_idx, x, y, menu_idx, false);
+  }
+
+  bool Session::show_tree_popup_model(uint32_t anchor_idx, int x, int y, uint32_t menu_idx,
+                                      bool internal)
+  {
     // Refuse where the platform layer does not route input to the popup (iOS,
     // null). paint_frame would still PAINT the cascade - it is
     // platform-independent - so without this the API would put up a menu that
@@ -5647,8 +5693,12 @@ namespace xpl_host
     // underneath. Failing honestly is strictly better.
     if (!platform_supports_tree_popup()) return false;
 
-    if (!_widgets.exists(menu_idx)) return false;
-    auto* pm = dynamic_cast<PopupMenuWidget*>(&_widgets[menu_idx]);
+    PopupMenuWidget* pm = nullptr;
+    if (internal) {
+      pm = _popup_menu_model.get();
+    } else if (_widgets.exists(menu_idx)) {
+      pm = dynamic_cast<PopupMenuWidget*>(&_widgets[menu_idx]);
+    }
     if (!pm) return false;                       // not a POPUPMENU
 
     // An empty menu must not open: a 1-row-high empty box that swallows the next
@@ -5676,9 +5726,10 @@ namespace xpl_host
     close_menubar_menu();
     close_tree_popup();
 
-    _tree_popup_active = true;
-    _tree_popup_menu   = menu_idx;
-    _tree_popup_frame  = frame_idx;
+    _tree_popup_active   = true;
+    _tree_popup_internal = internal;
+    _tree_popup_menu     = internal ? 0 : menu_idx;
+    _tree_popup_frame    = frame_idx;
     _tree_popup_x      = ax;
     _tree_popup_y      = ay;
     // Level 0's "parent" is the tree root, so the popup's rows are the items
@@ -5695,7 +5746,12 @@ namespace xpl_host
   {
     if (!_tree_popup_active) return;
     uint32_t frame_idx = _tree_popup_frame;
+    const uint32_t surface_idx = _tree_popup_surface;
+    _tree_popup_surface = 0;
+    if (surface_idx != 0 && popup_surface_depth(surface_idx) >= 0)
+      close_popup_surface(surface_idx, NEUI_POPUP_DISMISS_CLIENT);
     _tree_popup_active = false;
+    _tree_popup_internal = false;
     _tree_popup_menu   = 0;
     _tree_popup_frame  = 0;
     _menu_path.clear();
@@ -5704,6 +5760,10 @@ namespace xpl_host
       if (void* native = _widgets[frame_idx].native_handle)
         platform_invalidate(native);
     }
+    // A blocking popup_menu's nested loop re-reads _tree_popup_active only
+    // after an event, and this close may have come from none (the app losing
+    // activation, a timer).
+    if (_popup_menu_model) platform_wake_event_pump();
   }
 
   void Session::close_tree_popup_if_within(uint32_t subtree_root)
@@ -5720,6 +5780,53 @@ namespace xpl_host
       for (uint32_t p : _widgets.get_all_parents(probe)) {
         if (p == subtree_root) { close_tree_popup(); return; }
       }
+    }
+  }
+
+  PopupMenuWidget* Session::tree_popup_model()
+  {
+    if (_tree_popup_internal) return _popup_menu_model.get();
+    if (!_widgets.exists(_tree_popup_menu)) return nullptr;
+    return dynamic_cast<PopupMenuWidget*>(&_widgets[_tree_popup_menu]);
+  }
+
+  void Session::tree_popup_pick(uint32_t item_id)
+  {
+    // popup_menu's own model: the row's id is the index it returns.
+    if (_tree_popup_internal) {
+      _tree_popup_picked = item_id;
+      close_tree_popup();
+      return;
+    }
+    // A leaf of a client's POPUPMENU: report it, then close. The menu and its
+    // command are read BEFORE closing because close_tree_popup clears the state
+    // they came from.
+    const uint32_t menu_idx = _tree_popup_menu;
+    uint32_t menu_cmd = 0;
+    if (PopupMenuWidget* pm = tree_popup_model()) {
+      auto it = pm->menu_items.find(item_id);
+      if (it != pm->menu_items.end()) menu_cmd = it->second.menu_cmd;
+    }
+    close_tree_popup();
+
+    // Built-in command routing first (set_menu_cmd with NEUI_CMD_COPY and
+    // friends): offer it to the focused widget, exactly as the menu bar does.
+    //
+    // Deliberately NOT dispatch_menu_event / dispatch_menu_command: cmd ids
+    // restart at 0x8000 per menu widget, so the _menubars scan would hand a
+    // popup's pick to whichever menu BAR happens to hold the same id. And
+    // going through dispatch_menu_command even with the right widget would
+    // fire TREE_ITEM_ACTIVATED for EVERY row (every leaf carries a cmd_id,
+    // bound or not), making ITEM_SELECTED a redundant second event per pick.
+    // One pick, one client-facing event.
+    if (menu_cmd != 0 && menu_cmd < NEUI_CMD_USER_BASE)
+      invoke_focused_command(menu_cmd);
+    if (_widgets.exists(menu_idx)) {
+      neui_event_t ev = {};
+      ev.type              = NEUI_EVENT_ITEM_SELECTED;
+      ev.data.item.widget  = { _widgets[menu_idx].widget_id };
+      ev.data.item.index   = item_id;
+      dispatch_event(&ev);
     }
   }
 
@@ -5823,7 +5930,11 @@ namespace xpl_host
         platform_invalidate(native);
     }
 
-    if (widget_id != 0) {
+    // The surface hosting popup_menu's cascade: its dismissal (a press outside,
+    // Escape, the owner moving) closes the cascade, which ends popup_menu's
+    // nested loop. The host's own surface is not the client's to hear about.
+    if (idx != 0 && idx == s->_tree_popup_surface) s->close_tree_popup();
+    if (widget_id != 0 && idx != s->_menu_surface) {
       neui_event_t ev = {};
       ev.type              = NEUI_EVENT_POPUP_DISMISSED;
       ev.data.popup.widget = { widget_id };
@@ -6297,9 +6408,8 @@ namespace xpl_host
                        std::vector<MenuColL>& cols)
   {
     if (!s->_tree_popup_active || frame_index != s->_tree_popup_frame) return false;
-    if (!s->_widgets.exists(s->_tree_popup_menu)) return false;
-    auto* pm = dynamic_cast<PopupMenuWidget*>(&s->_widgets[s->_tree_popup_menu]);
-    if (!pm) return false;
+    PopupMenuWidget* pm = s->tree_popup_model();
+    if (!pm || !s->_widgets.exists(frame_index)) return false;
     const auto& fw = s->_widgets[frame_index];
     const float sc = tp_scale(s, frame_index);
     // Empty band == standalone popup: mb_build_columns then puts level 0 at
@@ -6327,6 +6437,79 @@ namespace xpl_host
     if (zoomed) _backend->pop_transform(ctx);
   }
 
+  uint32_t Session::menu_surface()
+  {
+    if (_menu_surface != 0 && _widgets.exists(_menu_surface) &&
+        dynamic_cast<PopupSurfaceWidget*>(&_widgets[_menu_surface]))
+      return _menu_surface;
+    auto obj = std::make_unique<PopupSurfaceWidget>();
+    obj->type       = NEUI_W_POPUPSURFACE;
+    obj->width      = 1;
+    obj->height     = 1;
+    obj->visible    = false;
+    obj->session    = this;
+    obj->session_id = _session_id;
+    obj->isroot     = true;
+    const uint32_t idx = _widgets.add_child(0, std::move(obj));
+    if (idx == 0) return 0;
+    _widgets[idx].index     = idx;
+    _widgets[idx].widget_id = ((_session_id & 0xffff) << 16) | (idx & 0xffff);
+    a11y_assign_generation(idx);
+    mark_layout_dirty(idx);
+    _menu_surface = idx;
+    return idx;
+  }
+
+  bool Session::show_tree_popup_on_surface(uint32_t anchor_idx, int x, int y)
+  {
+    if (!platform_supports_popup_surface() || !_popup_menu_model) return false;
+    if (!_widgets.exists(anchor_idx)) return false;
+    const uint32_t frame_idx = ps_frame_of_or_self(this, anchor_idx);
+    const uint32_t root = frame_idx ? ps_root_owner(this, frame_idx) : 0;
+    if (root == 0 || !_widgets.exists(root) || !_widgets[frame_idx].render_ctx) return false;
+    const uint32_t surface_idx = menu_surface();
+    if (surface_idx == 0) return false;
+
+    // Level 0 laid out in popup px (tp_scale: the surface takes the owner's
+    // scale) against the box the surface is clamped to - the work area - so a
+    // long list wraps into columns of the screen's height, not the frame's.
+    const float sc = _widgets[root].ui_scale();
+    int box_w = 0, box_h = 0;
+    popup_clamp_size(anchor_idx, &box_w, &box_h);
+    if (box_w <= 0 || box_h <= 0) return false;
+    static const std::vector<MenuBandItem> kNoBand;
+    std::vector<MenuColL> cols;
+    mb_build_columns(this, _widgets[frame_idx].render_ctx, *_popup_menu_model,
+                     tp_px(box_w, sc), tp_px(box_h, sc), kNoBand, { 0 }, cols, 0, 0);
+    if (cols.empty() || cols[0].rows.empty()) return false;
+    // The surface as big as that, in the owner's logical px.
+    auto logical = [sc](int px) { return static_cast<int>(std::ceil(static_cast<float>(px) / sc)); };
+    auto& ps = _widgets[surface_idx];
+    ps.width  = logical(cols[0].w);
+    ps.height = logical(cols[0].h);
+
+    close_menubar_menu();
+    close_tree_popup();
+    _tree_popup_active   = true;
+    _tree_popup_internal = true;
+    _tree_popup_menu     = 0;
+    _tree_popup_frame    = surface_idx;
+    _tree_popup_surface  = surface_idx;
+    _tree_popup_x        = 0;
+    _tree_popup_y        = 0;
+    _menu_path           = { 0 };
+    _menu_hover_item     = 0;
+    // Its top-left at the anchor's (x, y): BELOW, the offset taken back up by
+    // the anchor's height, so it flips above the anchor where it can't go below.
+    if (!open_popup_surface(surface_idx, anchor_idx, x, y - _widgets[anchor_idx].height,
+                            NEUI_POPUP_BELOW)) {
+      _tree_popup_surface = 0;
+      close_tree_popup();
+      return false;
+    }
+    return true;
+  }
+
   // Shared front half of the click / hover handlers: decides whether this input
   // belongs to the popup at all, and self-heals the two states that would
   // otherwise leave an invisible modal grab swallowing input forever.
@@ -6339,7 +6522,13 @@ namespace xpl_host
     // Input on a DIFFERENT frame: the popup loses its grab, exactly like an OS
     // menu when another window is clicked. Dismiss, but do NOT consume - the
     // click belongs to that other frame.
-    if (frame_index != s->_tree_popup_frame) { s->close_tree_popup(); return 0; }
+    // ...unless the cascade is in a popup surface: input on the owner (a press
+    // there is the surface's dismissal, a hover is nothing) is the popup
+    // surface's business, not the cascade's.
+    if (frame_index != s->_tree_popup_frame) {
+      if (s->_tree_popup_surface == 0) s->close_tree_popup();
+      return 0;
+    }
     if (!s->_widgets.exists(frame_index))    { s->close_tree_popup(); return 0; }
     if (!tp_build(s, s->_widgets[frame_index].render_ctx, frame_index, cols)) {
       // The menu widget is gone (destroyed, or no longer a POPUPMENU). Close so
@@ -6384,38 +6573,7 @@ namespace xpl_host
             platform_invalidate(native);
           return true;
         }
-        // A leaf: report it, then close. The item id is captured BEFORE closing
-        // because close_tree_popup clears the state the id came from.
-        const uint32_t menu_idx = _tree_popup_menu;
-        const uint32_t item_id  = r.item_id;
-        uint32_t menu_cmd = 0;
-        if (_widgets.exists(menu_idx)) {
-          if (auto* pm = dynamic_cast<PopupMenuWidget*>(&_widgets[menu_idx])) {
-            auto it = pm->menu_items.find(item_id);
-            if (it != pm->menu_items.end()) menu_cmd = it->second.menu_cmd;
-          }
-        }
-        close_tree_popup();
-
-        // Built-in command routing first (set_menu_cmd with NEUI_CMD_COPY and
-        // friends): offer it to the focused widget, exactly as the menu bar does.
-        //
-        // Deliberately NOT dispatch_menu_event / dispatch_menu_command: cmd ids
-        // restart at 0x8000 per menu widget, so the _menubars scan would hand a
-        // popup's pick to whichever menu BAR happens to hold the same id. And
-        // going through dispatch_menu_command even with the right widget would
-        // fire TREE_ITEM_ACTIVATED for EVERY row (every leaf carries a cmd_id,
-        // bound or not), making ITEM_SELECTED a redundant second event per pick.
-        // One pick, one client-facing event.
-        if (menu_cmd != 0 && menu_cmd < NEUI_CMD_USER_BASE)
-          invoke_focused_command(menu_cmd);
-        if (_widgets.exists(menu_idx)) {
-          neui_event_t ev = {};
-          ev.type              = NEUI_EVENT_ITEM_SELECTED;
-          ev.data.item.widget  = { _widgets[menu_idx].widget_id };
-          ev.data.item.index   = item_id;
-          dispatch_event(&ev);
-        }
+        tree_popup_pick(r.item_id);
         return true;
       }
       return true;   // inside the column but between rows: swallow
@@ -6467,7 +6625,76 @@ namespace xpl_host
   {
     if (!_tree_popup_active) return false;
     if (keycode == NEUI_KEY_ESCAPE) { close_tree_popup(); return true; }
-    return false;
+    const bool nav = keycode == NEUI_KEY_UP || keycode == NEUI_KEY_DOWN ||
+                     keycode == NEUI_KEY_HOME || keycode == NEUI_KEY_END ||
+                     keycode == NEUI_KEY_RETURN || keycode == NEUI_KEY_SPACE ||
+                     keycode == NEUI_KEY_RIGHT || keycode == NEUI_KEY_LEFT;
+    if (!nav) return false;
+    if (!_widgets.exists(_tree_popup_frame)) { close_tree_popup(); return true; }
+    std::vector<MenuColL> cols;
+    if (!tp_build(this, _widgets[_tree_popup_frame].render_ctx, _tree_popup_frame, cols))
+      return true;
+
+    // The deepest open level is the keyboard's: its highlighted row, if the
+    // highlight is in it; a level opened by hovering a row has none yet.
+    const size_t level = cols.size() - 1;
+    const auto& rows = cols[level].rows;
+    auto selectable = [&](size_t i) { return !rows[i].separator && rows[i].enabled; };
+    int at = -1;
+    for (size_t i = 0; i < rows.size(); ++i)
+      if (rows[i].item_id == _menu_hover_item) at = (int)i;
+    auto highlight = [&](int i) {
+      _menu_path.resize(level + 1);
+      _menu_hover_item = rows[(size_t)i].item_id;
+    };
+    // Open the row's submenu, its first selectable row highlighted.
+    auto open_sub = [&](const MenuRowL& r) {
+      _menu_path.resize(level + 1);
+      _menu_path.push_back(r.item_id);
+      _menu_hover_item = r.item_id;
+      std::vector<MenuColL> deeper;
+      if (tp_build(this, _widgets[_tree_popup_frame].render_ctx, _tree_popup_frame, deeper) &&
+          deeper.size() > level + 1)
+        for (const auto& k : deeper[level + 1].rows)
+          if (!k.separator && k.enabled) { _menu_hover_item = k.item_id; break; }
+    };
+
+    const int n = (int)rows.size();
+    if (keycode == NEUI_KEY_DOWN || keycode == NEUI_KEY_UP) {
+      const int dir = keycode == NEUI_KEY_DOWN ? 1 : -1;
+      int i = at < 0 ? (dir > 0 ? -1 : n) : at;
+      for (int step = 0; step < n; ++step) {
+        i = (i + dir + n) % n;
+        if (selectable((size_t)i)) { highlight(i); break; }
+      }
+    } else if (keycode == NEUI_KEY_HOME || keycode == NEUI_KEY_END) {
+      for (int k = 0; k < n; ++k) {
+        const int i = keycode == NEUI_KEY_HOME ? k : n - 1 - k;
+        if (selectable((size_t)i)) { highlight(i); break; }
+      }
+    } else if (keycode == NEUI_KEY_LEFT) {
+      // back to the row whose submenu this level is
+      if (level > 0) {
+        _menu_hover_item = _menu_path.back();
+        _menu_path.pop_back();
+      }
+    } else if (at >= 0 && selectable((size_t)at)) {
+      // Right opens a submenu; Return / Space open it or pick the leaf
+      const MenuRowL& r = rows[(size_t)at];
+      if (r.submenu) {
+        open_sub(r);
+      } else if (keycode != NEUI_KEY_RIGHT) {
+        tree_popup_pick(r.item_id);
+        return true;
+      }
+    } else if (keycode == NEUI_KEY_RETURN || keycode == NEUI_KEY_SPACE) {
+      close_tree_popup();   // nothing highlighted: dismiss, as the overlay did
+      return true;
+    }
+    if (_widgets.exists(_tree_popup_frame))
+      if (void* native = _widgets[_tree_popup_frame].native_handle)
+        platform_invalidate(native);
+    return true;
   }
 
   // Find the index of the visible menubar child of `frame_index` (0 if none).

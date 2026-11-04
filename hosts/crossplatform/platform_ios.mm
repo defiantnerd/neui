@@ -2435,6 +2435,7 @@ namespace xpl_host
   bool platform_pump_once() { return true; }
   // No nested pump on iOS - modals use UIKit presentation, not a blocking loop.
   bool platform_run_modal_until(bool* /*keep_running*/) { return true; }
+  void platform_wake_event_pump() {}
 
   // DAW-embedding seams (NEUI_API_EMBED). Not supported on iOS yet - an AUv3
   // app-extension embeds through UIKit view-controller containment, a

@@ -2438,6 +2438,10 @@ namespace xpl_host
     return true;
   }
 
+  // run_modal_pump_macos waits in nextEventMatchingMask: on distantFuture and
+  // re-tests its flag only once an event arrives.
+  void platform_wake_event_pump() { wake_app_event_pump(); }
+
   // -------------------------------------------------------------------------
   // Native menu bar (NSMenu / NSMenuItem). The macOS menu bar is process-global
   // (NSApp.mainMenu); per-frame menubars all funnel into it. NSMenuItem

@@ -1207,7 +1207,17 @@ namespace xpl_host
     // widget or an empty menu. Asynchronous: the pick arrives later as
     // NEUI_EVENT_ITEM_SELECTED on the menu widget.
     bool show_tree_popup(uint32_t anchor_idx, int x, int y, uint32_t menu_idx);
+    // show_tree_popup's body, for a client's POPUPMENU (menu_idx) or, with
+    // `internal`, popup_menu's own model (_popup_menu_model).
+    bool show_tree_popup_model(uint32_t anchor_idx, int x, int y, uint32_t menu_idx, bool internal);
     void close_tree_popup();
+    // The open cascade's item model: the POPUPMENU _tree_popup_menu names, or
+    // popup_menu's own while a blocking popup_menu runs. nullptr if neither.
+    PopupMenuWidget* tree_popup_model();
+    // A leaf picked (click, Return): closes the popup, then reports it - the
+    // built-in command and ITEM_SELECTED for a client's POPUPMENU, the pick
+    // kept for popup_menu's own (_tree_popup_picked).
+    void tree_popup_pick(uint32_t item_id);
     // Close the popup if the widget being destroyed is the popup itself, its
     // frame, or an ancestor of either. Called from widget_destroy BEFORE the
     // subtree goes away, so _tree_popup_active can never name a dead widget -
@@ -1226,7 +1236,9 @@ namespace xpl_host
     // took it away.
     bool handle_tree_popup_click(uint32_t frame_index, float lx, float ly);
     bool handle_tree_popup_hover(uint32_t frame_index, float lx, float ly);
-    // Esc dismisses. Returns true if the key was consumed.
+    // Esc dismisses; Up / Down / Home / End move over the deepest open level's
+    // rows, Return / Space pick the highlighted one (or open its submenu),
+    // Right / Left open / close a submenu. Returns true if the key was consumed.
     bool handle_tree_popup_key(uint32_t keycode);
     // A press consumed by the popup arms this; the platform layer's button-UP
     // path calls it to swallow the matching release exactly once, so the widget
@@ -1477,13 +1489,26 @@ namespace xpl_host
     // logical pixels (the same space as widget abs_x/abs_y).
     bool handle_toast_click(uint32_t frame_widget_idx, float lx, float ly);
 
-    // Popup menu overlay (used by widgets->popup_menu). Blocking - runs a
-    // nested message loop until the user picks an item or dismisses.
-    // anchor_idx is the widget the popup is anchored to; (lx, ly) are in
-    // its local logical coordinates. Returns 1-based pick index, or 0 if
-    // dismissed. items contains the displayed strings ("-" = separator).
+    // widgets->popup_menu. Blocking - runs a nested message loop until the
+    // user picks an item or dismisses. anchor_idx is the widget the popup is
+    // anchored to; (lx, ly) are in its local logical coordinates. Returns
+    // 1-based pick index, or 0 if dismissed. items contains the displayed
+    // strings ("-" = separator). Shown through the tree popup where the
+    // platform routes its input (open_popup_menu_as_tree), else through the
+    // overlay below.
     int open_popup_menu(uint32_t anchor_idx, int lx, int ly,
                         const std::vector<std::string>& items);
+    int open_popup_menu_as_tree(uint32_t anchor_idx, int lx, int ly,
+                                const std::vector<std::string>& items);
+    // popup_menu's cascade hosted in a popup surface of the host's own
+    // (menu_surface) where the platform has them, so the menu is a window of
+    // its own and may leave its frame: laid out against the box the surface is
+    // clamped to, the surface sized to it and opened at the anchor's (x, y).
+    // False where there are no popup surfaces (the cascade then paints into
+    // the frame).
+    bool show_tree_popup_on_surface(uint32_t anchor_idx, int x, int y);
+    // That surface: created on first use, kept for the session's life.
+    uint32_t menu_surface();
     // Paint the popup menu overlay. Called from paint_frame after the
     // combo overlay so the popup sits on top of everything else.
     void paint_popup_menu(neui_render_ctx_t ctx);
@@ -1787,6 +1812,20 @@ namespace xpl_host
     int                   _tree_popup_y      = 0;
     // Set when a press was consumed by the popup; see tree_popup_take_release.
     bool                  _tree_popup_swallow_release = false;
+    // A blocking widgets->popup_menu shown through the tree popup: its strings
+    // as the rows of a model of its own (row ids 1..n, so a row's id is the
+    // 1-based index popup_menu returns), the cascade naming it while it runs,
+    // and the pick kept rather than reported (0: none yet).
+    std::unique_ptr<PopupMenuWidget> _popup_menu_model;
+    bool                  _tree_popup_internal = false;
+    uint32_t              _tree_popup_picked   = 0;
+    // The popup surface hosting the open cascade (popup_menu's, where there
+    // are popup surfaces), 0 while it paints into its frame; and the host's
+    // own surface for it (menu_surface). The surface's dismissal (a press
+    // outside, Escape, the owner moving) closes the cascade, and closing the
+    // cascade closes the surface; the client hears of neither.
+    uint32_t              _tree_popup_surface  = 0;
+    uint32_t              _menu_surface        = 0;
 
     // Open popup surfaces (NEUI_W_POPUPSURFACE), outermost level first. Tree
     // slots of the PopupSurfaceWidget frames; the owner / anchor / placement for
