@@ -1544,6 +1544,9 @@ namespace xpl_host
                  SWP_NOZORDER | SWP_NOACTIVATE);
   }
 
+  // NEUI_ATTR_ZOOM is not supported on LVGL.
+  void platform_apply_zoom(WidgetData& /*wd*/) {}
+
   void platform_post_close(void* native_handle)
   {
     if (native_handle)

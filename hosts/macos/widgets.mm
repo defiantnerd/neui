@@ -169,8 +169,11 @@ namespace macos_host
   // render-ctx resize). No-op until the native object exists.
   void apply_geometry_native_macos(WidgetData& wd);
   // Defined in window.mm. Blocking popup menu anchored to an NSView; returns
-  // the 1-based pick (separators consume an index) or 0 on dismiss.
-  int  run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items);
+  // the 1-based pick (separators consume an index) or 0 on dismiss. The
+  // _strings variant takes popup_menu's NULL-terminated strings.
+  int  run_popup_menu_macos(NSView* anchor, int x, int y,
+                            const neui_popup_item_t* items, int count, int item_size);
+  int  run_popup_menu_strings_macos(NSView* anchor, int x, int y, const char* const* items);
   // Defined in window.mm. Applies NEUI_ATTR_FONT_* to a native control's
   // NSFont (no-op for painted widgets + when no font attr is set).
   void apply_font_native_macos(WidgetData& wd);
@@ -620,20 +623,37 @@ namespace macos_host
     }
     if (x) *x = 0; if (y) *y = 0; if (w) *w = gw; if (h) *h = gh;
   }
+  // The anchor's NSView (nil: none), or false if there is no such widget.
+  static bool popup_anchor_view_macos(neui_session_t session, neui_widget_t anchor, NSView** view)
+  {
+    auto* s = get_session_for_widget(session, anchor);
+    if (!s) return false;
+    uint32_t i = WidgetToIndex(anchor);
+    if (!s->_widgets.exists(i)) return false;
+    auto& wd = s->_widgets[i];
+    *view = nil;
+    if (wd.native_control) {
+      id obj = (__bridge id)wd.native_control;
+      if ([obj isKindOfClass:[NSView class]]) *view = (NSView*)obj;
+    }
+    return true;
+  }
+  static int   NEUI_ABI w_popup_menu_items(neui_session_t session, neui_widget_t anchor,
+                                            int x, int y, const neui_popup_item_t* items,
+                                            int count, int item_size)
+  {
+    if (!items || count <= 0 || item_size < NEUI_POPUP_ITEM_SIZE_MIN) return 0;
+    NSView* view = nil;
+    if (!popup_anchor_view_macos(session, anchor, &view)) return 0;
+    return run_popup_menu_macos(view, x, y, items, count, item_size);
+  }
   static int   NEUI_ABI w_popup_menu(neui_session_t session, neui_widget_t anchor,
                                       int x, int y, const char* const* items)
   {
-    auto* s = get_session_for_widget(session, anchor);
-    if (!s || !items) return 0;
-    uint32_t i = WidgetToIndex(anchor);
-    if (!s->_widgets.exists(i)) return 0;
-    auto& wd = s->_widgets[i];
+    if (!items) return 0;
     NSView* view = nil;
-    if (wd.native_control) {
-      id obj = (__bridge id)wd.native_control;
-      if ([obj isKindOfClass:[NSView class]]) view = (NSView*)obj;
-    }
-    return run_popup_menu_macos(view, x, y, items);
+    if (!popup_anchor_view_macos(session, anchor, &view)) return 0;
+    return run_popup_menu_strings_macos(view, x, y, items);
   }
 
   // Request a repaint of the widget. For painted views (IMAGE, KNOB,
@@ -826,6 +846,7 @@ namespace macos_host
     w_get_enabled,
     w_get_client_rect,
     w_create_from_component,
+    w_popup_menu_items,
   };
 
   // -------------------------------------------------------------------------

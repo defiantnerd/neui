@@ -1,6 +1,7 @@
 #pragma once
 
 #include <neui/neui.h>
+#include <stddef.h>
 #include "assets.h"
 #include "events.h"
 
@@ -18,6 +19,20 @@ typedef struct neui_widget_client {
   void (NEUI_ABI *ondestroy)(void* token, neui_widget_t widget, void* userdata);
   bool (NEUI_ABI *onevent)  (void* token, neui_event_t* event);
 } neui_widget_client_t;
+
+// One item of widgets->popup_menu_items. Fields may be appended to this
+// struct later: the caller passes sizeof(neui_popup_item_t) as item_size and
+// the host reads only the fields that fit in it, so a caller built against
+// an older header keeps working. NEUI_POPUP_ITEM_SIZE_MIN is the first
+// version's (text and flags): the smallest item_size a host accepts.
+typedef struct neui_popup_item {
+  const char* text;    // UTF-8
+  uint32_t    flags;   // NEUI_POPUP_ITEM_*
+} neui_popup_item_t;
+#define NEUI_POPUP_ITEM_SIZE_MIN   ((int)(offsetof(neui_popup_item_t, flags) + sizeof(uint32_t)))
+#define NEUI_POPUP_ITEM_CHECKED    0x1u  // a check mark beside it; any number of items may have one
+#define NEUI_POPUP_ITEM_DISABLED   0x2u  // greyed, can't be picked
+#define NEUI_POPUP_ITEM_SEPARATOR  0x4u  // a separator line (text ignored); it still counts in the result's index
 
 typedef struct neui_widget_api {
   // Create a widget under `parent`. (x, y) are logical pixels at 96 DPI,
@@ -150,6 +165,23 @@ typedef struct neui_widget_api {
   neui_widget_t      (NEUI_ABI *create_from_component)(neui_session_t session, neui_widget_t parent,
                                                        neui_asset_t component,
                                                        int x, int y, int width, int height);
+  // As popup_menu, with per-item flags (see neui_popup_item_t): any number of
+  // items may carry a check mark, be greyed out, or be a separator. `items` is
+  // an array of `count` items, `item_size` bytes apart (pass
+  // sizeof(neui_popup_item_t)); the host steps through them by item_size.
+  // Returns the 1-based index of the picked item (counting separators), or 0
+  // if dismissed without picking, if count <= 0 or if item_size is smaller
+  // than NEUI_POPUP_ITEM_SIZE_MIN. The call is BLOCKING, as popup_menu is.
+  // The host marks a checked item as its menus do (a check mark beside it);
+  // on the crossplatform host the arrow keys start from the first one. The
+  // host never changes the flags: a menu of several options toggles the
+  // picked item's state itself and can reopen the menu; a menu of one value's
+  // choices checks the current one. (Vtable-appended; check the api version /
+  // pointer before calling.)
+  int                (NEUI_ABI *popup_menu_items)(neui_session_t session, neui_widget_t anchor,
+                                                  int x, int y,
+                                                  const neui_popup_item_t* items, int count,
+                                                  int item_size);
 } neui_widget_api_t;
 
 #define NEUI_W_APPWINDOW  "neui.std.appwindow"

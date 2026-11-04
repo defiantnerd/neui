@@ -4693,14 +4693,15 @@ namespace win32_host
   // ---------------------------------------------------------------------------
   // Popup menu (context menu, free of the menubar)
 
-  static int NEUI_ABI popup_menu(neui_session_t session, neui_widget_t anchor,
-                                  int x, int y, const char* const* items)
+  static int NEUI_ABI popup_menu_items(neui_session_t session, neui_widget_t anchor,
+                                        int x, int y, const neui_popup_item_t* items,
+                                        int count, int item_size)
   {
+    if (!items || count <= 0 || item_size < NEUI_POPUP_ITEM_SIZE_MIN) return 0;
     auto* s = get_session(session);
     if (!s) return 0;
     auto* wd = s->get_widget(WidgetToIndex(anchor));
     if (!wd || !wd->session) return 0;
-    if (!items) return 0;
 
     // Find the parent frame's HWND for screen-coord conversion + as the
     // owner of TrackPopupMenuEx.
@@ -4711,21 +4712,23 @@ namespace win32_host
     HMENU h = CreatePopupMenu();
     if (!h) return 0;
 
-    int count = 0;
-    for (int i = 0; items[i] != nullptr; ++i) {
-      const char* s8 = items[i];
-      bool is_sep = (s8[0] == '-' && s8[1] == 0);
-      ++count;
-      if (is_sep) {
+    const char* p = reinterpret_cast<const char*>(items);
+    for (int i = 0; i < count; ++i, p += item_size) {
+      const auto* it = reinterpret_cast<const neui_popup_item_t*>(p);
+      if (it->flags & NEUI_POPUP_ITEM_SEPARATOR) {
         AppendMenuW(h, MF_SEPARATOR, 0, nullptr);
       } else {
         // Convert UTF-8 to UTF-16.
+        const char* s8 = it->text ? it->text : "";
         int wlen = MultiByteToWideChar(CP_UTF8, 0, s8, -1, nullptr, 0);
         std::wstring ws(wlen ? wlen - 1 : 0, L'\0');
         if (wlen > 1) {
           MultiByteToWideChar(CP_UTF8, 0, s8, -1, ws.data(), wlen);
         }
-        AppendMenuW(h, MF_STRING, static_cast<UINT_PTR>(count), ws.c_str());
+        AppendMenuW(h, MF_STRING |
+                       ((it->flags & NEUI_POPUP_ITEM_CHECKED) ? MF_CHECKED : MF_UNCHECKED) |
+                       ((it->flags & NEUI_POPUP_ITEM_DISABLED) ? MF_GRAYED : MF_ENABLED),
+                    static_cast<UINT_PTR>(i + 1), ws.c_str());
       }
     }
 
@@ -4753,6 +4756,20 @@ namespace win32_host
         pt.x, pt.y, owner, nullptr);
     DestroyMenu(h);
     return static_cast<int>(picked);
+  }
+
+  static int NEUI_ABI popup_menu(neui_session_t session, neui_widget_t anchor,
+                                  int x, int y, const char* const* items)
+  {
+    if (!items) return 0;
+    std::vector<neui_popup_item_t> v;
+    for (int i = 0; items[i] != nullptr; ++i) {
+      const bool sep = items[i][0] == '-' && items[i][1] == 0;
+      v.push_back({ items[i], sep ? NEUI_POPUP_ITEM_SEPARATOR : 0u });
+    }
+    if (v.empty()) return 0;
+    return popup_menu_items(session, anchor, x, y, v.data(), static_cast<int>(v.size()),
+                            static_cast<int>(sizeof(neui_popup_item_t)));
   }
 
   // -------------------------------------------------------------------------
@@ -4835,6 +4852,7 @@ namespace win32_host
     get_enabled,
     get_client_rect_api,
     create_from_component,
+    popup_menu_items,
   };
 
   // -------------------------------------------------------------------------

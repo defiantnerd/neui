@@ -107,6 +107,11 @@ namespace xpl_host
   void platform_set_window_pos(void* native_handle,
                                 int x, int y, int w, int h, uint32_t dpi);
 
+  // A realized frame's zoom (wd.zoom, NEUI_ATTR_ZOOM) changed: resize its
+  // native window to its logical client size times the zoom, hand the render
+  // context the zoomed DPI, and repaint. No-op where zoom isn't supported.
+  void platform_apply_zoom(WidgetData& wd);
+
   // Post an asynchronous close request to a native window.
   void platform_post_close(void* native_handle);
 

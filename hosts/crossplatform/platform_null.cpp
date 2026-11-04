@@ -44,6 +44,7 @@ namespace xpl_host
                                 int /*x*/, int /*y*/, int /*w*/, int /*h*/,
                                 uint32_t /*dpi*/) {}
 
+  void platform_apply_zoom(WidgetData& /*wd*/) {}
   void platform_post_close(void* /*native_handle*/) {}
 
   float platform_get_scale_factor(void* /*native_handle*/) { return 1.0f; }

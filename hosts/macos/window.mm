@@ -139,12 +139,16 @@ namespace macos_host {
                                                  uint32_t frame,
                                                  uint32_t tint);
 
-  // Blocking popup menu. Builds an NSMenu from the NULL-terminated UTF-8
-  // `items` ("-" = separator), presents it at `(x, y)` in `anchor`'s
-  // (flipped) coordinate space, and returns the 1-based index of the picked
-  // item (separators consume an index, matching the win32 host) or 0 on
-  // dismiss. Defined after the view; the KNOB right-click handler calls it.
-  int run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items);
+  // Blocking popup menu. Builds an NSMenu from `count` neui_popup_item_t
+  // `item_size` bytes apart (flags: checked, disabled, separator), presents
+  // it at `(x, y)` in `anchor`'s (flipped) coordinate space, and returns the
+  // 1-based index of the picked item (separators consume an index, matching
+  // the win32 host) or 0 on dismiss. The _strings variant takes
+  // popup_menu's NULL-terminated UTF-8 strings ("-" = separator). Defined
+  // after the view; the KNOB right-click handler calls it.
+  int run_popup_menu_macos(NSView* anchor, int x, int y,
+                           const neui_popup_item_t* items, int count, int item_size);
+  int run_popup_menu_strings_macos(NSView* anchor, int x, int y, const char* const* items);
 
   // Defined in widgets.mm. Routes a built-in command (NEUI_CMD_*) to the key
   // window's first responder; returns true if consumed. The menu-pick router
@@ -315,7 +319,7 @@ namespace macos_host {
     auto* wd = static_cast<WidgetData*>(host_data);
     if (!wd || !wd->native_control || !items) return 0;
     NSView* anchor = (__bridge NSView*)wd->native_control;
-    return run_popup_menu_macos(anchor, local_x, local_y, items);
+    return run_popup_menu_strings_macos(anchor, local_x, local_y, items);
   }
 
   // ------------------------------------------------------------------------
@@ -2155,7 +2159,7 @@ static float neui_snap_to_steps(float v, int steps)
     if (wd && !wd->enabled) return;  // disabled knob: no context menu
     NSPoint p = [self localPointForKnobEvent:event];
     static const char* k_items[] = { "Reset to default", nullptr };
-    int pick = macos_host::run_popup_menu_macos(self, (int)p.x, (int)p.y, k_items);
+    int pick = macos_host::run_popup_menu_strings_macos(self, (int)p.x, (int)p.y, k_items);
     if (pick == 1) {
       float def = 0.0f;
       if (wd && wd->attrs) def = neui_clamp01(wd->attrs->get_float(NEUI_PARAM_DEFAULT, 0.0f));
@@ -2925,28 +2929,31 @@ namespace macos_host {
 @end
 
 namespace macos_host {
-  int run_popup_menu_macos(NSView* anchor, int x, int y, const char* const* items)
+  int run_popup_menu_macos(NSView* anchor, int x, int y,
+                           const neui_popup_item_t* items, int count, int item_size)
   {
-    if (!items) return 0;
+    if (!items || count <= 0 || item_size < NEUI_POPUP_ITEM_SIZE_MIN) return 0;
     NSMenu* menu = [[NSMenu alloc] initWithTitle:@""];
     menu.autoenablesItems = NO;
     NEUIPopupCollector* collector = [[NEUIPopupCollector alloc] init];
 
-    int idx = 0;
-    for (const char* const* p = items; *p; ++p) {
-      ++idx;  // separators consume an index slot (matches the win32 host)
-      const char* t = *p;
-      if (t[0] == '-' && t[1] == '\0') {
+    // separators consume an index slot (matches the win32 host)
+    const char* p = (const char*)items;
+    for (int idx = 1; idx <= count; ++idx, p += item_size) {
+      const neui_popup_item_t* it = (const neui_popup_item_t*)p;
+      if (it->flags & NEUI_POPUP_ITEM_SEPARATOR) {
         [menu addItem:[NSMenuItem separatorItem]];
         continue;
       }
+      NSString* title = [NSString stringWithUTF8String:it->text ? it->text : ""];
       NSMenuItem* mi = [[NSMenuItem alloc]
-        initWithTitle:[NSString stringWithUTF8String:t]
+        initWithTitle:title ? title : @""
                action:@selector(neuiPopupPick:)
         keyEquivalent:@""];
       mi.target  = collector;
       mi.tag     = idx;
-      mi.enabled = YES;
+      mi.enabled = (it->flags & NEUI_POPUP_ITEM_DISABLED) ? NO : YES;
+      if (it->flags & NEUI_POPUP_ITEM_CHECKED) mi.state = NSControlStateValueOn;
       [menu addItem:mi];
     }
 
@@ -2962,6 +2969,17 @@ namespace macos_host {
                                 inView:kw.contentView];
     }
     return collector->pickedTag;
+  }
+
+  int run_popup_menu_strings_macos(NSView* anchor, int x, int y, const char* const* items)
+  {
+    if (!items) return 0;
+    std::vector<neui_popup_item_t> v;
+    for (const char* const* p = items; *p; ++p) {
+      const bool sep = (*p)[0] == '-' && (*p)[1] == '\0';
+      v.push_back({ *p, sep ? NEUI_POPUP_ITEM_SEPARATOR : 0u });
+    }
+    return run_popup_menu_macos(anchor, x, y, v.data(), (int)v.size(), (int)sizeof(neui_popup_item_t));
   }
 }
 

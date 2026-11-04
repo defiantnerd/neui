@@ -939,7 +939,7 @@ namespace xpl_host
     if (new_dpi == 0) new_dpi = 96;
     wd->dpi = new_dpi;
     if (wd->render_ctx && _backend)
-      _backend->update_dpi(wd->render_ctx, new_dpi);
+      _backend->update_dpi(wd->render_ctx, wd->client_dpi());
   }
 
   // -------------------------------------------------------------------------
@@ -3142,9 +3142,7 @@ namespace xpl_host
   {
     auto* wd = static_cast<CustomDrawWidget*>(host_data);
     if (!wd || !wd->session || !items) return 0;
-    std::vector<std::string> v;
-    for (int i = 0; items[i] != nullptr; ++i) v.emplace_back(items[i]);
-    return wd->session->open_popup_menu(wd->index, local_x, local_y, v);
+    return wd->session->open_popup_menu(wd->index, local_x, local_y, popup_items_from_strings(items));
   }
 
   // Defined in widgets.cpp where dnd_begin_drag_with_preview is in scope.
@@ -3295,8 +3293,8 @@ namespace xpl_host
       // frame-local; subtract the widget's frame-local origin to get local.
       int local_x = event->data.mouse.x - abs_x;
       int local_y = event->data.mouse.y - abs_y;
-      static const std::vector<std::string> k_items = {
-        "Reset to default",
+      static const std::vector<PopupItem> k_items = {
+        { "Reset to default", 0 },
       };
       int picked = session->open_popup_menu(index, local_x, local_y, k_items);
       if (picked == 1) {
@@ -3972,68 +3970,127 @@ namespace xpl_host
   static constexpr int POPUP_PAD_Y    = 4;
   static constexpr int POPUP_SEP_H    = 7;
   static constexpr int POPUP_MIN_W    = 140;
+  static constexpr int POPUP_CHECK_W  = 16;   // the check mark's gutter (left of the text)
+  // The frame's edge the popup stays off, so there is always somewhere
+  // outside it to click (a click outside dismisses it); a frame smaller
+  // than POPUP_MARGIN_MIN gets none.
+  static constexpr int POPUP_MARGIN     = 16;
+  static constexpr int POPUP_MARGIN_MIN = 8 * POPUP_MARGIN;
+  // The editor behind a popup of more than one column is dimmed by this.
+  static constexpr uint8_t POPUP_DIM_ALPHA = 0x59;
 
-  static bool popup_item_is_separator(const std::string& s)
+  std::vector<PopupItem> popup_items_from_strings(const char* const* strings)
   {
-    return s.size() == 1 && s[0] == '-';
-  }
-
-  static int popup_item_height(const std::string& s)
-  {
-    return popup_item_is_separator(s) ? POPUP_SEP_H : POPUP_ITEM_H();
-  }
-
-  static int popup_total_width(neui_render_backend_t* backend,
-                                neui_render_ctx_t ctx,
-                                const std::vector<std::string>& items)
-  {
-    float maxw = 0.0f;
-    if (backend && backend->measure_text) {
-      for (auto& s : items) {
-        if (popup_item_is_separator(s)) continue;
-        float w = backend->measure_text(ctx, s.c_str(), -1, (float)POPUP_FONT_PX());
-        if (w > maxw) maxw = w;
-      }
+    std::vector<PopupItem> v;
+    for (int i = 0; strings && strings[i] != nullptr; ++i) {
+      const bool sep = strings[i][0] == '-' && strings[i][1] == '\0';
+      v.push_back({ strings[i], sep ? NEUI_POPUP_ITEM_SEPARATOR : 0u });
     }
-    int w = (int)maxw + POPUP_PAD_X * 2;
-    return w < POPUP_MIN_W ? POPUP_MIN_W : w;
+    return v;
+  }
+
+  static bool popup_item_is_separator(const PopupItem& it)
+  {
+    return (it.flags & NEUI_POPUP_ITEM_SEPARATOR) != 0;
+  }
+
+  // A separator or a disabled item can't be hovered or picked.
+  static bool popup_item_is_pickable(const PopupItem& it)
+  {
+    return (it.flags & (NEUI_POPUP_ITEM_SEPARATOR | NEUI_POPUP_ITEM_DISABLED)) == 0;
+  }
+
+  static int popup_item_height(const PopupItem& it, int item_h)
+  {
+    return popup_item_is_separator(it) ? POPUP_SEP_H : item_h;
+  }
+
+  // Each item's text width at font_px (0 for a separator).
+  static std::vector<int> popup_text_widths(neui_render_backend_t* backend,
+                                            const std::vector<PopupItem>& items,
+                                            int font_px)
+  {
+    std::vector<int> widths(items.size(), 0);
+    if (!backend || !backend->measure_text) return widths;
+    for (size_t i = 0; i < items.size(); ++i) {
+      if (popup_item_is_separator(items[i])) continue;
+      widths[i] = (int)backend->measure_text(nullptr, items[i].text.c_str(), -1, (float)font_px);
+    }
+    return widths;
   }
 
   void Session::layout_popup(int frame_w, int frame_h)
   {
     // One column below the anchor while the items fit the frame's height;
-    // a longer list wraps into columns of the frame's height. Then moved up
-    // and left as far as it takes to stay inside the frame.
-    _popup_cells.clear();
-    _popup_col_w = popup_total_width(_backend, nullptr, _popup_items);
-    int col = 0, y = POPUP_PAD_Y, tallest = 0;
-    for (auto& s : _popup_items) {
-      int h = popup_item_height(s);
-      if (frame_h > 0 && y > POPUP_PAD_Y && y + h + POPUP_PAD_Y > frame_h) {
-        tallest = (std::max)(tallest, y + POPUP_PAD_Y);
-        ++col;
-        y = POPUP_PAD_Y;
+    // a longer list wraps into columns of the frame's height, each as wide
+    // as its widest item, and while those would be wider than the frame the
+    // rows get tighter (down to the font's height and a little), then the
+    // font smaller (two steps). Each column that holds a checked item gets a
+    // gutter for the check marks. The popup stays POPUP_MARGIN off the
+    // frame's edge: moved up and left as far as it takes.
+    const int mx = frame_w >= POPUP_MARGIN_MIN ? POPUP_MARGIN : 0;
+    const int my = frame_h >= POPUP_MARGIN_MIN ? POPUP_MARGIN : 0;
+    const int avail_w = frame_w > 0 ? frame_w - 2 * mx : 0;
+    const int avail_h = frame_h > 0 ? frame_h - 2 * my : 0;
+    const int base_font = POPUP_FONT_PX();
+    for (int font = base_font; font >= base_font - 2; --font) {
+      const std::vector<int> widths = popup_text_widths(_backend, _popup_items, font);
+      const int tightest = font + 4;
+      bool fits = false;
+      for (int item_h = font == base_font ? POPUP_ITEM_H() : tightest; item_h >= tightest; --item_h) {
+        _popup_cells.clear();
+        int col = 0, y = POPUP_PAD_Y, tallest = 0;
+        for (size_t i = 0; i < _popup_items.size(); ++i) {
+          int h = popup_item_height(_popup_items[i], item_h);
+          if (avail_h > 0 && y > POPUP_PAD_Y && y + h + POPUP_PAD_Y > avail_h) {
+            tallest = (std::max)(tallest, y + POPUP_PAD_Y);
+            ++col;
+            y = POPUP_PAD_Y;
+          }
+          _popup_cells.push_back({col, y, h});
+          y += h;
+        }
+        _popup_h = (std::max)(tallest, y + POPUP_PAD_Y);
+        // Each column's left edge, then the popup's width.
+        std::vector<int> col_w(static_cast<size_t>(col + 1), 0);
+        _popup_col_checked.assign(static_cast<size_t>(col + 1), false);
+        for (size_t i = 0; i < _popup_cells.size(); ++i) {
+          const size_t c = static_cast<size_t>(_popup_cells[i].col);
+          col_w[c] = (std::max)(col_w[c], widths[i]);
+          if (_popup_items[i].flags & NEUI_POPUP_ITEM_CHECKED) _popup_col_checked[c] = true;
+        }
+        _popup_col_x.assign(1, 0);
+        for (int c = 0; c <= col; ++c) {
+          int w = col_w[static_cast<size_t>(c)] + POPUP_PAD_X * 2 + (_popup_col_checked[static_cast<size_t>(c)] ? POPUP_CHECK_W : 0);
+          if (col == 0 && w < POPUP_MIN_W) w = POPUP_MIN_W;
+          _popup_col_x.push_back(_popup_col_x.back() + w);
+        }
+        _popup_font_px = font;
+        if (avail_w <= 0 || _popup_col_x.back() <= avail_w) { fits = true; break; }
       }
-      _popup_cells.push_back({col, y, h});
-      y += h;
+      if (fits) break;
     }
-    _popup_h    = (std::max)(tallest, y + POPUP_PAD_Y);
-    _popup_cols = col + 1;
-    if (frame_h > 0 && _popup_y_abs + _popup_h > frame_h)
-      _popup_y_abs = (std::max)(0, frame_h - _popup_h);
-    int w = _popup_col_w * _popup_cols;
-    if (frame_w > 0 && _popup_x_abs + w > frame_w)
-      _popup_x_abs = (std::max)(0, frame_w - w);
+    _popup_frame_w = frame_w;
+    _popup_frame_h = frame_h;
+    if (frame_h > 0 && _popup_y_abs + _popup_h > frame_h - my)
+      _popup_y_abs = frame_h - my - _popup_h;
+    if (frame_h > 0 && _popup_y_abs < my) _popup_y_abs = (std::max)(0, (std::min)(my, frame_h - _popup_h));
+    int w = _popup_col_x.back();
+    if (frame_w > 0 && _popup_x_abs + w > frame_w - mx)
+      _popup_x_abs = frame_w - mx - w;
+    if (frame_w > 0 && _popup_x_abs < mx) _popup_x_abs = (std::max)(0, (std::min)(mx, frame_w - w));
   }
 
   int Session::popup_item_at(float lx, float ly) const
   {
-    int w = _popup_col_w * _popup_cols;
+    int w = _popup_col_x.empty() ? 0 : _popup_col_x.back();
     if (lx < static_cast<float>(_popup_x_abs) || lx >= static_cast<float>(_popup_x_abs + w) ||
         ly < static_cast<float>(_popup_y_abs) || ly >= static_cast<float>(_popup_y_abs + _popup_h)) {
       return -1;
     }
-    int col = _popup_col_w > 0 ? ((int)lx - _popup_x_abs) / _popup_col_w : 0;
+    int rel_x = (int)lx - _popup_x_abs;
+    int col = 0;
+    while (col + 2 < (int)_popup_col_x.size() && rel_x >= _popup_col_x[static_cast<size_t>(col + 1)]) ++col;
     int rel_y = (int)ly - _popup_y_abs;
     for (size_t i = 0; i < _popup_cells.size(); ++i) {
       auto& c = _popup_cells[i];
@@ -4049,7 +4106,7 @@ namespace xpl_host
   bool Session::handle_popup_click(float lx, float ly)
   {
     if (!_popup_active) return false;
-    int idx = popup_item_at(lx, ly);
+    int idx = popup_item_at(lx * _popup_zoom, ly * _popup_zoom);
     if (idx < 0) {
       // click outside -> dismiss
       _popup_picked = 0;
@@ -4057,8 +4114,8 @@ namespace xpl_host
       _popup_running = false;
       return true;
     }
-    if (idx == 0 || popup_item_is_separator(_popup_items[static_cast<size_t>(idx - 1)])) {
-      // padding or a separator: stay open
+    if (idx == 0 || !popup_item_is_pickable(_popup_items[static_cast<size_t>(idx - 1)])) {
+      // padding, a separator or a disabled item: stay open
       return true;
     }
     _popup_picked = idx;
@@ -4070,10 +4127,10 @@ namespace xpl_host
   bool Session::handle_popup_hover(float lx, float ly)
   {
     if (!_popup_active) return false;
-    int idx = popup_item_at(lx, ly);
+    int idx = popup_item_at(lx * _popup_zoom, ly * _popup_zoom);
     // 1-based, as paint_popup_menu and handle_popup_key read it; -1: none
     int new_hover = -1;
-    if (idx > 0 && !popup_item_is_separator(_popup_items[static_cast<size_t>(idx - 1)])) new_hover = idx;
+    if (idx > 0 && popup_item_is_pickable(_popup_items[static_cast<size_t>(idx - 1)])) new_hover = idx;
     if (new_hover != _popup_hover) {
       _popup_hover = new_hover;
       uint32_t f = _widgets.child(0);
@@ -4110,14 +4167,20 @@ namespace xpl_host
     if (keycode == NEUI_KEY_DOWN || keycode == NEUI_KEY_UP) {
       int n = (int)_popup_items.size();
       int dir = (keycode == NEUI_KEY_DOWN) ? 1 : -1;
-      int next = (_popup_hover < 1) ? (dir > 0 ? 1 : n) : _popup_hover + dir;
-      // Skip separators.
+      // From the hovered item, else from the first checked one, else from an end.
+      int from = _popup_hover;
+      for (int i = 0; from < 1 && i < n; ++i)
+        if (_popup_items[static_cast<size_t>(i)].flags & NEUI_POPUP_ITEM_CHECKED) from = i + 1;
+      int next = (from < 1) ? (dir > 0 ? 1 : n) : from + dir;
+      // Skip separators and disabled items.
+      bool found = false;
       for (int safety = 0; safety < n; ++safety) {
         if (next < 1) next = n;
         if (next > n) next = 1;
-        if (!popup_item_is_separator(_popup_items[static_cast<size_t>(next - 1)])) break;
+        if (popup_item_is_pickable(_popup_items[static_cast<size_t>(next - 1)])) { found = true; break; }
         next += dir;
       }
+      if (!found) return true;
       _popup_hover = next;
       uint32_t f = _widgets.child(0);
       while (f != 0 && _widgets.exists(f)) {
@@ -4134,52 +4197,76 @@ namespace xpl_host
 
   void Session::paint_popup_menu(neui_render_ctx_t ctx)
   {
-    if (!_popup_active || !_backend) return;
+    if (!_popup_active || !_backend || _popup_col_x.size() < 2) return;
     using neui_detail::ColorRole;
-    int cw = _popup_col_w;
-    int w = cw * _popup_cols;
+    const int cols = (int)_popup_col_x.size() - 1;
+    int w = _popup_col_x.back();
     int h = _popup_h;
     float fx = (float)_popup_x_abs;
     float fy = (float)_popup_y_abs;
 
+    // popup px -> the frame's logical px
+    bool zoomed = _popup_zoom != 1.0f && _backend->push_transform && _backend->scale;
+    if (zoomed) {
+      _backend->push_transform(ctx);
+      _backend->scale(ctx, 1.0f / _popup_zoom, 1.0f / _popup_zoom);
+    }
+    // A popup of columns covers most of the frame: the rest is dimmed, the
+    // place to click to dismiss it.
+    if (cols > 1 && _popup_frame_w > 0 && _popup_frame_h > 0) {
+      _backend->fill_rect(ctx, 0.0f, 0.0f, (float)_popup_frame_w, (float)_popup_frame_h,
+                          neui_detail::with_alpha(0xFF000000u, POPUP_DIM_ALPHA));
+    }
     _backend->fill_rect(ctx, fx, fy, (float)w, (float)h,
                         neui_detail::color(ColorRole::control_bg_alt));
     _backend->draw_rect(ctx, fx, fy, (float)w, (float)h, 1.0f,
                         neui_detail::color(ColorRole::border));
-    for (int c = 1; c < _popup_cols; ++c) {
-      _backend->fill_rect(ctx, fx + (float)(c * cw), fy + 4.0f, 1.0f, (float)h - 8.0f,
+    for (int c = 1; c < cols; ++c) {
+      _backend->fill_rect(ctx, fx + (float)_popup_col_x[static_cast<size_t>(c)], fy + 4.0f, 1.0f, (float)h - 8.0f,
                           neui_detail::color(ColorRole::scrollbar_separator));
     }
 
     for (size_t i = 0; i < _popup_items.size() && i < _popup_cells.size(); ++i) {
-      auto& s = _popup_items[i];
+      auto& item = _popup_items[i];
       auto& cell = _popup_cells[i];
-      float cx = fx + (float)(cell.col * cw);
+      float cx = fx + (float)_popup_col_x[static_cast<size_t>(cell.col)];
+      float cw = (float)(_popup_col_x[static_cast<size_t>(cell.col) + 1] - _popup_col_x[static_cast<size_t>(cell.col)]);
       float cy = fy + (float)cell.y;
-      if (popup_item_is_separator(s)) {
+      if (popup_item_is_separator(item)) {
         float sy = cy + (float)POPUP_SEP_H * 0.5f;
         _backend->fill_rect(ctx, cx + 4.0f, sy,
-                             (float)cw - 8.0f, 1.0f,
+                             cw - 8.0f, 1.0f,
                              neui_detail::color(ColorRole::scrollbar_separator));
         continue;
       }
       bool hovered = ((int)i + 1 == _popup_hover);
       if (hovered) {
         _backend->fill_rect(ctx, cx + 1.0f, cy,
-                             (float)cw - 2.0f, (float)cell.h,
+                             cw - 2.0f, (float)cell.h,
                              neui_detail::color(ColorRole::accent));
       }
+      uint32_t tcol = neui_detail::color(ColorRole::text_primary);
+      if (item.flags & NEUI_POPUP_ITEM_DISABLED) tcol = neui_detail::color(ColorRole::text_disabled);
+      else if (hovered)                          tcol = neui_detail::color(ColorRole::accent_text);
+      // A column with a checked item has a gutter for the check marks, as
+      // the in-frame menubar's dropdowns do.
+      float gutter = _popup_col_checked[static_cast<size_t>(cell.col)] ? (float)POPUP_CHECK_W : 0.0f;
+      if (item.flags & NEUI_POPUP_ITEM_CHECKED) {
+        _backend->draw_text(ctx, cx + (float)POPUP_PAD_X, cy,
+                            (float)POPUP_CHECK_W, (float)cell.h,
+                            "\xE2\x9C\x93" /* U+2713 check mark */,
+                            (float)_popup_font_px, tcol);
+      }
       _backend->draw_text(ctx,
-        cx + (float)POPUP_PAD_X, cy,
-        (float)cw - (float)POPUP_PAD_X * 2.0f, (float)cell.h,
-        s.c_str(), (float)POPUP_FONT_PX(),
-        hovered ? neui_detail::color(ColorRole::accent_text)
-                : neui_detail::color(ColorRole::text_primary));
+        cx + (float)POPUP_PAD_X + gutter, cy,
+        cw - (float)POPUP_PAD_X * 2.0f - gutter, (float)cell.h,
+        item.text.c_str(), (float)_popup_font_px, tcol);
     }
+    if (zoomed) _backend->pop_transform(ctx);
   }
 
   int Session::open_popup_menu(uint32_t anchor_idx, int lx, int ly,
-                                const std::vector<std::string>& items)
+                                const std::vector<PopupItem>& items)
   {
     if (items.empty() || !_widgets.exists(anchor_idx)) return 0;
     if (_popup_active) return 0;
@@ -4195,22 +4282,31 @@ namespace xpl_host
     abs_x += anchor.x;
     abs_y += anchor.y;
     int frame_w = 0, frame_h = 0;
+    float zoom = 1.0f;
     for (auto p : parents) {
       if (p == 0 || !_widgets.exists(p)) continue;
       auto& pw = _widgets[p];
       if (pw.native_handle) {       // stop at the frame
         frame_w = pw.width;
         frame_h = pw.height;
+        zoom    = pw.zoom;
         break;
       }
       abs_x += pw.x;
       abs_y += pw.y;
     }
+    // In popup px (the frame's zoom applied), so a zoomed frame's popup
+    // keeps its unzoomed size.
+    auto zoomed = [zoom](int v) { return static_cast<int>(static_cast<float>(v) * zoom + 0.5f); };
 
     _popup_items     = items;
-    _popup_x_abs     = abs_x;
-    _popup_y_abs     = abs_y;
-    layout_popup(frame_w, frame_h);
+    // A separator carries no other flag.
+    for (auto& it : _popup_items)
+      if (popup_item_is_separator(it)) it.flags = NEUI_POPUP_ITEM_SEPARATOR;
+    _popup_zoom      = zoom;
+    _popup_x_abs     = zoomed(abs_x);
+    _popup_y_abs     = zoomed(abs_y);
+    layout_popup(zoomed(frame_w), zoomed(frame_h));
     _popup_hover     = -1;
     _popup_picked    = 0;
     _popup_active    = true;
@@ -4228,6 +4324,8 @@ namespace xpl_host
     _popup_active = false;
     _popup_items.clear();
     _popup_cells.clear();
+    _popup_col_x.clear();
+    _popup_col_checked.clear();
     _popup_hover  = -1;
     _popup_picked = 0;
 
@@ -5012,7 +5110,9 @@ namespace xpl_host
       }
     }
 
-    int max_box_w = static_cast<int>(static_cast<float>(fw->width) *
+    // In toast px: the frame's logical px times its zoom, so a zoomed
+    // frame's toast keeps its unzoomed size.
+    int max_box_w = static_cast<int>(static_cast<float>(fw->width) * fw->zoom *
                                       TOAST_MAX_FRAME_FRAC);
     if (max_box_w < 80) max_box_w = 80;
     int w_px = static_cast<int>(std::ceil(max_w)) + 2 * TOAST_PAD_X;
@@ -5035,8 +5135,9 @@ namespace xpl_host
     platform_invalidate(fw->native_handle);
   }
 
-  // Compute the toast rect (in frame-local logical px) for a frame's
-  // current ToastState. Returns false if no toast is active.
+  // Compute the toast rect (in frame-local toast px: logical px times the
+  // frame's zoom) for a frame's current ToastState. base_y is in logical px.
+  // Returns false if no toast is active.
   static bool toast_current_rect(FrameWidget* fw, int base_y,
                                   int& out_x, int& out_y,
                                   int& out_w, int& out_h)
@@ -5059,12 +5160,13 @@ namespace xpl_host
       float e     = p * p * p;
       slide_t     = 1.0f - e;
     }
+    base_y      = static_cast<int>(static_cast<float>(base_y) * fw->zoom + 0.5f);
     int rest_y  = base_y + ts.line_h;
     int start_y = base_y - ts.height;
     out_y = static_cast<int>(static_cast<float>(start_y) +
             (static_cast<float>(rest_y) - static_cast<float>(start_y)) *
             slide_t);
-    out_x = (fw->width - ts.width) / 2;
+    out_x = (static_cast<int>(static_cast<float>(fw->width) * fw->zoom + 0.5f) - ts.width) / 2;
     if (out_x < 0) out_x = 0;
     out_w = ts.width;
     out_h = ts.height;
@@ -5079,6 +5181,8 @@ namespace xpl_host
     int rx, ry, rw, rh;
     if (!toast_current_rect(fw, frame_top_inset(frame_widget_idx), rx, ry, rw, rh))
       return false;
+    lx *= fw->zoom;
+    ly *= fw->zoom;
     if (lx < static_cast<float>(rx) || lx >= static_cast<float>(rx + rw) ||
         ly < static_cast<float>(ry) || ly >= static_cast<float>(ry + rh))
       return false;
@@ -5139,6 +5243,10 @@ namespace xpl_host
     // base_y is 0 on native-menu platforms / menubar-less frames.
     int cx, cy, cw, ch;
     widget_client_rect(frame_widget_idx, &cx, &cy, &cw, &ch);
+    // To toast px, so a zoomed frame's toast keeps its unzoomed size.
+    float zoom = fw->zoom;
+    auto zoomed = [zoom](int v) { return static_cast<int>(static_cast<float>(v) * zoom + 0.5f); };
+    cx = zoomed(cx); cy = zoomed(cy); cw = zoomed(cw); ch = zoomed(ch);
     int base_y   = cy;
 
     // Resting position: top edge sits `line_h` below the client-area top
@@ -5149,13 +5257,18 @@ namespace xpl_host
     int top_y    = static_cast<int>(static_cast<float>(start_y) +
                     (static_cast<float>(rest_y) - static_cast<float>(start_y)) *
                     slide_t);
-    int left_x   = (fw->width - ts.width) / 2;
+    int left_x   = (zoomed(fw->width) - ts.width) / 2;
     if (left_x < 0) left_x = 0;
 
     if (!_backend->push_alpha || !_backend->pop_alpha) {
       // Alpha stack is required for the cross-fade; without it skip painting
       // rather than dump a fully opaque toast on top of widgets.
       return;
+    }
+    bool scaled = zoom != 1.0f && _backend->push_transform && _backend->scale;
+    if (scaled) {
+      _backend->push_transform(ctx);
+      _backend->scale(ctx, 1.0f / zoom, 1.0f / zoom);
     }
     // Clip to the client area so the fly-in never paints over the menubar band
     // (the toast is painted after the band). No-op-equivalent full-window clip
@@ -5213,6 +5326,7 @@ namespace xpl_host
 
     _backend->pop_alpha(ctx);
     if (clipped) _backend->pop_clip(ctx);
+    if (scaled) _backend->pop_transform(ctx);
   }
 
   void Session::open_combo(uint32_t idx)

@@ -151,6 +151,50 @@ int main()
     std::printf("painted pixels = %ld (baseline %ld)\n", nonhost, baseline);
     if (nonhost < 500) { std::printf("FAIL: frame did not render\n"); ++fail; }
 
+    // NEUI_ATTR_ZOOM: the view's size is the logical size times the zoom,
+    // its bounds stay logical (the space paint and events use), and the
+    // paint covers the zoomed size only.
+    auto* attrs = (neui_attr_api_t*)api->get_interface(sess, NEUI_API_ATTRS);
+    auto check_zoom = [&](float zoom) {
+      if (!attrs || !attrs->set_float(sess, plug, NEUI_ATTR_ZOOM, zoom)) {
+        std::printf("FAIL: set_float(NEUI_ATTR_ZOOM, %.2f) rejected\n", zoom);
+        ++fail;
+        return;
+      }
+      if (slot.subviews.count != 1) return;
+      NSView* v = slot.subviews[0];
+      std::printf("zoom %.2f: frame %.0fx%.0f, bounds %.0fx%.0f\n", zoom,
+                  v.frame.size.width, v.frame.size.height,
+                  v.bounds.size.width, v.bounds.size.height);
+      if (!NSEqualSizes(v.frame.size, NSMakeSize(320 * zoom, 200 * zoom))) {
+        std::printf("FAIL: zoomed frame size\n");
+        ++fail;
+      }
+      if (!NSEqualSizes(v.bounds.size, NSMakeSize(320, 200))) {
+        std::printf("FAIL: zoomed bounds are not the logical size\n");
+        ++fail;
+      }
+      // A point in the slot (y up, the frame at its origin) maps to the
+      // logical point mouse events see (y down).
+      NSPoint q = NSMakePoint(10 * zoom, (200 - 10) * zoom);
+      NSPoint p = [v convertPoint:q fromView:slot];
+      if (fabs(p.x - 10) > 0.01 || fabs(p.y - 10) > 0.01) {
+        std::printf("FAIL: slot (%.1f, %.1f) maps to (%.1f, %.1f), not (10, 10)\n",
+                    q.x, q.y, p.x, p.y);
+        ++fail;
+      }
+    };
+    check_zoom(0.5f);
+    [[NSRunLoop mainRunLoop] runUntilDate:
+        [NSDate dateWithTimeIntervalSinceNow:0.25]];
+    long half = count_foreign_pixels();
+    std::printf("painted pixels at zoom 0.5 = %ld (zoom 1: %ld)\n", half, nonhost);
+    if (half < nonhost / 8 || half > nonhost / 2) {
+      std::printf("FAIL: zoom 0.5 doesn't paint about a quarter of the frame\n");
+      ++fail;
+    }
+    check_zoom(1.0f);
+
     // Destroy must detach the subview from the DAW's hierarchy.
     w->destroy(sess, plug);
     if (slot.subviews.count != 0) {
