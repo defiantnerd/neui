@@ -5181,7 +5181,9 @@ namespace xpl_host
 
   namespace {
 
-    // A laid-out dropdown row. y/h are relative to the column's top-left.
+    // A laid-out dropdown row. x/y/w/h are relative to the column's top-left:
+    // a level taller than the frame wraps into sub-columns side by side, and a
+    // row's x / w are its sub-column's.
     struct MenuRowL {
       uint32_t    item_id   = 0;
       std::string text;
@@ -5190,13 +5192,16 @@ namespace xpl_host
       bool        submenu   = false;
       bool        enabled   = true;
       bool        checked   = false;
+      bool        gutter    = false;  // its sub-column reserves a left checkmark gutter
+      int         x         = 0;
       int         y         = 0;
+      int         w         = 0;
       int         h         = 0;
     };
+    // One open level of the cascade: its rows in one or more sub-columns.
     struct MenuColL {
       uint32_t              parent_item = 0;  // the item whose children this column shows
       int                   x = 0, y = 0, w = 0, h = 0;
-      bool                  check_gutter = false;  // reserve a left checkmark column
       std::vector<MenuRowL> rows;
     };
     struct MenuBandItem {
@@ -5304,9 +5309,12 @@ namespace xpl_host
   // (popup_tree_menu). The two differ in exactly one thing - where level 0 goes -
   // so an empty `band` means "standalone popup: put level 0 at (root_x, root_y)"
   // and a non-empty `band` means "menubar: put level 0 under its band item".
-  // Everything else (row sizing, arbitrary-depth cascade placement, right/bottom
-  // clamping, the submenu left-flip, the checkmark gutter, shortcut columns, and
+  // Everything else (row sizing, a level taller than the frame wrapped into
+  // sub-columns, arbitrary-depth cascade placement, right/bottom clamping, the
+  // submenu left-flip, the checkmark gutter, shortcut columns, and
   // validate-driven enabling) is already origin-agnostic and shared verbatim.
+  // The standalone popup passes its frame in popup px (tp_scale), so it lays
+  // out at its unzoomed size.
   static void mb_build_columns(Session* s, neui_render_ctx_t ctx,
                                const MenubarWidget& mb, int frame_w, int frame_h,
                                const std::vector<MenuBandItem>& band,
@@ -5322,8 +5330,7 @@ namespace xpl_host
       std::vector<uint32_t> kids;
       menu_children(mb, parent_id, kids);
 
-      int max_text = 0, max_short = 0;
-      bool any_sub = false, any_check = false;
+      std::vector<int> text_w, short_w;
       for (uint32_t kid : kids) {
         auto it = mb.menu_items.find(kid);
         if (it == mb.menu_items.end()) continue;
@@ -5337,31 +5344,62 @@ namespace xpl_host
         r.checked   = !r.separator && !r.submenu && mi.checked;
         r.enabled   = r.separator ? false
                     : (r.submenu ? mi.enabled : s->menu_item_enabled(mb, kid));
-        if (!r.separator) {
-          max_text = std::max(max_text, menu_measure(s->_backend, ctx, r.text));
-          if (!r.shortcut.empty())
-            max_short = std::max(max_short, menu_measure(s->_backend, ctx, r.shortcut));
-          if (r.submenu) any_sub = true;
-          if (r.checked) any_check = true;
-        }
+        text_w.push_back(r.separator ? 0 : menu_measure(s->_backend, ctx, r.text));
+        short_w.push_back(r.separator || r.shortcut.empty() ? 0
+                          : menu_measure(s->_backend, ctx, r.shortcut));
         col.rows.push_back(std::move(r));
       }
 
-      int w = POPUP_PAD_X * 2 + max_text;
-      if (any_check)     w += MENU_CHECK_W;
-      if (max_short > 0) w += MENU_SHORTCUT_GAP + max_short;
-      if (any_sub)       w += MENU_ARROW_W;
-      if (w < POPUP_MIN_W) w = POPUP_MIN_W;
-
-      int run = POPUP_PAD_Y;
-      for (auto& r : col.rows) {
-        r.y = run;
-        r.h = r.separator ? POPUP_SEP_H : POPUP_ITEM_H();
-        run += r.h;
+      // One column while the rows fit the frame's height; else sub-columns of
+      // the frame's height side by side, each as wide as its own rows - so every
+      // item of a long list is on screen - with the rows tighter (down to the
+      // font's height and a little) while those are wider than the frame.
+      const int tightest = MENUBAR_FONT_PX + 4;
+      for (int item_h = POPUP_ITEM_H(); ; --item_h) {
+        int run = POPUP_PAD_Y, x = 0, tallest = 0, subs = 0;
+        size_t first = 0;
+        // close the sub-column of rows [first, end): its width, its gutter
+        auto close_sub = [&](size_t end) {
+          int max_text = 0, max_short = 0;
+          bool any_sub = false, any_check = false;
+          for (size_t i = first; i < end; ++i) {
+            const auto& r = col.rows[i];
+            if (r.separator) continue;
+            max_text  = std::max(max_text, text_w[i]);
+            max_short = std::max(max_short, short_w[i]);
+            if (r.submenu) any_sub = true;
+            if (r.checked) any_check = true;
+          }
+          int w = POPUP_PAD_X * 2 + max_text;
+          if (any_check)     w += MENU_CHECK_W;
+          if (max_short > 0) w += MENU_SHORTCUT_GAP + max_short;
+          if (any_sub)       w += MENU_ARROW_W;
+          if (x == 0 && end == col.rows.size() && w < POPUP_MIN_W) w = POPUP_MIN_W;
+          for (size_t i = first; i < end; ++i) {
+            col.rows[i].x = x;
+            col.rows[i].w = w;
+            col.rows[i].gutter = any_check;
+          }
+          x += w;
+          tallest = std::max(tallest, run + POPUP_PAD_Y);
+          ++subs;
+        };
+        for (size_t i = 0; i < col.rows.size(); ++i) {
+          auto& r = col.rows[i];
+          r.h = r.separator ? POPUP_SEP_H : item_h;
+          if (frame_h > 0 && run > POPUP_PAD_Y && run + r.h + POPUP_PAD_Y > frame_h) {
+            close_sub(i);
+            first = i;
+            run = POPUP_PAD_Y;
+          }
+          r.y = run;
+          run += r.h;
+        }
+        close_sub(col.rows.size());
+        col.w = x;
+        col.h = tallest;
+        if (subs == 1 || frame_w <= 0 || col.w <= frame_w || item_h <= tightest) break;
       }
-      col.w = w;
-      col.h = run + POPUP_PAD_Y;
-      col.check_gutter = any_check;
 
       if (level == 0) {
         if (band.empty()) {
@@ -5482,9 +5520,14 @@ namespace xpl_host
                           C(ColorRole::border));
       for (auto& r : col.rows) {
         float ry = (float)(col.y + r.y);
+        const int rx = col.x + r.x;
+        // a rule left of each sub-column after the first, at its first row
+        if (r.x > 0 && r.y == POPUP_PAD_Y)
+          _backend->fill_rect(ctx, (float)rx, (float)col.y + 4.0f, 1.0f, (float)col.h - 8.0f,
+                              C(ColorRole::scrollbar_separator));
         if (r.separator) {
-          _backend->fill_rect(ctx, (float)col.x + 4.0f, ry + (float)POPUP_SEP_H * 0.5f,
-                              (float)col.w - 8.0f, 1.0f, C(ColorRole::scrollbar_separator));
+          _backend->fill_rect(ctx, (float)rx + 4.0f, ry + (float)POPUP_SEP_H * 0.5f,
+                              (float)r.w - 8.0f, 1.0f, C(ColorRole::scrollbar_separator));
           continue;
         }
         // Highlight the hovered row, or the row whose submenu is currently open.
@@ -5492,26 +5535,26 @@ namespace xpl_host
         for (uint32_t pid : path) if (pid == r.item_id) { open_sub = true; break; }
         bool hl = (r.item_id == hover_item) || open_sub;
         if (hl)
-          _backend->fill_rect(ctx, (float)col.x + 1.0f, ry, (float)col.w - 2.0f, (float)r.h,
+          _backend->fill_rect(ctx, (float)rx + 1.0f, ry, (float)r.w - 2.0f, (float)r.h,
                               C(ColorRole::accent));
         uint32_t tcol = !r.enabled ? C(ColorRole::text_disabled)
                       : hl          ? C(ColorRole::accent_text)
                                     : C(ColorRole::text_primary);
-        // When the column reserves a checkmark gutter, text is indented past it
-        // and a check glyph is drawn in the gutter for checked rows.
-        int gutter = col.check_gutter ? MENU_CHECK_W : 0;
+        // When the sub-column reserves a checkmark gutter, text is indented past
+        // it and a check glyph is drawn in the gutter for checked rows.
+        int gutter = r.gutter ? MENU_CHECK_W : 0;
         if (r.checked) {
-          _backend->draw_text(ctx, (float)(col.x + POPUP_PAD_X), ry,
+          _backend->draw_text(ctx, (float)(rx + POPUP_PAD_X), ry,
                               (float)MENU_CHECK_W, (float)r.h,
                               "\xE2\x9C\x93" /* U+2713 check mark */,
                               (float)MENUBAR_FONT_PX, tcol);
         }
-        _backend->draw_text(ctx, (float)(col.x + POPUP_PAD_X + gutter), ry,
-                            (float)(col.w - POPUP_PAD_X * 2 - gutter), (float)r.h,
+        _backend->draw_text(ctx, (float)(rx + POPUP_PAD_X + gutter), ry,
+                            (float)(r.w - POPUP_PAD_X * 2 - gutter), (float)r.h,
                             r.text.c_str(), (float)MENUBAR_FONT_PX, tcol);
         if (!r.shortcut.empty()) {
           int sw = menu_measure(_backend, ctx, r.shortcut);
-          int sx = col.x + col.w - POPUP_PAD_X - (r.submenu ? MENU_ARROW_W : 0) - sw;
+          int sx = rx + r.w - POPUP_PAD_X - (r.submenu ? MENU_ARROW_W : 0) - sw;
           uint32_t scol = !r.enabled ? C(ColorRole::text_disabled)
                         : hl          ? C(ColorRole::accent_text)
                                       : C(ColorRole::text_secondary);
@@ -5522,7 +5565,7 @@ namespace xpl_host
           uint32_t acol = !r.enabled ? C(ColorRole::text_disabled)
                         : hl          ? C(ColorRole::accent_text)
                                       : C(ColorRole::text_secondary);
-          _backend->draw_text(ctx, (float)(col.x + col.w - MENU_ARROW_W), ry,
+          _backend->draw_text(ctx, (float)(rx + r.w - MENU_ARROW_W), ry,
                               (float)MENU_ARROW_W, (float)r.h,
                               "\xE2\x96\xB8" /* U+25B8 small right triangle */,
                               (float)MENUBAR_FONT_PX, acol);
@@ -6233,8 +6276,23 @@ namespace xpl_host
     return true;
   }
 
-  // Build the open cascade for the active popup. Returns false when there is
-  // nothing to show, so paint / hit-test share one guard.
+  // The standalone popup keeps its unzoomed size in a zoomed frame
+  // (NEUI_ATTR_UI_SCALE), as an OS menu does: it is laid out in popup px, the
+  // frame's logical px times its scale, and painted through 1 / scale. At a
+  // scale of 0.5 a frame-zoomed menu's text would be half its size.
+  static float tp_scale(Session* s, uint32_t frame_index)
+  {
+    return s->_widgets.exists(frame_index) ? s->_widgets[frame_index].ui_scale() : 1.0f;
+  }
+
+  static int tp_px(int logical, float scale)
+  {
+    return static_cast<int>(static_cast<float>(logical) * scale + 0.5f);
+  }
+
+  // Build the open cascade for the active popup, in popup px (tp_scale).
+  // Returns false when there is nothing to show, so paint / hit-test share one
+  // guard.
   static bool tp_build(Session* s, neui_render_ctx_t ctx, uint32_t frame_index,
                        std::vector<MenuColL>& cols)
   {
@@ -6243,11 +6301,13 @@ namespace xpl_host
     auto* pm = dynamic_cast<PopupMenuWidget*>(&s->_widgets[s->_tree_popup_menu]);
     if (!pm) return false;
     const auto& fw = s->_widgets[frame_index];
+    const float sc = tp_scale(s, frame_index);
     // Empty band == standalone popup: mb_build_columns then puts level 0 at
     // (root_x, root_y) rather than under a band item.
     static const std::vector<MenuBandItem> kNoBand;
-    mb_build_columns(s, ctx, *pm, fw.width, fw.height, kNoBand, s->_menu_path,
-                     cols, s->_tree_popup_x, s->_tree_popup_y);
+    mb_build_columns(s, ctx, *pm, tp_px(fw.width, sc), tp_px(fw.height, sc), kNoBand,
+                     s->_menu_path, cols, tp_px(s->_tree_popup_x, sc),
+                     tp_px(s->_tree_popup_y, sc));
     return !cols.empty();
   }
 
@@ -6256,7 +6316,15 @@ namespace xpl_host
     if (!_backend) return;
     std::vector<MenuColL> cols;
     if (!tp_build(this, ctx, frame_index, cols)) return;
+    const float sc = tp_scale(this, frame_index);
+    const bool zoomed = sc != 1.0f && _backend->push_transform && _backend->scale &&
+                        _backend->pop_transform;
+    if (zoomed) {
+      _backend->push_transform(ctx);
+      _backend->scale(ctx, 1.0f / sc, 1.0f / sc);
+    }
     paint_menu_columns(this, ctx, cols, _menu_path, _menu_hover_item);
+    if (zoomed) _backend->pop_transform(ctx);
   }
 
   // Shared front half of the click / hover handlers: decides whether this input
@@ -6290,6 +6358,9 @@ namespace xpl_host
   {
     std::vector<MenuColL> cols;
     if (!tp_claim(this, frame_index, cols)) return false;
+    const float sc = tp_scale(this, frame_index);   // popup px, as tp_build lays out
+    lx *= sc;
+    ly *= sc;
 
     // Any click the popup consumes also owns the matching release, so the widget
     // under the dismissed popup can't see an UP (and synthesise a CLICK).
@@ -6302,6 +6373,7 @@ namespace xpl_host
       for (const auto& r : col.rows) {
         float ry = (float)(col.y + r.y);
         if (ly < ry || ly >= ry + (float)r.h) continue;
+        if (lx < (float)(col.x + r.x) || lx >= (float)(col.x + r.x + r.w)) continue;
         if (r.separator || !r.enabled) return true;   // consumed, no action
         if (r.submenu) {
           // Open the submenu: truncate the path to this level and descend.
@@ -6360,6 +6432,9 @@ namespace xpl_host
   {
     std::vector<MenuColL> cols;
     if (!tp_claim(this, frame_index, cols)) return false;
+    const float sc = tp_scale(this, frame_index);
+    lx *= sc;
+    ly *= sc;
 
     for (size_t level = 0; level < cols.size(); ++level) {
       const MenuColL& col = cols[level];
@@ -6368,6 +6443,7 @@ namespace xpl_host
       for (const auto& r : col.rows) {
         float ry = (float)(col.y + r.y);
         if (ly < ry || ly >= ry + (float)r.h) continue;
+        if (lx < (float)(col.x + r.x) || lx >= (float)(col.x + r.x + r.w)) continue;
         if (r.separator) return true;
         // Hover-to-open submenus, and hover-to-collapse a deeper cascade, which
         // is what makes a cascading menu feel native.
@@ -6458,6 +6534,7 @@ namespace xpl_host
       for (auto& r : col.rows) {
         float ry = (float)(col.y + r.y);
         if (ly < ry || ly >= ry + (float)r.h) continue;
+        if (lx < (float)(col.x + r.x) || lx >= (float)(col.x + r.x + r.w)) continue;
         if (r.separator) return true;
         if (r.submenu) {
           if (!r.enabled) return true;
@@ -6523,6 +6600,7 @@ namespace xpl_host
       for (auto& r : col.rows) {
         float ry = (float)(col.y + r.y);
         if (ly < ry || ly >= ry + (float)r.h) continue;
+        if (lx < (float)(col.x + r.x) || lx >= (float)(col.x + r.x + r.w)) continue;
         if (r.separator) return true;
         std::vector<uint32_t> newpath(_menu_path.begin(),
                                       _menu_path.begin() + static_cast<std::ptrdiff_t>(level + 1));
@@ -9380,13 +9458,16 @@ namespace xpl_host
     // hit-test paths make, with the same arguments, so the reported rows are
     // the rows on screen by construction.
     std::vector<MenuColL> cols;
+    float sc = 1.0f;   // popup px per logical px (tp_scale): 1 for a menu bar's cascade
     if (is_popup) {
+      sc = tp_scale(this, frame_index);
       static const std::vector<MenuBandItem> kNoBand;
-      mb_build_columns(this, ctx, mb, fw.width, fw.height, kNoBand, path, cols,
-                       _tree_popup_x, _tree_popup_y);
+      mb_build_columns(this, ctx, mb, tp_px(fw.width, sc), tp_px(fw.height, sc), kNoBand,
+                       path, cols, tp_px(_tree_popup_x, sc), tp_px(_tree_popup_y, sc));
     } else {
       mb_build_columns(this, ctx, mb, fw.width, fw.height, band, path, cols);
     }
+    auto logical = [sc](int px) { return static_cast<int>(static_cast<float>(px) / sc + 0.5f); };
 
     for (size_t level = 0; level < cols.size(); ++level) {
       const MenuColL& col = cols[level];
@@ -9394,7 +9475,8 @@ namespace xpl_host
         MenuElementRect e;
         e.item_id     = r.item_id;
         e.parent_item = col.parent_item;
-        e.x = col.x; e.y = col.y + r.y; e.w = col.w; e.h = r.h;
+        e.x = logical(col.x + r.x); e.y = logical(col.y + r.y);
+        e.w = logical(r.w);         e.h = logical(r.h);
         e.enabled     = r.enabled;
         e.checked     = r.checked;
         e.has_submenu = r.submenu;
