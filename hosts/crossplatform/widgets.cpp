@@ -484,6 +484,24 @@ namespace xpl_host
       // a borderless window in the corner of the display. NEUI_API_POPUP::open is
       // the entry point; ignoring this call is the honest answer.
       if (dynamic_cast<PopupSurfaceWidget*>(&wd)) return;
+      // A modal DIALOG remembers the focus to give back on close BEFORE its
+      // window is created and shown. Both can activate the window at once -
+      // AppKit sends becomeFirstResponder when the window is built and makes it
+      // key on show, win32 sends WM_SETFOCUS inside ShowWindow - and activation
+      // moves logical focus into the dialog's frame (Session::frame_activated),
+      // so saving afterwards remembered the dialog's own focus (or none) and
+      // closing the dialog gave nothing back. Not on a re-entrant show: the
+      // saved value would become the focus INSIDE the dialog and the owner's
+      // would be lost.
+      if (wd.is_dialog() && wd.owner_index != 0 && s->_widgets.exists(wd.owner_index) &&
+          (!wd.attrs || wd.attrs->get_int(NEUI_ATTR_MODAL, 1) != 0)) {
+        if (auto* fw = dynamic_cast<FrameWidget*>(&wd)) {
+          if (!fw->modal_pump_active()) {
+            fw->prev_focus     = s->_focused_widget;
+            fw->prev_focus_gen = s->a11y_generation(s->_focused_widget);
+          }
+        }
+      }
       if (!wd.native_handle) {
         if (wd.is_dialog()) {
           // Resolve owner HWND (if any) before creating the dialog HWND so
@@ -545,13 +563,8 @@ namespace xpl_host
             // session-global and key routing goes by it, not by which window the
             // key arrived at - so leaving focus in the owner meant typing into
             // the dialog edited a field in the window the dialog had just
-            // blocked. Remember where focus was so closing can give it back.
-            // Do not overwrite on a re-entrant show: the saved value would
-            // become the focus INSIDE the dialog and the owner's would be lost.
-            if (!fw->modal_pump_active()) {
-              fw->prev_focus     = s->_focused_widget;
-              fw->prev_focus_gen = s->a11y_generation(s->_focused_widget);
-            }
+            // blocked. Where focus was is already saved (above, before the
+            // window existed), so closing can give it back.
             s->focus_next(true, idx);
             // focus_next does nothing when the frame has NO tab stops - a
             // message-style dialog of plain LABELs, say. Focus would then still

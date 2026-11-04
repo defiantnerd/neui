@@ -1204,10 +1204,11 @@ void wake_app_event_pump()
 {
   if (session) {
     session->_os_focused = true;
-    // Focus moves into this frame; if it changed, set_focus already told
-    // the client.
-    const bool moved = session->frame_activated(widget_index);
-    if (!moved && session->_focused_widget != 0
+    // Not Session::frame_activated: AppKit sends this when the window is
+    // BUILT (makeFirstResponder in platform_create_*), long before it is key,
+    // and not again when the user switches windows (the view stays its
+    // window's first responder). windowDidBecomeKey: is the activation.
+    if (session->_focused_widget != 0
      && session->_widgets.exists(session->_focused_widget)) {
       auto& wd = session->_widgets[session->_focused_widget];
       if (wd.emit_events) {
@@ -1612,6 +1613,19 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
   if (!session->popup_surface_open()) return;
   if (session->popup_surface_depth(widget_index) >= 0) return;
   session->close_all_popup_surfaces(NEUI_POPUP_DISMISS_OWNER_MOVED);
+}
+
+// The window became key - the OS keyboard focus is here now, including when
+// the user switches between two of our windows - so logical focus moves into
+// this frame (Session::frame_activated, as Linux FocusIn and win32 WM_SETFOCUS
+// do): each frame gets its last focused widget back, and keys never reach
+// another window's widget. A popup surface's panel never becomes key, and
+// frame_activated ignores a frame a modal dialog is blocking.
+- (void)windowDidBecomeKey:(NSNotification*)note
+{
+  (void)note;
+  if (!session || !session->_widgets.exists(widget_index)) return;
+  session->frame_activated(widget_index);
 }
 
 // The owner losing key status dismisses too. NSApplicationDidResignActive (in
