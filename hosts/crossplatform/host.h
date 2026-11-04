@@ -555,15 +555,18 @@ namespace xpl_host
     // the one worth eliminating.
     // Cache holds VISUAL line starts: logical lines (split on '\n') when wrap
     // is off, plus soft word-wrap breaks when NEUI_ATTR_LINE_WRAP is set. The
-    // cache key is (text dirty, wrap on/off, wrap width, font size) so it
-    // rebuilds on edits, resize, font change, or toggling wrap; computing the
-    // wrapped layout needs measure_text, so it is only redone when one of
-    // those actually changes.
+    // cache key is (text dirty, wrap on/off, wrap width, font family / weight /
+    // size) so it rebuilds on edits, resize, font change, or toggling wrap;
+    // computing the wrapped layout needs measure_text, and a different family
+    // or weight at the same size has different advances, so all three font
+    // attrs are part of the key. It is only redone when one of those changes.
     std::vector<int> _ls_cache;
-    bool             _ls_dirty   = true;
-    bool             _cache_wrap = false;
-    float            _cache_w    = -1.0f;
-    float            _cache_font = -1.0f;
+    bool             _ls_dirty    = true;
+    bool             _cache_wrap  = false;
+    float            _cache_w     = -1.0f;
+    float            _cache_font  = -1.0f;
+    std::string      _cache_family;
+    int              _cache_weight = 0;
     const std::vector<int>& cached_line_starts();
     void mark_lines_dirty() { _ls_dirty = true; }
     bool wrap_enabled() const {

@@ -9,6 +9,19 @@
 //   * Painted prong: a CUSTOMDRAW widget draws text with the family via
 //     painter->push_font (the same path used by every neui-backend-* draw).
 //
+// Usage:  neui_font_loading_example [native|xpl] [ui_scale]
+//   native (default) - the platform's own host (win32 / macOS native controls;
+//                      Linux has only xpl).
+//   xpl              - the crossplatform host, which paints INPUTBOX / MULTILINE
+//                      itself: the styled fields at the bottom show
+//                      NEUI_ATTR_BACKGROUND / _TEXT_COLOR / _BORDER_COLOR /
+//                      _BORDER_FOCUS_COLOR / _SELECTION_COLOR plus the registered
+//                      family on a dark, custom-designed surface (the native
+//                      hosts take the text colour + background only). Type in
+//                      them, select text, Tab between them - caret, selection
+//                      and clicks follow the glyphs of the registered font.
+//   ui_scale         - NEUI_ATTR_UI_SCALE on the frame (xpl only), e.g. 1.5.
+//
 // The font binds to NEUI_ASSET_KIND_FONT: assets->create_font_from_file
 // returns an ordinary neui_asset_t that owns the registration lifetime; the
 // client references the font by its family-name string thereafter, exactly
@@ -66,6 +79,7 @@ struct AppState
   neui_session_t     session = { 0 };
 
   uint32_t           canvas_id = 0;
+  bool               styled_fields = false;   // paint the caption for them
 
   neui_asset_t       font   = asset_none;
   char               family[256] = { 0 };  // resolved family name; "" if none
@@ -167,6 +181,12 @@ static void paint_canvas(neui_event_paint_t* p, AppState* a)
                   "(no font registered - nothing extra to show)",
                   16.0f, 0xFFE08080);
   }
+
+  if (a->styled_fields) {
+    px->draw_text(ph, 16, 138, p->width - 32, 22,
+                  "INPUTBOX + MULTILINE with background / text / border / selection colours and the same family:",
+                  12.0f, 0xFF90A0B0);
+  }
 }
 
 static bool NEUI_ABI on_event(void* token, neui_event_t* event)
@@ -199,10 +219,13 @@ static void* NEUI_ABI get_interface(void* /*token*/, const char* iface)
   return nullptr;
 }
 
-int main(int /*argc*/, char* /*argv*/[])
+int main(int argc, char* argv[])
 {
+  const bool want_xpl = argc > 1 && (!strcmp(argv[1], "xpl") || !strcmp(argv[1], "crossplatform"));
+  const float ui_scale = argc > 2 ? (float)atof(argv[2]) : 1.0f;
+
   neui_init();
-  neui_api_t* host = neui_get_api(ACTIVE_HOST);
+  neui_api_t* host = neui_get_api(want_xpl ? "neui.host.crossplatform" : ACTIVE_HOST);
   if (!host) host = neui_get_api(nullptr);
   if (!host) { dbglog("[font_loading] no host\n"); return 1; }
 
@@ -261,6 +284,46 @@ int main(int /*argc*/, char* /*argv*/[])
   neui_widget_t canvas = app.widgets->create(app.session, win, NEUI_W_CUSTOMDRAW,
                                              16, 150, 720, 280, nullptr);
   app.canvas_id = canvas.id;
+
+  // Styled text fields, on top of the dark canvas. The colour attributes are
+  // honoured by the crossplatform host (which paints these widgets); the macOS
+  // native host takes the text colour + background; elsewhere they are inert.
+  // Unset attributes would leave a field on the OS theme - these opt out of it.
+  {
+    const int32_t k_fill = (int32_t)0xFF0F151B, k_text = (int32_t)0xFFE8F0FF,
+                  k_border = (int32_t)0xFF304050, k_focus = (int32_t)0xFF5AA0FF,
+                  k_select = (int32_t)0x805AA0FF;
+    auto style = [&](neui_widget_t f) {
+      app.attrs->set_int(app.session, f, NEUI_ATTR_BACKGROUND,         k_fill);
+      app.attrs->set_int(app.session, f, NEUI_ATTR_TEXT_COLOR,         k_text);
+      app.attrs->set_int(app.session, f, NEUI_ATTR_BORDER_COLOR,       k_border);
+      app.attrs->set_int(app.session, f, NEUI_ATTR_BORDER_FOCUS_COLOR, k_focus);
+      app.attrs->set_int(app.session, f, NEUI_ATTR_SELECTION_COLOR,    k_select);
+      if (app.family[0]) {
+        app.attrs->set_string(app.session, f, NEUI_ATTR_FONT_FAMILY, app.family);
+        app.attrs->set_float (app.session, f, NEUI_ATTR_FONT_SIZE,   15.0f);
+      }
+    };
+    neui_widget_t sfield = app.widgets->create(app.session, win, NEUI_W_INPUTBOX,
+                                               32, 318, 340, 32, nullptr);
+    app.widgets->set_text(app.session, sfield, "Styled INPUTBOX - type here");
+    style(sfield);
+    neui_widget_t smulti = app.widgets->create(app.session, win, NEUI_W_MULTILINE,
+                                               392, 318, 330, 100, nullptr);
+    app.widgets->set_text(app.session, smulti,
+                          "Styled MULTILINE with soft wrap in the registered family: "
+                          "the wrap follows the glyph advances, so it re-flows when the "
+                          "family changes.");
+    app.attrs->set_int(app.session, smulti, NEUI_ATTR_LINE_WRAP, 1);
+    style(smulti);
+    // MULTILINE rows are a fixed 18 px tall, so keep the size to what fits one.
+    if (app.family[0])
+      app.attrs->set_float(app.session, smulti, NEUI_ATTR_FONT_SIZE, 13.0f);
+    app.styled_fields = true;
+  }
+
+  if (want_xpl && ui_scale > 0.0f && ui_scale != 1.0f)
+    app.attrs->set_float(app.session, win, NEUI_ATTR_UI_SCALE, ui_scale);
 
   app.widgets->show(app.session, win);
   host->run(app.session);

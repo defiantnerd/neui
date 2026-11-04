@@ -236,8 +236,11 @@ typedef struct neui_render_backend {
   // reset to empty (effective default) at every begin_frame so a
   // missing pop in one frame can't bleed across.
   //
-  // D2D, CG and Cairo implement font selection; the null backend has
-  // no-op stubs to keep the vtable shape.
+  // d2d, cg, cairo and canvas2d all implement the stack (DirectWrite / Core
+  // Text / Fontconfig + FreeType / CSS font), and a family the client
+  // registered through register_font resolves on all of them. The null backend
+  // provides no-op stubs to keep the vtable shape; its text does not render at
+  // all.
   void (NEUI_ABI *push_font)(neui_render_ctx_t ctx,
                               const char* family_utf8,
                               int          weight);
