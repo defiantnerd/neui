@@ -91,6 +91,26 @@ TEST_CASE("behavior_fine_mul: fine_scale only when the modifier bit is set")
   CHECK_APPROX(behavior_fine_mul(H, NEUI_MK_SHIFT), 1.0);     // None never fine
 }
 
+TEST_CASE("behavior_fine_mul: fine_modifier \"alt\" reads NEUI_MK_ALT, which hosts now populate")
+{
+  BehaviorHandler H;
+  apply_behavior_set_string(H, "fine_modifier", "alt");
+  CHECK(H.fine_modifier == FineModifier::Alt);
+
+  CHECK_APPROX(behavior_fine_mul(H, 0), 1.0);
+  CHECK_APPROX(behavior_fine_mul(H, NEUI_MK_ALT), 0.2);
+  CHECK_APPROX(behavior_fine_mul(H, NEUI_MK_ALT | NEUI_MK_LBUTTON), 0.2);
+  // Not Shift, not Control - and not Command, the bit next to Alt that the
+  // hosts also fill in now.
+  CHECK_APPROX(behavior_fine_mul(H, NEUI_MK_SHIFT), 1.0);
+  CHECK_APPROX(behavior_fine_mul(H, NEUI_MK_CONTROL), 1.0);
+  CHECK_APPROX(behavior_fine_mul(H, NEUI_MK_COMMAND), 1.0);
+
+  // The same handler on the key path reads NEUI_KMOD_ALT.
+  CHECK_APPROX(behavior_fine_mul_kmod(H, NEUI_KMOD_ALT), 0.2);
+  CHECK_APPROX(behavior_fine_mul_kmod(H, NEUI_KMOD_SHIFT), 1.0);
+}
+
 // ---------------------------------------------------------------------------
 // behavior_write_value: snap -> clamp -> write -> change detection
 // ---------------------------------------------------------------------------
@@ -964,6 +984,31 @@ TEST_CASE("WHEEL: Shift scales by fine_scale and does NOT reverse direction")
   CHECK_APPROX(wheel_up_once(/*shift*/true, 0.1f, /*steps*/0), 0.48);
 }
 
+TEST_CASE("WHEEL: fine_modifier alt scales only when NEUI_MK_ALT is set (Option / Alt + wheel)")
+{
+  auto notch = [](uint32_t buttonmap) {
+    BehaviorAsset ba;
+    uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_WHEEL);
+    BehaviorHandler* H = behavior_get_handler(ba, slot);
+    H->step = 0.1f;
+    apply_behavior_set_string(*H, "fine_modifier", "alt");
+    BehaviorRuntime rt;
+    AttrBag bag;
+    bag.set_float(NEUI_PARAM_VALUE, 0.5f);
+    GestureLog log;
+    auto ctx = gesture_ctx(bag, log);
+    // A plain vertical notch (no Shift, so no flip) carrying `buttonmap`.
+    neui_event_t wheel = { NEUI_EVENT_MOUSE_WHEEL };
+    wheel.data.wheel = { { 1 }, 10, 10, 1, 0, buttonmap };
+    behavior_dispatch_mouse(ba, rt, ctx, &wheel, 10, 10);
+    return bag.get_float(NEUI_PARAM_VALUE, -1.0f);
+  };
+  CHECK_APPROX(notch(0), 0.4);                          // full step
+  CHECK_APPROX(notch(NEUI_MK_ALT), 0.48);               // 0.1 * 0.2
+  CHECK_APPROX(notch(NEUI_MK_SHIFT), 0.4);              // wrong modifier: not fine
+  CHECK_APPROX(notch(NEUI_MK_COMMAND), 0.4);            // nor is Command
+}
+
 TEST_CASE("WHEEL: a genuine horizontal notch (no Shift) is unchanged")
 {
   BehaviorAsset ba;
@@ -1040,6 +1085,34 @@ TEST_CASE("gesture: KEY_STEP pairs per keypress")
   // Home again at 0: no change, no pair.
   CHECK(behavior_dispatch_key(ba, rt, ctx, NEUI_KEY_HOME, 0));
   CHECK_EQ(log.recs.size(), (size_t)6);
+}
+
+TEST_CASE("gesture: a modifier key pressed on its own does nothing to a KEY_STEP value")
+{
+  // The modifier keys are KEYDOWNs now (NEUI_KEY_SHIFT ...). A KEY_STEP handler
+  // walks its value on arrows / Home / End / Page - not on those: no change, not
+  // consumed, no gesture bracket opened for an edit that never happens.
+  BehaviorAsset ba;
+  uint32_t slot = behavior_add_handler(ba, NEUI_BEHAVIOR_KIND_KEY_STEP);
+  behavior_get_handler(ba, slot)->step = 0.25f;
+
+  BehaviorRuntime rt;
+  AttrBag bag;
+  bag.set_float(NEUI_PARAM_VALUE, 0.5f);
+  GestureLog log;
+  auto ctx = gesture_ctx(bag, log);
+
+  const struct { uint32_t key; uint32_t kmod; } presses[] = {
+    { NEUI_KEY_SHIFT,   NEUI_KMOD_SHIFT },
+    { NEUI_KEY_CONTROL, NEUI_KMOD_CTRL  },
+    { NEUI_KEY_ALT,     NEUI_KMOD_ALT   },
+    { NEUI_KEY_COMMAND, NEUI_KMOD_META  },
+  };
+  for (const auto& p : presses) {
+    CHECK_FALSE(behavior_dispatch_key(ba, rt, ctx, p.key, p.kmod));
+    CHECK_APPROX(bag.get_float(NEUI_PARAM_VALUE, -1.0f), 0.5);
+  }
+  CHECK(log.recs.empty());
 }
 
 TEST_CASE("gesture: CLICK_TOGGLE pairs around the flip")

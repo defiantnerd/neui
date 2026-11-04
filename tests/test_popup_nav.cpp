@@ -177,3 +177,18 @@ TEST_CASE("popup nav: a one-item list is stable under every key")
   CHECK(!popup_nav_key(list(1, 0), NEUI_KEY_PAGEDOWN).changed);
   CHECK_EQ(popup_nav_key(list(1, -1), NEUI_KEY_DOWN).index, 0);
 }
+
+TEST_CASE("popup nav: a modifier key pressed on its own is not navigation")
+{
+  // Modifier keys reach the popup gate as KEYDOWN / KEYUP now (NEUI_KEY_SHIFT
+  // ...). On a list that is otherwise fully navigable the host must leave them
+  // alone: not handled, index untouched, nothing to activate.
+  for (uint32_t k : { (uint32_t)NEUI_KEY_SHIFT, (uint32_t)NEUI_KEY_CONTROL,
+                      (uint32_t)NEUI_KEY_ALT,   (uint32_t)NEUI_KEY_COMMAND }) {
+    auto r = popup_nav_key(list(5, 2), k);
+    CHECK(!r.handled);
+    CHECK(!r.changed);
+    CHECK(!r.activate);
+    CHECK_EQ(r.index, 2);
+  }
+}

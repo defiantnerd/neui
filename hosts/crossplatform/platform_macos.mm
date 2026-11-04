@@ -67,6 +67,7 @@ namespace xpl_host {
 using neui_detail::mac_keycode_to_neui;
 using neui_detail::mac_modifiers_to_neui;
 using neui_detail::mac_buttonmap;
+using neui_detail::mac_modifier_flags;
 using neui_detail::is_printable_codepoint;
 
 // ---------------------------------------------------------------------------
@@ -145,6 +146,13 @@ void wake_app_event_pump()
   // Animation clock heartbeat (Session::animation_tick); _anim_ms its interval.
   NSTimer*           _anim_timer;
   uint32_t           _anim_ms;
+  // The modifier flags (mac_modifier_flags: Shift / Control / Option / Command)
+  // as of the last flagsChanged: - what the next one is diffed against to find
+  // which modifier KEY moved. Re-read from the OS (syncModifierFlags) when the
+  // view becomes first responder and when its window becomes key, so a modifier
+  // held or released while the window was not receiving keys is not diffed
+  // against a stale value.
+  NSEventModifierFlags _mod_flags;
 }
 - (void)toastStart;
 - (void)toastStop;
@@ -154,6 +162,7 @@ void wake_app_event_pump()
 - (void)beginSelfResize:(int)w height:(int)h;
 - (void)endSelfResize;
 - (void)animSetInterval:(uint32_t)ms;
+- (void)syncModifierFlags;
 @end
 
 @implementation NEUIView
@@ -1186,6 +1195,52 @@ void wake_app_event_pump()
   // public event path, mirroring the win32 host's dispatch_key_to_focused.
 }
 
+// Re-read the modifier flags from the OS without reporting a change.
+- (void)syncModifierFlags
+{
+  _mod_flags = mac_modifier_flags(NSEvent.modifierFlags);
+}
+
+// A modifier pressed or released on its own never reaches keyDown: / keyUp: -
+// AppKit reports it as flagsChanged:, with the NEW combined flags and no record
+// of what they replaced. Diff against the flags seen last to find which keys
+// moved and deliver each as a KEYDOWN / KEYUP of NEUI_KEY_SHIFT / _CONTROL /
+// _ALT / _COMMAND, through the same two-tier route as every other key: the
+// popup-surface gate, then the focused widget (client first, then the widget's
+// own on_keydown). `modifiers` is the state AFTER the change, which is exactly
+// what event.modifierFlags holds here. Never a KEYCHAR: a modifier has no text.
+- (void)flagsChanged:(NSEvent*)event
+{
+  if (!session) { [super flagsChanged:event]; return; }
+  const NSEventModifierFlags now = mac_modifier_flags(event.modifierFlags);
+  neui_detail::ModifierKeyChange changes[4];
+  const int n = neui_detail::mac_modifier_key_changes(_mod_flags, now, changes);
+  _mod_flags = now;
+  const uint32_t mods = mac_modifiers_to_neui(event.modifierFlags);
+
+  for (int i = 0; i < n && session; ++i) {
+    const bool down = changes[i].down;
+    const uint32_t keycode = changes[i].keycode;
+    const neui_event_type_t type = down ? NEUI_EVENT_KEYDOWN : NEUI_EVENT_KEYUP;
+    // The press and release halves of the gate, like keyDown: / keyUp:.
+    if (session->popup_gate_key(type, keycode, mods)) continue;
+    uint32_t fw = session->_focused_widget;
+    if (fw == 0 || !session->_widgets.exists(fw)) continue;
+    auto& wd = session->_widgets[fw];
+    bool consumed = false;
+    if (wd.emit_events) {
+      neui_event_t ev = {};
+      ev.type     = type;
+      ev.data.key = { { wd.widget_id }, keycode, mods };
+      consumed = session->dispatch_event(&ev);
+    }
+    // KEYUP has no on_keyup fallback (see keyUp:).
+    if (down && !consumed)
+      session->handle_input_key(NEUI_EVENT_KEYDOWN, keycode, mods);
+  }
+  [super flagsChanged:event];
+}
+
 // AppKit beeps when an unhandled key reaches the responder chain. Override
 // to swallow keys we already routed (Tab, control keys we handle in
 // keyDown:) so the user doesn't hear a beep on every navigation key.
@@ -1202,6 +1257,7 @@ void wake_app_event_pump()
 
 - (BOOL)becomeFirstResponder
 {
+  [self syncModifierFlags];
   if (session) {
     session->_os_focused = true;
     // Not Session::frame_activated: AppKit sends this when the window is
@@ -1520,7 +1576,7 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
                                                     (int)p.x, (int)p.y,
                                                     ml.ptrs.data(),
                                                     (uint32_t)ml.ptrs.size(),
-                                                    suggested, 0);
+                                                    suggested, neui_detail::dnd_buttonmap_macos());
   return neui_detail::dnd_nsop_from_action(accepted);
 }
 
@@ -1535,7 +1591,7 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
                                                    (int)p.x, (int)p.y,
                                                    ml.ptrs.data(),
                                                    (uint32_t)ml.ptrs.size(),
-                                                   suggested, 0);
+                                                   suggested, neui_detail::dnd_buttonmap_macos());
   return neui_detail::dnd_nsop_from_action(accepted);
 }
 
@@ -1558,7 +1614,7 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
                                                    (int)p.x, (int)p.y,
                                                    ml.ptrs.data(),
                                                    (uint32_t)ml.ptrs.size(),
-                                                   suggested, 0, &item);
+                                                   suggested, neui_detail::dnd_buttonmap_macos(), &item);
   return accepted ? YES : NO;
 }
 
@@ -1623,7 +1679,12 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
 // frame_activated ignores a frame a modal dialog is blocking.
 - (void)windowDidBecomeKey:(NSNotification*)note
 {
-  (void)note;
+  // The window's view stays its first responder across a switch away and back,
+  // so becomeFirstResponder does not run again: re-read the modifier flags here,
+  // or a modifier released while another window was key would be reported
+  // (late) as a change.
+  NSView* content = [(NSWindow*)note.object contentView];
+  if ([content isKindOfClass:[NEUIView class]]) [(NEUIView*)content syncModifierFlags];
   if (!session || !session->_widgets.exists(widget_index)) return;
   session->frame_activated(widget_index);
 }

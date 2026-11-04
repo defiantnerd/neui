@@ -34,7 +34,6 @@ TEST_CASE("keys_web: named keys and function keys")
   CHECK_EQ(web_key_to_neui("F1", "F1"), (uint32_t)NEUI_KEY_F1);
   CHECK_EQ(web_key_to_neui("F12", "F12"), (uint32_t)NEUI_KEY_F12);
   CHECK_EQ(web_key_to_neui("F13", "F13"), (uint32_t)0);
-  CHECK_EQ(web_key_to_neui("ShiftLeft", "Shift"), (uint32_t)0);
   CHECK_EQ(web_key_to_neui("Minus", "-"), (uint32_t)0);
 }
 
@@ -74,4 +73,66 @@ TEST_CASE("keys_web: pointer buttons and modifiers map to MK_* bits")
   CHECK_EQ(web_buttonmap(1, 0), (uint32_t)0x0001);
   CHECK_EQ(web_buttonmap(2, 0), (uint32_t)0x0002);
   CHECK_EQ(web_buttonmap(4, WEB_MOD_SHIFT | WEB_MOD_CTRL), (uint32_t)(0x0010 | 0x0004 | 0x0008));
+}
+
+TEST_CASE("keys_web: Alt is NEUI_MK_ALT and Meta is NEUI_MK_COMMAND, whatever the platform")
+{
+  // The MK_* bits name physical keys, unlike the KMOD_* roles: Meta is Cmd on an
+  // Apple device and the Windows key / Super elsewhere, and is COMMAND either way.
+  CHECK_EQ(web_buttonmap(0, WEB_MOD_ALT),  (uint32_t)NEUI_MK_ALT);
+  CHECK_EQ(web_buttonmap(0, WEB_MOD_META), (uint32_t)NEUI_MK_COMMAND);
+  CHECK_EQ(web_buttonmap(1, WEB_MOD_ALT | WEB_MOD_META),
+           (uint32_t)(NEUI_MK_LBUTTON | NEUI_MK_ALT | NEUI_MK_COMMAND));
+  // Ctrl stays Control: not where Cmd lands.
+  CHECK_EQ(web_buttonmap(0, WEB_MOD_CTRL), (uint32_t)NEUI_MK_CONTROL);
+}
+
+TEST_CASE("keys_web: AltGr is no modifier in a buttonmap either")
+{
+  // Windows reports AltGr as Ctrl + Alt + AltGraph, as for the KeyboardEvent.
+  CHECK_EQ(web_buttonmap(1, WEB_MOD_CTRL | WEB_MOD_ALT | WEB_MOD_ALTGRAPH),
+           (uint32_t)NEUI_MK_LBUTTON);
+  // ...but the other modifiers pressed with it still count.
+  CHECK_EQ(web_buttonmap(0, WEB_MOD_SHIFT | WEB_MOD_META | WEB_MOD_ALTGRAPH | WEB_MOD_ALT),
+           (uint32_t)(NEUI_MK_SHIFT | NEUI_MK_COMMAND));
+}
+
+TEST_CASE("keys_web: a wheel event reports the modifiers but never Shift")
+{
+  CHECK_EQ(web_wheel_buttonmap(0), (uint32_t)0);
+  CHECK_EQ(web_wheel_buttonmap(WEB_MOD_SHIFT), (uint32_t)0);     // browsers convert it themselves
+  CHECK_EQ(web_wheel_buttonmap(WEB_MOD_ALT), (uint32_t)NEUI_MK_ALT);
+  CHECK_EQ(web_wheel_buttonmap(WEB_MOD_META), (uint32_t)NEUI_MK_COMMAND);
+  CHECK_EQ(web_wheel_buttonmap(WEB_MOD_SHIFT | WEB_MOD_CTRL | WEB_MOD_ALT | WEB_MOD_META),
+           (uint32_t)(NEUI_MK_CONTROL | NEUI_MK_ALT | NEUI_MK_COMMAND));
+}
+
+TEST_CASE("keys_web: the modifier keys are keys, either side one code")
+{
+  CHECK_EQ(web_key_to_neui("ShiftLeft", "Shift"),     (uint32_t)NEUI_KEY_SHIFT);
+  CHECK_EQ(web_key_to_neui("ShiftRight", "Shift"),    (uint32_t)NEUI_KEY_SHIFT);
+  CHECK_EQ(web_key_to_neui("ControlLeft", "Control"), (uint32_t)NEUI_KEY_CONTROL);
+  CHECK_EQ(web_key_to_neui("ControlRight", "Control"),(uint32_t)NEUI_KEY_CONTROL);
+  CHECK_EQ(web_key_to_neui("AltLeft", "Alt"),         (uint32_t)NEUI_KEY_ALT);
+  CHECK_EQ(web_key_to_neui("AltRight", "Alt"),        (uint32_t)NEUI_KEY_ALT);
+  CHECK_EQ(web_key_to_neui("MetaLeft", "Meta"),       (uint32_t)NEUI_KEY_COMMAND);
+  CHECK_EQ(web_key_to_neui("MetaRight", "Meta"),      (uint32_t)NEUI_KEY_COMMAND);
+  // Firefox before 118 called the Meta keys "OS".
+  CHECK_EQ(web_key_to_neui("OSLeft", "OS"),           (uint32_t)NEUI_KEY_COMMAND);
+  CHECK_EQ(web_key_to_neui("OSRight", "Meta"),        (uint32_t)NEUI_KEY_COMMAND);
+  // Not modifiers neui reports: the lock keys, Fn, the context-menu key.
+  CHECK_EQ(web_key_to_neui("CapsLock", "CapsLock"),   (uint32_t)0);
+  CHECK_EQ(web_key_to_neui("NumLock", "NumLock"),     (uint32_t)0);
+  CHECK_EQ(web_key_to_neui("ContextMenu", "ContextMenu"), (uint32_t)0);
+}
+
+TEST_CASE("keys_web: AltGr (AltRight / AltGraph) is not the Alt key")
+{
+  CHECK_EQ(web_key_to_neui("AltRight", "AltGraph"), (uint32_t)0);
+  // A plain right Alt on a layout without AltGr is.
+  CHECK_EQ(web_key_to_neui("AltRight", "Alt"), (uint32_t)NEUI_KEY_ALT);
+  // A modifier key types nothing.
+  CHECK_EQ(web_key_char("Shift", 0), (uint32_t)0);
+  CHECK_EQ(web_key_char("Meta", 0), (uint32_t)0);
+  CHECK_EQ(web_key_char("AltGraph", 0), (uint32_t)0);
 }

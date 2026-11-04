@@ -1568,19 +1568,26 @@ namespace xpl_host
     case WM_KEYDOWN: {
       auto* wud = get_wud(hwnd);
       if (!wud) break;
+      // A modifier held down repeats WM_KEYDOWN like any key, but it is reported
+      // once (hosts/shared/modifier_keys.h): the typematic repeats are dropped.
+      if (neui_detail::win32_modifier_key(wParam) != 0 &&
+          neui_detail::win32_key_is_repeat(lParam))
+        break;
+      // The modifier keys fold to their one NEUI_KEY_* (VK_RWIN -> COMMAND ...);
+      // every other key is the identity.
+      const uint32_t keycode = neui_detail::win32_keycode_to_neui(wParam);
       // Esc dismisses an open tree popup.
-      if (wud->session->handle_tree_popup_key(static_cast<uint32_t>(wParam)))
+      if (wud->session->handle_tree_popup_key(keycode))
         return 0;
       // ...and an open popup-surface stack. The key arrives at the OWNER: a
       // popup surface is WS_EX_NOACTIVATE and never holds focus. The gate
       // retargets it - see Session::popup_gate_key.
-      if (wud->session->popup_gate_key(NEUI_EVENT_KEYDOWN,
-                                       static_cast<uint32_t>(wParam),
+      if (wud->session->popup_gate_key(NEUI_EVENT_KEYDOWN, keycode,
                                        build_modifiers()))
         return 0;
       // Popup menu absorbs Esc / Enter / Space / arrow keys.
       if (wud->session->_popup_active &&
-          wud->session->handle_popup_key(static_cast<uint32_t>(wParam))) {
+          wud->session->handle_popup_key(keycode)) {
         return 0;
       }
       if (wParam == VK_TAB) {
@@ -1589,22 +1596,41 @@ namespace xpl_host
         wud->session->focus_next(!shift, wud->widget_index);
         return 0;  // consumed - do not feed to DefWindowProc
       }
-      dispatch_key_to_focused(wud->session, NEUI_EVENT_KEYDOWN,
-                               static_cast<uint32_t>(wParam));
+      dispatch_key_to_focused(wud->session, NEUI_EVENT_KEYDOWN, keycode);
       break;
     }
 
     case WM_KEYUP: {
       auto* wud = get_wud(hwnd);
       if (!wud) break;
+      const uint32_t keycode = neui_detail::win32_keycode_to_neui(wParam);
       // The release peer of the KEYDOWN gate: a press the popup swallowed must
       // not have its release land on the widget underneath.
-      if (wud->session->popup_gate_key(NEUI_EVENT_KEYUP,
-                                       static_cast<uint32_t>(wParam),
+      if (wud->session->popup_gate_key(NEUI_EVENT_KEYUP, keycode,
                                        build_modifiers()))
         return 0;
-      dispatch_key_to_focused(wud->session, NEUI_EVENT_KEYUP,
-                               static_cast<uint32_t>(wParam));
+      dispatch_key_to_focused(wud->session, NEUI_EVENT_KEYUP, keycode);
+      break;
+    }
+
+    // Alt - and, while Alt is down, EVERY key - arrives as WM_SYSKEYDOWN /
+    // WM_SYSKEYUP instead, which this host has never looked at: DefWindowProc
+    // owns them (Alt+F4, the Alt-tap menu activation, SC_KEYMENU ...). Surface
+    // the modifier keys themselves - Alt, and the Shift / Control / Windows key
+    // pressed while Alt is held - and nothing else: Alt+letter, F10 and the rest
+    // go to DefWindowProc exactly as before. Always `break`, never `return 0`,
+    // for the same reason: swallowing Alt would break the system menu.
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP: {
+      auto* wud = get_wud(hwnd);
+      const uint32_t keycode = neui_detail::win32_modifier_key(wParam);
+      if (!wud || keycode == 0) break;
+      const bool down = (msg == WM_SYSKEYDOWN);
+      if (down && neui_detail::win32_key_is_repeat(lParam)) break;
+      const neui_event_type_t type = down ? NEUI_EVENT_KEYDOWN : NEUI_EVENT_KEYUP;
+      if (wud->session->popup_gate_key(type, keycode, build_modifiers()))
+        break;
+      dispatch_key_to_focused(wud->session, type, keycode);
       break;
     }
 

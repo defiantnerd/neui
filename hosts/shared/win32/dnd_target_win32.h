@@ -19,6 +19,7 @@
 
 #include "../clipboard_item.h"
 #include "../dnd_modifier_suggest.h"
+#include "keys_win32.h"
 #include "clipboard_format_html_win32.h"
 #include "clipboard_format_urilist_win32.h"
 
@@ -246,10 +247,12 @@ namespace neui_detail
   }
 
   // Translate a Win32 KEY/MOUSE state bitmap (grfKeyState) to NEUI_MK_*
-  // flags. Matches what platform_win32.cpp does for mouse events.
+  // flags: the same bits platform_win32.cpp puts on mouse events, through the
+  // shared keys_win32.h translation. grfKeyState carries MK_ALT, but not the
+  // Windows key - that one is read live.
   inline uint32_t dnd_buttonmap_from_keystate(DWORD grfKeyState)
   {
-    return static_cast<uint32_t>(grfKeyState) & 0xFFu;
+    return win32_buttonmap_from_ole(grfKeyState);
   }
 
   inline uint32_t dnd_action_to_dropeffect(uint32_t action)
@@ -264,11 +267,10 @@ namespace neui_detail
     // Modifier convention lives in the shared dnd_suggest_action helper
     // (hosts/shared/dnd_modifier_suggest.h) so all hosts agree. The
     // DROPEFFECT_COPY/MOVE/LINK values align 1:1 with NEUI_DND_ACTION_*,
-    // so the mask passes through unchanged. Alt isn't checked here
-    // because IDropTarget's grfKeyState only carries MK_LBUTTON /
-    // MK_RBUTTON / MK_SHIFT / MK_CONTROL / MK_MBUTTON / MK_XBUTTON*;
-    // Alt comes through VK_MENU / GetKeyState, which a future revision
-    // could probe if needed.
+    // so the mask passes through unchanged. Alt is not part of the shared
+    // convention (Ctrl / Shift only); it reaches the client in the event's
+    // buttonmap (NEUI_MK_ALT / NEUI_MK_COMMAND), so a client that wants
+    // Finder- or Explorer-style Alt / Command drags applies its own reading.
     const bool ctrl  = (grfKeyState & MK_CONTROL) != 0;
     const bool shift = (grfKeyState & MK_SHIFT)   != 0;
     return dnd_suggest_action(

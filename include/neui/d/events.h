@@ -121,23 +121,56 @@ extern "C" {
     NEUI_CHECK_INDETERMINATE = 2,
   } neui_check_state_t;
 
-  // Bit values for neui_event_mouse_t::buttonmap and
-  // neui_event_wheel_t::buttonmap. Numeric values match the Win32 MK_*
-  // constants, but a host must still MASK rather than forward a raw wParam:
-  // Win32's MK_XBUTTON1 is 0x0020, which collides with NEUI_MK_ALT, and
-  // MK_XBUTTON2 (0x0040) is not in this enum at all. The per-OS translations
-  // in hosts/shared/{win32,macos,linux}/keys_*.h do the masking - use them.
-  // Note: NEUI_MK_ALT is not produced by any host layer today (Win32 MK_* has
-  // no ALT bit and the macOS / Linux layers do not populate it). It is
-  // reserved so behavior handlers can opt into ALT-fine semantics when hosts
-  // later plumb it through.
+  // Bit values for neui_event_mouse_t::buttonmap, neui_event_wheel_t::buttonmap
+  // and neui_event_dnd_t::buttonmap: the mouse buttons and the modifier KEYS
+  // that are held when the event happens, so a client can implement
+  // Shift-for-fine, Option-drag-to-copy, Alt-click ... without asking the OS
+  // for key state itself.
+  //
+  // Which key is which. NEUI_MK_* name PHYSICAL keys and mean the same thing on
+  // every platform. NEUI_KMOD_* (d/keys.h, KEYDOWN.modifiers and accelerators)
+  // name ROLES instead: KMOD_CTRL is the platform's primary command modifier and
+  // so is the Command key on macOS. The two vocabularies therefore line up like
+  // this, and a client that reads both must not mix them up:
+  //
+  //   physical key          NEUI_MK_*        NEUI_KMOD_* on macOS  on Windows / Linux
+  //   --------------------  ---------------  --------------------  ------------------
+  //   Shift                 NEUI_MK_SHIFT    NEUI_KMOD_SHIFT       NEUI_KMOD_SHIFT
+  //   Control               NEUI_MK_CONTROL  NEUI_KMOD_META        NEUI_KMOD_CTRL
+  //   Alt / Option          NEUI_MK_ALT      NEUI_KMOD_ALT         NEUI_KMOD_ALT
+  //   Command / Win / Super NEUI_MK_COMMAND  NEUI_KMOD_CTRL        NEUI_KMOD_META
+  //
+  // NEUI_MK_COMMAND is the Command key on macOS and the key in the same place on
+  // a PC keyboard - the Windows key on Win32, Super (Mod4) on X11 - so "the
+  // fourth modifier" is available everywhere without #ifdefs. Treat it as
+  // best-effort off macOS: the Windows shell and most Linux window managers
+  // claim that key for themselves, and may swallow the event or the key state
+  // before it reaches the application. Likewise NEUI_MK_ALT is Mod1 on X11 (the
+  // Alt key on every common keymap), and a Linux window manager may reserve
+  // Alt-drag for moving windows. The iOS hosts are touch-driven: they report
+  // LBUTTON while a finger is down and no modifier bits at all. A web wheel event
+  // carries every modifier except Shift (a browser converts Shift + wheel to a
+  // horizontal scroll itself; see hosts/shared/web/keys_web.h).
+  //
+  // Numeric values. LBUTTON .. MBUTTON match the Win32 MK_* constants, and ALT
+  // (0x0020) equals OLE's MK_ALT, but a host must still MASK rather than forward
+  // a raw wParam: Win32's MK_XBUTTON1 is 0x0020 on a mouse message, which would
+  // read as a phantom Alt, and MK_XBUTTON2 (0x0040) is not in this enum at all.
+  // NEUI_MK_COMMAND is 0x0080, the first bit above every Win32 MK_* value, so
+  // no raw Win32 state can ever be mistaken for it. The per-OS translations in
+  // hosts/shared/{win32,macos,linux}/keys_*.h (win32_buttonmap / mac_buttonmap /
+  // x11_buttonmap) do the masking and add the Alt / Command bits Win32 does not
+  // carry in its mouse messages - use them. The bits are filled in on mouse
+  // move / down / up / click / double-click / right-button and wheel events and
+  // on drag-and-drop events.
   enum {
     NEUI_MK_LBUTTON = 0x0001,
     NEUI_MK_RBUTTON = 0x0002,
     NEUI_MK_SHIFT   = 0x0004,
     NEUI_MK_CONTROL = 0x0008,
     NEUI_MK_MBUTTON = 0x0010,
-    NEUI_MK_ALT     = 0x0020,
+    NEUI_MK_ALT     = 0x0020,   // Alt (Win32 / X11), Option (macOS)
+    NEUI_MK_COMMAND = 0x0080,   // Command (macOS); Windows key (Win32); Super (X11)
   };
 
   // event_mouse for all events like move/click/button etc.
@@ -204,7 +237,14 @@ extern "C" {
     int is_flipped;
   } neui_event_wheel_t;
 
-  // event_key for all events like keydown/keyup/emitted key
+  // event_key for all events like keydown/keyup/emitted key.
+  // keycode is a NEUI_KEY_* (d/keys.h) for KEYDOWN / KEYUP and a Unicode
+  // codepoint for KEYCHAR; modifiers is a NEUI_KMOD_* bitmask. A modifier
+  // pressed or released on its own is a KEYDOWN / KEYUP with keycode
+  // NEUI_KEY_SHIFT / _CONTROL / _ALT / _COMMAND and modifiers as it stands after
+  // the change - see "Modifier keys" in d/keys.h. (The NEUI_MK_* of the mouse
+  // events are the physical keys; modifiers here are the NEUI_KMOD_* roles - the
+  // table at NEUI_MK_* above lines them up.)
   typedef struct neui_event_key
   {
     neui_widget_t widget;

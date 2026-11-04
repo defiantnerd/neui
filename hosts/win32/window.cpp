@@ -1353,10 +1353,14 @@ namespace win32_host
       int ly = MulDiv(GET_Y_LPARAM(lParam), 96, (int)dpi);
       neui_widget_t wid = { wd->widget_id };
       // NEUI_MK_* button / modifier bits. Every mouse message handled below
-      // except WM_MOUSELEAVE carries the key state in wParam, so forward that
-      // (state as of when the message was posted); LEAVE falls back to the
-      // live state so a drag leaving the widget still reports its held button.
-      uint32_t mk = neui_detail::win32_buttonmap(wParam);
+      // except WM_MOUSELEAVE carries the key state in wParam, so translate that
+      // (state as of when the message was posted; Alt and the Windows key are
+      // not in it and are read live); LEAVE falls back to the live state so a
+      // drag leaving the widget still reports its held button. Only mouse
+      // messages are translated - the key / focus / paint messages that pass
+      // through here have no use for it, and a translation reads the keyboard.
+      const uint32_t mk = (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST)
+                        ? neui_detail::win32_buttonmap(wParam) : 0u;
 
       switch (msg)
       {
@@ -1428,11 +1432,18 @@ namespace win32_host
         }
         break;
       case WM_KEYDOWN:
+        // A modifier held down repeats WM_KEYDOWN like any key, but it is
+        // reported once (hosts/shared/modifier_keys.h): drop the repeats.
+        if (neui_detail::win32_modifier_key(wParam) != 0 &&
+            neui_detail::win32_key_is_repeat(lParam))
+          break;
         {
           // The key messages carry no modifier state (wParam is the VK), so
           // read the live state - matching the xpl host's build_modifiers().
+          // The modifier keys fold to their one NEUI_KEY_* (VK_RWIN -> COMMAND
+          // ...); every other key is the identity.
           neui_event_t event = { NEUI_EVENT_KEYDOWN };
-          event.data.key = { wid, static_cast<uint32_t>(wParam),
+          event.data.key = { wid, neui_detail::win32_keycode_to_neui(wParam),
                              neui_detail::win32_kmod_from_state() };
           wd->session->dispatch_event(&event);
         }
@@ -1440,7 +1451,26 @@ namespace win32_host
       case WM_KEYUP:
         {
           neui_event_t event = { NEUI_EVENT_KEYUP };
-          event.data.key = { wid, static_cast<uint32_t>(wParam),
+          event.data.key = { wid, neui_detail::win32_keycode_to_neui(wParam),
+                             neui_detail::win32_kmod_from_state() };
+          wd->session->dispatch_event(&event);
+        }
+        break;
+      // Alt - and, while Alt is down, every key - arrives as WM_SYSKEYDOWN /
+      // WM_SYSKEYUP, which DefSubclassProc / DefWindowProc own (Alt+F4, the
+      // Alt-tap menu activation ...). Surface only the modifier keys themselves
+      // (Alt, and Shift / Control / Windows pressed while Alt is held) and let
+      // the message continue to the default handling untouched: Alt+letter,
+      // F10 and the rest are not reported, exactly as before.
+      case WM_SYSKEYDOWN:
+      case WM_SYSKEYUP:
+        {
+          const uint32_t keycode = neui_detail::win32_modifier_key(wParam);
+          if (keycode == 0) break;
+          const bool down = (msg == WM_SYSKEYDOWN);
+          if (down && neui_detail::win32_key_is_repeat(lParam)) break;
+          neui_event_t event = { down ? NEUI_EVENT_KEYDOWN : NEUI_EVENT_KEYUP };
+          event.data.key = { wid, keycode,
                              neui_detail::win32_kmod_from_state() };
           wd->session->dispatch_event(&event);
         }
