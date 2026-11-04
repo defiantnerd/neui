@@ -27,6 +27,7 @@
 #include "../shared/widget_tabview_host.h"
 #include "../shared/widget_paint_grid.h"
 #include "../shared/painter.h"
+#include "../shared/text_style.h"
 #include "../../backends/cg/cg_backend.h"
 
 #include <cstring>
@@ -3694,6 +3695,58 @@ namespace macos_host
     else      tv.font   = font;
   }
 
+  // NSColor from 0xAARRGGBB (sRGB, straight alpha).
+  static NSColor* nscolor_from_argb_macos(uint32_t argb)
+  {
+    return [NSColor colorWithSRGBRed:((argb >> 16) & 0xFF) / 255.0
+                               green:((argb >>  8) & 0xFF) / 255.0
+                                blue:( argb        & 0xFF) / 255.0
+                               alpha:((argb >> 24) & 0xFF) / 255.0];
+  }
+
+  // Apply NEUI_ATTR_TEXT_COLOR / NEUI_ATTR_BACKGROUND to a native text control:
+  // an INPUTBOX / LABEL NSTextField, or the NSTextView behind a MULTILINE (its
+  // NSScrollView backdrop included). Unset puts the AppKit default back, so a
+  // live remove() returns the control to the system look. LABEL has no fill, so
+  // only its text colour applies; BUTTON keeps the system title colour. The
+  // border colour / focus colour / selection colour attrs are crossplatform-host
+  // only - the native control draws its own bezel and selection.
+  void apply_colors_native_macos(WidgetData& wd)
+  {
+    if (!wd.native_control || !wd.type) return;
+    const bool is_input = !strcmp(wd.type, NEUI_W_INPUTBOX);
+    const bool is_multi = !strcmp(wd.type, NEUI_W_MULTILINE);
+    const bool is_label = !strcmp(wd.type, NEUI_W_LABEL);
+    if (!is_input && !is_multi && !is_label) return;
+
+    const neui_detail::AttrBag* bag = wd.attrs.get();
+    uint32_t text_argb = 0, bg_argb = 0;
+    const bool has_text = neui_detail::attr_color_get(bag, NEUI_ATTR_TEXT_COLOR, text_argb);
+    const bool has_bg   = !is_label &&
+                          neui_detail::attr_color_get(bag, NEUI_ATTR_BACKGROUND, bg_argb);
+
+    id obj = (__bridge id)wd.native_control;
+    if ([obj isKindOfClass:[NSTextField class]]) {
+      NSTextField* tf = (NSTextField*)obj;
+      tf.textColor = has_text ? nscolor_from_argb_macos(text_argb)
+                              : [NSColor controlTextColor];
+      if (!is_label)
+        tf.backgroundColor = has_bg ? nscolor_from_argb_macos(bg_argb)
+                                    : [NSColor textBackgroundColor];
+    } else if ([obj isKindOfClass:[NSScrollView class]]) {
+      NSScrollView* sv = (NSScrollView*)obj;
+      NSView* doc = sv.documentView;
+      if (![doc isKindOfClass:[NSTextView class]]) return;
+      NSTextView* tv = (NSTextView*)doc;
+      NSColor* fg = has_text ? nscolor_from_argb_macos(text_argb) : [NSColor textColor];
+      NSColor* bg = has_bg   ? nscolor_from_argb_macos(bg_argb)   : [NSColor textBackgroundColor];
+      tv.textColor           = fg;
+      tv.insertionPointColor = has_text ? fg : [NSColor controlTextColor];
+      tv.backgroundColor     = bg;
+      sv.backgroundColor     = bg;
+    }
+  }
+
   // Push WidgetData geometry (x/y/width/height, logical px) into the live
   // native object. Mirror of the win32 host's SetWindowPos path. Child
   // controls get a parent-relative frame (the content view is isFlipped, so
@@ -4450,6 +4503,10 @@ namespace macos_host
     // Apply any pre-show custom font (NEUI_ATTR_FONT_*) - no-op when unset.
     if (w.native_control)
       apply_font_native_macos(w);
+
+    // ...and any pre-show text colour / background on a text control.
+    if (w.native_control && w.attrs)
+      apply_colors_native_macos(w);
   }
 
   // True for widget types whose NSView should act as the parent container

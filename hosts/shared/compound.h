@@ -90,7 +90,7 @@ namespace neui_detail
     float                    text_size    = 12.0f;
     // Text-layer font selection. Empty family / weight 0 leaves the
     // host's system default in place (Segoe UI Normal on D2D). Honoured
-    // by the d2d backend; the cg backend ignores them (no-op push_font).
+    // by the d2d, cg and cairo backends; the null backend ignores them.
     // `family` is a template string (same {key} substitution as `text`),
     // pre-parsed at set_string time so paint can resolve it cheaply.
     std::string              text_family_template;
