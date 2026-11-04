@@ -640,9 +640,11 @@ endif()
 # compile as C++. The source is kept C99-clean so the snippet in the
 # README still reads as C code.
 set_source_files_properties(examples/readme_example.c PROPERTIES LANGUAGE CXX)
-# em++ compiles a .c input as C++ but warns that this is deprecated unless the
-# language is named explicitly (-Wdeprecated, fatal under NEUI_WERROR).
-if(EMSCRIPTEN)
+# Clang (em++, and AppleClang under the Ninja / Makefile generators - Xcode
+# names the language itself) compiles a .c input as C++ but warns that this is
+# deprecated unless the language is named explicitly (-Wdeprecated, fatal
+# under NEUI_WERROR). GCC takes the flag as well; MSVC has its own route.
+if(NOT MSVC)
   set_source_files_properties(examples/readme_example.c PROPERTIES
     COMPILE_OPTIONS "-xc++")
 endif()
