@@ -3441,6 +3441,9 @@ namespace
     return !g_quit;
   }
 
+  // The loop above wakes every 16 ms (its select timeout) anyway.
+  void platform_wake_event_pump() {}
+
   // ---- Menu bar -------------------------------------------------------------
   // X11 has no native menu bar, so the host draws it itself inside the frame's
   // client area (Session::paint_menubar + the handle_menubar_* input path). The

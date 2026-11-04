@@ -1676,6 +1676,9 @@ namespace xpl_host
     return !g_quit;
   }
 
+  // loop_turn polls; nothing to wake.
+  void platform_wake_event_pump() {}
+
   // -------------------------------------------------------------------------
   // Clipboard / DnD / menubar / polish - prototype stubs (compiled out per
   // the plan; neui degrades gracefully, same as the null platform).

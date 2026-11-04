@@ -2181,6 +2181,13 @@ namespace xpl_host
     return true;
   }
 
+  // GetMessageW above sleeps until a message arrives: a WM_NULL for the thread
+  // is one (dispatch_one passes a window-less message through harmlessly).
+  void platform_wake_event_pump()
+  {
+    PostThreadMessageW(GetCurrentThreadId(), WM_NULL, 0, 0);
+  }
+
   // -------------------------------------------------------------------------
   // Native menu bar
 

@@ -327,6 +327,11 @@ namespace xpl_host
   // user picks an item or dismisses. Returns false on quit (WM_QUIT seen),
   // true on normal exit via *keep_running.
   bool platform_run_modal_until(bool* keep_running);
+  // Wake the thread's event pump if it is blocked waiting for input, so a
+  // nested loop above re-reads its flag after something that posts no event
+  // cleared it - a timer, a notification (the app losing activation), a
+  // client call. A no-op where the pump never blocks for long.
+  void platform_wake_event_pump();
 
   // -------------------------------------------------------------------------
   // System clipboard.
