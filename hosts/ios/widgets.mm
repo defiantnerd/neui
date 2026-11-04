@@ -483,10 +483,12 @@ namespace ios_host
     return 0;
   }
 
-  static int NEUI_ABI w_popup_menu_checked(neui_session_t session, neui_widget_t anchor,
-                                           int x, int y, const char* const* items, int /*checked*/)
+  static int NEUI_ABI w_popup_menu_items(neui_session_t /*session*/, neui_widget_t /*anchor*/,
+                                         int /*x*/, int /*y*/, const neui_popup_item_t* /*items*/,
+                                         int /*count*/, int /*item_size*/)
   {
-    return w_popup_menu(session, anchor, x, y, items);
+    // TODO(ios phase 2): with popup_menu.
+    return 0;
   }
 
   static void NEUI_ABI w_invalidate(neui_session_t session, neui_widget_t widget)
@@ -629,7 +631,7 @@ namespace ios_host
     w_get_enabled,
     w_get_client_rect,
     w_create_from_component,
-    w_popup_menu_checked,
+    w_popup_menu_items,
   };
 
   // -------------------------------------------------------------------------

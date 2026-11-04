@@ -709,23 +709,33 @@ namespace xpl_host
     s->widget_client_rect(WidgetToIndex(widget), x, y, width, height);
   }
 
-  static int NEUI_ABI w_popup_menu_checked(neui_session_t session, neui_widget_t anchor,
-                                            int x, int y, const char* const* items, int checked)
+  static int NEUI_ABI w_popup_menu_items(neui_session_t session, neui_widget_t anchor,
+                                          int x, int y, const neui_popup_item_t* items,
+                                          int count, int item_size)
+  {
+    if (!items || count <= 0 || item_size < NEUI_POPUP_ITEM_SIZE_MIN) return 0;
+    auto* s = get_session_for_widget(session, anchor);
+    if (!s) return 0;
+    uint32_t aidx = WidgetToIndex(anchor);
+    if (!s->_widgets.exists(aidx)) return 0;
+    std::vector<PopupItem> v;
+    const char* p = reinterpret_cast<const char*>(items);
+    for (int i = 0; i < count; ++i, p += item_size) {
+      auto* it = reinterpret_cast<const neui_popup_item_t*>(p);
+      v.push_back({ it->text ? it->text : "", it->flags });
+    }
+    return s->open_popup_menu(aidx, x, y, v);
+  }
+
+  static int NEUI_ABI w_popup_menu(neui_session_t session, neui_widget_t anchor,
+                                    int x, int y, const char* const* items)
   {
     auto* s = get_session_for_widget(session, anchor);
     if (!s) return 0;
     uint32_t aidx = WidgetToIndex(anchor);
     if (!s->_widgets.exists(aidx)) return 0;
     if (!items) return 0;
-    std::vector<std::string> v;
-    for (int i = 0; items[i] != nullptr; ++i) v.emplace_back(items[i]);
-    return s->open_popup_menu(aidx, x, y, v, checked);
-  }
-
-  static int NEUI_ABI w_popup_menu(neui_session_t session, neui_widget_t anchor,
-                                    int x, int y, const char* const* items)
-  {
-    return w_popup_menu_checked(session, anchor, x, y, items, 0);
+    return s->open_popup_menu(aidx, x, y, popup_items_from_strings(items));
   }
 
   static void NEUI_ABI w_invalidate(neui_session_t session, neui_widget_t widget)
@@ -768,7 +778,7 @@ namespace xpl_host
     w_get_enabled,
     w_get_client_rect,
     w_create_from_component,
-    w_popup_menu_checked,
+    w_popup_menu_items,
   };
 
   // -------------------------------------------------------------------------

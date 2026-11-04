@@ -24,6 +24,16 @@ namespace xpl_host
 {
   class Session;
 
+  // One item of the popup menu: its text and neui_popup_item_t's flags
+  // (NEUI_POPUP_ITEM_*).
+  struct PopupItem
+  {
+    std::string text;
+    uint32_t    flags = 0;
+  };
+  // widgets->popup_menu's NULL-terminated strings as items ("-" = separator).
+  std::vector<PopupItem> popup_items_from_strings(const char* const* strings);
+
   // -------------------------------------------------------------------------
   // Base widget class - holds all common fields and the virtual interface.
   // Derived classes add type-specific fields and override virtual methods.
@@ -954,11 +964,11 @@ namespace xpl_host
     // nested message loop until the user picks an item or dismisses.
     // anchor_idx is the widget the popup is anchored to; (lx, ly) are in
     // its local logical coordinates. Returns 1-based pick index, or 0 if
-    // dismissed. items contains the displayed strings ("-" = separator);
-    // checked is the 1-based index of the item drawn with a check mark (the
-    // keyboard starts there), 0 for none.
+    // dismissed. Any number of items may be checked (drawn with a check mark;
+    // the keyboard starts at the first one), disabled (greyed, can't be
+    // picked) or separators.
     int open_popup_menu(uint32_t anchor_idx, int lx, int ly,
-                        const std::vector<std::string>& items, int checked = 0);
+                        const std::vector<PopupItem>& items);
     // Paint the popup menu overlay. Called from paint_frame after the
     // combo overlay so the popup sits on top of everything else.
     void paint_popup_menu(neui_render_ctx_t ctx);
@@ -1076,20 +1086,19 @@ namespace xpl_host
     // The popup keeps its unzoomed size in a zoomed frame: its geometry is in
     // popup px, the frame's logical px times its zoom (NEUI_ATTR_ZOOM).
     float                    _popup_zoom       = 1.0f;
-    std::vector<std::string> _popup_items;
-    int                      _popup_checked    = 0;     // 1-based, 0: none
+    std::vector<PopupItem>   _popup_items;
     // The popup's layout, fitted to the frame when it opens (layout_popup):
     // each item's column and its y / height in it (popup-local), each
-    // column's left edge and the popup's width last (popup-local), the
-    // tallest column's height, the font, the column that holds the checked
-    // item (its check mark's gutter; -1: none) and the frame's size (popup
-    // px, for the dimmed backdrop).
+    // column's left edge and the popup's width last (popup-local), whether
+    // each column holds a checked item (its check marks' gutter), the
+    // tallest column's height, the font and the frame's size (popup px, for
+    // the dimmed backdrop).
     struct PopupCell { int col = 0; int y = 0; int h = 0; };
     std::vector<PopupCell>   _popup_cells;
     std::vector<int>         _popup_col_x;
+    std::vector<bool>        _popup_col_checked;
     int                      _popup_h          = 0;
     int                      _popup_font_px    = 0;
-    int                      _popup_check_col  = -1;
     int                      _popup_frame_w    = 0;
     int                      _popup_frame_h    = 0;
 

@@ -3142,9 +3142,7 @@ namespace xpl_host
   {
     auto* wd = static_cast<CustomDrawWidget*>(host_data);
     if (!wd || !wd->session || !items) return 0;
-    std::vector<std::string> v;
-    for (int i = 0; items[i] != nullptr; ++i) v.emplace_back(items[i]);
-    return wd->session->open_popup_menu(wd->index, local_x, local_y, v);
+    return wd->session->open_popup_menu(wd->index, local_x, local_y, popup_items_from_strings(items));
   }
 
   // Defined in widgets.cpp where dnd_begin_drag_with_preview is in scope.
@@ -3295,8 +3293,8 @@ namespace xpl_host
       // frame-local; subtract the widget's frame-local origin to get local.
       int local_x = event->data.mouse.x - abs_x;
       int local_y = event->data.mouse.y - abs_y;
-      static const std::vector<std::string> k_items = {
-        "Reset to default",
+      static const std::vector<PopupItem> k_items = {
+        { "Reset to default", 0 },
       };
       int picked = session->open_popup_menu(index, local_x, local_y, k_items);
       if (picked == 1) {
@@ -3981,26 +3979,42 @@ namespace xpl_host
   // The editor behind a popup of more than one column is dimmed by this.
   static constexpr uint8_t POPUP_DIM_ALPHA = 0x59;
 
-  static bool popup_item_is_separator(const std::string& s)
+  std::vector<PopupItem> popup_items_from_strings(const char* const* strings)
   {
-    return s.size() == 1 && s[0] == '-';
+    std::vector<PopupItem> v;
+    for (int i = 0; strings && strings[i] != nullptr; ++i) {
+      const bool sep = strings[i][0] == '-' && strings[i][1] == '\0';
+      v.push_back({ strings[i], sep ? NEUI_POPUP_ITEM_SEPARATOR : 0u });
+    }
+    return v;
   }
 
-  static int popup_item_height(const std::string& s, int item_h)
+  static bool popup_item_is_separator(const PopupItem& it)
   {
-    return popup_item_is_separator(s) ? POPUP_SEP_H : item_h;
+    return (it.flags & NEUI_POPUP_ITEM_SEPARATOR) != 0;
+  }
+
+  // A separator or a disabled item can't be hovered or picked.
+  static bool popup_item_is_pickable(const PopupItem& it)
+  {
+    return (it.flags & (NEUI_POPUP_ITEM_SEPARATOR | NEUI_POPUP_ITEM_DISABLED)) == 0;
+  }
+
+  static int popup_item_height(const PopupItem& it, int item_h)
+  {
+    return popup_item_is_separator(it) ? POPUP_SEP_H : item_h;
   }
 
   // Each item's text width at font_px (0 for a separator).
   static std::vector<int> popup_text_widths(neui_render_backend_t* backend,
-                                            const std::vector<std::string>& items,
+                                            const std::vector<PopupItem>& items,
                                             int font_px)
   {
     std::vector<int> widths(items.size(), 0);
     if (!backend || !backend->measure_text) return widths;
     for (size_t i = 0; i < items.size(); ++i) {
       if (popup_item_is_separator(items[i])) continue;
-      widths[i] = (int)backend->measure_text(nullptr, items[i].c_str(), -1, (float)font_px);
+      widths[i] = (int)backend->measure_text(nullptr, items[i].text.c_str(), -1, (float)font_px);
     }
     return widths;
   }
@@ -4011,8 +4025,8 @@ namespace xpl_host
     // a longer list wraps into columns of the frame's height, each as wide
     // as its widest item, and while those would be wider than the frame the
     // rows get tighter (down to the font's height and a little), then the
-    // font smaller (two steps). The column that holds the checked item gets
-    // a gutter for its check mark. The popup stays POPUP_MARGIN off the
+    // font smaller (two steps). Each column that holds a checked item gets a
+    // gutter for the check marks. The popup stays POPUP_MARGIN off the
     // frame's edge: moved up and left as far as it takes.
     const int mx = frame_w >= POPUP_MARGIN_MIN ? POPUP_MARGIN : 0;
     const int my = frame_h >= POPUP_MARGIN_MIN ? POPUP_MARGIN : 0;
@@ -4025,7 +4039,6 @@ namespace xpl_host
       bool fits = false;
       for (int item_h = font == base_font ? POPUP_ITEM_H() : tightest; item_h >= tightest; --item_h) {
         _popup_cells.clear();
-        _popup_check_col = -1;
         int col = 0, y = POPUP_PAD_Y, tallest = 0;
         for (size_t i = 0; i < _popup_items.size(); ++i) {
           int h = popup_item_height(_popup_items[i], item_h);
@@ -4035,19 +4048,20 @@ namespace xpl_host
             y = POPUP_PAD_Y;
           }
           _popup_cells.push_back({col, y, h});
-          if ((int)i + 1 == _popup_checked) _popup_check_col = col;
           y += h;
         }
         _popup_h = (std::max)(tallest, y + POPUP_PAD_Y);
         // Each column's left edge, then the popup's width.
         std::vector<int> col_w(static_cast<size_t>(col + 1), 0);
+        _popup_col_checked.assign(static_cast<size_t>(col + 1), false);
         for (size_t i = 0; i < _popup_cells.size(); ++i) {
-          int& w = col_w[static_cast<size_t>(_popup_cells[i].col)];
-          w = (std::max)(w, widths[i]);
+          const size_t c = static_cast<size_t>(_popup_cells[i].col);
+          col_w[c] = (std::max)(col_w[c], widths[i]);
+          if (_popup_items[i].flags & NEUI_POPUP_ITEM_CHECKED) _popup_col_checked[c] = true;
         }
         _popup_col_x.assign(1, 0);
         for (int c = 0; c <= col; ++c) {
-          int w = col_w[static_cast<size_t>(c)] + POPUP_PAD_X * 2 + (c == _popup_check_col ? POPUP_CHECK_W : 0);
+          int w = col_w[static_cast<size_t>(c)] + POPUP_PAD_X * 2 + (_popup_col_checked[static_cast<size_t>(c)] ? POPUP_CHECK_W : 0);
           if (col == 0 && w < POPUP_MIN_W) w = POPUP_MIN_W;
           _popup_col_x.push_back(_popup_col_x.back() + w);
         }
@@ -4100,8 +4114,8 @@ namespace xpl_host
       _popup_running = false;
       return true;
     }
-    if (idx == 0 || popup_item_is_separator(_popup_items[static_cast<size_t>(idx - 1)])) {
-      // padding or a separator: stay open
+    if (idx == 0 || !popup_item_is_pickable(_popup_items[static_cast<size_t>(idx - 1)])) {
+      // padding, a separator or a disabled item: stay open
       return true;
     }
     _popup_picked = idx;
@@ -4116,7 +4130,7 @@ namespace xpl_host
     int idx = popup_item_at(lx * _popup_zoom, ly * _popup_zoom);
     // 1-based, as paint_popup_menu and handle_popup_key read it; -1: none
     int new_hover = -1;
-    if (idx > 0 && !popup_item_is_separator(_popup_items[static_cast<size_t>(idx - 1)])) new_hover = idx;
+    if (idx > 0 && popup_item_is_pickable(_popup_items[static_cast<size_t>(idx - 1)])) new_hover = idx;
     if (new_hover != _popup_hover) {
       _popup_hover = new_hover;
       uint32_t f = _widgets.child(0);
@@ -4153,16 +4167,20 @@ namespace xpl_host
     if (keycode == NEUI_KEY_DOWN || keycode == NEUI_KEY_UP) {
       int n = (int)_popup_items.size();
       int dir = (keycode == NEUI_KEY_DOWN) ? 1 : -1;
-      // From the hovered item, else from the checked one, else from an end.
-      int from = _popup_hover >= 1 ? _popup_hover : _popup_checked;
+      // From the hovered item, else from the first checked one, else from an end.
+      int from = _popup_hover;
+      for (int i = 0; from < 1 && i < n; ++i)
+        if (_popup_items[static_cast<size_t>(i)].flags & NEUI_POPUP_ITEM_CHECKED) from = i + 1;
       int next = (from < 1) ? (dir > 0 ? 1 : n) : from + dir;
-      // Skip separators.
+      // Skip separators and disabled items.
+      bool found = false;
       for (int safety = 0; safety < n; ++safety) {
         if (next < 1) next = n;
         if (next > n) next = 1;
-        if (!popup_item_is_separator(_popup_items[static_cast<size_t>(next - 1)])) break;
+        if (popup_item_is_pickable(_popup_items[static_cast<size_t>(next - 1)])) { found = true; break; }
         next += dir;
       }
+      if (!found) return true;
       _popup_hover = next;
       uint32_t f = _widgets.child(0);
       while (f != 0 && _widgets.exists(f)) {
@@ -4209,12 +4227,12 @@ namespace xpl_host
     }
 
     for (size_t i = 0; i < _popup_items.size() && i < _popup_cells.size(); ++i) {
-      auto& s = _popup_items[i];
+      auto& item = _popup_items[i];
       auto& cell = _popup_cells[i];
       float cx = fx + (float)_popup_col_x[static_cast<size_t>(cell.col)];
       float cw = (float)(_popup_col_x[static_cast<size_t>(cell.col) + 1] - _popup_col_x[static_cast<size_t>(cell.col)]);
       float cy = fy + (float)cell.y;
-      if (popup_item_is_separator(s)) {
+      if (popup_item_is_separator(item)) {
         float sy = cy + (float)POPUP_SEP_H * 0.5f;
         _backend->fill_rect(ctx, cx + 4.0f, sy,
                              cw - 8.0f, 1.0f,
@@ -4227,12 +4245,13 @@ namespace xpl_host
                              cw - 2.0f, (float)cell.h,
                              neui_detail::color(ColorRole::accent));
       }
-      uint32_t tcol = hovered ? neui_detail::color(ColorRole::accent_text)
-                              : neui_detail::color(ColorRole::text_primary);
-      // The checked item's column has a gutter for its check mark, as the
-      // in-frame menubar's dropdowns do.
-      float gutter = cell.col == _popup_check_col ? (float)POPUP_CHECK_W : 0.0f;
-      if ((int)i + 1 == _popup_checked) {
+      uint32_t tcol = neui_detail::color(ColorRole::text_primary);
+      if (item.flags & NEUI_POPUP_ITEM_DISABLED) tcol = neui_detail::color(ColorRole::text_disabled);
+      else if (hovered)                          tcol = neui_detail::color(ColorRole::accent_text);
+      // A column with a checked item has a gutter for the check marks, as
+      // the in-frame menubar's dropdowns do.
+      float gutter = _popup_col_checked[static_cast<size_t>(cell.col)] ? (float)POPUP_CHECK_W : 0.0f;
+      if (item.flags & NEUI_POPUP_ITEM_CHECKED) {
         _backend->draw_text(ctx, cx + (float)POPUP_PAD_X, cy,
                             (float)POPUP_CHECK_W, (float)cell.h,
                             "\xE2\x9C\x93" /* U+2713 check mark */,
@@ -4241,13 +4260,13 @@ namespace xpl_host
       _backend->draw_text(ctx,
         cx + (float)POPUP_PAD_X + gutter, cy,
         cw - (float)POPUP_PAD_X * 2.0f - gutter, (float)cell.h,
-        s.c_str(), (float)_popup_font_px, tcol);
+        item.text.c_str(), (float)_popup_font_px, tcol);
     }
     if (zoomed) _backend->pop_transform(ctx);
   }
 
   int Session::open_popup_menu(uint32_t anchor_idx, int lx, int ly,
-                                const std::vector<std::string>& items, int checked)
+                                const std::vector<PopupItem>& items)
   {
     if (items.empty() || !_widgets.exists(anchor_idx)) return 0;
     if (_popup_active) return 0;
@@ -4281,8 +4300,9 @@ namespace xpl_host
     auto zoomed = [zoom](int v) { return static_cast<int>(static_cast<float>(v) * zoom + 0.5f); };
 
     _popup_items     = items;
-    _popup_checked   = checked >= 1 && checked <= (int)items.size() &&
-                       !popup_item_is_separator(items[static_cast<size_t>(checked - 1)]) ? checked : 0;
+    // A separator carries no other flag.
+    for (auto& it : _popup_items)
+      if (popup_item_is_separator(it)) it.flags = NEUI_POPUP_ITEM_SEPARATOR;
     _popup_zoom      = zoom;
     _popup_x_abs     = zoomed(abs_x);
     _popup_y_abs     = zoomed(abs_y);
@@ -4305,7 +4325,7 @@ namespace xpl_host
     _popup_items.clear();
     _popup_cells.clear();
     _popup_col_x.clear();
-    _popup_checked = 0;
+    _popup_col_checked.clear();
     _popup_hover  = -1;
     _popup_picked = 0;
 
