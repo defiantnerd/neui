@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -163,5 +164,29 @@ namespace neui_detail
     bool                    _full = false;
     std::vector<DamageRect> _rects;
   };
+
+  // `r` scaled by `s` about the origin, rounded outward to whole px (a
+  // superset is always safe: it only widens what is repainted). Converts
+  // between a frame's logical px and its window's units under a frame zoom
+  // (NEUI_ATTR_UI_SCALE), which the xpl host paints as one CTM scale.
+  inline DamageRect damage_rect_scaled(const DamageRect& r, float s)
+  {
+    if (damage_rect_empty(r)) return r;
+    const double x0 = std::floor(static_cast<double>(r.x) * s);
+    const double y0 = std::floor(static_cast<double>(r.y) * s);
+    const double x1 = std::ceil(static_cast<double>(r.x + r.w) * s);
+    const double y1 = std::ceil(static_cast<double>(r.y + r.h) * s);
+    return { static_cast<int>(x0), static_cast<int>(y0),
+             static_cast<int>(x1 - x0), static_cast<int>(y1 - y0) };
+  }
+
+  // A region with every rect scaled outward by `s` (FULL stays FULL).
+  inline DamageRegion damage_region_scaled(const DamageRegion& d, float s)
+  {
+    DamageRegion out;
+    if (d.full()) { out.mark_full(); return out; }
+    for (const auto& r : d.rects()) out.add(damage_rect_scaled(r, s));
+    return out;
+  }
 
 } // namespace neui_detail

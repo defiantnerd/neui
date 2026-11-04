@@ -2190,9 +2190,10 @@ namespace xpl_host
                  RDW_INVALIDATE | RDW_UPDATENOW);
   }
 
-  // Partial repaint: invalidate just the logical rect, mapped outward to
-  // client px. Windows accumulates a true update region (a whole-client
-  // InvalidateRect absorbs it); WM_PAINT hands it to paint_frame.
+  // Partial repaint: invalidate just the rect (the window's logical px, frame
+  // zoom included), mapped outward to client px. Windows accumulates a true
+  // update region (a whole-client InvalidateRect absorbs it); WM_PAINT maps it
+  // back and hands it to paint_frame.
   void platform_invalidate_rect(void* native_handle, int x, int y, int w, int h)
   {
     if (!native_handle || w <= 0 || h <= 0) return;

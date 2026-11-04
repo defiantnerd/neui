@@ -701,7 +701,19 @@ namespace xpl_host
       platform_invalidate(frame);
       return;
     }
-    const neui_detail::DamageRect r = widget_damage_rect(*wd);
+    neui_detail::DamageRect r = widget_damage_rect(*wd);
+    // The platform takes the rect in its window's units: frame-local logical
+    // px times the frame's zoom (NEUI_ATTR_UI_SCALE), which paint_frame
+    // applies as one CTM scale over the whole frame. paint_frame scales the
+    // damage back for its cull.
+    float zoom = 1.0f;
+    for (uint32_t p : _widgets.get_all_parents(widget_index)) {
+      if (p != 0 && _widgets.exists(p) && _widgets[p].native_handle) {
+        zoom = _widgets[p].ui_scale();
+        break;
+      }
+    }
+    if (zoom != 1.0f) r = neui_detail::damage_rect_scaled(r, zoom);
     platform_invalidate_rect(frame, r.x, r.y, r.w, r.h);
   }
 
@@ -2956,18 +2968,32 @@ namespace xpl_host
                                                  : nullptr;
     if (fw && fw->attrs && fw->attrs->has(NEUI_ATTR_BACKGROUND))
       clear = static_cast<uint32_t>(fw->attrs->get_int(NEUI_ATTR_BACKGROUND, 0));
+    // The frame's user zoom (NEUI_ATTR_UI_SCALE), applied as a CTM scale below.
+    const float zoom = (fw ? fw->ui_scale() : 1.0f);
     // Partial frame? Only for real damage (not EMPTY / FULL), below the
     // coverage threshold, and only once the backend has ACCEPTED it - it may
     // refuse (fresh surface, DPI change) and then clears everything, so
     // culling must not happen. Every other frame tells the backend "full"
     // explicitly, so no damage can leak into a later frame.
+    //
+    // `damage` is in the window's units - the backend's space at begin_frame,
+    // which is frame-local logical px times the zoom (invalidate_widget_rect
+    // scales by it on the way in) - and goes to the backend as it is. The cull
+    // compares it with the widgets' unzoomed rects, so under a zoom it is
+    // scaled back first (outward, so it can only widen).
     static const bool force_full  = env_flag("NEUI_DEBUG_FULL_REPAINT");
     static const bool flash_damage = env_flag("NEUI_DEBUG_DAMAGE");
     const neui_detail::DamageRegion* cull = nullptr;
+    neui_detail::DamageRegion unzoomed_damage;
     if (_backend->set_frame_damage) {
       bool want_partial = damage && !damage->empty() && !damage->full() && !force_full;
+      const neui_detail::DamageRegion* logical = damage;
+      if (want_partial && zoom != 1.0f) {
+        unzoomed_damage = neui_detail::damage_region_scaled(*damage, 1.0f / zoom);
+        logical = &unzoomed_damage;
+      }
       if (want_partial) {
-        if (!fw || damage->coverage(fw->width, fw->height) >= k_partial_max_coverage)
+        if (!fw || logical->coverage(fw->width, fw->height) >= k_partial_max_coverage)
           want_partial = false;
       }
       if (want_partial) {
@@ -2981,7 +3007,7 @@ namespace xpl_host
         }
         if (_backend->set_frame_damage(ctx, rects.data(),
                                        static_cast<int>(damage->rects().size())))
-          cull = damage;
+          cull = logical;
       } else {
         _backend->set_frame_damage(ctx, nullptr, 0);
       }
@@ -3006,8 +3032,8 @@ namespace xpl_host
     // stays in the same logical space as the cached abs_x/abs_y and the
     // logical mouse coordinates - which is what keeps paint and hit-test
     // agreeing for free. Font caches key on (family, weight, size) with no
-    // DPI, so zoom needs no cache invalidation either.
-    const float zoom = (fw ? fw->ui_scale() : 1.0f);
+    // DPI, so zoom needs no cache invalidation either. (`zoom` is read above,
+    // with the clear colour: the damage handed to the backend is in its units.)
     _paint_zoom = zoom;
     const bool zooming = (zoom != 1.0f) && _backend->push_transform
                          && _backend->scale && _backend->pop_transform;
@@ -3071,11 +3097,11 @@ namespace xpl_host
     _paint_zoom = 1.0f;
     // The overlays above are not culled: the backend clips them to the
     // damage, which is all a partial frame needs. The flash is drawn after the
-    // zoom is popped, in the backend's space.
+    // zoom is popped, in the backend's space, where `damage` is.
     if (cull && flash_damage && _backend->fill_rect) {
       static uint32_t flash_phase = 0;
       const uint32_t tint = (++flash_phase & 1u) ? 0x40FF00FFu : 0x4000FFFFu;
-      for (const auto& d : cull->rects())
+      for (const auto& d : damage->rects())
         _backend->fill_rect(ctx, static_cast<float>(d.x), static_cast<float>(d.y),
                             static_cast<float>(d.w), static_cast<float>(d.h), tint);
     }

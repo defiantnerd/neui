@@ -2461,8 +2461,9 @@ namespace xpl_host
 
   // Partial repaint: AppKit unions every rect marked before the next display
   // pass (a whole-view setNeedsDisplay:YES absorbs them) and hands the result
-  // to drawRect: via getRectsBeingDrawn:. The content view is flipped, so the
-  // frame-local logical rect is already in view coordinates.
+  // to drawRect: via getRectsBeingDrawn:. The content view is flipped and the
+  // rect is in the window's logical px (frame zoom included), so it is
+  // already in view coordinates.
   void platform_invalidate_rect(void* native_handle, int x, int y, int w, int h)
   {
     if (!native_handle || w <= 0 || h <= 0) return;

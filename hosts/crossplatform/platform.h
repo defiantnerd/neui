@@ -272,10 +272,13 @@ namespace xpl_host
   // wrong. Must not be called from inside a paint (it would re-enter).
   void platform_force_paint(void* native_handle);
 
-  // Invalidate one frame-local rect (logical px) so the next paint can be
-  // partial (see Session::paint_frame's `damage`). A pending full-window
-  // invalidation absorbs it. Platforms without partial repaint forward to
-  // platform_invalidate, which is always correct.
+  // Invalidate one rect of a native window so the next paint can be partial
+  // (see Session::paint_frame's `damage`). The rect is in the window's
+  // logical px - frame-local logical px times the frame's zoom
+  // (NEUI_ATTR_UI_SCALE), which Session::invalidate_widget_rect applies - the
+  // backend's space at begin_frame. A pending full-window invalidation absorbs
+  // it. Platforms without partial repaint forward to platform_invalidate,
+  // which is always correct.
   void platform_invalidate_rect(void* native_handle, int x, int y, int w, int h);
 
   // Start / stop a 16 ms repaint heartbeat on a frame's native window.

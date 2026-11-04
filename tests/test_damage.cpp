@@ -153,3 +153,37 @@ TEST_CASE("damage_rect_to_device: clamps to the surface; off-surface is rejected
   CHECK_FALSE(neui_detail::damage_rect_to_device(50, 50, 5, 5, 1.0f, 10, 10, r));
   CHECK_FALSE(neui_detail::damage_rect_to_device(-20, 0, 5, 5, 1.0f, 10, 10, r));
 }
+
+TEST_CASE("damage_rect_scaled: a frame zoom scales outward, never inward")
+{
+  // Zoom 1.5: x 1..11 -> 1.5..16.5 -> [1, 17); y 2..9 -> 3..13.5 -> [3, 14).
+  const DamageRect z = neui_detail::damage_rect_scaled({ 1, 2, 10, 7 }, 1.5f);
+  CHECK_EQ(z.x, 1); CHECK_EQ(z.y, 3); CHECK_EQ(z.w, 16); CHECK_EQ(z.h, 11);
+  // And back by 1 / zoom: a superset of the original rect, so the cull can only
+  // widen.
+  const DamageRect u = neui_detail::damage_rect_scaled(z, 1.0f / 1.5f);
+  CHECK(u.x <= 1); CHECK(u.y <= 2);
+  CHECK(u.x + u.w >= 11); CHECK(u.y + u.h >= 9);
+  // Zoom 0.5 and negative origins round outward too.
+  const DamageRect h = neui_detail::damage_rect_scaled({ -3, 5, 7, 3 }, 0.5f);
+  CHECK_EQ(h.x, -2); CHECK_EQ(h.y, 2); CHECK_EQ(h.w, 4); CHECK_EQ(h.h, 2);
+  // Empty stays empty.
+  CHECK(neui_detail::damage_rect_empty(neui_detail::damage_rect_scaled({ 4, 4, 0, 9 }, 2.0f)));
+}
+
+TEST_CASE("damage_region_scaled: rects scale, FULL stays FULL, EMPTY stays EMPTY")
+{
+  DamageRegion d;
+  d.add({ 0, 0, 10, 10 });
+  d.add({ 100, 100, 10, 10 });
+  const DamageRegion z = neui_detail::damage_region_scaled(d, 2.0f);
+  REQUIRE_EQ(z.rects().size(), static_cast<size_t>(2));
+  CHECK(z.intersects({ 0, 0, 20, 20 }));
+  CHECK(z.intersects({ 200, 200, 20, 20 }));
+  CHECK_FALSE(z.intersects({ 30, 30, 20, 20 }));
+
+  DamageRegion full;
+  full.mark_full();
+  CHECK(neui_detail::damage_region_scaled(full, 0.5f).full());
+  CHECK(neui_detail::damage_region_scaled(DamageRegion{}, 3.0f).empty());
+}
