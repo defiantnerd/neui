@@ -11,6 +11,8 @@
 #include <new>
 #include <string>
 
+#include "window_class_win32.h"
+
 #pragma comment(lib, "Windowscodecs")
 #pragma comment(lib, "shlwapi")
 
@@ -156,10 +158,12 @@ namespace neui_detail
     MultiByteToWideChar(CP_UTF8, 0, path, -1, &wpath[0], n);
 
     // Embedded "PNG" resource: name = the caller-supplied path wrapped
-    // in literal quotes (the rc.exe quirk above). Resource memory has
-    // process lifetime, so decoding straight out of it is safe.
+    // in literal quotes (the rc.exe quirk above). Resource memory lives as
+    // long as its module, so decoding straight out of it is safe. Looked
+    // for in neui's module, then the exe (window_class_win32.h).
     std::wstring res_name = L"\"" + wpath + L"\"";
-    if (HMODULE hMod = GetModuleHandleW(nullptr)) {
+    for (HMODULE hMod : neui_win32::resource_modules()) {
+      if (!hMod) continue;
       if (HRSRC hRes = FindResourceW(hMod, res_name.c_str(), L"PNG")) {
         DWORD   rsize = SizeofResource(hMod, hRes);
         HGLOBAL hGlob = LoadResource(hMod, hRes);

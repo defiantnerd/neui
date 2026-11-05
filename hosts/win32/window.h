@@ -3,6 +3,8 @@
 #include "host.h"
 #include <CommCtrl.h>
 
+#include "../shared/win32/window_class_win32.h"
+
 #pragma comment(lib, "Comctl32")
 #pragma comment(linker, "\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
@@ -20,6 +22,14 @@ namespace win32_host
   void set_hinstance(HINSTANCE h);
   HINSTANCE get_hinstance();
   void register_classes();
+
+  // The native host's window classes, named with NEUI_WIN32_CLASS_SUFFIX
+  // (hosts/shared/win32/window_class_win32.h).
+  inline const wchar_t* const k_class_appwindow   = NEUI_WIN32_CLASS(L"neui.appwindow");
+  inline const wchar_t* const k_class_plugwindow  = NEUI_WIN32_CLASS(L"neui.plugwindow");
+  inline const wchar_t* const k_class_dialog      = NEUI_WIN32_CLASS(L"neui.dialog");
+  inline const wchar_t* const k_class_painted     = NEUI_WIN32_CLASS(L"neui.painted");
+  inline const wchar_t* const k_class_sectionbody = NEUI_WIN32_CLASS(L"neui.sectionbody");
   LRESULT CALLBACK AppWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   LRESULT CALLBACK PaintedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   LRESULT CALLBACK SectionBodyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);

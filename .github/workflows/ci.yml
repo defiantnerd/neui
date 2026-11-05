@@ -46,7 +46,10 @@ jobs:
             test: ctest --test-dir build -C Debug --output-on-failure
           - name: Windows (MSVC · Direct2D)
             os: windows-latest
-            configure: cmake -B build -DNEUI_WERROR=ON
+            # With a window class suffix (hosts/shared/win32/window_class_win32.h),
+            # so the suffixed names are built and neui_module_classes_win32
+            # checks them.
+            configure: cmake -B build -DNEUI_WERROR=ON -DNEUI_WIN32_CLASS_SUFFIX=_CI
             build: cmake --build build --config Debug --parallel
             test: ctest --test-dir build -C Debug --output-on-failure
     steps:

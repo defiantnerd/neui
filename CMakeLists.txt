@@ -42,6 +42,22 @@ if(NEUI_OBJC_SUFFIX)
   add_compile_definitions(NEUI_OBJC_SUFFIX=${NEUI_OBJC_SUFFIX})
 endif()
 
+# Win32 window classes are registered for neui's own module (the plugin's DLL),
+# so another neui binary in the process never shares them
+# (hosts/shared/win32/window_class_win32.h). This suffix also ends their names,
+# so a plugin's windows are told apart by name too (FindWindowExW, a host's or a
+# tool's window search). Empty (the default) keeps the names as they are.
+# Letters, digits, '_', '.' and '-' only.
+set(NEUI_WIN32_CLASS_SUFFIX "" CACHE STRING
+    "Suffix for the Win32 window class names neui registers; empty: none")
+if(NEUI_WIN32_CLASS_SUFFIX)
+  if(NOT NEUI_WIN32_CLASS_SUFFIX MATCHES "^[A-Za-z0-9_.-]+$")
+    message(FATAL_ERROR "NEUI_WIN32_CLASS_SUFFIX ends window class names: letters, "
+                        "digits, '_', '.' and '-' only, not '${NEUI_WIN32_CLASS_SUFFIX}'")
+  endif()
+  add_compile_definitions("NEUI_WIN32_CLASS_SUFFIX=\"${NEUI_WIN32_CLASS_SUFFIX}\"")
+endif()
+
 # NEUI_API_SHADER (include/neui/d/shader.h) is optional: with this ON no host
 # hands it out. The LVGL host and the null platform never do.
 option(NEUI_NO_SHADERS     "Build without the optional shader interface (NEUI_API_SHADER)" OFF)

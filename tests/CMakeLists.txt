@@ -455,6 +455,28 @@ if(WIN32)
     neui neui-xplhost neui-win32host)
 endif()
 
+# Win32: two DLLs built on neui in one process, as a host loads two plugins.
+# Each must register its window classes for its own module, with its own window
+# procedure (hosts/shared/win32/window_class_win32.h), and the second must keep
+# working once the first is unloaded. The DLLs are one source built twice; the
+# harness gets their paths. It creates hidden windows only and posts no input.
+if(WIN32)
+  foreach(dll a b)
+    add_library(neui_module_classes_${dll} SHARED module_classes_dll_win32.cpp)
+    target_include_directories(neui_module_classes_${dll} PRIVATE
+      ${PROJECT_SOURCE_DIR}/include)
+    target_compile_features(neui_module_classes_${dll} PRIVATE cxx_std_17)
+    target_link_libraries(neui_module_classes_${dll} PRIVATE
+      neui neui-xplhost neui-win32host)
+  endforeach()
+  add_executable(neui_module_classes_win32 module_classes_win32.cpp)
+  target_compile_features(neui_module_classes_win32 PRIVATE cxx_std_17)
+  add_dependencies(neui_module_classes_win32 neui_module_classes_a neui_module_classes_b)
+  add_test(NAME neui_module_classes_win32
+           COMMAND neui_module_classes_win32
+                   $<TARGET_FILE:neui_module_classes_a> $<TARGET_FILE:neui_module_classes_b>)
+endif()
+
 # Windows-only: .nsl programs on the GPU through the real D2D backend, held
 # against the CPU executor with the fidelity contract. Runs on WARP where
 # there is no GPU (CI), and reports SKIP without d3dcompiler_47.dll or a
