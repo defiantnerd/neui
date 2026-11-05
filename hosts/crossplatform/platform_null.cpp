@@ -119,6 +119,7 @@ namespace xpl_host
   // Drag & drop - no-op on platforms without window-system DnD support.
   bool platform_dnd_register_window(void* /*native_handle*/, void* /*session_ptr*/,
                                      uint32_t /*frame_widget_id*/)            { return false; }
+  void platform_dnd_accepted_formats_changed(void*, void*, uint32_t) {}   // the OS needs no per-type registration
   void platform_dnd_unregister_window(void* /*native_handle*/)                {}
   uint32_t platform_dnd_begin_drag(void* /*native_handle*/,
                                      neui_detail::DataItem* /*item*/,

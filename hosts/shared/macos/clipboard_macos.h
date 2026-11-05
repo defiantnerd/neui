@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../clipboard_item.h"
+#include "pasteboard_mime_macos.h"
 
 // macOS system-clipboard helpers. Header-only / `inline` so the platform
 // layer (and any future macOS-specific code that needs clipboard access)
@@ -101,12 +102,11 @@ namespace neui_detail
     return [pb setData:d forType:type] == YES;
   }
 
-  // Place every format on `item` onto the system pasteboard. Known MIMEs
-  // map to native pasteboard types; everything else passes through as
-  // its MIME string (UTI passthrough).
-  inline bool clipboard_write_item_macos(const DataItem& item)
+  // Place every format on `item` onto `pb`. Known MIMEs map to native
+  // pasteboard types; everything else goes under the UTI of its MIME
+  // (pasteboard_mime_macos.h), which pb_read_item_macos maps back.
+  inline bool pb_write_item_macos(NSPasteboard* pb, const DataItem& item)
   {
-    NSPasteboard* pb = [NSPasteboard generalPasteboard];
     [pb clearContents];
 
     bool any = false;
@@ -162,20 +162,21 @@ namespace neui_detail
         return;
       }
 
-      // ---- image/png -> NSPasteboardTypePNG (+ MIME alias) ----
+      // ---- image/png -> NSPasteboardTypePNG ----
       // PNG is the native macOS bitmap clipboard format; emit it under
-      // its UTI so Preview / Photos / Mail see the image, and keep the
-      // raw MIME alias for neui-to-neui round-trip fidelity.
+      // its UTI so Preview / Photos / Mail see the image. That UTI is also
+      // the one of the MIME, so pb_read_item_macos maps it back.
       if (mime == "image/png") {
         if (pb_set_data_macos(pb, NSPasteboardTypePNG,
                                 bytes.data(),
                                 static_cast<uint32_t>(bytes.size())))
           any = true;
-        // Fall through to also publish under the MIME name.
+        return;
       }
 
-      // ---- arbitrary MIME -> UTI passthrough using MIME as the type ----
-      NSString* t = [NSString stringWithUTF8String:mime.c_str()];
+      // ---- arbitrary MIME -> the UTI of its MIME tag ----
+      // The MIME string itself is not a valid pasteboard type.
+      NSString* t = pb_type_for_mime_macos(mime);
       if (t && pb_set_data_macos(pb, t,
                                    bytes.data(),
                                    static_cast<uint32_t>(bytes.size())))
@@ -183,6 +184,11 @@ namespace neui_detail
     });
 
     return any;
+  }
+
+  inline bool clipboard_write_item_macos(const DataItem& item)
+  {
+    return pb_write_item_macos([NSPasteboard generalPasteboard], item);
   }
 
   // Snapshot every known representation on `pb` into `item`. Used by
@@ -226,13 +232,12 @@ namespace neui_detail
       }
     }
 
-    // ---- Other types whose name looks like a MIME (contains '/') ----
+    // ---- Other types that stand for a MIME ----
+    // A type named like one, or one pb_type_for_mime_macos made of one.
     NSArray<NSPasteboardType>* types = [pb types];
     for (NSPasteboardType t in types) {
-      const char* c = [t UTF8String];
-      if (!c) continue;
-      std::string mime(c);
-      if (mime.find('/') == std::string::npos) continue;
+      std::string mime = pb_mime_for_type_macos(t);
+      if (mime.empty()) continue;
       if (item.has_format(mime)) continue;
       if (NSData* d = [pb dataForType:t]) {
         item.set_format(mime, [d bytes],
@@ -280,11 +285,9 @@ namespace neui_detail
       }
     }
     for (NSPasteboardType t in [pb types]) {
-      const char* c = [t UTF8String];
-      if (!c) continue;
-      std::string mime(c);
-      if (mime.find('/') == std::string::npos) continue;
-      note(c);
+      std::string mime = pb_mime_for_type_macos(t);
+      if (mime.empty()) continue;
+      note(mime.c_str());
     }
     return out;
   }

@@ -420,6 +420,16 @@ namespace xpl_host
                                      uint32_t frame_widget_id);
   void platform_dnd_unregister_window(void* native_handle);
 
+  // A widget in the frame's tree changed the MIMEs it accepts
+  // (NEUI_API_DND::set_accepted_formats) after the frame was registered. macOS
+  // registers a view for the pasteboard types of the MIMEs widgets accept - a drag
+  // that carries only a custom type is otherwise never offered to it - and adds
+  // the new ones here. A no-op wherever the OS routes a drag without per-type
+  // registration.
+  void platform_dnd_accepted_formats_changed(void* native_handle,
+                                              void* session_ptr,
+                                              uint32_t frame_widget_id);
+
   // Initiate a synchronous OS-level drag from `native_handle` (frame HWND
   // on Win32; frame content NSView on macOS). Spins the OS drag loop /
   // a nested runloop until the user drops or cancels. `item` is borrowed

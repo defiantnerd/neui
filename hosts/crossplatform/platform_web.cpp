@@ -3007,6 +3007,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
     web_dnd_register(static_cast<WebFrame*>(native_handle)->id, 1);
     return true;
   }
+  void platform_dnd_accepted_formats_changed(void*, void*, uint32_t) {}   // the OS needs no per-type registration
   void platform_dnd_unregister_window(void* native_handle)
   {
     if (!native_handle) return;

@@ -1149,7 +1149,7 @@ NSWindowStyleMask styles_for_appwindow()
 
 // NSDragOperation <-> NEUI_DND_ACTION_* translation + the modifier-aware
 // suggestion live in hosts/shared/macos/dnd_helpers_macos.h
-// (dnd_suggested_from_nsop / dnd_nsop_from_action), shared with the xpl
+// (dnd_suggested_from_nsop / dnd_nsop_answer), shared with the xpl
 // host's NEUIView.
 
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender
@@ -1159,14 +1159,14 @@ NSWindowStyleMask styles_for_appwindow()
   NSPasteboard* pb = [sender draggingPasteboard];
   auto ml = neui_detail::pb_collect_mime_list_macos(pb);
   NSPoint p = [self convertPoint:[sender draggingLocation] fromView:nil];
-  uint32_t suggested = neui_detail::dnd_suggested_from_nsop(
-    [sender draggingSourceOperationMask]);
+  NSDragOperation mask = [sender draggingSourceOperationMask];
+  uint32_t suggested = neui_detail::dnd_suggested_from_nsop(mask);
   uint32_t accepted = d->session->dispatch_dnd_enter(d->widget_index,
                                                        (int)p.x, (int)p.y,
                                                        ml.ptrs.data(),
                                                        (uint32_t)ml.ptrs.size(),
                                                        suggested, neui_detail::dnd_buttonmap_macos());
-  return neui_detail::dnd_nsop_from_action(accepted);
+  return neui_detail::dnd_nsop_answer(accepted, mask);
 }
 
 - (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender
@@ -1176,14 +1176,14 @@ NSWindowStyleMask styles_for_appwindow()
   NSPasteboard* pb = [sender draggingPasteboard];
   auto ml = neui_detail::pb_collect_mime_list_macos(pb);
   NSPoint p = [self convertPoint:[sender draggingLocation] fromView:nil];
-  uint32_t suggested = neui_detail::dnd_suggested_from_nsop(
-    [sender draggingSourceOperationMask]);
+  NSDragOperation mask = [sender draggingSourceOperationMask];
+  uint32_t suggested = neui_detail::dnd_suggested_from_nsop(mask);
   uint32_t accepted = d->session->dispatch_dnd_move(d->widget_index,
                                                       (int)p.x, (int)p.y,
                                                       ml.ptrs.data(),
                                                       (uint32_t)ml.ptrs.size(),
                                                       suggested, neui_detail::dnd_buttonmap_macos());
-  return neui_detail::dnd_nsop_from_action(accepted);
+  return neui_detail::dnd_nsop_answer(accepted, mask);
 }
 
 - (void)draggingExited:(id<NSDraggingInfo>)sender
@@ -3567,11 +3567,15 @@ namespace macos_host
     // routes external drags into our NSDraggingDestination protocol
     // methods on NEUINativeContentView. The framework gates whether
     // any client event fires via the widget's drop_target flag.
-    [cv registerForDraggedTypes:@[
-      NSPasteboardTypeString,
-      NSPasteboardTypeHTML,
-      NSPasteboardTypeFileURL,
-    ]];
+    [cv registerForDraggedTypes:neui_detail::dnd_base_dragged_types_macos()];
+    {
+      // Plus the pasteboard type of every MIME a widget of the frame accepts:
+      // a drag that carries only a custom type is not offered to the view
+      // otherwise.
+      std::vector<std::string> mimes;
+      neui_detail::dnd_collect_accepted_mimes(s->_widgets, idx, mimes);
+      neui_detail::dnd_register_mimes_macos(cv, mimes);
+    }
 
     // Tab / Shift-Tab focus traversal: the key-view loop is built manually in
     // widget-creation order (see rebuild_key_view_loop_macos, called after the

@@ -36,4 +36,7 @@ target_link_libraries(neui-macoshost PRIVATE
   # UTType, for the NSOpenPanel / NSSavePanel type filters in
   # hosts/shared/macos/file_dialog_macos.h (macOS 11+; guarded at runtime).
   "-framework UniformTypeIdentifiers"
+  # UTTypeCreatePreferredIdentifierForTag, the pre-macOS-11 half of the
+  # MIME <-> pasteboard type mapping in hosts/shared/macos/pasteboard_mime_macos.h.
+  "-framework CoreServices"
 )

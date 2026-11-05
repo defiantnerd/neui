@@ -1837,6 +1837,8 @@ namespace macos_host
     return s->_widgets[idx].drop_target;
   }
 
+  static NSWindow* find_owning_nswindow_macos(Session* s, uint32_t widget_idx);
+
   static void NEUI_ABI d_set_accepted_formats(neui_session_t session,
                                                neui_widget_t widget,
                                                const char* const* mimes,
@@ -1854,6 +1856,11 @@ namespace macos_host
         if (mimes[i]) w.accepted_mimes.emplace_back(mimes[i]);
       }
     }
+    // Once the frame's window exists its view is registered; a MIME added now
+    // has to be added to that registration (create_native_frame registers the
+    // ones the tree holds when the window is made).
+    if (NSWindow* win = find_owning_nswindow_macos(s, idx))
+      neui_detail::dnd_register_mimes_macos([win contentView], w.accepted_mimes);
   }
 
   static void NEUI_ABI d_accept(neui_session_t session,

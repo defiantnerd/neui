@@ -2629,6 +2629,7 @@ namespace xpl_host
     [view installDragDrop];
     return true;
   }
+  void platform_dnd_accepted_formats_changed(void*, void*, uint32_t) {}   // the OS needs no per-type registration
   void platform_dnd_unregister_window(void* native_handle)
   {
     NEUIView* view = neui_view_for_window(native_handle);

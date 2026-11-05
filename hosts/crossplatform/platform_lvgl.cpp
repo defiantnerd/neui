@@ -1708,6 +1708,7 @@ namespace xpl_host
   bool platform_clipboard_read_item(neui_detail::DataItem&) { return false; }
 
   bool platform_dnd_register_window(void*, void*, uint32_t) { return false; }
+  void platform_dnd_accepted_formats_changed(void*, void*, uint32_t) {}   // the OS needs no per-type registration
   void platform_dnd_unregister_window(void*) {}
   uint32_t platform_dnd_begin_drag(void*, neui_detail::DataItem*, uint32_t,
                                    void*, int, int) { return 0; }
