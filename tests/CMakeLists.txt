@@ -38,6 +38,7 @@ add_executable(neui_tests
   test_a11y_uia_map.cpp
   test_wheel_direction.cpp
   test_mouse_modifiers.cpp
+  test_dnd_mac_ops.cpp
   test_popup_nav.cpp
   test_metrics.cpp
   test_ios_api.cpp
