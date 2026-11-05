@@ -7777,6 +7777,33 @@ namespace win32_host
     s->_last_accepted_action = static_cast<uint32_t>(action);
   }
 
+  // Resolve a preview asset to a DragPreviewW32 (an HBITMAP the caller owns
+  // until it hands it to the Shell's helper). False when the asset is
+  // asset_none, belongs to another session or has no displayable pixels. Shared
+  // by begin and update_drag_preview.
+  static bool dnd_make_preview_w32(Session* s, neui_asset_t preview_asset,
+                                    int hot_x, int hot_y,
+                                    neui_detail::DragPreviewW32* out)
+  {
+    if (preview_asset.id == asset_none.id) return false;
+    uint32_t a_sess = (preview_asset.id >> 16) & 0xffff;
+    if (a_sess != (s->session_id() & 0xffff)) return false;
+    const uint8_t* bgra = nullptr;
+    uint32_t       w_px = 0, h_px = 0;
+    float          scale = 1.0f;
+    if (!s->_asset_manager.get_pixels_for_export(preview_asset.id & 0xffff,
+                                                   &bgra, &w_px, &h_px, &scale))
+      return false;
+    HBITMAP hbm = neui_detail::w32_make_drag_hbitmap(bgra, w_px, h_px);
+    if (!hbm) return false;
+    out->hbitmap = hbm;
+    out->width   = static_cast<int>(w_px);
+    out->height  = static_cast<int>(h_px);
+    out->hot_x   = (hot_x < 0) ? out->width  / 2 : hot_x;
+    out->hot_y   = (hot_y < 0) ? out->height / 2 : hot_y;
+    return true;
+  }
+
   // Internal worker shared by both public entry points. `preview_asset` and
   // hot-spot may be all zero / -1 for "no preview".
   static neui_dnd_action_t dnd_begin_drag_impl(neui_session_t session,
@@ -7804,28 +7831,8 @@ namespace win32_host
     // belongs to this session AND it has displayable pixels. Anything that
     // doesn't pass these checks degrades gracefully to no-preview.
     neui_detail::DragPreviewW32 preview;
-    bool have_preview = false;
-    if (preview_asset.id != asset_none.id) {
-      uint32_t a_sess = (preview_asset.id >> 16) & 0xffff;
-      if (a_sess == (s->session_id() & 0xffff)) {
-        const uint8_t* bgra = nullptr;
-        uint32_t       w_px = 0, h_px = 0;
-        float          scale = 1.0f;
-        if (s->_asset_manager.get_pixels_for_export(preview_asset.id & 0xffff,
-                                                      &bgra, &w_px, &h_px,
-                                                      &scale)) {
-          HBITMAP hbm = neui_detail::w32_make_drag_hbitmap(bgra, w_px, h_px);
-          if (hbm) {
-            preview.hbitmap = hbm;
-            preview.width   = static_cast<int>(w_px);
-            preview.height  = static_cast<int>(h_px);
-            preview.hot_x   = (hot_x < 0) ? preview.width  / 2 : hot_x;
-            preview.hot_y   = (hot_y < 0) ? preview.height / 2 : hot_y;
-            have_preview = true;
-          }
-        }
-      }
-    }
+    bool have_preview = dnd_make_preview_w32(s, preview_asset, hot_x, hot_y,
+                                              &preview);
 
     s->_drag_source_active = true;
     uint32_t r = neui_detail::platform_dnd_begin_drag_w32(
@@ -7860,6 +7867,22 @@ namespace win32_host
                                 preview->hot_x, preview->hot_y);
   }
 
+  // Swap the image of the drag this session has in flight. Not behind the
+  // _in_dnd_dispatch guard that blocks begin_drag: the typical caller is a
+  // DND_MOVE handler, run from inside DoDragDrop's own loop.
+  static bool NEUI_ABI dnd_update_drag_preview(neui_session_t session,
+                                                const neui_drag_preview_t* preview)
+  {
+    auto* s = get_session(session);
+    if (!s || !preview) return false;
+    if (!s->_drag_source_active) return false;
+    neui_detail::DragPreviewW32 pv;
+    if (!dnd_make_preview_w32(s, preview->image, preview->hot_x, preview->hot_y, &pv))
+      return false;
+    // Takes the bitmap over on every path.
+    return neui_detail::platform_dnd_update_drag_preview_w32(&pv);
+  }
+
   neui_dnd_api_t dnd_api = {
     NEUI_VERSION,
     dnd_set_drop_target,
@@ -7868,6 +7891,7 @@ namespace win32_host
     dnd_accept,
     dnd_begin_drag,
     dnd_begin_drag_with_preview,
+    dnd_update_drag_preview,
   };
 
   // -------------------------------------------------------------------------

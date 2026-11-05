@@ -129,6 +129,8 @@ namespace xpl_host
   void*    platform_make_drag_preview(const uint8_t* /*bgra_premul*/,
                                        uint32_t /*w_px*/, uint32_t /*h_px*/,
                                        float /*scale*/)                       { return nullptr; }
+  bool     platform_dnd_update_drag_preview(void* /*preview_native*/,
+                                              int /*hot_x*/, int /*hot_y*/)   { return false; }
 
   void     platform_set_cursor(int /*kind*/)                                  {}
 

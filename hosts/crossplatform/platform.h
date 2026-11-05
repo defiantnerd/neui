@@ -462,6 +462,16 @@ namespace xpl_host
                                      uint32_t w_px, uint32_t h_px,
                                      float scale);
 
+  // Swap the image of the drag a platform_dnd_begin_drag call is running, from
+  // inside one of its callbacks (a DnD dispatch, a timer). `preview_native` is
+  // a fresh platform_make_drag_preview result and `hot_x` / `hot_y` as for
+  // platform_dnd_begin_drag; ownership of `preview_native` transfers into this
+  // call on EVERY path, true or false. Returns false (the old image stays) when
+  // no drag is running here or the platform cannot change a running drag's
+  // image - the null, iOS and LVGL layers always.
+  bool platform_dnd_update_drag_preview(void* preview_native,
+                                          int hot_x, int hot_y);
+
   // -------------------------------------------------------------------------
   // Native menu bar support.
   // All hmenu / parent_hmenu / submenu parameters are HMENU on Win32 and

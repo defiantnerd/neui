@@ -2590,14 +2590,8 @@ namespace xpl_host
   {
     if (preview_native) {
       HBITMAP hbm = static_cast<HBITMAP>(preview_native);
-      BITMAP bm = {};
       neui_detail::DragPreviewW32 preview;
-      if (GetObjectW(hbm, sizeof(bm), &bm)) {
-        preview.hbitmap = hbm;
-        preview.width   = bm.bmWidth;
-        preview.height  = (bm.bmHeight < 0) ? -bm.bmHeight : bm.bmHeight;
-        preview.hot_x   = (hot_x < 0) ? preview.width  / 2 : hot_x;
-        preview.hot_y   = (hot_y < 0) ? preview.height / 2 : hot_y;
+      if (neui_detail::w32_preview_from_hbitmap(hbm, hot_x, hot_y, &preview)) {
         return neui_detail::platform_dnd_begin_drag_w32(native_handle, item,
                                                          allowed_actions,
                                                          &preview);
@@ -2607,6 +2601,19 @@ namespace xpl_host
     }
     return neui_detail::platform_dnd_begin_drag_w32(native_handle, item,
                                                      allowed_actions);
+  }
+
+  bool platform_dnd_update_drag_preview(void* preview_native, int hot_x, int hot_y)
+  {
+    if (!preview_native) return false;
+    HBITMAP hbm = static_cast<HBITMAP>(preview_native);
+    neui_detail::DragPreviewW32 preview;
+    if (!neui_detail::w32_preview_from_hbitmap(hbm, hot_x, hot_y, &preview)) {
+      DeleteObject(hbm);   // ownership came with the call
+      return false;
+    }
+    // Takes the bitmap over on every path.
+    return neui_detail::platform_dnd_update_drag_preview_w32(&preview);
   }
 
   // -------------------------------------------------------------------------

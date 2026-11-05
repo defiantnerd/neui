@@ -4561,6 +4561,24 @@ namespace xpl_host {
     s->_last_accepted_action = static_cast<uint32_t>(action);
   }
 
+  // Resolve a preview asset to a per-platform native bitmap
+  // (platform_make_drag_preview). nullptr when the asset is asset_none, belongs
+  // to another session, has no displayable pixels (COMPOUND / BEHAVIOR kind) or
+  // the platform builder fails. Shared by begin and update_drag_preview.
+  static void* dnd_make_preview_native(Session* s, neui_asset_t preview_asset)
+  {
+    if (preview_asset.id == asset_none.id) return nullptr;
+    uint32_t a_sess = (preview_asset.id >> 16) & 0xffff;
+    if (a_sess != (s->get_session_id() & 0xffff)) return nullptr;
+    const uint8_t* bgra = nullptr;
+    uint32_t       w_px = 0, h_px = 0;
+    float          scale = 1.0f;
+    if (!s->_asset_manager.get_pixels_for_export(preview_asset.id & 0xffff,
+                                                   &bgra, &w_px, &h_px, &scale))
+      return nullptr;
+    return platform_make_drag_preview(bgra, w_px, h_px, scale);
+  }
+
   // Shared worker for both public entry points. asset_none + (-1, -1) =
   // no preview.
   static neui_dnd_action_t dnd_begin_drag_impl(neui_session_t session,
@@ -4584,23 +4602,8 @@ namespace xpl_host {
     }
     if (!native) return NEUI_DND_ACTION_NONE;
 
-    // Resolve preview asset to a per-platform native bitmap. Degrades to
-    // no-preview on any failure (wrong session, COMPOUND/BEHAVIOR kind,
-    // platform builder returns null).
-    void* preview_native = nullptr;
-    if (preview_asset.id != asset_none.id) {
-      uint32_t a_sess = (preview_asset.id >> 16) & 0xffff;
-      if (a_sess == (s->get_session_id() & 0xffff)) {
-        const uint8_t* bgra = nullptr;
-        uint32_t       w_px = 0, h_px = 0;
-        float          scale = 1.0f;
-        if (s->_asset_manager.get_pixels_for_export(preview_asset.id & 0xffff,
-                                                      &bgra, &w_px, &h_px,
-                                                      &scale)) {
-          preview_native = platform_make_drag_preview(bgra, w_px, h_px, scale);
-        }
-      }
-    }
+    // Degrades to no-preview on any failure (see dnd_make_preview_native).
+    void* preview_native = dnd_make_preview_native(s, preview_asset);
 
     s->_drag_source_active = true;
     uint32_t r = platform_dnd_begin_drag(native, item, allowed_actions,
@@ -4634,6 +4637,25 @@ namespace xpl_host {
                                 preview->hot_x, preview->hot_y);
   }
 
+  // Swap the image of the drag this session has in flight. Deliberately NOT
+  // behind the _in_dnd_dispatch guard that blocks begin_drag: the typical caller
+  // is a DND_MOVE handler, and the platform loop that dispatched it is the very
+  // one whose image is being changed. _drag_source_active is the "a drag of this
+  // session is in flight" test (set around platform_dnd_begin_drag).
+  static bool NEUI_ABI dnd_update_drag_preview(neui_session_t session,
+                                                const neui_drag_preview_t* preview)
+  {
+    auto* s = get_session(session);
+    if (!s || !preview) return false;
+    if (!s->_drag_source_active) return false;
+    if (preview->image.id == asset_none.id) return false;
+    void* preview_native = dnd_make_preview_native(s, preview->image);
+    if (!preview_native) return false;
+    // Ownership of preview_native passes to the platform on every path.
+    return platform_dnd_update_drag_preview(preview_native,
+                                             preview->hot_x, preview->hot_y);
+  }
+
   neui_dnd_api_t dnd_api = {
     NEUI_VERSION,
     dnd_set_drop_target,
@@ -4642,6 +4664,7 @@ namespace xpl_host {
     dnd_accept,
     dnd_begin_drag,
     dnd_begin_drag_with_preview,
+    dnd_update_drag_preview,
   };
 
   // Non-static wrapper so host.cpp's BehaviorDispatchCtx::begin_drag can

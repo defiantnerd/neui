@@ -2660,6 +2660,10 @@ namespace xpl_host
   void*    platform_make_drag_preview(const uint8_t* /*bgra_premul*/,
                                        uint32_t /*w_px*/, uint32_t /*h_px*/,
                                        float /*scale*/)                       { return nullptr; }
+  // Nothing to swap: no programmatic drag runs (begin_drag returns NONE) and
+  // the system owns the preview of a gesture-driven one.
+  bool     platform_dnd_update_drag_preview(void* /*preview_native*/,
+                                              int /*hot_x*/, int /*hot_y*/)   { return false; }
 
   // No mouse cursor on touch (iPad pointer styles are a later milestone).
   void     platform_set_cursor(int /*kind*/)                                  {}

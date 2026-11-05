@@ -1891,6 +1891,23 @@ namespace macos_host
     return nil;
   }
 
+  // Resolve a preview asset to an NSImage: nil when it is asset_none, belongs
+  // to another session or has no displayable pixels. Shared by begin and
+  // update_drag_preview.
+  static NSImage* d_make_preview_nsimage(Session* s, neui_asset_t preview_asset)
+  {
+    if (preview_asset.id == asset_none.id) return nil;
+    uint32_t a_sess = (preview_asset.id >> 16) & 0xffff;
+    if (a_sess != (s->session_id() & 0xffff)) return nil;
+    const uint8_t* bgra = nullptr;
+    uint32_t       w_px = 0, h_px = 0;
+    float          scale = 1.0f;
+    if (!s->_asset_manager.get_pixels_for_export(preview_asset.id & 0xffff,
+                                                   &bgra, &w_px, &h_px, &scale))
+      return nil;
+    return neui_detail::macos_make_drag_nsimage(bgra, w_px, h_px, scale);
+  }
+
   // Shared worker for both public entry points. asset_none + (-1, -1) =
   // no preview.
   static neui_dnd_action_t d_begin_drag_impl(neui_session_t session,
@@ -1913,20 +1930,7 @@ namespace macos_host
 
     // Resolve preview asset to an NSImage if one was supplied AND it
     // belongs to this session AND it has displayable pixels.
-    NSImage* preview = nil;
-    if (preview_asset.id != asset_none.id) {
-      uint32_t a_sess = (preview_asset.id >> 16) & 0xffff;
-      if (a_sess == (s->session_id() & 0xffff)) {
-        const uint8_t* bgra = nullptr;
-        uint32_t       w_px = 0, h_px = 0;
-        float          scale = 1.0f;
-        if (s->_asset_manager.get_pixels_for_export(preview_asset.id & 0xffff,
-                                                      &bgra, &w_px, &h_px,
-                                                      &scale)) {
-          preview = neui_detail::macos_make_drag_nsimage(bgra, w_px, h_px, scale);
-        }
-      }
-    }
+    NSImage* preview = d_make_preview_nsimage(s, preview_asset);
 
     s->_drag_source_active = true;
     uint32_t r = neui_detail::macos_run_drag_source(cv, *item, allowed_actions,
@@ -1960,6 +1964,22 @@ namespace macos_host
                               preview->hot_x, preview->hot_y);
   }
 
+  // Swap the image of the drag this session has in flight. Not behind the
+  // _in_dnd_dispatch guard that blocks begin_drag: the typical caller is a
+  // DND_MOVE handler running inside the drag's own pump.
+  static bool NEUI_ABI d_update_drag_preview(neui_session_t session,
+                                              const neui_drag_preview_t* preview)
+  {
+    auto* s = get_session(session);
+    if (!s || !preview) return false;
+    if (!s->_drag_source_active) return false;
+    if (preview->image.id == asset_none.id) return false;
+    NSImage* image = d_make_preview_nsimage(s, preview->image);
+    if (!image) return false;
+    return neui_detail::macos_update_drag_preview(image, preview->hot_x,
+                                                   preview->hot_y);
+  }
+
   neui_dnd_api_t dnd_api = {
     NEUI_VERSION,
     d_set_drop_target,
@@ -1968,6 +1988,7 @@ namespace macos_host
     d_accept,
     d_begin_drag,
     d_begin_drag_with_preview,
+    d_update_drag_preview,
   };
 
   // Non-static wrapper so the BehaviorDispatchCtx::begin_drag callback wired

@@ -913,8 +913,13 @@ EM_JS(void, web_dnd_verdict, (int id, int ev_id, int act), {
 // (hx, hy) logical px, -1 = centre.
 EM_JS(void, web_drag_begin, (const unsigned char* px, int w, int h, double scale, int hx, int hy), {
   var W = Module.neuiWeb;
-  var d = W.drag = { cx: 0, cy: 0, pv: null, hx: 0, hy: 0, style: null, h: null };
-  if (px && w > 0 && h > 0) {
+  var d = W.drag = { cx: 0, cy: 0, moved: false, pv: null, hx: 0, hy: 0, style: null, h: null };
+  // The preview canvas, built from the pixels at px (read now, not kept). Also
+  // what web_drag_preview calls to swap the image of the drag while it runs.
+  W.dragSetPreview = function(px, w, h, scale, hx, hy) {
+    if (d.pv && d.pv.parentNode) d.pv.parentNode.removeChild(d.pv);
+    d.pv = null;
+    if (!(px && w > 0 && h > 0)) return;
     var c = document.createElement('canvas');
     c.width = w; c.height = h;
     var cw = w / scale, ch = h / scale;
@@ -931,7 +936,14 @@ EM_JS(void, web_drag_begin, (const unsigned char* px, int w, int h, double scale
     d.pv = c;
     d.hx = hx < 0 ? cw / 2 : hx;
     d.hy = hy < 0 ? ch / 2 : hy;
-  }
+    // Like the first image, shown from the pointer's first move; a swap after
+    // that puts the new one under the pointer where it stands.
+    if (d.moved) {
+      c.style.display = 'block';
+      c.style.transform = 'translate(' + (d.cx - d.hx) + 'px,' + (d.cy - d.hy) + 'px)';
+    }
+  };
+  W.dragSetPreview(px, w, h, scale, hx, hy);
   d.style = document.createElement('style');
   document.head.appendChild(d.style);
   W.dragCursor = function(name) { d.style.textContent = '*{cursor:' + name + ' !important}'; };
@@ -945,7 +957,7 @@ EM_JS(void, web_drag_begin, (const unsigned char* px, int w, int h, double scale
     return [0, 0, 0];
   };
   var move = function(x, y, mods) {
-    d.cx = x; d.cy = y;
+    d.cx = x; d.cy = y; d.moved = true;
     if (d.pv) {
       d.pv.style.display = 'block';
       d.pv.style.transform = 'translate(' + (x - d.hx) + 'px,' + (y - d.hy) + 'px)';
@@ -983,8 +995,16 @@ EM_JS(void, web_drag_cursor, (int act), {
   W.dragCursor((act & 1) ? 'copy' : (act & 2) ? 'grabbing' : (act & 4) ? 'alias' : 'no-drop');
 });
 
+// Swap the preview of the in-page drag that runs now (update_drag_preview);
+// the pixels and hot spot as for web_drag_begin. Nothing without a drag.
+EM_JS(void, web_drag_preview, (const unsigned char* px, int w, int h, double scale, int hx, int hy), {
+  var W = Module.neuiWeb;
+  if (W.drag && W.dragSetPreview) W.dragSetPreview(px, w, h, scale, hx, hy);
+});
+
 EM_JS(void, web_drag_end, (), {
   var W = Module.neuiWeb, d = W.drag; if (!d) return;
+  W.dragSetPreview = null;
   for (var n in d.h) window.removeEventListener(n, d.h[n], true);
   if (d.pv && d.pv.parentNode) d.pv.parentNode.removeChild(d.pv);
   if (d.style.parentNode) d.style.parentNode.removeChild(d.style);
@@ -3004,6 +3024,19 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neui_web_drop_file(int name_len, int type_l
     p->bgra.assign(bgra_premul, bgra_premul + static_cast<size_t>(w_px) * h_px * 4);
     p->w_px = w_px; p->h_px = h_px; p->scale = scale > 0.0f ? scale : 1.0f;
     return p;   // consumed by platform_dnd_begin_drag
+  }
+
+  // Swap the image of the in-page drag that runs (see platform.h). The preview
+  // is a canvas of our own, so this is a plain replacement; `preview` only has
+  // to outlive the call (the page side reads the pixels at once).
+  bool platform_dnd_update_drag_preview(void* preview_native, int hot_x, int hot_y)
+  {
+    std::unique_ptr<DragPreview> preview(static_cast<DragPreview*>(preview_native));
+    if (!preview || !g_drag) return false;
+    web_drag_preview(preview->bgra.data(), static_cast<int>(preview->w_px),
+                     static_cast<int>(preview->h_px),
+                     static_cast<double>(preview->scale), hot_x, hot_y);
+    return true;
   }
 
   // Blocking in-page drag: a nested loop until release or Esc. Targets are

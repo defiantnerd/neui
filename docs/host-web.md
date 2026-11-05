@@ -93,7 +93,7 @@ Size options, measured on `neui_example` (wasm / gzip -9; the shader library kee
 ### Drag and drop
 
 - **Drop target**: DOM drag events over a registered canvas → `dispatch_dnd_*`. Formats from `DataTransfer.types`; dropped files are written to the in-memory file system as `/tmp/neui-drop/<n>/<name>` and listed as `file://` URIs in `text/uri-list` (desktop code that opens dropped paths works unchanged); the first file of each type is also there as bytes under its MIME type. Files over 256 MB are left out.
-- **Drag source**: `begin_drag` is an **in-page** drag between neui frames (any session on the page), run on the modal loop with window-level capture listeners; Ctrl / Shift pick copy / move / link, Esc cancels, the preview follows the pointer. Dragging out of the page is not supported: browsers start drags only from a native `dragstart`.
+- **Drag source**: `begin_drag` is an **in-page** drag between neui frames (any session on the page), run on the modal loop with window-level capture listeners; Ctrl / Shift pick copy / move / link, Esc cancels, the preview follows the pointer (`update_drag_preview` replaces the preview canvas while the drag runs: `web_drag_preview` -> `W.dragSetPreview`). Dragging out of the page is not supported: browsers start drags only from a native `dragstart`.
 
 ### Resources, fonts, images, debug
 

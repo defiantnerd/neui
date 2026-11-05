@@ -1714,6 +1714,7 @@ namespace xpl_host
                                    void*, int, int) { return 0; }
   void* platform_make_drag_preview(const uint8_t*, uint32_t, uint32_t, float)
   { return nullptr; }
+  bool platform_dnd_update_drag_preview(void*, int, int) { return false; }
 
   bool  platform_menubar_in_frame() { return false; }
   int   platform_frame_extra_top_inset(void*, bool) { return 0; }

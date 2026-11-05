@@ -285,6 +285,20 @@ if(APPLE AND NOT NEUI_IOS)
   target_link_libraries(neui_popup_surface_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
+  # Drag-preview swap harness (NEUI_API_DND::update_drag_preview), both macOS
+  # hosts: the appended slot is wired, and the call is refused when no drag of
+  # the session is in flight. With `live xpl` / `live native` it also begins a
+  # real NSDraggingSession (no button held, so the harness exits from a timer
+  # inside the drag's pump) and reads the swap back off the session's own
+  # dragging items; the on-screen refresh needs a real mouse and is not
+  # asserted. Realizes real NSWindows, so built but NOT ctest-registered.
+  add_executable(neui_dnd_preview_smoke_macos dnd_preview_smoke_macos.mm)
+  target_include_directories(neui_dnd_preview_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR})
+  target_compile_features(neui_dnd_preview_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_dnd_preview_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
   # File-dialog harness (NEUI_API_NOTIFY::open_file / save_file): asserts the
   # appended slots are wired on BOTH macOS hosts, that -1 (no dialog) stays
   # distinct from 0 (cancelled), that a cancelled panel delivers nothing, and
