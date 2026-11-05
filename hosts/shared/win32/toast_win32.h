@@ -19,7 +19,7 @@
 // same parent replaces any in-flight toast.
 //
 // ODR safety: every function inline. Multiple TUs may include this
-// header. One per-process atom is registered on the first show.
+// header. The class is registered for neui's module on the first show.
 
 #pragma once
 
@@ -28,6 +28,8 @@
 #include <windows.h>
 #include <string>
 #include <vector>
+
+#include "window_class_win32.h"
 
 namespace neui_detail
 {
@@ -58,19 +60,20 @@ namespace neui_detail
                                int top_y_px);
   inline void toast_tick_w32(HWND hwnd, ToastW32State* st);
 
-  inline ATOM toast_register_class_w32()
+  // neui's own module and name (window_class_win32.h).
+  inline const wchar_t* const k_toast_class_w32 = NEUI_WIN32_CLASS(L"NeuiToastW32");
+
+  inline bool toast_register_class_w32()
   {
-    static ATOM atom = 0;
-    if (atom) return atom;
+    static bool registered = false;
+    if (registered) return true;
     WNDCLASSEXW wc = {};
-    wc.cbSize        = sizeof(wc);
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = toast_wndproc_w32;
-    wc.hInstance     = GetModuleHandleW(nullptr);
     wc.hCursor       = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
-    wc.lpszClassName = L"NeuiToastW32";
-    atom = RegisterClassExW(&wc);
-    return atom;
+    wc.lpszClassName = k_toast_class_w32;
+    registered = neui_win32::register_window_class(wc);
+    return registered;
   }
 
   inline std::wstring toast_utf8_to_wide(const char* utf8)
@@ -342,8 +345,10 @@ namespace neui_detail
   inline void toast_destroy_existing_w32(HWND parent)
   {
     HWND h = nullptr;
-    while ((h = FindWindowExW(nullptr, h, L"NeuiToastW32", nullptr)) != nullptr) {
-      if (GetWindow(h, GW_OWNER) == parent) {
+    while ((h = FindWindowExW(nullptr, h, k_toast_class_w32, nullptr)) != nullptr) {
+      // Another neui binary's toast has a class of the same name.
+      if (GetWindow(h, GW_OWNER) == parent &&
+          neui_win32::is_own_window_class(h, k_toast_class_w32)) {
         DestroyWindow(h);
         // FindWindowExW would skip the just-destroyed handle anyway;
         // walking once is enough since toast_show enforces one-at-a-
@@ -392,13 +397,13 @@ namespace neui_detail
       // No WS_EX_TRANSPARENT: the toast absorbs its own clicks so a click
       // on it triggers the fade-out dismiss path in toast_wndproc_w32.
       WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-      L"NeuiToastW32",
+      k_toast_class_w32,
       L"",
       WS_POPUP,
       0, 0, st->width_px, st->height_px,
       parent,                         // owner so the toast moves with the parent
       nullptr,
-      GetModuleHandleW(nullptr),
+      neui_win32::module_instance(),
       st);
     if (!tw) { delete st; return; }
 

@@ -203,13 +203,13 @@ namespace win32_host
     wc.hCursor       = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);  // resource ID, not a string pointer
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
 
-    wc.lpszClassName = L"neui.appwindow";
+    wc.lpszClassName = k_class_appwindow;
     RegisterClassExW(&wc);
 
-    wc.lpszClassName = L"neui.plugwindow";
+    wc.lpszClassName = k_class_plugwindow;
     RegisterClassExW(&wc);
 
-    wc.lpszClassName = L"neui.dialog";
+    wc.lpszClassName = k_class_dialog;
     RegisterClassExW(&wc);
 
     // Shared class for self-painted widgets (KNOB, SECTION, IMAGE,
@@ -218,7 +218,7 @@ namespace win32_host
     wc.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc   = PaintedWndProc;
     wc.hbrBackground = nullptr;
-    wc.lpszClassName = L"neui.painted";
+    wc.lpszClassName = k_class_painted;
     RegisterClassExW(&wc);
 
     // Scrolling-SECTION inner body container. Hosts the section's child
@@ -230,7 +230,7 @@ namespace win32_host
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = SectionBodyWndProc;
     wc.hbrBackground = nullptr;
-    wc.lpszClassName = L"neui.sectionbody";
+    wc.lpszClassName = k_class_sectionbody;
     RegisterClassExW(&wc);
   }
 

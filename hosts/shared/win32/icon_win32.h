@@ -93,8 +93,10 @@ namespace neui_detail
                                        0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE))
         return h;
 
-      if (HMODULE hMod = GetModuleHandleW(nullptr)) {
-        std::wstring res_name = L"\"" + std::wstring(wpath) + L"\"";
+      // neui's module, then the exe (window_class_win32.h).
+      const std::wstring res_name = L"\"" + std::wstring(wpath) + L"\"";
+      for (HMODULE hMod : neui_win32::resource_modules()) {
+        if (!hMod) continue;
         if (HICON h = (HICON)LoadImageW(hMod, res_name.c_str(), IMAGE_ICON,
                                          0, 0, LR_DEFAULTSIZE))
           return h;

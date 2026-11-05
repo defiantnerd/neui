@@ -16,6 +16,7 @@
 #include <winrt/Windows.UI.ViewManagement.h>
 
 #include "../theme_palette.h"
+#include "window_class_win32.h"
 
 // Win32 theme provider.
 //
@@ -242,18 +243,16 @@ namespace neui_detail
     HWND& hwnd = theme_listener_hwnd();
     if (hwnd) return hwnd;
 
-    static const wchar_t* k_class = L"NeUiThemeListener";
+    // neui's own module and name (window_class_win32.h).
+    static const wchar_t* k_class = NEUI_WIN32_CLASS(L"NeUiThemeListener");
     static bool s_registered = false;
 
-    HINSTANCE hi = GetModuleHandleW(nullptr);
+    HINSTANCE hi = neui_win32::module_instance();
     if (!s_registered) {
       WNDCLASSEXW wc = {};
-      wc.cbSize        = sizeof(wc);
       wc.lpfnWndProc   = theme_listener_proc;
-      wc.hInstance     = hi;
       wc.lpszClassName = k_class;
-      RegisterClassExW(&wc);
-      s_registered = true;
+      s_registered = neui_win32::register_window_class(wc);
     }
 
     hwnd = CreateWindowExW(0, k_class, L"", 0, 0, 0, 0, 0,

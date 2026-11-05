@@ -32,6 +32,7 @@
 #include "../shared/win32/file_dialog_win32.h"
 #include "../shared/relative_pointer.h"
 #include "../shared/win32/paint_pacer_win32.h"
+#include "../shared/win32/window_class_win32.h"
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
 
@@ -44,7 +45,10 @@ namespace xpl_host
   // -------------------------------------------------------------------------
   // Window class
 
-  static const wchar_t* k_wndclass      = L"NeUiXplHost";
+  // Registered for neui's own module, and named with NEUI_WIN32_CLASS_SUFFIX
+  // (hosts/shared/win32/window_class_win32.h): a plugin's DLL keeps its
+  // windows on its own window procedure.
+  static const wchar_t* k_wndclass      = NEUI_WIN32_CLASS(L"NeUiXplHost");
   static HINSTANCE      g_hinstance     = nullptr;
   static bool           g_class_registered = false;
 
@@ -1323,10 +1327,11 @@ namespace xpl_host
         // WindowFromPoint can name ANY window on the desktop, including another
         // process's, and GWLP_USERDATA on a foreign window is whatever that app
         // put there - so the class name is checked before get_wud() is allowed to
-        // interpret it as ours.
+        // interpret it as ours. The class's module too: another neui binary in
+        // the process (another plugin) has a class of the same name, and its
+        // GWLP_USERDATA is that binary's.
         if (under && under != hwnd) {
-          wchar_t cls[64] = {};
-          if (GetClassNameW(under, cls, 64) && wcscmp(cls, k_wndclass) == 0) {
+          if (neui_win32::is_own_window_class(under, k_wndclass)) {
             if (auto* uwud = get_wud(under)) {
               if (uwud->session == wud->session &&
                   uwud->session->popup_surface_depth(uwud->widget_index) >= 0)
@@ -1845,18 +1850,16 @@ namespace xpl_host
   void platform_init()
   {
     if (g_class_registered) return;
-    g_hinstance = GetModuleHandleW(nullptr);
+    g_hinstance = neui_win32::module_instance();
 
     WNDCLASSEXW wc = {};
     wc.cbSize        = sizeof(wc);
     wc.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc   = XplWndProc;
-    wc.hInstance     = g_hinstance;
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;  // D2D handles painting
     wc.lpszClassName = k_wndclass;
-    RegisterClassExW(&wc);
-    g_class_registered = true;
+    g_class_registered = neui_win32::register_window_class(wc);
   }
 
   neui_render_backend_t* platform_get_backend()

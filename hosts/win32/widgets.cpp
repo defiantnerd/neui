@@ -1377,7 +1377,7 @@ namespace win32_host
     int phys_y = LogicalToPhysical(L.body_y, dpi);
     int phys_w = LogicalToPhysical(L.body_w > 0 ? L.body_w : 1, dpi);
     int phys_h = LogicalToPhysical(L.body_h > 0 ? L.body_h : 1, dpi);
-    HWND body = CreateWindowExW(WS_EX_COMPOSITED, L"neui.sectionbody", L"",
+    HWND body = CreateWindowExW(WS_EX_COMPOSITED, k_class_sectionbody, L"",
                                  WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN
                                    | WS_CLIPSIBLINGS,
                                  phys_x, phys_y, phys_w, phys_h,
@@ -2163,7 +2163,7 @@ namespace win32_host
       DWORD style = WS_CHILD;
       if (wd.visible) style |= WS_VISIBLE;
       wd.paint_fn = &paint_image_w32;
-      HWND hwnd = CreateWindowExW(0, L"neui.painted", L"", style,
+      HWND hwnd = CreateWindowExW(0, k_class_painted, L"", style,
         LogicalToPhysical(wd.x, parent_dpi),
         LogicalToPhysical(wd.y, parent_dpi),
         LogicalToPhysical(wd.width, parent_dpi),
@@ -2183,7 +2183,7 @@ namespace win32_host
       if (wd.visible) style |= WS_VISIBLE;
       wd.paint_fn       = &paint_knob_w32;
       wd.painted_msg_fn = &painted_msg_knob_w32;
-      HWND hwnd = CreateWindowExW(0, L"neui.painted", L"", style,
+      HWND hwnd = CreateWindowExW(0, k_class_painted, L"", style,
         LogicalToPhysical(wd.x, parent_dpi),
         LogicalToPhysical(wd.y, parent_dpi),
         LogicalToPhysical(wd.width, parent_dpi),
@@ -2222,7 +2222,7 @@ namespace win32_host
       if (overlay)           ex_style |= WS_EX_NOREDIRECTIONBITMAP;
       wd.paint_fn       = &paint_customdraw_w32;
       wd.painted_msg_fn = &painted_msg_customdraw_w32;
-      HWND hwnd = CreateWindowExW(ex_style, L"neui.painted", L"", style,
+      HWND hwnd = CreateWindowExW(ex_style, k_class_painted, L"", style,
         LogicalToPhysical(wd.x, parent_dpi),
         LogicalToPhysical(wd.y, parent_dpi),
         LogicalToPhysical(wd.width, parent_dpi),
@@ -2254,7 +2254,7 @@ namespace win32_host
       if (wd.visible) style |= WS_VISIBLE;
       wd.paint_fn       = &paint_grid_w32;
       wd.painted_msg_fn = &painted_msg_grid_w32;
-      HWND hwnd = CreateWindowExW(0, L"neui.painted", L"", style,
+      HWND hwnd = CreateWindowExW(0, k_class_painted, L"", style,
         LogicalToPhysical(wd.x, parent_dpi),
         LogicalToPhysical(wd.y, parent_dpi),
         LogicalToPhysical(wd.width, parent_dpi),
@@ -2282,7 +2282,7 @@ namespace win32_host
       wd.paint_fn       = &paint_tabview_w32;
       wd.painted_msg_fn = &painted_msg_tabview_w32;
       wd.emit_events    = true;
-      HWND hwnd = CreateWindowExW(0, L"neui.painted", L"", style,
+      HWND hwnd = CreateWindowExW(0, k_class_painted, L"", style,
         LogicalToPhysical(wd.x, parent_dpi),
         LogicalToPhysical(wd.y, parent_dpi),
         LogicalToPhysical(wd.width, parent_dpi),
@@ -2318,7 +2318,7 @@ namespace win32_host
         wd.painted_msg_fn = &painted_msg_section_w32;
         wd.emit_events    = true;
       }
-      HWND hwnd = CreateWindowExW(0, L"neui.painted", L"", style,
+      HWND hwnd = CreateWindowExW(0, k_class_painted, L"", style,
         LogicalToPhysical(wd.x, parent_dpi),
         LogicalToPhysical(wd.y, parent_dpi),
         LogicalToPhysical(wd.width, parent_dpi),
@@ -2910,15 +2910,15 @@ namespace win32_host
       if (is_plug) {
         ex_style = 0;
         style    = WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
-        wclass   = L"neui.plugwindow";
+        wclass   = k_class_plugwindow;
       } else if (is_dialog) {
         ex_style = WS_EX_DLGMODALFRAME;
         style    = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
-        wclass   = L"neui.dialog";
+        wclass   = k_class_dialog;
       } else {
         ex_style = WS_EX_APPWINDOW;
         style    = WS_OVERLAPPEDWINDOW;
-        wclass   = L"neui.appwindow";
+        wclass   = k_class_appwindow;
       }
 
       // Resolve owner HWND for dialogs so CreateWindowEx can wire the
