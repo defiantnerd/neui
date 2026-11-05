@@ -298,6 +298,23 @@ if(APPLE AND NOT NEUI_IOS)
   target_link_libraries(neui_file_dialog_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
+  # Custom MIMEs on the macOS pasteboard: MIME <-> UTI mapping, the clipboard and
+  # drag-source write/read helpers on NAMED pasteboards (never the general one),
+  # and - on both hosts - the drop-target registration for the types of the MIMEs
+  # widgets accept plus a stand-in drag carrying only a custom type. Realizes real
+  # NSWindows, so built but NOT ctest-registered; run
+  # ./tests/<config>/neui_mime_pasteboard_smoke_macos manually. ARC, like the
+  # hosts whose headers it includes.
+  add_executable(neui_mime_pasteboard_smoke_macos mime_pasteboard_smoke_macos.mm)
+  set_source_files_properties(mime_pasteboard_smoke_macos.mm PROPERTIES
+    COMPILE_FLAGS "-fobjc-arc")
+  target_include_directories(neui_mime_pasteboard_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_mime_pasteboard_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_mime_pasteboard_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit"
+    "-framework UniformTypeIdentifiers" "-framework CoreServices")
+
   # Repaint throughput benchmark (wave 5 / Phase 0a): times one full-frame
   # repaint of an NxN CUSTOMDRAW mesh on the xpl host and reports it against a
   # 60 Hz budget, plus the single-widget-invalidate baseline that partial
