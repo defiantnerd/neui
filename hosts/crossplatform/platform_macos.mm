@@ -1549,7 +1549,7 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
 
 // NSDragOperation <-> NEUI_DND_ACTION_* translation + the modifier-aware
 // suggestion live in hosts/shared/macos/dnd_helpers_macos.h
-// (dnd_suggested_from_nsop / dnd_nsop_from_action), shared with the
+// (dnd_suggested_from_nsop / dnd_nsop_answer), shared with the
 // native host's NEUINativeContentView.
 
 - (NSPoint)neuiLocalPointFromDragInfo:(id<NSDraggingInfo>)sender
@@ -1571,13 +1571,14 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
   NSPasteboard* pb = [sender draggingPasteboard];
   auto ml = neui_detail::pb_collect_mime_list_macos(pb);
   NSPoint p = [self neuiLocalPointFromDragInfo:sender];
-  uint32_t suggested = neui_detail::dnd_suggested_from_nsop([sender draggingSourceOperationMask]);
+  NSDragOperation mask = [sender draggingSourceOperationMask];
+  uint32_t suggested = neui_detail::dnd_suggested_from_nsop(mask);
   uint32_t accepted = session->dispatch_dnd_enter(widget_index,
                                                     (int)p.x, (int)p.y,
                                                     ml.ptrs.data(),
                                                     (uint32_t)ml.ptrs.size(),
                                                     suggested, neui_detail::dnd_buttonmap_macos());
-  return neui_detail::dnd_nsop_from_action(accepted);
+  return neui_detail::dnd_nsop_answer(accepted, mask);
 }
 
 - (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender
@@ -1586,13 +1587,14 @@ static int utf16_caret_to_utf8_bytes(NSString* s, NSUInteger u16_offset)
   NSPasteboard* pb = [sender draggingPasteboard];
   auto ml = neui_detail::pb_collect_mime_list_macos(pb);
   NSPoint p = [self neuiLocalPointFromDragInfo:sender];
-  uint32_t suggested = neui_detail::dnd_suggested_from_nsop([sender draggingSourceOperationMask]);
+  NSDragOperation mask = [sender draggingSourceOperationMask];
+  uint32_t suggested = neui_detail::dnd_suggested_from_nsop(mask);
   uint32_t accepted = session->dispatch_dnd_move(widget_index,
                                                    (int)p.x, (int)p.y,
                                                    ml.ptrs.data(),
                                                    (uint32_t)ml.ptrs.size(),
                                                    suggested, neui_detail::dnd_buttonmap_macos());
-  return neui_detail::dnd_nsop_from_action(accepted);
+  return neui_detail::dnd_nsop_answer(accepted, mask);
 }
 
 - (void)draggingExited:(id<NSDraggingInfo>)sender

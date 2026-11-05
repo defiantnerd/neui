@@ -154,11 +154,9 @@ namespace neui_detail
   inline uint32_t nsop_to_dnd_action(NSDragOperation op)
   {
     // The OS reports one bit. Probe in the order COPY > MOVE > LINK to
-    // match the same priority the Win32 path uses on DROPEFFECT.
-    if (op & NSDragOperationCopy) return NEUI_DND_ACTION_COPY;
-    if (op & NSDragOperationMove) return NEUI_DND_ACTION_MOVE;
-    if (op & NSDragOperationLink) return NEUI_DND_ACTION_LINK;
-    return 0;
+    // match the same priority the Win32 path uses on DROPEFFECT; Generic (a
+    // Command-drag) is MOVE. The portable mapping: hosts/shared/dnd_mac_ops.h.
+    return dnd_action_from_mac_op(op);
   }
 
   // Synchronous drag requires spinning the runloop until AppKit reports the
