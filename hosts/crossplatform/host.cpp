@@ -342,6 +342,12 @@ namespace xpl_host
       neui_detail::unregister_theme_listener(_theme_listener_handle);
       _theme_listener_handle = 0;
     }
+#ifdef _WIN32
+    // The last session tears the theme provider down: its listener window
+    // and subscription are this module's code, and a plugin's DLL may be
+    // unloaded once its last session has gone.
+    neui_detail::release_theme_provider_win32();
+#endif
     // Defensive: in case a scope guard somewhere failed to restore (or
     // an extension installed a permanent pointer), clear the override
     // when it currently points into this session.
