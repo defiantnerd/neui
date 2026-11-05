@@ -2228,11 +2228,14 @@ namespace ios_host
                                                               neui_data_item_t, uint32_t,
                                                               const neui_drag_preview_t*)
   { return NEUI_DND_ACTION_NONE; }
+  // No programmatic drag runs on iOS, so there is no image of ours to swap.
+  static bool NEUI_ABI d_update_drag_preview(neui_session_t, const neui_drag_preview_t*)
+  { return false; }
 
   neui_dnd_api_t dnd_api = {
     NEUI_VERSION,
     d_set_drop_target, d_get_drop_target, d_set_accepted_formats,
-    d_accept, d_begin_drag, d_begin_drag_with_preview,
+    d_accept, d_begin_drag, d_begin_drag_with_preview, d_update_drag_preview,
   };
 
   // -------------------------------------------------------------------------

@@ -453,6 +453,67 @@ namespace neui_detail
     return img;
   }
 
+  // The drag session macos_run_drag_source is pumping, kept reachable so a
+  // client can swap its image while it runs (macos_update_drag_preview). Both
+  // macOS hosts include this header and co-link, and one drag runs at a time per
+  // process, so a single function-local static (shared across TUs, being
+  // inline) is the right scope. Set after beginDraggingSession succeeds, cleared
+  // when the pump returns.
+  struct ActiveDragSession
+  {
+    NSDraggingSession* session = nil;
+    NEUIDragSource*    source  = nil;
+  };
+  inline ActiveDragSession& dnd_active_drag_session()
+  {
+    static ActiveDragSession a;
+    return a;
+  }
+
+  // Swap the image of the drag in flight. `image` is the new preview (a
+  // macos_make_drag_nsimage result); `hot_x` / `hot_y` are the hot-spot on it in
+  // logical px from the image top-left, -1 = centre on that axis - the same
+  // convention as begin. Returns false (nothing changed) when no drag is
+  // running, it has already ended, or `image` is nil / empty.
+  //
+  // Every dragging item gets the same frame and image, exactly as
+  // build_dragging_items gives them at begin (one per URL, all stacked on the
+  // cursor; AppKit's own count badge tells them apart).
+  //
+  // The frame is placed in SCREEN coordinates (enumerate with forView:nil) so
+  // that the hot-spot sits at the current pointer: [NSEvent mouseLocation] and
+  // NSDraggingItem frames are both bottom-left origin, the hot-spot is measured
+  // from the image's TOP-left, so the frame's bottom edge is
+  // `mouse.y + hot_y - height`. AppKit only lets a dragging item be changed
+  // inside this enumeration block; the new image appears with the drag's next
+  // update, which a moving pointer (the DND_MOVE caller) provides at once.
+  inline bool macos_update_drag_preview(NSImage* image, int hot_x, int hot_y)
+  {
+    ActiveDragSession& active = dnd_active_drag_session();
+    if (!image || !active.session || !active.source || active.source->done)
+      return false;
+    const NSSize size = [image size];
+    if (size.width <= 0 || size.height <= 0) return false;
+    const CGFloat eff_hot_x = (hot_x < 0) ? (size.width  * 0.5) : (CGFloat)hot_x;
+    const CGFloat eff_hot_y = (hot_y < 0) ? (size.height * 0.5) : (CGFloat)hot_y;
+    const NSPoint mouse = [NSEvent mouseLocation];
+    const NSRect  frame = NSMakeRect(mouse.x - eff_hot_x,
+                                     mouse.y + eff_hot_y - size.height,
+                                     size.width, size.height);
+    __block NSInteger changed = 0;
+    [active.session
+      enumerateDraggingItemsWithOptions:0   // serial: the block is trivial
+                                forView:nil
+                                classes:@[[NSPasteboardItem class]]
+                          searchOptions:@{}
+                             usingBlock:^(NSDraggingItem* di, NSInteger idx, BOOL* stop) {
+      (void)idx; (void)stop;
+      [di setDraggingFrame:frame contents:image];
+      ++changed;
+    }];
+    return changed > 0;
+  }
+
   // Entry point used by platform_macos.mm and hosts/macos/widgets.mm.
   // `preview` may be nil (no custom drag image, falls back to the historic
   // placeholder). `hot_x`/`hot_y` -1 = image centre on that axis.
@@ -487,7 +548,12 @@ namespace neui_detail
       [anchor_view beginDraggingSessionWithItems:items event:evt source:src];
     if (!session) return 0;
 
+    ActiveDragSession& active = dnd_active_drag_session();
+    active.session = session;
+    active.source  = src;
     dnd_pump_until(src);
+    active.session = nil;
+    active.source  = nil;
     return nsop_to_dnd_action(src->finalOp);
   }
 }

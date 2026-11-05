@@ -8,6 +8,13 @@
 //   status label             - shows the negotiated action from the
 //                              last drag (copy / move / link / cancelled).
 //
+// While a drag is over the right pane, holding Shift swaps the drag preview
+// for a wide orange strip (dnd->update_drag_preview) and releasing it swaps
+// the checkerboard back - the shape of "my dragged content is laid out
+// differently now". The swap needs a platform that can change a running
+// drag's image; where it cannot (iOS, null) the call returns false and the
+// checkerboard stays.
+//
 // Demonstrates both internal drag (left -> right) and external drag
 // (left -> Notepad / TextEdit / Finder / Explorer). The drop pane uses
 // the same shape as examples/dnd_example.cpp.
@@ -57,6 +64,9 @@ struct AppState
   // recognisable as "the neui example's drag image". Built once at startup
   // and reused for every drag (assets are session-scoped, freed on exit).
   neui_asset_t          preview   = { UINT32_MAX };
+  // The image swapped in while Shift is held over the drop pane.
+  neui_asset_t          preview_alt = { UINT32_MAX };
+  bool                  alt_shown   = false;   // which image the drag shows now
 
   uint32_t source_id = 0;
   uint32_t drop_id   = 0;
@@ -139,7 +149,8 @@ static std::vector<std::string> parse_uri_list(const char* data, int len)
 static void start_drag(AppState* a)
 {
   if (a->in_drag) return;
-  a->in_drag = true;
+  a->in_drag   = true;
+  a->alt_shown = false;   // every drag starts with the checkerboard
   a->widgets->invalidate(a->session, { a->source_id });
 
   // Build the payload: plain text + a single-URI file list. The URI is
@@ -234,11 +245,24 @@ static bool NEUI_ABI on_event(void* token, neui_event_t* event)
 
   switch (event->type) {
     case NEUI_EVENT_DND_ENTER:
-    case NEUI_EVENT_DND_MOVE:
+    case NEUI_EVENT_DND_MOVE: {
       a->drag_over = true;
       a->widgets->invalidate(a->session, { a->drop_id });
       a->dnd->accept(a->session, suggested_action());
+
+      // Shift changes the image: swap it when the key changes, not on every
+      // move. update_drag_preview is fine to call from inside this dispatch
+      // (begin_drag is not).
+      const bool shift = (event->data.dnd.buttonmap & NEUI_MK_SHIFT) != 0;
+      if (shift != a->alt_shown) {
+        a->alt_shown = shift;
+        neui_drag_preview_t pv = { shift ? a->preview_alt : a->preview, -1, -1 };
+        bool ok = a->dnd->update_drag_preview(a->session, &pv);
+        dbglog("[dnd_source_example] Shift %s: update_drag_preview -> %s\n",
+               shift ? "down" : "up", ok ? "swapped" : "refused");
+      }
       return true;
+    }
 
     case NEUI_EVENT_DND_LEAVE:
       a->drag_over = false;
@@ -338,6 +362,24 @@ int main(int /*argc*/, char* /*argv*/[])
     }
     app.preview = app.assets->create_bitmap(app.session, W, H,
                                               pixels.data(), 1.0f);
+  }
+
+  // The alternate preview: a wide 120x40 orange strip with darker stripes, so
+  // the swap is obvious in both size and colour.
+  {
+    const int W = 120, H = 40, STRIPE = 10;
+    std::vector<uint8_t> pixels(static_cast<size_t>(W) * H * 4);
+    for (int y = 0; y < H; ++y) {
+      for (int x = 0; x < W; ++x) {
+        bool dark = (((x + y) / STRIPE) & 1) == 0;
+        uint8_t* px = &pixels[(y * W + x) * 4];
+        // BGRA order. Dark = #C05010, light = #F0A040.
+        if (dark) { px[0] = 0x10; px[1] = 0x50; px[2] = 0xC0; px[3] = 0xFF; }
+        else      { px[0] = 0x40; px[1] = 0xA0; px[2] = 0xF0; px[3] = 0xFF; }
+      }
+    }
+    app.preview_alt = app.assets->create_bitmap(app.session, W, H,
+                                                  pixels.data(), 1.0f);
   }
 
   neui_widget_t win = app.widgets->create(app.session,

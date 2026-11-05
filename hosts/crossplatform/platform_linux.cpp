@@ -1452,6 +1452,71 @@ namespace
   // during a drag (a window can vanish mid-drag; the default handler aborts).
   int drag_xerror(Display*, XErrorEvent*) { return 0; }
 
+  // The follow-the-pointer preview of a drag-source spin: a borderless
+  // override-redirect X window painted with XPutImage. It lives on
+  // platform_dnd_begin_drag's stack; g_drag_pv points at it while the spin runs,
+  // which is what lets platform_dnd_update_drag_preview swap the image from a
+  // callback the spin dispatches (a DnD dispatch to one of our own windows).
+  struct DragPreviewWin {
+    Display* d    = nullptr;
+    Window   win  = None;                  // None until a preview is set
+    GC       gc   = nullptr;
+    XImage*  img  = nullptr;               // wraps preview->bgra (data owned by `preview`)
+    std::unique_ptr<DragPreview> preview;
+    int      hx = 0, hy = 0;               // hot-spot, physical px
+
+    // Make `next` the image shown: creates and maps the window the first time,
+    // resizes it afterwards. A null `next` leaves everything as it is.
+    // hot_x / hot_y are logical px from the image top-left, -1 = centre.
+    void set(std::unique_ptr<DragPreview> next, int hot_x, int hot_y)
+    {
+      if (!next || !d) return;
+      // The old XImage wraps the old pixels: let go of it before they go.
+      if (img) { img->data = nullptr; XDestroyImage(img); img = nullptr; }
+      preview = std::move(next);
+      hx = (hot_x < 0) ? (int)(preview->w_px / 2)
+                       : (int)(static_cast<float>(hot_x) * preview->scale);
+      hy = (hot_y < 0) ? (int)(preview->h_px / 2)
+                       : (int)(static_cast<float>(hot_y) * preview->scale);
+      const int scr = DefaultScreen(d);
+      const bool first = (win == None);
+      if (first) {
+        XSetWindowAttributes swa; std::memset(&swa, 0, sizeof swa);
+        swa.override_redirect = True; swa.save_under = True; swa.background_pixmap = None;
+        win = XCreateWindow(d, DefaultRootWindow(d), 0, 0, preview->w_px, preview->h_px, 0,
+                            DefaultDepth(d, scr), InputOutput, DefaultVisual(d, scr),
+                            CWOverrideRedirect | CWSaveUnder | CWBackPixmap, &swa);
+        gc  = XCreateGC(d, win, 0, nullptr);
+      } else {
+        XResizeWindow(d, win, preview->w_px, preview->h_px);
+      }
+      img = XCreateImage(d, DefaultVisual(d, scr), static_cast<unsigned int>(DefaultDepth(d, scr)), ZPixmap, 0,
+                         reinterpret_cast<char*>(preview->bgra.data()),
+                         preview->w_px, preview->h_px, 32, (int)preview->w_px * 4);
+      if (first) XMapRaised(d, win);
+    }
+
+    // Put the image with its hot-spot on the pointer at root (rx, ry).
+    void place(int rx, int ry)
+    {
+      if (win == None) return;
+      XMoveWindow(d, win, rx - hx, ry - hy);
+      if (img) XPutImage(d, win, gc, img, 0, 0, 0, 0, preview->w_px, preview->h_px);
+    }
+
+    void destroy()
+    {
+      if (win == None) return;
+      if (img) { img->data = nullptr; XDestroyImage(img); img = nullptr; }  // data owned by `preview`
+      if (gc) { XFreeGC(d, gc); gc = nullptr; }
+      XDestroyWindow(d, win);
+      win = None;
+    }
+  };
+
+  // The preview of the drag-source spin in flight; null outside one.
+  DragPreviewWin* g_drag_pv = nullptr;
+
   // Process-wide error handler. The normal event loop touches foreign windows
   // too - e.g. an XdndEnter names a source window we then XGetWindowProperty,
   // and that source can crash/close between the message and our read. Xlib's
@@ -3625,6 +3690,23 @@ namespace
     return p;   // consumed by platform_dnd_begin_drag
   }
 
+  // Swap the image of the drag-source spin that is running (see platform.h):
+  // the preview is neui's own X window, so it is resized and repainted in
+  // place and put back under the pointer straight away. A drag begun with no
+  // preview gets its window here.
+  bool platform_dnd_update_drag_preview(void* preview_native, int hot_x, int hot_y)
+  {
+    std::unique_ptr<DragPreview> next(static_cast<DragPreview*>(preview_native));
+    if (!next || !g_drag_pv || !g_display) return false;
+    g_drag_pv->set(std::move(next), hot_x, hot_y);
+    Display* d = g_drag_pv->d;
+    Window rr, ch; int rx = 0, ry = 0, wx, wy; unsigned mask;
+    if (XQueryPointer(d, DefaultRootWindow(d), &rr, &ch, &rx, &ry, &wx, &wy, &mask))
+      g_drag_pv->place(rx, ry);
+    XFlush(d);
+    return true;
+  }
+
   // Blocking XDND drag-source spin. Returns the negotiated neui_dnd_action_t
   // (0 = cancelled). Foreign targets go through the XDND ClientMessage
   // handshake; our own windows (internal drags) dispatch Session::dispatch_dnd_*
@@ -3681,30 +3763,13 @@ namespace
 
     int (*old_err)(Display*, XErrorEvent*) = XSetErrorHandler(drag_xerror);
 
-    // Preview hot-spot (physical px) + follow window.
-    int hx = (hot_x < 0) ? (int)(preview ? preview->w_px / 2 : 0)
-                         : (int)(static_cast<float>(hot_x) * (preview ? preview->scale : 1.0f));
-    int hy = (hot_y < 0) ? (int)(preview ? preview->h_px / 2 : 0)
-                         : (int)(static_cast<float>(hot_y) * (preview ? preview->scale : 1.0f));
-    Window  pvwin = None; GC pvgc = nullptr; XImage* pvimg = nullptr;
-    if (preview) {
-      int scr = DefaultScreen(d);
-      XSetWindowAttributes swa; std::memset(&swa, 0, sizeof swa);
-      swa.override_redirect = True; swa.save_under = True; swa.background_pixmap = None;
-      pvwin = XCreateWindow(d, root, 0, 0, preview->w_px, preview->h_px, 0,
-                            DefaultDepth(d, scr), InputOutput, DefaultVisual(d, scr),
-                            CWOverrideRedirect | CWSaveUnder | CWBackPixmap, &swa);
-      pvgc  = XCreateGC(d, pvwin, 0, nullptr);
-      pvimg = XCreateImage(d, DefaultVisual(d, scr), static_cast<unsigned int>(DefaultDepth(d, scr)), ZPixmap, 0,
-                           reinterpret_cast<char*>(preview->bgra.data()),
-                           preview->w_px, preview->h_px, 32, (int)preview->w_px * 4);
-      XMapRaised(d, pvwin);
-    }
-    auto put_preview = [&](int rx, int ry) {
-      if (!pvwin) return;
-      XMoveWindow(d, pvwin, rx - hx, ry - hy);
-      if (pvimg) XPutImage(d, pvwin, pvgc, pvimg, 0, 0, 0, 0, preview->w_px, preview->h_px);
-    };
+    // Follow window. g_drag_pv exposes it to platform_dnd_update_drag_preview
+    // for as long as this spin runs.
+    DragPreviewWin pv;
+    pv.d = d;
+    pv.set(std::move(preview), hot_x, hot_y);
+    g_drag_pv = &pv;
+    auto put_preview = [&](int rx, int ry) { pv.place(rx, ry); };
 
     // Drag state.
     Window   cur = None; bool cur_internal = false, cur_entered = false;
@@ -3745,7 +3810,7 @@ namespace
               rx < top_rect.x + top_rect.width && ry < top_rect.y + top_rect.height) {
             top = top_cache;                          // still inside the cached toplevel
           } else {
-            top = xdnd_topmost_at(rx, ry, pvwin, &top_rect);
+            top = xdnd_topmost_at(rx, ry, pv.win, &top_rect);
             top_cache = top; top_valid = (top != None);
           }
           Window tw = (top == None) ? None : xdnd_choose_aware(top, rx, ry, &ver);
@@ -3848,11 +3913,8 @@ namespace
 
     XUngrabPointer(d, CurrentTime);
     XUngrabKeyboard(d, CurrentTime);
-    if (pvwin) {
-      if (pvimg) { pvimg->data = nullptr; XDestroyImage(pvimg); }  // data owned by `preview`
-      if (pvgc) XFreeGC(d, pvgc);
-      XDestroyWindow(d, pvwin);
-    }
+    g_drag_pv = nullptr;
+    pv.destroy();
     XSync(d, False);
     XSetErrorHandler(old_err);
     return result;

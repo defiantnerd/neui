@@ -557,6 +557,92 @@ namespace neui_detail
   };
 
   // -------------------------------------------------------------------------
+  // Hand `preview` to the Shell's drag-image helper as the drag image of `data`.
+  //
+  // IDragSourceHelper stores the bitmap through the data object's SetData
+  // (CFSTR_DRAGIMAGEBITS and friends - DataObjectImpl::SetData keeps them,
+  // replacing an earlier set of the same format), and "follow the cursor"
+  // rendering is done by the shell's drop-target helper on DragEnter.
+  //
+  // Ownership: per Shell docs, IDragSourceHelper takes ownership of
+  // hbmpDragImage on a successful InitializeFromBitmap call; we must not
+  // DeleteObject it afterwards. Returns true on success (the helper owns the
+  // bitmap now); on false ownership stays with the caller.
+  inline bool w32_set_drag_image(IDataObject* data, const DragPreviewW32& preview)
+  {
+    if (!data || !preview.hbitmap) return false;
+    IDragSourceHelper* helper = nullptr;
+    HRESULT hh = CoCreateInstance(CLSID_DragDropHelper, nullptr,
+                                   CLSCTX_INPROC_SERVER,
+                                   IID_IDragSourceHelper,
+                                   reinterpret_cast<void**>(&helper));
+    if (FAILED(hh) || !helper) return false;
+    SHDRAGIMAGE sdi = {};
+    sdi.sizeDragImage.cx = preview.width;
+    sdi.sizeDragImage.cy = preview.height;
+    sdi.ptOffset.x       = preview.hot_x;
+    sdi.ptOffset.y       = preview.hot_y;
+    sdi.hbmpDragImage    = preview.hbitmap;
+    // CLR_NONE: rely on the bitmap's own alpha channel (it's premul
+    // BGRA); no per-pixel colour key masking.
+    sdi.crColorKey       = CLR_NONE;
+    HRESULT hr = helper->InitializeFromBitmap(&sdi, data);
+    helper->Release();
+    return SUCCEEDED(hr);
+  }
+
+  // -------------------------------------------------------------------------
+  // The data object of the drag DoDragDrop is running, so update_drag_preview
+  // can reach it from a callback (a DnD dispatch, a timer) on the same thread.
+  // Null outside platform_dnd_begin_drag_w32. Both win32 hosts include this
+  // header; the inline function's static is one object across them.
+  inline DataObjectImpl*& w32_drag_object_in_flight()
+  {
+    static DataObjectImpl* in_flight = nullptr;
+    return in_flight;
+  }
+
+  // The drag-image window the Shell created for the running drag, or null.
+  // The drop-target helper (IDropTargetHelper::DragEnter, which every neui
+  // frame calls) creates it and stores its HWND in the data object under the
+  // registered format "DragWindow" - an HWND in an HGLOBAL, arriving through
+  // DataObjectImpl::SetData like the image bits. Read it back through the data
+  // object's own GetData. Null while no target has shown the image yet.
+  inline HWND w32_drag_image_window(IDataObject* data)
+  {
+    if (!data) return nullptr;
+    const UINT cf = RegisterClipboardFormatA("DragWindow");
+    if (!cf) return nullptr;
+    FORMATETC fe = {};
+    fe.cfFormat = static_cast<CLIPFORMAT>(cf);
+    fe.dwAspect = DVASPECT_CONTENT;
+    fe.lindex   = -1;
+    fe.tymed    = TYMED_HGLOBAL;
+    STGMEDIUM stg = {};
+    if (FAILED(data->GetData(&fe, &stg))) return nullptr;
+    HWND wnd = nullptr;
+    if (stg.tymed == TYMED_HGLOBAL && stg.hGlobal &&
+        GlobalSize(stg.hGlobal) >= sizeof(DWORD)) {
+      if (const void* raw = GlobalLock(stg.hGlobal)) {
+        DWORD handle32 = 0;
+        std::memcpy(&handle32, raw, sizeof handle32);
+        GlobalUnlock(stg.hGlobal);
+        // A window handle is 32 bits significant on every Windows; widen it
+        // the way the SDK's LongToHandle does (sign-extending).
+        wnd = reinterpret_cast<HWND>(
+                static_cast<LONG_PTR>(static_cast<LONG>(handle32)));
+      }
+    }
+    ReleaseStgMedium(&stg);
+    return (wnd && IsWindow(wnd)) ? wnd : nullptr;
+  }
+
+  // DDWM_UPDATEWINDOW (WM_USER + 3), the message the Shell's drag-image window
+  // answers by re-reading the image bits from the data object. Not in the
+  // public SDK headers.
+  constexpr UINT k_ddwm_updatewindow = WM_USER + 3;
+
+  // -------------------------------------------------------------------------
   // Entry point used by platform_win32.cpp and hosts/win32/widgets.cpp.
 
   inline uint32_t platform_dnd_begin_drag_w32(void* /*native_handle*/,
@@ -571,41 +657,17 @@ namespace neui_detail
     DataObjectImpl* obj    = new DataObjectImpl(*item);
     DropSourceImpl* source = new DropSourceImpl();
 
-    // Attach drag image BEFORE DoDragDrop. IDragSourceHelper stores the
-    // bitmap reference via the data object's stored IDataObject side
-    // channel (CFSTR_DRAGIMAGEBITS / CFSTR_DROPDESCRIPTION) and AppKit-
-    // style "follow the cursor" rendering is done by the shell.
-    //
-    // Ownership: per Shell docs, IDragSourceHelper takes ownership of
-    // hbmpDragImage on a successful InitializeFromBitmap call; we must
-    // not DeleteObject it afterwards. On failure ownership stays with
-    // the caller - we DeleteObject in that case.
+    // Attach drag image BEFORE DoDragDrop. On failure the bitmap stays ours
+    // and is deleted below.
     bool helper_owns_bitmap = false;
-    if (preview && preview->hbitmap) {
-      IDragSourceHelper* helper = nullptr;
-      HRESULT hh = CoCreateInstance(CLSID_DragDropHelper, nullptr,
-                                     CLSCTX_INPROC_SERVER,
-                                     IID_IDragSourceHelper,
-                                     reinterpret_cast<void**>(&helper));
-      if (SUCCEEDED(hh) && helper) {
-        SHDRAGIMAGE sdi = {};
-        sdi.sizeDragImage.cx = preview->width;
-        sdi.sizeDragImage.cy = preview->height;
-        sdi.ptOffset.x       = preview->hot_x;
-        sdi.ptOffset.y       = preview->hot_y;
-        sdi.hbmpDragImage    = preview->hbitmap;
-        // CLR_NONE: rely on the bitmap's own alpha channel (it's premul
-        // BGRA); no per-pixel colour key masking.
-        sdi.crColorKey       = CLR_NONE;
-        HRESULT hr2 = helper->InitializeFromBitmap(&sdi, obj);
-        if (SUCCEEDED(hr2)) helper_owns_bitmap = true;
-        helper->Release();
-      }
-    }
+    if (preview && preview->hbitmap)
+      helper_owns_bitmap = w32_set_drag_image(obj, *preview);
 
     DWORD effects = dnd_action_to_dropeffect(allowed_actions);
     DWORD result  = 0;
+    w32_drag_object_in_flight() = obj;
     HRESULT hr = DoDragDrop(obj, source, effects, &result);
+    w32_drag_object_in_flight() = nullptr;
     obj->Release();
     source->Release();
 
@@ -618,6 +680,50 @@ namespace neui_detail
     if (result & DROPEFFECT_MOVE) return NEUI_DND_ACTION_MOVE;
     if (result & DROPEFFECT_LINK) return NEUI_DND_ACTION_LINK;
     return 0;
+  }
+
+  // Swap the image of the drag platform_dnd_begin_drag_w32 is running, from a
+  // callback on the drag's thread. The Shell's way to change a drag image
+  // mid-drag: hand the new bitmap to the helper again on the SAME data object
+  // (which replaces the stored image bits), then tell the drag-image window,
+  // when a target has already made one, to re-read them (DDWM_UPDATEWINDOW).
+  // Without a window yet the new bits are simply what the next DragEnter shows.
+  //
+  // Takes ownership of preview->hbitmap on every path: the helper owns it after
+  // a successful hand-over, else it is deleted here. Returns false, the old
+  // image intact, when no drag is running or the helper refuses the bitmap.
+  inline bool platform_dnd_update_drag_preview_w32(const DragPreviewW32* preview)
+  {
+    if (!preview || !preview->hbitmap) return false;
+    DataObjectImpl* obj = w32_drag_object_in_flight();
+    if (!obj || !w32_set_drag_image(obj, *preview)) {
+      DeleteObject(preview->hbitmap);
+      return false;
+    }
+    if (HWND wnd = w32_drag_image_window(obj)) {
+      // The window may belong to another process (a foreign target's helper);
+      // never wait on it for long or let a hung one stall the drag.
+      DWORD_PTR ignored = 0;
+      SendMessageTimeoutW(wnd, k_ddwm_updatewindow, 0, 0,
+                          SMTO_ABORTIFHUNG, 250, &ignored);
+    }
+    return true;
+  }
+
+  // Describe a preview HBITMAP (as w32_make_drag_hbitmap builds it) as a
+  // DragPreviewW32, the hot-spot defaulting to the centre on a -1 axis. False
+  // when GetObject cannot read it; the bitmap is then still the caller's.
+  inline bool w32_preview_from_hbitmap(HBITMAP hbm, int hot_x, int hot_y,
+                                        DragPreviewW32* out)
+  {
+    BITMAP bm = {};
+    if (!hbm || !out || !GetObjectW(hbm, sizeof(bm), &bm)) return false;
+    out->hbitmap = hbm;
+    out->width   = bm.bmWidth;
+    out->height  = (bm.bmHeight < 0) ? -bm.bmHeight : bm.bmHeight;
+    out->hot_x   = (hot_x < 0) ? out->width  / 2 : hot_x;
+    out->hot_y   = (hot_y < 0) ? out->height / 2 : hot_y;
+    return true;
   }
 
   // -------------------------------------------------------------------------

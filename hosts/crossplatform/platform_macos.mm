@@ -2910,6 +2910,14 @@ namespace xpl_host
                                                 preview, hot_x, hot_y);
   }
 
+  bool platform_dnd_update_drag_preview(void* preview_native, int hot_x, int hot_y)
+  {
+    // Same hand-off as platform_dnd_begin_drag: take ownership first so every
+    // exit path releases the bridged NSImage.
+    NSImage* preview = (__bridge_transfer NSImage*)preview_native;
+    return neui_detail::macos_update_drag_preview(preview, hot_x, hot_y);
+  }
+
   // -------------------------------------------------------------------------
   // Mouse cursor.
   //

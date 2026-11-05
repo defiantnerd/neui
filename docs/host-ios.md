@@ -48,7 +48,7 @@ backend separately as `wd.dpi = 96 * screen.scale`.
   Build the UI from `scene:willConnectToSession:`.
 - A modal DIALOG does not block `show`: it is presented as a form sheet and `show` returns
   at once; dismiss it with `widgets->destroy` as on the desktop.
-- `dnd->begin_drag` is a no-op; attach a `DRAG_SOURCE` behavior asset.
+- `dnd->begin_drag` is a no-op; attach a `DRAG_SOURCE` behavior asset. `dnd->update_drag_preview` returns false (no programmatic drag runs, and the system owns the preview of a gesture-driven one).
 - Nothing moves content out from under the keyboard — ask `NEUI_API_IOS::keyboard_inset`.
 
 ### `NEUI_API_IOS`

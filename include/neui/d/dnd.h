@@ -150,6 +150,30 @@ typedef struct neui_dnd_api {
                                             neui_data_item_t payload,
                                             uint32_t allowed_actions,
                                             const neui_drag_preview_t* preview);
+
+  // Swap the preview image of this session's drag in flight (one begun with
+  // begin_drag / begin_drag_with_preview), for a client whose dragged content
+  // changes shape while the drag runs - e.g. the items will be laid out
+  // differently once a modifier key is pressed. Callable while the drag runs:
+  // from a DND_ENTER / DND_MOVE dispatch (the drag's own windows are drop
+  // targets too), from a timer, or from a key event. Unlike begin_drag it is
+  // NOT refused inside a DnD dispatch - that is where it is usually called.
+  //
+  // `preview` is as for begin_drag_with_preview: an asset resolving to
+  // displayable BGRA8 pixels (BITMAP or SURFACE), snapshotted inside the call
+  // so the asset may be released at once, and hot_x / hot_y in logical px from
+  // the image's top-left (-1 on an axis = the image centre on that axis). The
+  // new image takes the place of the old one under the pointer.
+  //
+  // Returns true when the image was swapped. Returns false, and the image
+  // stays as it was, when no drag of this session is in flight, `preview` is
+  // NULL, its `image` is asset_none (there is no "back to the OS default"), it
+  // does not resolve to pixels, or the platform cannot change a running
+  // drag's image: iOS (a gesture-driven drag, see begin_drag) and the null and
+  // LVGL hosts always return false. A drag begun without a preview can be
+  // given one.
+  bool (NEUI_ABI *update_drag_preview)(neui_session_t session,
+                                       const neui_drag_preview_t* preview);
 } neui_dnd_api_t;
 
 #ifdef __cplusplus
