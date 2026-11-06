@@ -177,6 +177,8 @@ namespace win32_host
       neui_detail::unregister_theme_listener(_theme_listener_handle);
       _theme_listener_handle = 0;
     }
+    // The last session tears the theme provider down (theme_provider_win32.h).
+    neui_detail::release_theme_provider_win32();
     // Defensive: in case a scope guard somewhere failed to restore (or
     // an extension installed a permanent pointer), clear the override
     // when it currently points into this session.

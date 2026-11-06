@@ -30,6 +30,16 @@
 // the UI thread (the thread that called ensure_theme_provider_win32()
 // first - i.e. the UI thread that owns this process's message pump).
 //
+// Lifetime: every session that calls ensure_theme_provider_win32() calls
+// release_theme_provider_win32() when it goes, and the last one tears the
+// provider down - the ColorValuesChanged subscription revoked, the UISettings
+// released, the listener window destroyed and its class unregistered. Both
+// the subscription's handler and the window's procedure are this module's
+// code: in a plugin, whose DLL the host may unload once its last editor has
+// closed, left in place they would be called into freed memory (a colour or
+// light/dark change, any message to the window). A later session sets it up
+// again.
+//
 // Header-only `inline` storage, mirroring the clipboard listener pattern.
 
 namespace neui_detail
@@ -195,6 +205,30 @@ namespace neui_detail
     return b;
   }
 
+  // The sessions using the provider (ensure_ / release_theme_provider_win32).
+  inline int& theme_provider_users()
+  {
+    static int n = 0;
+    return n;
+  }
+
+  // The ColorValuesChanged subscription, revoked at teardown.
+  inline winrt::event_token& theme_colors_token()
+  {
+    static winrt::event_token t{};
+    return t;
+  }
+
+  // The listener window's class: neui's own module and name
+  // (window_class_win32.h), registered while the provider is up.
+  inline const wchar_t* const k_theme_listener_class = NEUI_WIN32_CLASS(L"NeUiThemeListener");
+
+  inline bool& theme_listener_class_registered()
+  {
+    static bool b = false;
+    return b;
+  }
+
   // WM_APP-range message used to marshal ColorValuesChanged from a thread
   // pool thread back to the UI thread.
   static constexpr UINT k_wm_app_theme_changed = WM_APP + 0x0042;
@@ -232,7 +266,9 @@ namespace neui_detail
       return 0;
     }
     if (msg == WM_DESTROY) {
-      theme_listener_hwnd() = nullptr;
+      // Only this window's handle: one closed from another thread at
+      // teardown may go after a later session made a new one.
+      if (theme_listener_hwnd() == hwnd) theme_listener_hwnd() = nullptr;
       return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -243,28 +279,27 @@ namespace neui_detail
     HWND& hwnd = theme_listener_hwnd();
     if (hwnd) return hwnd;
 
-    // neui's own module and name (window_class_win32.h).
-    static const wchar_t* k_class = NEUI_WIN32_CLASS(L"NeUiThemeListener");
-    static bool s_registered = false;
-
-    HINSTANCE hi = neui_win32::module_instance();
-    if (!s_registered) {
+    bool& registered = theme_listener_class_registered();
+    if (!registered) {
       WNDCLASSEXW wc = {};
       wc.lpfnWndProc   = theme_listener_proc;
-      wc.lpszClassName = k_class;
-      s_registered = neui_win32::register_window_class(wc);
+      wc.lpszClassName = k_theme_listener_class;
+      registered = neui_win32::register_window_class(wc);
     }
 
-    hwnd = CreateWindowExW(0, k_class, L"", 0, 0, 0, 0, 0,
-                           HWND_MESSAGE, nullptr, hi, nullptr);
+    hwnd = CreateWindowExW(0, k_theme_listener_class, L"", 0, 0, 0, 0, 0,
+                           HWND_MESSAGE, nullptr, neui_win32::module_instance(),
+                           nullptr);
     return hwnd;
   }
 
-  // Idempotent. Call from each host's session-creation path; the first
-  // call sets up the UISettings instance, the listener window, and the
-  // ColorValuesChanged subscription. Subsequent calls do nothing.
+  // Call from each host's session-creation path, and
+  // release_theme_provider_win32() from its teardown: the first call sets up
+  // the UISettings instance, the listener window, and the ColorValuesChanged
+  // subscription; later calls only count the session.
   inline void ensure_theme_provider_win32()
   {
+    ++theme_provider_users();
     if (theme_provider_initialised()) return;
 
     HWND hwnd = ensure_theme_listener_window();
@@ -279,7 +314,7 @@ namespace neui_detail
 
       // Subscribe. Handler fires on a WinRT thread pool thread; we
       // marshal back to the UI thread via PostMessage.
-      s.ColorValuesChanged([](
+      theme_colors_token() = s.ColorValuesChanged([](
         winrt::Windows::UI::ViewManagement::UISettings const& /*sender*/,
         winrt::Windows::Foundation::IInspectable const& /*args*/)
       {
@@ -293,6 +328,47 @@ namespace neui_detail
     }
 
     theme_provider_initialised() = true;
+  }
+
+  // The counterpart of ensure_theme_provider_win32(), from each session's
+  // teardown: the last session tears the provider down (see Lifetime above).
+  // The palette stays as it was. A ColorValuesChanged handler already running
+  // on a thread pool thread when the subscription is revoked still finishes
+  // (it only posts to the window, which is gone by then).
+  inline void release_theme_provider_win32()
+  {
+    int& users = theme_provider_users();
+    if (users <= 0 || --users > 0) return;
+
+    if (auto& s = theme_uisettings()) {
+      try {
+        if (theme_colors_token()) s.ColorValuesChanged(theme_colors_token());
+      } catch (...) {
+        // Revoking can throw only if the UISettings object is broken;
+        // releasing it below drops the subscription with it.
+      }
+      s = nullptr;
+    }
+    theme_colors_token() = {};
+
+    // The window belongs to the thread that created it: destroyed there, or
+    // closed through its own queue from any other thread.
+    HWND& hwnd = theme_listener_hwnd();
+    if (hwnd) {
+      if (GetWindowThreadProcessId(hwnd, nullptr) == GetCurrentThreadId())
+        DestroyWindow(hwnd);
+      else
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+      hwnd = nullptr;
+    }
+    // Fails while the window still exists (closed from another thread);
+    // register_window_class() takes the class over again then.
+    bool& registered = theme_listener_class_registered();
+    if (registered &&
+        UnregisterClassW(k_theme_listener_class, neui_win32::module_instance()))
+      registered = false;
+
+    theme_provider_initialised() = false;
   }
 
 } // namespace neui_detail
