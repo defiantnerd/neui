@@ -89,7 +89,8 @@ extern "C" {
 // dims to 50%) but is NEVER claimed by hit-testing, so mouse input falls
 // through to whatever sits beneath it (siblings / parent). This is distinct
 // from both:
-//   - enabled = false  : click-transparent BUT force-dimmed to 50% alpha;
+//   - enabled = false  : click-transparent BUT dimmed - to 50% alpha unless
+//                        NEUI_ATTR_DISABLED_DIM (below) says otherwise;
 //   - emit_events       : governs whether the widget emits events at all
 //                         (auto-set by interactive widget types).
 // Use it for overlays, rulers, guides, selection marquees and measurement
@@ -101,6 +102,34 @@ extern "C" {
 // gets WS_EX_TRANSPARENT so clicks pass through to the window beneath.
 // Live - re-read each hit-test on the crossplatform host.
 #define NEUI_ATTR_INPUT_TRANSPARENT "neui.attr.input_transparent"
+
+// int (ARGB, read as unsigned): how this widget is dimmed while it is
+// DISABLED (widgets->set_enabled(..., false)). Each channel of everything the
+// widget paints is multiplied by that channel's byte / 256, where 0xFF means
+// exactly 1.0 (unchanged) and 0x80 is exactly 0.5. A scales the opacity; R, G
+// and B scale the colour channels.
+//   unset (default) - 0x80FFFFFF: half opacity, colours unchanged.
+//   0xFF808080      - half brightness, still opaque.
+//   0x80FFFFFF      - half opacity (the default, spelled out).
+//   0xFFFFFFFF      - no dim at all: for a component that draws its own
+//                     disabled look (e.g. compound layers gated on
+//                     NEUI_LAYER_STATE_NOT_ENABLED).
+// It acts only while the widget is disabled: an enabled widget is never
+// dimmed, whatever this says. It covers everything the widget itself paints -
+// both paint passes, so a CUSTOMDRAW compound's layers at every z, its text and
+// its bitmap layers - and each pass is dimmed exactly once. It is per widget,
+// not per subtree: the children of a disabled widget keep their own state.
+// Setting or removing it, like toggling enabled, repaints the widget.
+// Host support:
+//   - crossplatform host: on every backend. The alpha part costs what the 50%
+//     dim always did; a colour byte below 0xFF also multiplies the colour of
+//     every draw call (a bitmap through its tint, a GPU shader through its CPU
+//     image). The experimental LVGL backend applies the alpha part only. The
+//     null backend draws nothing either way.
+//   - native win32 / macOS / iOS hosts: stored but not read; their disabled
+//     look is unchanged (see docs/widget-internals.md).
+// Live - read at each paint.
+#define NEUI_ATTR_DISABLED_DIM "neui.attr.disabled_dim"
 
 // int (bool): transparent OVERLAY mode for a CUSTOMDRAW widget. The widget
 // composites over the sibling widgets beneath it with per-pixel alpha -

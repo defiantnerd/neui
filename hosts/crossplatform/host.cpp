@@ -18,6 +18,8 @@
 #include "../shared/widget_tabview_host.h"
 #include "../shared/widget_paint_compound.h"
 #include "../shared/widget_paint_grid.h"
+#include "../shared/color_dim_backend.h"
+#include "../shared/disabled_dim.h"
 #include "../shared/theme_palette.h"
 #include "../shared/painter.h"
 #include "../shared/widget_font.h"
@@ -2777,6 +2779,46 @@ namespace xpl_host
     return o;
   }
 
+  // One of a widget's two paint passes - paint(), or paint_after_children()
+  // once its children are painted - under the widget's disabled dim
+  // (NEUI_ATTR_DISABLED_DIM, hosts/shared/disabled_dim.h). Every paint call
+  // site goes through here, so both passes are dimmed, each exactly once: a
+  // compound's layers at any z, not only those below zero. The dim's A factor
+  // goes on the backend's alpha stack - the default 0x80FFFFFF is the 50 %
+  // push_alpha it has always been - and only a colour byte below 0xFF adds a
+  // ColorDimBackend, handed to the pass in place of the backend. Per widget,
+  // not per subtree: the children paint between the two passes, outside both,
+  // in their own enabled state.
+  //
+  // The LVGL backend gets the alpha part only: its bitmap recolour mixes
+  // towards a flat colour rather than multiplying, so the colour part would
+  // flatten its bitmaps instead of dimming them.
+  static void paint_widget_pass(neui_render_backend_t* backend,
+                                neui_render_ctx_t ctx, WidgetData& wd,
+                                bool after_children, bool is_focused)
+  {
+    const uint32_t dim = neui_detail::widget_disabled_dim(
+        wd.enabled, neui_detail::attrs_readonly(wd.attrs));
+    auto pass = [&](neui_render_backend_t* be) {
+      if (after_children) wd.paint_after_children(be, ctx, is_focused);
+      else                wd.paint(be, ctx, is_focused);
+    };
+    const bool fade = neui_detail::dim_scales_alpha(dim)
+                      && backend->push_alpha && backend->pop_alpha;
+    if (fade) backend->push_alpha(ctx, neui_detail::dim_alpha_factor(dim));
+#ifndef NEUI_PLATFORM_LVGL
+    if (neui_detail::dim_scales_color(dim)) {
+      neui_detail::ColorDimBackend tinted(backend, ctx, dim);
+      pass(tinted.backend());
+    } else {
+      pass(backend);
+    }
+#else
+    pass(backend);
+#endif
+    if (fade) backend->pop_alpha(ctx);
+  }
+
   // `cull` != nullptr only on a partial frame the backend accepted: widgets
   // whose damage footprint misses it are skipped (no PREUPDATE, no paint).
   // The backend clips to the damage regardless, so culling is purely a
@@ -2808,13 +2850,8 @@ namespace xpl_host
             pre.data.preupdate.widget.id = wd.widget_id;
             wd.session->dispatch_event(&pre);
           }
-          // Dim disabled widgets uniformly via the backend's alpha stack.
-          // Per-widget dim (not subtree); a parent's disabled flag does
-          // not propagate to children in v1.
-          bool dim = !wd.enabled && backend->push_alpha && backend->pop_alpha;
-          if (dim) backend->push_alpha(ctx, 0.5f);
-          wd.paint(backend, ctx, idx == focused_widget);
-          if (dim) backend->pop_alpha(ctx);
+          // Dimmed while disabled; per widget, not per subtree.
+          paint_widget_pass(backend, ctx, wd, false, idx == focused_widget);
         }
         // SECTION descent: children's stored (x, y) is relative to the
         // BODY's top-left, so we add (body_x, body_y) into the translate.
@@ -2858,9 +2895,10 @@ namespace xpl_host
         // After-children hook: widget-local coords are active here (we
         // translated by (wd.x, wd.y) above and have not popped yet).
         // Used by CUSTOMDRAW + compound to paint z>=0 layers above the
-        // child-widget pass; default implementation is a no-op.
+        // child-widget pass; default implementation is a no-op. Dimmed like
+        // the first pass.
         if (!culled && !wd.native_handle && !wd.is_menu_model() && wd.visible && wd.width > 0 && wd.height > 0) {
-          wd.paint_after_children(backend, ctx, idx == focused_widget);
+          paint_widget_pass(backend, ctx, wd, true, idx == focused_widget);
         }
         if (backend->pop_transform) backend->pop_transform(ctx);
         if (pushed_clip && backend->pop_clip) backend->pop_clip(ctx);
@@ -3181,20 +3219,14 @@ namespace xpl_host
     RetainedPaletteBracket palette(this, owning_frame_index(this, widget_index));
     const uint32_t focus_for_paint = _os_focused ? _focused_widget : 0;
 
-    if (!after_children) {
-      if (wd.emit_events) {
-        neui_event_t pre{};
-        pre.type = NEUI_EVENT_WIDGET_PREUPDATE;
-        pre.data.preupdate.widget.id = wd.widget_id;
-        dispatch_event(&pre);
-      }
-      bool dim = !wd.enabled && _backend->push_alpha && _backend->pop_alpha;
-      if (dim) _backend->push_alpha(ctx, 0.5f);
-      wd.paint(_backend, ctx, widget_index == focus_for_paint);
-      if (dim) _backend->pop_alpha(ctx);
-    } else {
-      wd.paint_after_children(_backend, ctx, widget_index == focus_for_paint);
+    if (!after_children && wd.emit_events) {
+      neui_event_t pre{};
+      pre.type = NEUI_EVENT_WIDGET_PREUPDATE;
+      pre.data.preupdate.widget.id = wd.widget_id;
+      dispatch_event(&pre);
     }
+    paint_widget_pass(_backend, ctx, wd, after_children,
+                      widget_index == focus_for_paint);
   }
 
   void Session::paint_frame_background_retained(neui_render_ctx_t ctx,
