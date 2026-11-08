@@ -118,11 +118,12 @@ typedef struct neui_widget_api {
   // - win32 native host: calls EnableWindow on the underlying HWND; if
   //   the HWND has not been created yet (deferred), the flag is stored
   //   and applied at show().
-  // - xpl host: stored as a flag on WidgetData; paint dims the widget
-  //   (push_alpha(0.5) around its paint pass) and the hit-test / tab
-  //   traversal skip disabled widgets.
-  // - macOS native host: state is stored but the visual / input effect
-  //   is not yet wired (TODO: NSControl setEnabled:).
+  // - xpl host: stored as a flag on WidgetData; paint dims everything the
+  //   widget paints (both paint passes; 50% alpha unless
+  //   NEUI_ATTR_DISABLED_DIM says otherwise - <neui/d/attrs.h>) and the
+  //   hit-test / tab traversal skip disabled widgets.
+  // - macOS native host: NSControl setEnabled: for controls, a fixed 50%
+  //   dim for painted views (NEUI_ATTR_DISABLED_DIM is not read).
   void               (NEUI_ABI *set_enabled)(neui_session_t session, neui_widget_t widget, bool enabled);
   bool               (NEUI_ABI *get_enabled)(neui_session_t session, neui_widget_t widget);
   // Read the usable content area of a widget in its own coordinate space

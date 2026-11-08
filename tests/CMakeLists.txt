@@ -12,6 +12,7 @@ add_executable(neui_tests
   test_behavior.cpp
   test_attrs.cpp
   test_text_style.cpp
+  test_disabled_dim.cpp
   test_edit_history.cpp
   test_text_edit.cpp
   test_tree.cpp
@@ -134,6 +135,19 @@ if(APPLE AND NOT NEUI_IOS)
     ${PROJECT_SOURCE_DIR}/include)
   target_compile_features(neui_text_style_smoke_macos PRIVATE cxx_std_17)
   target_link_libraries(neui_text_style_smoke_macos PRIVATE
+    neui neui-xplhost neui-macoshost "-framework AppKit")
+
+  # Disabled-dim harness (NEUI_ATTR_DISABLED_DIM): snapshots a real window (xpl
+  # + CoreGraphics) and reads back a disabled CUSTOMDRAW compound's pixels -
+  # layers on both sides of z = 0, a bitmap and a gradient layer, the default
+  # 50 % and colour dims, an enabled child, and live changes that repaint
+  # through a partial frame. Realizes a real NSWindow, so built but NOT
+  # ctest-registered.
+  add_executable(neui_disabled_dim_smoke_macos disabled_dim_smoke_macos.mm)
+  target_include_directories(neui_disabled_dim_smoke_macos PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(neui_disabled_dim_smoke_macos PRIVATE cxx_std_17)
+  target_link_libraries(neui_disabled_dim_smoke_macos PRIVATE
     neui neui-xplhost neui-macoshost "-framework AppKit")
 
   # Cursor harness (NEUI_ATTR_CURSOR): asserts inheritance up the widget tree,

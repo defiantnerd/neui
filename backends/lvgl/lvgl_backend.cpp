@@ -784,8 +784,8 @@ namespace neui_lvgl_backend
     dsc.src   = &sub->dsc;
     // `tint` is a multiplicative ARGB (renderer.h): its alpha scales the draw
     // opacity on top of the ctx alpha stack, its RGB multiplies the pixels.
-    // d2d/cg fold both into a colour-matrix; cairo paints at alpha then
-    // MULTIPLYs the RGB through the image's own alpha mask.
+    // d2d/cg fold both into a colour-matrix; cairo paints a cached copy with
+    // the RGB multiplied in at that opacity.
     dsc.opa = fold_opa(c, tint);
     if ((tint & 0x00FFFFFFu) != 0x00FFFFFFu) {
       // LVGL offers no multiply - only recolor, a mix toward a flat colour. At
