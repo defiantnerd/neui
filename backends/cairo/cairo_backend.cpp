@@ -769,7 +769,65 @@ namespace neui_cairo_backend
     uint32_t         width_px  = 0;
     uint32_t         height_px = 0;
     float            scale     = 1.0f;
+
+    // Copies with a tint's RGB multiplied in (draw_bitmap), oldest first. A
+    // few are kept, so a tint that stays - a layer's fixed tint, a disabled
+    // widget's colour dim - is made once rather than per frame.
+    struct Tinted
+    {
+      uint32_t         rgb;
+      cairo_surface_t* surf;
+      unsigned char*   data;
+    };
+    std::vector<Tinted> tinted;
   };
+
+  static constexpr size_t k_max_tinted_copies = 4;
+
+  static void cairo_free_tinted(CairoBitmap::Tinted& t)
+  {
+    if (t.surf) cairo_surface_destroy(t.surf);
+    std::free(t.data);
+  }
+
+  // `h` with each premultiplied colour channel multiplied by the tint's
+  // (byte / 255) and its alpha kept: the multiplicative tint d2d (D2D1Tint)
+  // and cg apply, done exactly. Null on allocation failure.
+  static cairo_surface_t* cairo_tinted_surface(CairoBitmap& h, uint32_t tint)
+  {
+    const uint32_t rgb = tint & 0x00FFFFFFu;
+    for (const auto& t : h.tinted)
+      if (t.rgb == rgb) return t.surf;
+
+    const int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32,
+                                                     static_cast<int>(h.width_px));
+    const size_t total = static_cast<size_t>(stride) * h.height_px;
+    auto* owned = static_cast<unsigned char*>(std::malloc(total));
+    if (!owned) return nullptr;
+    const uint32_t tr = (rgb >> 16) & 0xFFu, tg = (rgb >> 8) & 0xFFu, tb = rgb & 0xFFu;
+    // B, G, R, A per pixel (ARGB32 on a little-endian host); premultiplied, so
+    // a scaled colour channel stays <= its alpha.
+    for (size_t i = 0; i + 3 < total; i += 4) {
+      owned[i + 0] = static_cast<unsigned char>((h.data[i + 0] * tb + 127u) / 255u);
+      owned[i + 1] = static_cast<unsigned char>((h.data[i + 1] * tg + 127u) / 255u);
+      owned[i + 2] = static_cast<unsigned char>((h.data[i + 2] * tr + 127u) / 255u);
+      owned[i + 3] = h.data[i + 3];
+    }
+    cairo_surface_t* surf = cairo_image_surface_create_for_data(
+      owned, CAIRO_FORMAT_ARGB32, static_cast<int>(h.width_px),
+      static_cast<int>(h.height_px), stride);
+    if (cairo_surface_status(surf) != CAIRO_STATUS_SUCCESS) {
+      cairo_surface_destroy(surf);
+      std::free(owned);
+      return nullptr;
+    }
+    if (h.tinted.size() >= k_max_tinted_copies) {
+      cairo_free_tinted(h.tinted.front());
+      h.tinted.erase(h.tinted.begin());
+    }
+    h.tinted.push_back({ rgb, surf, owned });
+    return surf;
+  }
 
   static void* cairo_create_bitmap(neui_render_ctx_t /*raw*/,
                                    uint32_t width_px, uint32_t height_px,
@@ -807,6 +865,7 @@ namespace neui_cairo_backend
   {
     if (!bitmap) return;
     auto* h = static_cast<CairoBitmap*>(bitmap);
+    for (auto& t : h->tinted) cairo_free_tinted(t);
     if (h->surf) cairo_surface_destroy(h->surf);
     std::free(h->data);
     delete h;
@@ -843,15 +902,16 @@ namespace neui_cairo_backend
     if (tint == 0xFFFFFFFFu) {
       cairo_paint_with_alpha(st->cr, current_alpha(st));
     } else {
-      // Approximate the d2d/cg multiplicative tint: lay down the image, then
-      // multiply the tint RGB over it masked by the image's own alpha. The
-      // composite alpha folds in the tint alpha * the alpha stack so a
-      // translucent tint lets the background bleed through.
+      // The d2d / cg multiplicative tint: a copy of the image with the tint's
+      // RGB multiplied in, composited at the tint alpha * the alpha stack, so
+      // a translucent tint lets the background bleed through. (A MULTIPLY
+      // over the target, as this used to be, also darkened what lay beneath
+      // the image wherever it was drawn translucent - under the alpha stack,
+      // e.g. a disabled widget's dim, or at soft edges.)
       double rgba[4]; argb_to_rgba(tint, rgba);
+      if (cairo_surface_t* tinted = cairo_tinted_surface(*h, tint))
+        cairo_set_source_surface(st->cr, tinted, -sxp, -syp);
       cairo_paint_with_alpha(st->cr, current_alpha(st) * rgba[3]);
-      cairo_set_operator(st->cr, CAIRO_OPERATOR_MULTIPLY);
-      cairo_set_source_rgb(st->cr, rgba[0], rgba[1], rgba[2]);
-      cairo_mask_surface(st->cr, h->surf, -sxp, -syp);
     }
     cairo_restore(st->cr);
   }

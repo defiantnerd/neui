@@ -135,7 +135,8 @@ typedef struct neui_render_backend {
   // bypasses any effect setup and draws the bitmap byte-for-byte as on
   // pre-tint code paths. Any other value runs the backend's native
   // multiplicative-tint primitive (D2D effect on Windows, blend-mode
-  // multiply + alpha mask on macOS); the null backend ignores the tint.
+  // multiply + alpha mask on macOS, a cached tinted copy on Cairo and
+  // Canvas 2D); the null backend ignores the tint.
   void (NEUI_ABI *draw_bitmap)(neui_render_ctx_t ctx, void* bitmap,
                                 float src_x, float src_y, float src_w, float src_h,
                                 float dst_x, float dst_y, float dst_w, float dst_h,
